@@ -1,7 +1,40 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+build/
+*.tsbuildinfo
+
+# Environment & secrets (never commit)
 .env
-.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+velatrix-review.pem
+
+# Logs & runtime data
 *.log
-.DS_Store
+npm-debug.log*
+pnpm-debug.log*
 .data/
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# OS & editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Tooling caches
+.turbo/
+.cache/
+*.local
+
+# Optional local overrides
+docker-compose.override.yml
