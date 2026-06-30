@@ -1,0 +1,20 @@
+{
+  "name": "velatrix-review",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @velatrix-review/server dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "review": "tsx apps/cli/src/review.ts",
+    "start": "pnpm --filter @velatrix-review/server start"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=20"
+  }
+}
