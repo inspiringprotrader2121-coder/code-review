@@ -8,7 +8,8 @@
       "@velatrix-review/queue": ["../../packages/queue/src/index.ts"],
       "@velatrix-review/review": ["../../packages/review/src/index.ts"],
       "@velatrix-review/rules": ["../../packages/rules/src/index.ts"],
-      "@velatrix-review/store": ["../../packages/store/src/index.ts"]
+      "@velatrix-review/store": ["../../packages/store/src/index.ts"],
+      "@velatrix-review/tenants": ["../../packages/tenants/src/index.ts"]
     }
   },
   "include": ["src"]

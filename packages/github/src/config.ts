@@ -39,6 +39,7 @@ export function loadGitHubConfigFromEnv(): GitHubAppConfig {
   const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET ?? '';
   const botLogin = process.env.GITHUB_APP_BOT_LOGIN ?? 'velatrix-review[bot]';
   const allowedRepo = process.env.GITHUB_ALLOWED_REPO;
+  const appSlug = process.env.GITHUB_APP_SLUG;
 
   if (!appId) {
     throw new Error('GITHUB_APP_ID is required');
@@ -57,6 +58,7 @@ export function loadGitHubConfigFromEnv(): GitHubAppConfig {
     privateKey: privateKey.replace(/\\n/g, '\n'),
     webhookSecret,
     botLogin,
+    appSlug,
     allowedRepo,
   };
 }

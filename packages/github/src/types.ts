@@ -3,6 +3,7 @@ export interface GitHubAppConfig {
   privateKey: string;
   webhookSecret: string;
   botLogin: string;
+  appSlug?: string;
   allowedRepo?: string;
 }
 

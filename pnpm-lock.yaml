@@ -35,6 +35,9 @@ importers:
       '@velatrix-review/store':
         specifier: workspace:*
         version: link:../../packages/store
+      '@velatrix-review/tenants':
+        specifier: workspace:*
+        version: link:../../packages/tenants
       dotenv:
         specifier: ^16.5.0
         version: 16.6.1
@@ -143,6 +146,28 @@ importers:
       '@types/node':
         specifier: ^22.15.21
         version: 22.20.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
+  packages/tenants:
+    dependencies:
+      '@octokit/rest':
+        specifier: ^21.1.1
+        version: 21.1.1
+      '@velatrix-review/github':
+        specifier: workspace:*
+        version: link:../github
+      '@velatrix-review/store':
+        specifier: workspace:*
+        version: link:../store
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.21
+        version: 22.20.0
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.4
       typescript:
         specifier: ^5.8.3
         version: 5.9.3

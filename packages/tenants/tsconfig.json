@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@velatrix-review/github": ["../github/src/index.ts"],
+      "@velatrix-review/store": ["../store/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}

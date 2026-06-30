@@ -6,7 +6,6 @@ import {
   fetchPrLabels,
   fetchPullRequest,
   fetchRepoFile,
-  getInstallationIdForRepo,
   hasIgnoreLabel,
   isRepoAllowed,
   loadGitHubConfigFromEnv,
@@ -37,9 +36,9 @@ import {
   type ReviewFinding,
 } from '@velatrix-review/review';
 import {
-  createReviewStore,
+  createAppDatabase,
+  type AppDatabase,
   type PrReviewState,
-  type SqliteReviewStore,
   type StoredFinding,
 } from '@velatrix-review/store';
 
@@ -50,10 +49,10 @@ export interface WorkerConfig {
   maxFileBytes: number;
   maxFiles: number;
   enableCheckRuns: boolean;
-  store: SqliteReviewStore;
+  store: AppDatabase;
 }
 
-let sharedStore: SqliteReviewStore | null = null;
+let sharedStore: AppDatabase | null = null;
 
 export function loadWorkerConfig(): WorkerConfig {
   const github = loadGitHubConfigFromEnv();
@@ -63,7 +62,7 @@ export function loadWorkerConfig(): WorkerConfig {
   }
 
   if (!sharedStore) {
-    sharedStore = createReviewStore();
+    sharedStore = createAppDatabase();
   }
 
   return {
@@ -88,14 +87,20 @@ export async function processReviewJob(
   job: ReviewJobPayload,
   config: WorkerConfig,
 ): Promise<ProcessResult> {
-  const { owner, repo, pr: number, action } = job;
+  const { installationId, tenantId, owner, repo, pr: number, action } = job;
   const ref = { owner, repo, number };
 
-  if (!isRepoAllowed(owner, repo, config.github.allowedRepo)) {
+  if (config.github.allowedRepo && !isRepoAllowed(owner, repo, config.github.allowedRepo)) {
     throw new Error(`Repo ${owner}/${repo} not in GITHUB_ALLOWED_REPO allowlist`);
   }
 
-  const installationId = await getInstallationIdForRepo(config.github, owner, repo);
+  const installation = config.store.getInstallation(installationId);
+  if (!installation || installation.suspendedAt) {
+    throw new Error(`Installation ${installationId} not active`);
+  }
+
+  console.log(`[worker] tenant=${tenantId.slice(0, 8)} inst=${installationId} account=${installation.accountLogin}`);
+
   const octokit = createInstallationOctokit(config.github, installationId);
 
   const pr = await fetchPullRequest(octokit, ref);
@@ -122,7 +127,7 @@ export async function processReviewJob(
     return { findingCount: 0, newCount: 0, fixedCount: 0 };
   }
 
-  const priorState = config.store.getState({ owner, repo, pr: number });
+  const priorState = config.store.getState({ installationId, owner, repo, pr: number });
   const sinceSha =
     action === 'synchronize' && priorState?.lastSha ? priorState.lastSha : undefined;
 
@@ -287,6 +292,8 @@ export async function processReviewJob(
   ];
 
   const state: PrReviewState = {
+    installationId,
+    tenantId,
     owner,
     repo,
     pr: number,

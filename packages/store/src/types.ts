@@ -19,6 +19,8 @@ export interface StoredFinding {
 }
 
 export interface PrReviewState {
+  installationId: number;
+  tenantId: string;
   owner: string;
   repo: string;
   pr: number;
@@ -29,7 +31,26 @@ export interface PrReviewState {
 }
 
 export interface PrKey {
+  installationId: number;
   owner: string;
   repo: string;
   pr: number;
+}
+
+export interface Tenant {
+  id: string;
+  slug: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface GitHubInstallation {
+  installationId: number;
+  tenantId: string;
+  accountLogin: string;
+  accountType: 'Organization' | 'User' | string;
+  repositorySelection: 'all' | 'selected' | string;
+  suspendedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }

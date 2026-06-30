@@ -5,6 +5,7 @@ import {
   fetchPullRequest,
   getInstallationIdForRepo,
 } from '@velatrix-review/github';
+import { TenantService } from '@velatrix-review/tenants';
 import { processReviewJob, loadWorkerConfig } from './worker.js';
 
 const POLL_MS = 500;
@@ -19,7 +20,9 @@ export function startWorkerLoop(queue: ReviewQueue): () => void {
     if (!job) return;
 
     const pk = prKey(job);
-    console.log(`[worker] start ${pk} @ ${job.headSha.slice(0, 7)} action=${job.action}`);
+    console.log(
+      `[worker] start inst=${job.installationId} ${pk} @ ${job.headSha.slice(0, 7)} action=${job.action}`,
+    );
 
     try {
       const config = loadWorkerConfig();
@@ -49,10 +52,42 @@ export function startWorkerLoop(queue: ReviewQueue): () => void {
 
 export async function enqueueManualReview(
   queue: ReviewQueue,
-  input: { owner: string; repo: string; pr: number; headSha?: string },
+  input: {
+    owner: string;
+    repo: string;
+    pr: number;
+    headSha?: string;
+    installationId?: number;
+    tenantSlug?: string;
+  },
 ): Promise<ReviewJobPayload> {
   const config = loadWorkerConfig();
-  const installationId = await getInstallationIdForRepo(config.github, input.owner, input.repo);
+  const tenants = new TenantService(config.store);
+
+  let installationId = input.installationId;
+  let tenantId: string;
+
+  if (installationId) {
+    const inst = tenants.resolveInstallation(installationId);
+    if (!inst) throw new Error(`Unknown installation_id ${installationId}`);
+    tenantId = inst.tenantId;
+  } else {
+    const existing = config.store.findInstallationForRepo(input.owner, input.repo);
+    if (existing) {
+      installationId = existing.installationId;
+      tenantId = existing.tenantId;
+    } else {
+      installationId = await getInstallationIdForRepo(config.github, input.owner, input.repo);
+      const slug = input.tenantSlug ?? input.owner.toLowerCase();
+      const { installation } = await tenants.completeInstallCallback(
+        installationId,
+        slug,
+        config.github,
+      );
+      tenantId = installation.tenantId;
+    }
+  }
+
   const octokit = createInstallationOctokit(config.github, installationId);
   const pr = await fetchPullRequest(octokit, {
     owner: input.owner,
@@ -61,6 +96,8 @@ export async function enqueueManualReview(
   });
 
   const job: ReviewJobPayload = {
+    installationId,
+    tenantId,
     owner: input.owner,
     repo: input.repo,
     pr: input.pr,

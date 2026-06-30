@@ -1,2 +1,14 @@
-export type { StoredFinding, PrReviewState, PrKey, FindingStatus } from './types.js';
-export { SqliteReviewStore, createReviewStore } from './sqlite.js';
+export type {
+  StoredFinding,
+  PrReviewState,
+  PrKey,
+  FindingStatus,
+  Tenant,
+  GitHubInstallation,
+} from './types.js';
+export {
+  AppDatabase,
+  createAppDatabase,
+  createReviewStore,
+  type SqliteReviewStore,
+} from './database.js';

@@ -20,4 +20,6 @@ export {
   type InlineReviewComment,
   type PullRequestReviewResult,
   type CheckConclusion,
+  fetchInstallationMeta,
+  buildGitHubInstallUrl,
 } from './api.js';

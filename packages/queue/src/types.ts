@@ -1,6 +1,8 @@
 export type JobId = string;
 
 export interface ReviewJobPayload {
+  installationId: number;
+  tenantId: string;
   owner: string;
   repo: string;
   pr: number;
@@ -25,9 +27,9 @@ export interface ReviewQueue {
 }
 
 export function jobIdempotencyKey(job: ReviewJobPayload): string {
-  return `${job.owner}/${job.repo}#${job.pr}@${job.headSha}`;
+  return `${job.installationId}/${job.owner}/${job.repo}#${job.pr}@${job.headSha}`;
 }
 
-export function prKey(job: Pick<ReviewJobPayload, 'owner' | 'repo' | 'pr'>): string {
-  return `${job.owner}/${job.repo}#${job.pr}`;
+export function prKey(job: Pick<ReviewJobPayload, 'installationId' | 'owner' | 'repo' | 'pr'>): string {
+  return `${job.installationId}/${job.owner}/${job.repo}#${job.pr}`;
 }
