@@ -1,82 +1,91 @@
 # Velatrix Review
 
-Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** with LLM + Velatrix-specific rules.
+Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** with deterministic rules first, LLM second, and intelligent re-review on push.
 
 **Service repo:** [Velatrixcloud/code-review](https://github.com/Velatrixcloud/code-review)
 
-Phase 1: webhook → queue → diff → LLM → one PR comment.
+## Features (Phase 1–3)
+
+| Phase | Capability |
+|-------|------------|
+| **1** | Webhook → queue → diff → LLM → PR comment |
+| **2** | SQLite state, fingerprints, incremental diff, “fixed on sha” replies |
+| **3** | Inline P1/P2 comments, `.velatrix-review.yml`, doc-audit + Semgrep, check runs |
 
 ## Prerequisites
 
-1. **GitHub App** named `Velatrix Review` on the Velatrixcloud org
-   - Permissions: `pull_requests` read/write, `contents` read, `metadata` read
+1. **GitHub App** `Velatrix Review` on Velatrixcloud org
+   - Permissions: `pull_requests` R/W, `contents` R, `metadata` R, `checks` W (optional)
    - Events: `pull_request`
-   - Install on org; restrict to `Velatrixcloud/Velatrix-Cloud` initially
 2. **Anthropic API key**
 3. Node 20+, pnpm 9+
+4. Optional: `semgrep` CLI on PATH for deterministic scans
 
 ## Setup
 
 ```bash
 cp .env.example .env
-# Fill GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_WEBHOOK_SECRET, ANTHROPIC_API_KEY
+# GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_WEBHOOK_SECRET, ANTHROPIC_API_KEY
 
 pnpm install
 pnpm dev
 ```
 
-Expose webhook (local dev):
+## Manual review
 
 ```bash
-ngrok http 8787
-# Set GitHub App webhook URL → https://<ngrok>/webhooks/github
-```
-
-## Manual review (no webhook)
-
-```bash
-# Enqueue + worker (server must be running, or use --sync)
-pnpm review --pr 67
-
-# Inline — posts comment immediately
 pnpm review --pr 67 --sync
 ```
 
-Or HTTP:
+## Per-repo config
 
-```bash
-curl -X POST http://localhost:8787/review \
-  -H 'Content-Type: application/json' \
-  -d '{"repoSlug":"Velatrixcloud/Velatrix-Cloud","pr":67}'
+Copy `examples/velatrix-review.yml` to **Velatrix-Cloud** as `.velatrix-review.yml`:
+
+```yaml
+mode: normal
+max_comments: 8
+ignore:
+  - "**/dist/**"
+ignore_labels:
+  - review-bot:ignore
 ```
 
 ## Architecture
 
 ```
-apps/server     Hono webhook + embedded worker loop
-packages/github GitHub App auth, diff, comments
-packages/review LLM + redaction + comment formatting
-packages/queue  Idempotency + per-PR coalescing (memory or Redis)
-rules/          Velatrix system prompt
+apps/server/src/pipeline.ts   Full review orchestration
+packages/store                SQLite PR state + findings
+packages/rules                doc-audit, Semgrep, config
+packages/review               LLM, fingerprints, merge, format
+packages/github               API client (diff, reviews, checks)
+packages/queue                Webhook job queue
 ```
 
-## Phase 1 exit checklist
+## Re-review behavior
 
-- [ ] Webhook fires on PR open/sync; worker logs job
-- [ ] `pnpm review --pr N --sync` posts markdown findings
-- [ ] Draft + Dependabot + self-authored PRs skipped
-- [ ] Duplicate webhooks deduped by `(repo, pr, head_sha)`
+On `synchronize`:
 
-## Env reference
+1. Diff only `last_sha..head_sha`
+2. Re-run doc-audit / Semgrep / LLM on new hunks
+3. Verify prior findings on HEAD (audit rules)
+4. Reply `✅ Fixed on abc123` on resolved inline comments
+5. Post only **new** fingerprints (no spam)
 
-See `.env.example`.
+State persists in `.data/reviews.db` (or `STORE_PATH`).
 
-| Variable | Purpose |
-|----------|---------|
-| `GITHUB_APP_ID` | App ID |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | PEM path |
-| `GITHUB_WEBHOOK_SECRET` | Webhook HMAC secret |
-| `GITHUB_APP_BOT_LOGIN` | Skip self-authored PRs |
-| `GITHUB_ALLOWED_REPO` | Allowlist `owner/repo` |
-| `ANTHROPIC_API_KEY` | LLM |
-| `QUEUE_BACKEND` | `memory` (default) or `redis` |
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `pnpm dev` | Webhook + worker |
+| `pnpm review --pr N --sync` | One-shot review |
+| `pnpm typecheck` | TypeScript |
+| `pnpm test` | Unit tests |
+
+## Env
+
+See `.env.example` for full list. Key vars:
+
+- `STORE_PATH` — SQLite database
+- `CHECK_RUNS_ENABLED=1` — GitHub check `velatrix-review`
+- `SEMGREP_DISABLED=1` — skip Semgrep layer

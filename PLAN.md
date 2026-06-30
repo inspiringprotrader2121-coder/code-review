@@ -146,7 +146,14 @@ Re-push will re-post similar findings (noisy). Fixed in Phase 2.
 **Time:** 3–5 days  
 **Goal:** Push 3× on one PR → bot updates intelligently, not 3× the same nit.
 
-**Hardest phase.** Most DIY bots stop at Phase 1.
+**Status:** ✅ Implemented in PR #1 (`packages/store`, incremental diff, fingerprints, fixed replies)
+
+## Phase 3 — “Feels professional”
+
+**Time:** 1–2 weeks  
+**Goal:** Trust it on real Velatrix PRs (#67-style code, audit docs).
+
+**Status:** ✅ Core implemented in PR #1 (inline reviews, `.velatrix-review.yml`, doc-audit, Semgrep, check runs optional)
 
 ### Deliverables
 

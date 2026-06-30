@@ -8,6 +8,7 @@ export const FindingSchema = z.object({
   message: z.string(),
   suggestion: z.string().optional(),
   confidence: z.number().min(0).max(1),
+  ruleId: z.string().optional(),
 });
 
 export const LlmReviewResponseSchema = z.object({
@@ -23,10 +24,4 @@ export interface ReviewableFile {
   status: string;
   patch?: string;
   truncated?: boolean;
-}
-
-export interface DiffInput {
-  filename: string;
-  status: string;
-  patch?: string;
 }

@@ -1,7 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { buildUserPrompt, loadVelatrixRules } from './prompt.js';
 import { redactPatch } from './redact.js';
-import { LlmReviewResponseSchema, type Finding, type LlmReviewResponse, type ReviewableFile } from './types.js';
+import type { ReviewFinding } from './finding.js';
+import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 
 export interface LlmReviewOptions {
   apiKey: string;
@@ -48,8 +49,24 @@ export async function runLlmReview(
 
   return {
     ...parsed,
-    findings: parsed.findings.slice(0, 8),
+    findings: parsed.findings.slice(0, 8).map((f) => ({
+      ...f,
+      ruleId: f.ruleId ?? `llm.${f.category}`,
+    })),
   };
+}
+
+export function llmFindingsToReviewFindings(findings: LlmReviewResponse['findings']): ReviewFinding[] {
+  return findings.map((f) => ({
+    file: f.file,
+    line: f.line,
+    severity: f.severity,
+    category: f.category,
+    message: f.message,
+    suggestion: f.suggestion,
+    confidence: f.confidence,
+    ruleId: f.ruleId ?? `llm.${f.category}`,
+  }));
 }
 
 function extractJson(text: string): unknown {
@@ -58,40 +75,5 @@ function extractJson(text: string): unknown {
   return JSON.parse(raw);
 }
 
-export function formatReviewComment(
-  findings: Finding[],
-  meta: { owner: string; repo: string; pr: number; headSha: string; summary?: string },
-): string {
-  const shortSha = meta.headSha.slice(0, 7);
-  const lines: string[] = [
-    '## Velatrix Review',
-    '',
-    `Reviewed \`${meta.owner}/${meta.repo}#${meta.pr}\` @ \`${shortSha}\`.`,
-    '',
-  ];
-
-  if (meta.summary) {
-    lines.push(meta.summary, '');
-  }
-
-  if (findings.length === 0) {
-    lines.push('No issues found in the changed hunks.');
-    return lines.join('\n');
-  }
-
-  lines.push('| Severity | File | Message |', '| --- | --- | --- |');
-  for (const f of findings) {
-    const file = f.line ? `\`${f.file}:${f.line}\`` : `\`${f.file}\``;
-    const msg = f.message.replace(/\|/g, '\\|').replace(/\n/g, ' ');
-    lines.push(`| ${f.severity} | ${file} | ${msg} |`);
-  }
-
-  lines.push('', '<details><summary>Suggestions</summary>', '');
-  for (const f of findings) {
-    if (!f.suggestion) continue;
-    lines.push(`**${f.file}** — ${f.message}`, '', f.suggestion, '');
-  }
-  lines.push('</details>');
-
-  return lines.join('\n');
-}
+// backwards compat
+export { formatReviewBody as formatReviewComment } from './format.js';

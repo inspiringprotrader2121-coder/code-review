@@ -19,6 +19,8 @@
     "@velatrix-review/github": "workspace:*",
     "@velatrix-review/queue": "workspace:*",
     "@velatrix-review/review": "workspace:*",
+    "@velatrix-review/rules": "workspace:*",
+    "@velatrix-review/store": "workspace:*",
     "dotenv": "^16.5.0",
     "hono": "^4.7.11"
   },

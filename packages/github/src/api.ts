@@ -1,22 +1,5 @@
-import { minimatch } from 'minimatch';
 import type { Octokit } from '@octokit/rest';
-import type { ChangedFile, PrRef, PullRequestMeta } from './types.js';
-
-const DEFAULT_SKIP_GLOBS = [
-  '**/package-lock.json',
-  '**/pnpm-lock.yaml',
-  '**/yarn.lock',
-  '**/dist/**',
-  '**/build/**',
-  '**/*.min.js',
-  '**/*.map',
-  '**/coverage/**',
-];
-
-const BINARY_EXTENSIONS = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf',
-  '.zip', '.gz', '.woff', '.woff2', '.ttf', '.eot', '.sqlite',
-]);
+import type { PrRef, PullRequestMeta } from './types.js';
 
 export function parseRepoSlug(slug: string): { owner: string; repo: string } {
   const [owner, repo] = slug.split('/');
@@ -48,18 +31,6 @@ export function shouldSkipPr(
   return null;
 }
 
-function shouldSkipFile(filename: string, maxBytes: number, size?: number): boolean {
-  const lower = filename.toLowerCase();
-  for (const ext of BINARY_EXTENSIONS) {
-    if (lower.endsWith(ext)) return true;
-  }
-  for (const glob of DEFAULT_SKIP_GLOBS) {
-    if (minimatch(filename, glob)) return true;
-  }
-  if (size !== undefined && size > maxBytes) return true;
-  return false;
-}
-
 export async function fetchPullRequest(
   octokit: Octokit,
   ref: PrRef,
@@ -81,45 +52,6 @@ export async function fetchPullRequest(
   };
 }
 
-export async function fetchPrDiff(
-  octokit: Octokit,
-  ref: PrRef,
-  opts: { maxFileBytes: number; maxFiles: number },
-): Promise<ChangedFile[]> {
-  const { data: files } = await octokit.rest.pulls.listFiles({
-    owner: ref.owner,
-    repo: ref.repo,
-    pull_number: ref.number,
-    per_page: 100,
-  });
-
-  const changed: ChangedFile[] = [];
-
-  for (const file of files.slice(0, opts.maxFiles)) {
-    if (shouldSkipFile(file.filename, opts.maxFileBytes, file.changes)) {
-      continue;
-    }
-
-    let patch = file.patch;
-    let truncated = false;
-
-    if (patch && patch.length > opts.maxFileBytes) {
-      patch = patch.slice(0, opts.maxFileBytes) + '\n\n… [truncated for review]';
-      truncated = true;
-    }
-
-    changed.push({
-      filename: file.filename,
-      status: file.status as ChangedFile['status'],
-      patch,
-      previousFilename: file.previous_filename,
-      truncated,
-    });
-  }
-
-  return changed;
-}
-
 export async function postPrComment(
   octokit: Octokit,
   ref: PrRef,
@@ -133,3 +65,15 @@ export async function postPrComment(
   });
   return data.id;
 }
+
+export { fetchPrDiff, fetchCompareDiff } from './diff.js';
+export { fetchFileContent, fetchRepoFile } from './content.js';
+export { fetchPrLabels, hasIgnoreLabel } from './labels.js';
+export {
+  postPullRequestReview,
+  replyToReviewComment,
+  replyToIssueComment,
+  type InlineReviewComment,
+  type PullRequestReviewResult,
+} from './reviews.js';
+export { createCheckRun, type CheckConclusion } from './checks.js';

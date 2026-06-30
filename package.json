@@ -6,6 +6,7 @@
     "dev": "pnpm --filter @velatrix-review/server dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
     "review": "tsx apps/cli/src/review.ts",
     "start": "pnpm --filter @velatrix-review/server start"
   },

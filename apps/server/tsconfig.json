@@ -1,7 +1,15 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@velatrix-review/github": ["../../packages/github/src/index.ts"],
+      "@velatrix-review/queue": ["../../packages/queue/src/index.ts"],
+      "@velatrix-review/review": ["../../packages/review/src/index.ts"],
+      "@velatrix-review/rules": ["../../packages/rules/src/index.ts"],
+      "@velatrix-review/store": ["../../packages/store/src/index.ts"]
+    }
   },
   "include": ["src"]
 }

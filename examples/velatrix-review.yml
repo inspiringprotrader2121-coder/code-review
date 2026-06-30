@@ -1,0 +1,19 @@
+# Velatrix Review — per-repo config (place in repo root)
+mode: normal # strict | normal
+include_docs: false
+
+ignore:
+  - "**/package-lock.json"
+  - "**/pnpm-lock.yaml"
+  - "**/dist/**"
+  - "**/build/**"
+
+max_comments: 8
+max_tokens: 50000
+min_confidence: 0.6
+inline_min_confidence: 0.7
+
+run_semgrep: true
+
+ignore_labels:
+  - review-bot:ignore
