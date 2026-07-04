@@ -15,25 +15,41 @@ export interface LlmClientOptions {
  * - `baseUrl` set → OpenAI-compatible `/chat/completions` (MiniMax, etc.)
  * - otherwise → Anthropic SDK
  */
+/** Hard ceiling on any single LLM call so a hung provider can't wedge a job. */
+const LLM_TIMEOUT_MS = Number(process.env.ORVEX_LLM_TIMEOUT_MS ?? 90_000);
+
 export async function llmChat(system: string, user: string, opts: LlmClientOptions): Promise<string> {
   if (opts.baseUrl) {
-    const response = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${opts.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: opts.model,
-        max_completion_tokens: opts.maxTokens ?? 4096,
-        ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
-        thinking: { type: 'disabled' },
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-      }),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${opts.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: opts.model,
+          max_completion_tokens: opts.maxTokens ?? 4096,
+          ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
+          thinking: { type: 'disabled' },
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+        }),
+      });
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') {
+        throw new Error(`LLM request timed out after ${LLM_TIMEOUT_MS}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!response.ok) {
       const errorBody = await response.text();
@@ -50,7 +66,7 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
     return stripThinking(text);
   }
 
-  const client = new Anthropic({ apiKey: opts.apiKey });
+  const client = new Anthropic({ apiKey: opts.apiKey, timeout: LLM_TIMEOUT_MS });
   const response = await client.messages.create({
     model: opts.model,
     max_tokens: opts.maxTokens ?? 4096,

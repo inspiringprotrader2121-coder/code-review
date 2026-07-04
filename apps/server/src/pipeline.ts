@@ -295,15 +295,12 @@ async function executeReview(
         body: formatInlineBody(f),
       }));
 
+    // Advisory by default: post as COMMENT (never blocks the PR). Set
+    // ORVEX_REQUEST_CHANGES=1 to use REQUEST_CHANGES on P1 findings.
     const hasP1 = merged.toPost.some((f) => f.severity === 'P1');
-    const review = await postPullRequestReview(
-      octokit,
-      ref,
-      effectiveSha,
-      body,
-      inlineComments,
-      hasP1 ? 'REQUEST_CHANGES' : 'COMMENT',
-    );
+    const event =
+      hasP1 && process.env.ORVEX_REQUEST_CHANGES === '1' ? 'REQUEST_CHANGES' : 'COMMENT';
+    const review = await postPullRequestReview(octokit, ref, effectiveSha, body, inlineComments, event);
     reviewId = review.reviewId;
 
     for (const c of review.commentIds) {
@@ -369,8 +366,16 @@ async function executeReview(
   if (config.enableCheckRuns) {
     const openP1 = finalFindings.some((f) => f.status === 'open' && f.severity === 'P1');
     const openAny = finalFindings.some((f) => f.status === 'open');
+    // Advisory: never fail the check (no red ✗). Findings show as 'neutral';
+    // set ORVEX_FAIL_CHECK_ON_P1=1 to hard-fail on open P1s if you want gating.
+    const conclusion =
+      openP1 && process.env.ORVEX_FAIL_CHECK_ON_P1 === '1'
+        ? 'failure'
+        : openAny
+          ? 'neutral'
+          : 'success';
     await createCheckRun(octokit, ref, effectiveSha, {
-      conclusion: openP1 ? 'failure' : openAny ? 'neutral' : 'success',
+      conclusion,
       title: 'Orvex Review',
       summary: `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open`,
     });

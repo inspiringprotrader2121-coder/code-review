@@ -17,9 +17,8 @@ function legacyConnectMode(): boolean {
   return !loadOAuthConfigFromEnv() && !authDisabled();
 }
 
-const LEGACY_BANNER = `<div class="banner error">User accounts are not configured
-(<code>GITHUB_OAUTH_CLIENT_ID</code> unset) — running the legacy connect flow without login.
-Workspaces created here can be claimed by the first signed-in user once accounts are enabled.</div>`;
+const LEGACY_BANNER = `<div class="banner info">You can connect GitHub and start reviewing now — no sign-in required yet.
+To require per-user login later, set <code>GITHUB_OAUTH_CLIENT_ID</code>; the workspace you create now stays yours.</div>`;
 
 export function authRoutes() {
   const app = new Hono();

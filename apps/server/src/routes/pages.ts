@@ -103,6 +103,7 @@ const SHELL_CSS = `
   }
   .banner.error { background: var(--crit-wash); color: var(--crit); }
   .banner.ok { background: var(--good-wash); color: var(--good); }
+  .banner.info { background: var(--accent-wash); color: var(--accent-ink); }
   .divider { border: 0; border-top: 1px solid var(--border); margin: 22px 0; }
   h2 { font-size: 14px; margin: 0 0 4px; }
   .muted { color: var(--ink-3); font-size: 12.5px; }
