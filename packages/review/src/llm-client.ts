@@ -29,64 +29,7 @@ function thinkingEnabled(opts: LlmClientOptions): boolean {
 
 export async function llmChat(system: string, user: string, opts: LlmClientOptions): Promise<string> {
   if (opts.baseUrl) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${opts.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: opts.model,
-          // Reasoning burns output tokens before the answer, so give it plenty
-          // of headroom or the JSON gets truncated ('Unexpected end of JSON input').
-          max_completion_tokens: thinkingEnabled(opts)
-            ? Math.max(opts.maxTokens ?? 4096, 40_000)
-            : (opts.maxTokens ?? 4096),
-          ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
-          // MiniMax reasoning: 'adaptive' (think when useful) or 'disabled'
-          thinking: { type: thinkingEnabled(opts) ? 'adaptive' : 'disabled' },
-          messages: [
-            { role: 'system', content: system },
-            { role: 'user', content: user },
-          ],
-        }),
-      });
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') {
-        throw new Error(`LLM request timed out after ${LLM_TIMEOUT_MS}ms`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`LLM request failed (${response.status}): ${errorBody.slice(0, 500)}`);
-    }
-
-    const completion = (await response.json()) as {
-      choices?: Array<{
-        finish_reason?: string;
-        message?: { content?: string | null; reasoning_content?: string | null };
-      }>;
-    };
-    const choice = completion.choices?.[0];
-    const text = choice?.message?.content;
-    if (!text) {
-      // reasoning-only response with no answer, or empty content
-      throw new Error('LLM returned no text content');
-    }
-    if (choice?.finish_reason === 'length') {
-      // ran out of output tokens mid-answer — surface a clear, retryable error
-      throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
-    }
-    return stripThinking(text);
+    return openAiCompatStreamChat(system, user, opts);
   }
 
   const client = new Anthropic({ apiKey: opts.apiKey, timeout: LLM_TIMEOUT_MS });
@@ -111,6 +54,122 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
   }
   // re-attach the prefilled '{' when JSON mode used a prefill
   return opts.json ? `{${textBlock.text}` : textBlock.text;
+}
+
+/**
+ * Streaming call to an OpenAI-compatible endpoint (MiniMax, etc.).
+ *
+ * Deep reasoning over a full-repo prompt can run for many minutes; a plain
+ * non-streaming POST gets its connection dropped ("fetch failed") long before
+ * the answer is ready. Streaming keeps the socket alive with a steady trickle
+ * of tokens. The timeout is an INACTIVITY timer (reset on every chunk), so a
+ * long-but-progressing reason never aborts — only a truly stalled socket does.
+ *
+ * No output cap is imposed: `max_completion_tokens` is set to a very high
+ * ceiling (the model only emits what it needs), so reasoning + the answer are
+ * never truncated. Override with ORVEX_MAX_OUTPUT_TOKENS if ever needed.
+ */
+async function openAiCompatStreamChat(
+  system: string,
+  user: string,
+  opts: LlmClientOptions,
+): Promise<string> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const armTimer = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+  };
+  armTimer();
+
+  // A generous ceiling so nothing is capped; the model stops at its natural end
+  // and only bills for tokens actually generated. Reasoning shares this budget.
+  const maxOut = opts.maxTokens ?? Number(process.env.ORVEX_MAX_OUTPUT_TOKENS ?? 128_000);
+
+  let response: Response;
+  try {
+    response = await fetch(`${opts.baseUrl!.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${opts.apiKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify({
+        model: opts.model,
+        max_completion_tokens: maxOut,
+        stream: true,
+        ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
+        thinking: { type: thinkingEnabled(opts) ? 'adaptive' : 'disabled' },
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+    });
+  } catch (err) {
+    clearTimeout(timer!);
+    if ((err as Error).name === 'AbortError') {
+      throw new Error(`LLM request stalled (no data for ${LLM_TIMEOUT_MS}ms)`);
+    }
+    throw err;
+  }
+
+  if (!response.ok || !response.body) {
+    clearTimeout(timer!);
+    const errorBody = response.ok ? 'no response body' : await response.text().catch(() => '');
+    throw new Error(`LLM request failed (${response.status}): ${errorBody.slice(0, 500)}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let finishReason: string | undefined;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      armTimer(); // progress — reset the inactivity timer
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (data === '' || data === '[DONE]') continue;
+        try {
+          const chunk = JSON.parse(data) as {
+            choices?: Array<{
+              finish_reason?: string | null;
+              delta?: { content?: string | null; reasoning_content?: string | null };
+            }>;
+          };
+          const choice = chunk.choices?.[0];
+          if (choice?.delta?.content) content += choice.delta.content;
+          if (choice?.finish_reason) finishReason = choice.finish_reason;
+        } catch {
+          // partial/keepalive line — ignore, more will arrive
+        }
+      }
+    }
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error(`LLM stream stalled (no data for ${LLM_TIMEOUT_MS}ms)`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer!);
+  }
+
+  const text = stripThinking(content);
+  if (!text) throw new Error('LLM returned no text content');
+  if (finishReason === 'length') {
+    throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
+  }
+  return text;
 }
 
 export function stripThinking(text: string): string {

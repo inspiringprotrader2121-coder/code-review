@@ -280,10 +280,9 @@ async function executeReview(
       apiKey: config.llmApiKey,
       baseUrl: config.llmBaseUrl,
       model: config.llmModel,
-      // Give the review its full token budget (config default 50k) so it has
-      // room to emit detailed findings *with* their originalCode/fixedCode fix
-      // blocks — the 4096 throttle was starving the fix suggestions.
-      maxTokens: reviewConfig.max_tokens,
+      // no token cap — the streaming client uses a high ceiling so the review
+      // has room for full reasoning + detailed findings *with* their
+      // originalCode/fixedCode fix blocks (the old throttle starved suggestions)
       context: { ...(reviewContext ?? {}), prTitle: pr.title, prBody: pr.body },
     });
     llmSummary = llm.summary;

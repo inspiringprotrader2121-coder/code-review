@@ -56,7 +56,9 @@ export async function runLlmReview(
       apiKey: opts.apiKey,
       model: opts.model,
       baseUrl: opts.baseUrl,
-      maxTokens: opts.maxTokens ?? 4096,
+      // no cap — pass through (undefined → client's high ceiling) so the review
+      // has room for full reasoning + detailed findings with fix code
+      maxTokens: opts.maxTokens,
       json: true,
       thinking,
     });

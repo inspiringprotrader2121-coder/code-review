@@ -95,7 +95,7 @@ export async function verifyFindings(
     const text = await llmChat(
       'You are a skeptical principal engineer verifying code-review findings before they are posted. You respond with strict JSON only.',
       user,
-      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, maxTokens: 8000, json: true },
+      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, json: true },
     );
     const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
     parsed = VerdictSchema.parse(JSON.parse(fenced ? fenced[1].trim() : text.trim()));
@@ -173,7 +173,7 @@ export async function verifyFixes(
     const text = await llmChat(
       'You are a skeptical principal engineer gating auto-generated fixes before they are committed. You respond with strict JSON only.',
       user,
-      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, maxTokens: 6000, json: true },
+      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, json: true },
     );
     const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
     const parsed = VerdictSchema.parse(JSON.parse(fenced ? fenced[1].trim() : text.trim()));
