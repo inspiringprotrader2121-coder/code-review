@@ -11,6 +11,7 @@ export {
   appPublicUrl,
   githubAppSlug,
 } from './service.js';
+export { hashPassword, verifyPassword } from './password.js';
 export {
   authDisabled,
   legacyAuthMode,

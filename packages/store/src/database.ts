@@ -226,6 +226,18 @@ export class AppDatabase {
     this.db.pragma('journal_mode = WAL');
     this.db.exec(SCHEMA_V2);
     this.migrateLegacyPrReviews();
+    this.migrateUserAuthColumns();
+  }
+
+  /** Add email/password columns to an existing users table (email/password login). */
+  private migrateUserAuthColumns(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('email')) this.db.exec(`ALTER TABLE users ADD COLUMN email TEXT`);
+    if (!names.has('password_hash')) this.db.exec(`ALTER TABLE users ADD COLUMN password_hash TEXT`);
+    this.db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL`,
+    );
   }
 
   private migrateLegacyPrReviews(): void {
@@ -540,6 +552,65 @@ export class AppDatabase {
   getUserById(id: string): User | null {
     const row = this.db.prepare(`SELECT * FROM users WHERE id = ?`).get(id) as UserRow | undefined;
     return row ? mapUser(row) : null;
+  }
+
+  // ——— Email/password auth ———
+
+  /** Create (or update the password of) an email/password user. */
+  upsertPasswordUser(input: {
+    email: string;
+    passwordHash: string;
+    name?: string;
+    login?: string;
+  }): User {
+    const email = input.email.toLowerCase().trim();
+    const now = new Date().toISOString();
+    const existing = this.getUserByEmail(email);
+    if (existing) {
+      this.db
+        .prepare(`UPDATE users SET password_hash = ?, name = COALESCE(?, name) WHERE id = ?`)
+        .run(input.passwordHash, input.name ?? null, existing.id);
+      return this.getUserById(existing.id)!;
+    }
+    // password-only users get a synthetic negative github_id (real ids are > 0)
+    const syntheticGithubId = -Math.abs(hashToInt(email));
+    this.db
+      .prepare(
+        `INSERT INTO users (id, github_id, login, name, email, password_hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        syntheticGithubId,
+        input.login ?? email,
+        input.name ?? null,
+        email,
+        input.passwordHash,
+        now,
+      );
+    return this.getUserByEmail(email)!;
+  }
+
+  getUserByEmail(email: string): User | null {
+    const row = this.db
+      .prepare(`SELECT * FROM users WHERE lower(email) = lower(?)`)
+      .get(email.trim()) as UserRow | undefined;
+    return row ? mapUser(row) : null;
+  }
+
+  getPasswordHash(userId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT password_hash FROM users WHERE id = ?`)
+      .get(userId) as { password_hash: string | null } | undefined;
+    return row?.password_hash ?? null;
+  }
+
+  /** True if any email/password account exists — used to require login. */
+  hasPasswordUsers(): boolean {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM users WHERE password_hash IS NOT NULL`)
+      .get() as { n: number };
+    return row.n > 0;
   }
 
   createSession(userId: string, ttlMs = 30 * 24 * 3_600_000): Session {
@@ -1339,6 +1410,7 @@ interface UserRow {
   login: string;
   name: string | null;
   avatar_url: string | null;
+  email: string | null;
   created_at: string;
 }
 
@@ -1349,8 +1421,16 @@ function mapUser(row: UserRow): User {
     login: row.login,
     name: row.name ?? undefined,
     avatarUrl: row.avatar_url ?? undefined,
+    email: row.email ?? undefined,
     createdAt: row.created_at,
   };
+}
+
+/** Stable 31-bit int hash of a string (for synthetic github ids). */
+function hashToInt(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return (h & 0x7fffffff) || 1;
 }
 
 interface ReviewRunRow {

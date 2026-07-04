@@ -10,7 +10,14 @@ import {
   platformSecret,
   signOAuthState,
   verifyOAuthState,
+  verifyPassword,
 } from '@orvex-review/tenants';
+import { pageShell } from './pages.js';
+
+/** Email/password login is active whenever any password account exists. */
+function passwordAuthEnabled(db: AppDatabase): boolean {
+  return process.env.ORVEX_REQUIRE_LOGIN === '1' || db.hasPasswordUsers();
+}
 
 export const SESSION_COOKIE = 'orvex_session';
 const SESSION_TTL_S = 30 * 24 * 3600;
@@ -54,6 +61,12 @@ export function sessionRoutes() {
       return c.redirect(next);
     }
 
+    // Email/password login page
+    if (passwordAuthEnabled(db)) {
+      const err = c.req.query('error');
+      return c.html(loginPage(next, err));
+    }
+
     const oauth = loadOAuthConfigFromEnv();
     if (!oauth) {
       // No OAuth configured → /connect runs in legacy (no-login) mode; send
@@ -63,6 +76,21 @@ export function sessionRoutes() {
 
     const state = signOAuthState({ ts: Date.now(), next }, platformSecret());
     return c.redirect(buildAuthorizeUrl(oauth, oauthCallbackUrl(), state));
+  });
+
+  app.post('/auth/login', async (c) => {
+    const body = await c.req.parseBody();
+    const email = String(body.email ?? '').trim().toLowerCase();
+    const password = String(body.password ?? '');
+    const next = safeNext(typeof body.next === 'string' ? body.next : undefined);
+
+    const user = email ? db.getUserByEmail(email) : null;
+    if (!user || !verifyPassword(password, db.getPasswordHash(user.id))) {
+      return c.redirect(`/auth/login?error=1&next=${encodeURIComponent(next)}`);
+    }
+    const session = db.createSession(user.id);
+    setSessionCookie(c, session.id);
+    return c.redirect(next);
   });
 
   app.get('/auth/oauth/callback', async (c) => {
@@ -117,6 +145,25 @@ function oauthCallbackUrl(): string {
 
 /** Only allow same-site relative redirect targets. */
 function safeNext(next: string | undefined): string {
-  if (!next || !next.startsWith('/') || next.startsWith('//')) return '/connect';
+  if (!next || !next.startsWith('/') || next.startsWith('//')) return '/dashboard';
   return next;
+}
+
+function loginPage(next: string, error?: string): string {
+  const nextAttr = next.replace(/"/g, '&quot;');
+  const banner = error ? '<div class="banner error">Incorrect email or password.</div>' : '';
+  return pageShell(
+    'Sign in',
+    `<h1>Sign in to Orvex</h1>
+     <p class="lead">Access your review dashboard and connected GitHub.</p>
+     ${banner}
+     <form method="post" action="/auth/login">
+       <input type="hidden" name="next" value="${nextAttr}" />
+       <label for="email">Email</label>
+       <input id="email" name="email" type="email" required autocomplete="username" placeholder="you@example.com" />
+       <label for="password">Password</label>
+       <input id="password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" />
+       <button type="submit">Sign in →</button>
+     </form>`,
+  );
 }

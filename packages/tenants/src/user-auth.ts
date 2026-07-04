@@ -27,6 +27,8 @@ export function authDisabled(): boolean {
  * previously copy-pasted across three route files.
  */
 export function legacyAuthMode(): boolean {
+  // ORVEX_REQUIRE_LOGIN forces auth on even without GitHub OAuth (email/password mode)
+  if (process.env.ORVEX_REQUIRE_LOGIN === '1') return false;
   return !loadOAuthConfigFromEnv() && !authDisabled();
 }
 
