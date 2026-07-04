@@ -15,6 +15,28 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  apps/eval:
+    dependencies:
+      '@orvex-review/github':
+        specifier: workspace:*
+        version: link:../../packages/github
+      '@orvex-review/review':
+        specifier: workspace:*
+        version: link:../../packages/review
+      '@orvex-review/rules':
+        specifier: workspace:*
+        version: link:../../packages/rules
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.21
+        version: 22.20.0
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.4
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   apps/server:
     dependencies:
       '@hono/node-server':

@@ -1,0 +1,16 @@
+{
+  "name": "@orvex-review/eval",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "eval": "tsx src/run.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@orvex-review/github": "workspace:*",
+    "@orvex-review/review": "workspace:*",
+    "@orvex-review/rules": "workspace:*"
+  },
+  "devDependencies": { "@types/node": "^22.15.21", "tsx": "^4.19.4", "typescript": "^5.8.3" }
+}

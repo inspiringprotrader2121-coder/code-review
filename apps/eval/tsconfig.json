@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@orvex-review/github": ["../../packages/github/src/index.ts"],
+      "@orvex-review/review": ["../../packages/review/src/index.ts"],
+      "@orvex-review/rules": ["../../packages/rules/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}
