@@ -277,10 +277,21 @@ export class AppDatabase {
     return this.getTenantBySlug(slug) ?? this.createTenant(slug, name);
   }
 
-  /** Slug of the earliest-created tenant, or null. Used by the legacy dashboard. */
+  /**
+   * Slug of the most "active" tenant for the legacy dashboard's default view:
+   * the one with the most tracked repos, then the one with a live installation,
+   * then the earliest created. Avoids landing on an empty demo workspace.
+   */
   firstTenantSlug(): string | null {
     const row = this.db
-      .prepare(`SELECT slug FROM tenants ORDER BY created_at LIMIT 1`)
+      .prepare(
+        `SELECT t.slug,
+                (SELECT COUNT(*) FROM repos r WHERE r.tenant_id = t.id) AS repo_count,
+                (SELECT COUNT(*) FROM github_installations gi WHERE gi.tenant_id = t.id AND gi.suspended_at IS NULL) AS inst_count
+         FROM tenants t
+         ORDER BY inst_count DESC, repo_count DESC, t.created_at ASC
+         LIMIT 1`,
+      )
       .get() as { slug: string } | undefined;
     return row?.slug ?? null;
   }
