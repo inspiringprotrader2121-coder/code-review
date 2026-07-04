@@ -75,6 +75,18 @@ export class TenantService {
     return { tenant, installUrl };
   }
 
+  /**
+   * Pre-auth connect flow, used only while user login (OAuth) is not
+   * configured. No membership is created; the first user to sign in after
+   * accounts are enabled can claim the workspace (member-less tenants are
+   * claimable in startConnect).
+   */
+  startConnectLegacy(tenantSlug: string, displayName?: string): { tenant: Tenant; installUrl: string } {
+    const tenant = this.db.getOrCreateTenant(tenantSlug, displayName);
+    const installUrl = buildGitHubInstallUrl(tenant.slug);
+    return { tenant, installUrl };
+  }
+
   /** Tenant status, only if the user is a member. */
   getTenantStatusForUser(
     slug: string,

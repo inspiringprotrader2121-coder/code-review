@@ -4,19 +4,60 @@ import { createAppDatabase } from '@orvex-review/store';
 import {
   TenantService,
   WorkspaceAccessError,
+  authDisabled,
+  loadOAuthConfigFromEnv,
   verifyInstallState,
   platformSecret,
 } from '@orvex-review/tenants';
 import { loginRedirect, sessionUser } from './session.js';
 import { escapeHtml, onboardingSteps, pageShell } from './pages.js';
 
+/** True while user login (OAuth) is not configured — the pre-auth signup flow stays available. */
+function legacyConnectMode(): boolean {
+  return !loadOAuthConfigFromEnv() && !authDisabled();
+}
+
+const LEGACY_BANNER = `<div class="banner error">User accounts are not configured
+(<code>GITHUB_OAUTH_CLIENT_ID</code> unset) — running the legacy connect flow without login.
+Workspaces created here can be claimed by the first signed-in user once accounts are enabled.</div>`;
+
 export function authRoutes() {
   const app = new Hono();
   const db = createAppDatabase();
   const tenants = new TenantService(db);
 
+  // Old entry points (marketing links, GitHub App homepage) → connect flow.
+  app.get('/dashboard', (c) => c.redirect('/connect'));
+  app.get('/start', (c) => c.redirect('/connect'));
+  app.post('/start', (c) => c.redirect('/connect', 303));
+
   app.get('/connect', (c) => {
     const user = sessionUser(c, db);
+    if (!user && legacyConnectMode()) {
+      const error = c.req.query('error');
+      const errorBanner = error ? `<div class="banner error">${escapeHtml(error)}</div>` : '';
+      return c.html(
+        pageShell(
+          'Connect GitHub',
+          `${onboardingSteps(2)}
+           ${errorBanner}
+           ${LEGACY_BANNER}
+           <h1>Start your workspace</h1>
+           <p class="lead">Pick a workspace slug, then install the Orvex Review GitHub App and
+           choose which repositories it can review.</p>
+           <form method="get" action="/auth/github/install">
+             <label for="tenant">Workspace slug</label>
+             <input id="tenant" name="tenant" required pattern="[a-zA-Z0-9-]{2,40}" placeholder="acme" />
+             <p class="hint">Lowercase letters, numbers, and dashes.</p>
+             <label for="name">Display name <span style="font-weight:400;color:var(--ink-3)">(optional)</span></label>
+             <input id="name" name="name" placeholder="Acme Corp" />
+             <button type="submit">Continue to GitHub →</button>
+           </form>
+           <p class="muted" style="margin-top:14px">You'll authorize the GitHub App with scoped
+           permissions — no passwords are ever shared.</p>`,
+        ),
+      );
+    }
     if (!user) return loginRedirect(c, '/connect');
 
     const workspaces = db.getWorkspacesForUser(user.id);
@@ -70,13 +111,17 @@ export function authRoutes() {
 
   app.get('/auth/github/install', (c) => {
     const user = sessionUser(c, db);
-    if (!user) return loginRedirect(c, fullPath(c.req.url));
-
     const tenantSlug = c.req.query('tenant');
     const name = c.req.query('name') ?? undefined;
     if (!tenantSlug) {
       return c.redirect('/connect');
     }
+
+    if (!user && legacyConnectMode()) {
+      const { installUrl } = tenants.startConnectLegacy(tenantSlug, name);
+      return c.redirect(installUrl);
+    }
+    if (!user) return loginRedirect(c, fullPath(c.req.url));
 
     try {
       const { installUrl } = tenants.startConnect(tenantSlug, user.id, name);
@@ -91,6 +136,43 @@ export function authRoutes() {
 
   app.get('/auth/github/callback', async (c) => {
     const user = sessionUser(c, db);
+
+    if (!user && legacyConnectMode()) {
+      const legacyInstallationId = Number(c.req.query('installation_id'));
+      if (!legacyInstallationId || Number.isNaN(legacyInstallationId)) {
+        return c.json({ error: 'missing installation_id' }, 400);
+      }
+      let legacySlug = 'default';
+      const legacyState = c.req.query('state');
+      if (legacyState) {
+        const payload = verifyInstallState(legacyState, platformSecret());
+        if (!payload) return c.json({ error: 'invalid or expired state' }, 400);
+        legacySlug = payload.tenantSlug;
+      }
+      try {
+        const { tenant, installation } = await tenants.completeInstallCallback(
+          legacyInstallationId,
+          legacySlug,
+          loadGitHubConfigFromEnv(),
+        );
+        return c.html(
+          pageShell(
+            'Connected',
+            `${onboardingSteps(3)}
+             <div class="banner ok">✓ GitHub connected</div>
+             <h1>Workspace ready</h1>
+             <p class="lead">Workspace <strong>${escapeHtml(tenant.name)}</strong> is linked to
+             <strong>${escapeHtml(installation.accountLogin)}</strong>. Orvex reviews the next
+             pull request automatically — comment <code>@orvex help</code> on any PR for commands.</p>
+             ${LEGACY_BANNER}`,
+          ),
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return c.json({ error: message }, 500);
+      }
+    }
+
     if (!user) return loginRedirect(c, fullPath(c.req.url));
 
     const installationId = Number(c.req.query('installation_id'));

@@ -56,13 +56,9 @@ export function sessionRoutes() {
 
     const oauth = loadOAuthConfigFromEnv();
     if (!oauth) {
-      return c.json(
-        {
-          error: 'user login is not configured',
-          hint: 'Set GITHUB_OAUTH_CLIENT_ID and GITHUB_OAUTH_CLIENT_SECRET from the GitHub App settings page, or AUTH_DISABLED=1 for local development.',
-        },
-        501,
-      );
+      // No OAuth configured → /connect runs in legacy (no-login) mode; send
+      // visitors there instead of dead-ending the signup flow.
+      return c.redirect('/connect');
     }
 
     const state = signOAuthState({ ts: Date.now(), next }, platformSecret());
