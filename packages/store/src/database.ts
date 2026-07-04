@@ -630,12 +630,29 @@ export class AppDatabase {
       .get(key.installationId, key.owner, key.repo, key.pr) as
       | { auto_apply: number; updated_at: string }
       | undefined;
+
+    // Effective auto-apply cascades: per-PR override → per-repo toggle →
+    // workspace default. Without this, the dashboard repo/workspace toggles
+    // were silent no-ops (only the `@orvex auto-apply` PR command took effect).
+    let autoApply = row ? Boolean(row.auto_apply) : undefined;
+    if (autoApply === undefined) {
+      const repo = this.getRepoByFullName(key.installationId, `${key.owner}/${key.repo}`);
+      if (repo?.autoApply) {
+        autoApply = true;
+      } else if (repo) {
+        const inst = this.getInstallation(key.installationId);
+        autoApply = inst ? this.getWorkspaceSettings(inst.tenantId).autoApplyDefault : false;
+      } else {
+        autoApply = false;
+      }
+    }
+
     return {
       installationId: key.installationId,
       owner: key.owner,
       repo: key.repo,
       pr: key.pr,
-      autoApply: Boolean(row?.auto_apply),
+      autoApply,
       updatedAt: row?.updated_at ?? new Date().toISOString(),
     };
   }

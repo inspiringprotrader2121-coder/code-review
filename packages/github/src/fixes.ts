@@ -1,6 +1,29 @@
 import type { Octokit } from '@octokit/rest';
 import type { PrRef } from './types.js';
 
+/**
+ * True when `username` has write access (write/maintain/admin) to the repo.
+ * Used to gate the apply-checkbox commit path, which has no author_association
+ * to check (the comment is the bot's).
+ */
+export async function userCanWrite(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  username: string,
+): Promise<boolean> {
+  try {
+    const { data } = await octokit.rest.repos.getCollaboratorPermissionLevel({
+      owner,
+      repo,
+      username,
+    });
+    return data.permission === 'admin' || data.permission === 'write' || data.permission === 'maintain';
+  } catch {
+    return false;
+  }
+}
+
 export interface PrHeadInfo {
   sha: string;
   /** head branch name */
@@ -67,51 +90,6 @@ export async function fetchBranchSha(
 ): Promise<string> {
   const { data } = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
   return data.object.sha;
-}
-
-/**
- * Commit a single-file change to the PR branch via the Contents API.
- * GitHub rejects the update with a 409 if the file's blob changed between our
- * read and write — that conflict is surfaced as `concurrent_update` so callers
- * can abort instead of overwriting someone's in-flight edit.
- */
-export async function commitFileUpdate(
-  octokit: Octokit,
-  owner: string,
-  repo: string,
-  branch: string,
-  path: string,
-  newContent: string,
-  message: string,
-): Promise<CommitFileResult> {
-  const { data: current } = await octokit.rest.repos.getContent({ owner, repo, path, ref: branch });
-  if (Array.isArray(current) || current.type !== 'file') {
-    throw new Error(`cannot update ${path}: not a file on ${branch}`);
-  }
-
-  try {
-    const { data } = await octokit.rest.repos.createOrUpdateFileContents({
-      owner,
-      repo,
-      path,
-      branch,
-      message,
-      content: Buffer.from(newContent, 'utf8').toString('base64'),
-      sha: current.sha,
-    });
-    return { commitSha: data.commit.sha ?? '' };
-  } catch (err) {
-    const status = (err as { status?: number }).status;
-    if (status === 409 || status === 422) {
-      throw new Error('concurrent_update');
-    }
-    if (status === 403) {
-      // App has contents:write in its definition but this installation hasn't
-      // accepted the upgraded permission yet.
-      throw new Error('contents_write_denied');
-    }
-    throw err;
-  }
 }
 
 export interface FileChange {

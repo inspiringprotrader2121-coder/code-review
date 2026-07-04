@@ -37,7 +37,16 @@ export class RedisReviewQueue implements ReviewQueue {
 
     const inflight = await this.redis.exists(`${INFLIGHT_PREFIX}${pk}`);
     if (inflight) {
-      await this.redis.set(`${PENDING_PREFIX}${pk}`, JSON.stringify(job));
+      // pending is a LIST; coalesce only a trailing review-after-review so a
+      // fix/ask/resolve command is never overwritten by a later review.
+      const kind = job.kind ?? 'review';
+      const lastRaw = await this.redis.lindex(`${PENDING_PREFIX}${pk}`, -1);
+      const lastKind = lastRaw ? (JSON.parse(lastRaw).kind ?? 'review') : null;
+      if (kind === 'review' && lastKind === 'review') {
+        await this.redis.lset(`${PENDING_PREFIX}${pk}`, -1, JSON.stringify(job));
+      } else {
+        await this.redis.rpush(`${PENDING_PREFIX}${pk}`, JSON.stringify(job));
+      }
       return { accepted: true, jobId: idKey, reason: 'coalesced' };
     }
 
@@ -71,10 +80,9 @@ export class RedisReviewQueue implements ReviewQueue {
   }
 
   async releaseLockAndDrain(prKeyStr: string): Promise<ReviewJobPayload | null> {
-    const raw = await this.redis.get(`${PENDING_PREFIX}${prKeyStr}`);
+    const raw = await this.redis.lpop(`${PENDING_PREFIX}${prKeyStr}`);
     if (!raw) return null;
 
-    await this.redis.del(`${PENDING_PREFIX}${prKeyStr}`);
     const job = JSON.parse(raw) as ReviewJobPayload;
     await this.redis.rpush(QUEUE_KEY, JSON.stringify(job));
     return job;

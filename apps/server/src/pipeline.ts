@@ -592,21 +592,28 @@ function normalizeFindingLine(finding: ReviewFinding, addedLinesByFile: AddedLin
   if (finding.line && candidateLines.has(finding.line)) {
     return finding;
   }
-  // Anchor to the nearest changed line in the same file so the finding still
-  // gets an inline comment (and its fix checkbox). GitHub only accepts inline
-  // comments on changed lines; a slightly-off anchor is far better than hiding
-  // the finding — and its fix button — in a summary table.
-  const anchor = nearestAddedLine(candidateLines, finding.line);
+  // Anchor to a NEARBY changed line so the finding keeps its inline comment +
+  // fix checkbox. But if the nearest changed line is far away (or the finding
+  // has no line at all), don't misattribute it to unrelated code — leave it
+  // summary-only. ORVEX_ANCHOR_MAX_DIST tunes the window.
+  const maxDist = Number(process.env.ORVEX_ANCHOR_MAX_DIST ?? 8);
+  const anchor = nearestAddedLine(candidateLines, finding.line, maxDist);
   return { ...finding, line: anchor };
 }
 
-/** Nearest changed line to `requested`, or the first changed line if no hint. */
-function nearestAddedLine(addedLines: Set<number>, requested?: number): number {
-  const sorted = [...addedLines];
-  if (!requested) return Math.min(...sorted);
-  let bestLine = sorted[0];
+/**
+ * Nearest changed line within `maxDist` of `requested`, else undefined.
+ * A line-less finding is never force-anchored (returns undefined).
+ */
+function nearestAddedLine(
+  addedLines: Set<number>,
+  requested: number | undefined,
+  maxDist: number,
+): number | undefined {
+  if (!requested) return undefined;
+  let bestLine: number | undefined;
   let bestDistance = Number.POSITIVE_INFINITY;
-  for (const addedLine of sorted) {
+  for (const addedLine of addedLines) {
     const distance = Math.abs(addedLine - requested);
     if (distance < bestDistance) {
       bestDistance = distance;
@@ -614,5 +621,5 @@ function nearestAddedLine(addedLines: Set<number>, requested?: number): number {
       if (distance === 0) break;
     }
   }
-  return bestLine;
+  return bestLine !== undefined && bestDistance <= maxDist ? bestLine : undefined;
 }

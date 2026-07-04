@@ -9,6 +9,7 @@ import {
   loadGitHubConfigFromEnv,
   replyToIssueComment,
   replyToReviewComment,
+  userCanWrite,
   verifyWebhookSignature,
   type GitHubAppConfig,
 } from '@orvex-review/github';
@@ -279,6 +280,13 @@ export function webhookRoutes(queue: ReviewQueue) {
 
       const installation = await resolveActiveInstallation(data, owner);
       if (!installation) return 'no_installation';
+
+      // this path commits to the branch, so gate it on the toggler's write
+      // access (there's no author_association on a bot-authored comment).
+      const gateOctokit = createInstallationOctokit(githubConfig, installation.installationId);
+      if (!(await userCanWrite(gateOctokit, owner, repo, data.sender.login))) {
+        return 'insufficient_permissions';
+      }
 
       await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
         scope: 'one',

@@ -90,17 +90,27 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
   }
 
   const client = new Anthropic({ apiKey: opts.apiKey, timeout: LLM_TIMEOUT_MS });
+  // Match the MiniMax branch: JSON mode is steered via the system prompt (which
+  // already says "JSON only"); give generous output headroom; nudge JSON with an
+  // assistant prefill so the reply starts with '{'.
+  const maxTokens = Math.max(opts.maxTokens ?? 4096, 8000);
+  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: user }];
+  if (opts.json) messages.push({ role: 'assistant', content: '{' });
   const response = await client.messages.create({
     model: opts.model,
-    max_tokens: opts.maxTokens ?? 4096,
+    max_tokens: maxTokens,
     system,
-    messages: [{ role: 'user', content: user }],
+    messages,
   });
+  if (response.stop_reason === 'max_tokens') {
+    throw new Error('LLM response truncated (stop_reason=max_tokens); increase max tokens');
+  }
   const textBlock = response.content.find((b) => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') {
     throw new Error('LLM returned no text content');
   }
-  return textBlock.text;
+  // re-attach the prefilled '{' when JSON mode used a prefill
+  return opts.json ? `{${textBlock.text}` : textBlock.text;
 }
 
 export function stripThinking(text: string): string {

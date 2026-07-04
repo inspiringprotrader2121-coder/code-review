@@ -11,7 +11,10 @@ interface MemoryState {
   completed: Set<string>;
   queue: ReviewJobPayload[];
   inFlight: Map<string, ReviewJobPayload>;
-  pending: Map<string, ReviewJobPayload>;
+  // a per-PR pending LIST, not a single slot: coalescing consecutive reviews is
+  // fine, but a fix/ask/resolve command must never be overwritten by a later
+  // review (or vice versa).
+  pending: Map<string, ReviewJobPayload[]>;
 }
 
 export class MemoryReviewQueue implements ReviewQueue {
@@ -34,7 +37,16 @@ export class MemoryReviewQueue implements ReviewQueue {
     this.state.seen.add(idKey);
 
     if (this.state.inFlight.has(pk)) {
-      this.state.pending.set(pk, job);
+      const list = this.state.pending.get(pk) ?? [];
+      const kind = job.kind ?? 'review';
+      const last = list[list.length - 1];
+      // collapse only a review-after-review; keep every command distinct
+      if (kind === 'review' && last && (last.kind ?? 'review') === 'review') {
+        list[list.length - 1] = job;
+      } else {
+        list.push(job);
+      }
+      this.state.pending.set(pk, list);
       return { accepted: true, jobId: idKey, reason: 'coalesced' };
     }
 
@@ -63,12 +75,15 @@ export class MemoryReviewQueue implements ReviewQueue {
   }
 
   async releaseLockAndDrain(prKeyStr: string): Promise<ReviewJobPayload | null> {
-    const pending = this.state.pending.get(prKeyStr);
-    if (!pending) return null;
+    const list = this.state.pending.get(prKeyStr);
+    if (!list || list.length === 0) return null;
 
-    this.state.pending.delete(prKeyStr);
-    this.state.queue.push(pending);
-    return pending;
+    const next = list.shift()!;
+    if (list.length === 0) this.state.pending.delete(prKeyStr);
+    else this.state.pending.set(prKeyStr, list);
+
+    this.state.queue.push(next);
+    return next;
   }
 
   async close(): Promise<void> {

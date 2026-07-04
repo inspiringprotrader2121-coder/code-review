@@ -56,7 +56,16 @@ export function jobIdempotencyKey(job: ReviewJobPayload): string {
   const base = `${job.installationId}/${job.owner}/${job.repo}#${job.pr}@${job.headSha}`;
   if (kind === 'review') return base;
   const fix = job.fix;
-  return `${base}:${kind}:${fix?.scope ?? 'ready'}:${fix?.fingerprint ?? ''}:${fix?.replyToCommentId ?? ''}`;
+  // include instruction so two different free-form `@orvex <x>` replies on the
+  // same thread aren't collapsed into one and silently deduped.
+  const instr = fix?.instruction ? `:${hashShort(fix.instruction)}` : '';
+  return `${base}:${kind}:${fix?.scope ?? 'ready'}:${fix?.fingerprint ?? ''}:${fix?.replyToCommentId ?? ''}${instr}`;
+}
+
+function hashShort(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
 }
 
 export function prKey(job: Pick<ReviewJobPayload, 'installationId' | 'owner' | 'repo' | 'pr'>): string {

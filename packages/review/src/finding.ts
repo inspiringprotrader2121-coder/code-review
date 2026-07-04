@@ -24,12 +24,23 @@ export function normalizeMessage(message: string): string {
     .slice(0, 80);
 }
 
-export function fingerprintFinding(f: Pick<ReviewFinding, 'file' | 'line' | 'ruleId' | 'message'>): string {
-  // Deliberately line-independent: pushes shift line numbers, and a shifted
-  // finding is the SAME finding — including the line here caused every
-  // re-review to re-post slightly-moved findings as new inline comments.
+/**
+ * Version tag on the fingerprint recipe. Bump when the stem changes so old and
+ * new fingerprints are distinguishable — prevents a recipe change from silently
+ * mismatching every stored fingerprint (false "resolved", re-posts, dead
+ * suppressions). Stored fingerprints carry their version as the "vN-" prefix.
+ */
+export const FINGERPRINT_VERSION = 2;
+
+export function fingerprintFinding(
+  f: Pick<ReviewFinding, 'file' | 'ruleId' | 'message'>,
+): string {
+  // Line-independent on purpose: pushes shift line numbers, and a shifted
+  // finding is the SAME finding. The message (normalized) is the per-occurrence
+  // discriminator, so two genuinely different issues don't collapse.
   const stem = [f.file, f.ruleId, normalizeMessage(f.message)].join('|');
-  return createHash('sha256').update(stem).digest('hex').slice(0, 16);
+  const hash = createHash('sha256').update(stem).digest('hex').slice(0, 16);
+  return `v${FINGERPRINT_VERSION}-${hash}`;
 }
 
 export function findingId(fingerprint: string, headSha: string): string {

@@ -183,6 +183,11 @@ export async function verifyFixes(
     });
     return { approved, rejected };
   } catch {
-    return { approved: candidates.map((_, i) => i), rejected: [] }; // fail open
+    // FAIL CLOSED: this is the only gate before a real commit to the branch.
+    // If we can't verify, don't commit — reject all rather than guess.
+    return {
+      approved: [],
+      rejected: candidates.map((_, i) => ({ index: i, reason: 'verification unavailable — not committing unverified' })),
+    };
   }
 }

@@ -4,15 +4,10 @@ import { createAppDatabase, type Tenant } from '@orvex-review/store';
 import {
   TenantService,
   WorkspaceAccessError,
-  authDisabled,
-  loadOAuthConfigFromEnv,
+  legacyAuthMode,
 } from '@orvex-review/tenants';
 import { sessionUser } from './session.js';
 
-/** True while user login is not configured — dashboard is viewable without auth. */
-function legacyMode(): boolean {
-  return !loadOAuthConfigFromEnv() && !authDisabled();
-}
 
 export function apiRoutes() {
   const app = new Hono();
@@ -26,7 +21,7 @@ export function apiRoutes() {
 
     // Legacy mode (no OAuth configured): allow read access by slug so the
     // dashboard works before login is set up. Locks down once OAuth is on.
-    if (legacyMode()) {
+    if (legacyAuthMode()) {
       const tenant = db.getTenantBySlug(slug);
       if (!tenant) return c.json({ error: 'workspace not found' }, 404);
       return { tenant };

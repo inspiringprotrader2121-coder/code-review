@@ -1,11 +1,8 @@
 import { Hono } from 'hono';
 import { createAppDatabase } from '@orvex-review/store';
-import { authDisabled, loadOAuthConfigFromEnv } from '@orvex-review/tenants';
+import { legacyAuthMode } from '@orvex-review/tenants';
 import { sessionUser } from './session.js';
 
-function legacyMode(): boolean {
-  return !loadOAuthConfigFromEnv() && !authDisabled();
-}
 
 export function dashboardRoutes() {
   const app = new Hono();
@@ -13,7 +10,7 @@ export function dashboardRoutes() {
 
   // /dashboard → pick the caller's workspace (or, in legacy mode, the first one)
   app.get('/dashboard', (c) => {
-    if (legacyMode()) {
+    if (legacyAuthMode()) {
       const slug = db.firstTenantSlug() ?? 'default';
       return c.redirect(`/dashboard/${slug}`);
     }
@@ -265,7 +262,7 @@ async function toggleRepo(t){
 function rel(iso){ const d=(Date.now()-new Date(iso).getTime())/1000; if(d<60)return'just now'; if(d<3600)return Math.floor(d/60)+'m ago'; if(d<86400)return Math.floor(d/3600)+'h ago'; return Math.floor(d/86400)+'d ago'; }
 
 fetch('/health').then(r=>r.json()).then(()=>{}).catch(()=>{});
-if (${legacyMode()}) document.getElementById('legacyBanner').style.display='';
+if (${legacyAuthMode()}) document.getElementById('legacyBanner').style.display='';
 loadAll();
 </script>
 </body></html>`;

@@ -13,6 +13,7 @@ export {
 } from './service.js';
 export {
   authDisabled,
+  legacyAuthMode,
   buildAuthorizeUrl,
   exchangeCodeForUser,
   loadOAuthConfigFromEnv,

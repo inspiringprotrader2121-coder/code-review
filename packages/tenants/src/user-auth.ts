@@ -21,6 +21,15 @@ export function authDisabled(): boolean {
   return process.env.AUTH_DISABLED === '1';
 }
 
+/**
+ * Legacy no-login mode: OAuth not configured and dev bypass off. The single
+ * source of truth for whether unauthenticated read/connect access is allowed —
+ * previously copy-pasted across three route files.
+ */
+export function legacyAuthMode(): boolean {
+  return !loadOAuthConfigFromEnv() && !authDisabled();
+}
+
 export interface OAuthStatePayload {
   ts: number;
   next?: string;

@@ -38,7 +38,7 @@ export {
 export {
   fetchPrHeadInfo,
   fetchBranchSha,
-  commitFileUpdate,
+  userCanWrite,
   commitFilesAtomic,
   mergeBranchInto,
   type FileChange,
