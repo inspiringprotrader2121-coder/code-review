@@ -115,6 +115,79 @@ export interface PrSettings {
   updatedAt: string;
 }
 
+export interface Repo {
+  id: string;
+  installationId: number;
+  tenantId: string;
+  githubRepoId: number;
+  owner: string;
+  name: string;
+  fullName: string;
+  private: boolean;
+  defaultBranch?: string;
+  /** whether Orvex actively reviews PRs on this repo */
+  enabled: boolean;
+  reviewMode: 'normal' | 'strict';
+  autoApply: boolean;
+  addedAt: string;
+  updatedAt: string;
+}
+
+export type PullRequestState = 'open' | 'closed' | 'merged';
+
+export interface PullRequest {
+  id: string;
+  tenantId: string;
+  installationId: number;
+  repoFullName: string;
+  number: number;
+  title: string;
+  author: string;
+  state: PullRequestState;
+  draft: boolean;
+  headSha: string;
+  url?: string;
+  openFindings: number;
+  openedAt?: string;
+  closedAt?: string;
+  mergedAt?: string;
+  lastReviewedAt?: string;
+  updatedAt: string;
+}
+
+/** A finding row projected out of PrReviewState for dashboard querying. */
+export interface FindingRecord {
+  id: string;
+  tenantId: string;
+  installationId: number;
+  repoFullName: string;
+  prNumber: number;
+  fingerprint: string;
+  file: string;
+  line?: number;
+  severity: string;
+  category: string;
+  message: string;
+  status: FindingStatus;
+  ruleId: string;
+  githubCommentId?: number;
+  firstSeenSha: string;
+  fixedAtSha?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceSettings {
+  tenantId: string;
+  defaultReviewMode: 'normal' | 'strict';
+  autoApplyDefault: boolean;
+  minConfidence: number;
+  maxComments: number;
+  /** auto-enable newly-added repos for review */
+  autoEnableNewRepos: boolean;
+  updatedAt: string;
+}
+
 export interface WorkspaceStats {
   sinceDays: number;
   runsTotal: number;

@@ -13,6 +13,11 @@ export type {
   ReviewRunStatus,
   WorkspaceStats,
   PrSettings,
+  Repo,
+  PullRequest,
+  PullRequestState,
+  FindingRecord,
+  WorkspaceSettings,
 } from './types.js';
 export {
   AppDatabase,

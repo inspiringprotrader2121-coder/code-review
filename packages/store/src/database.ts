@@ -3,17 +3,24 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import type {
+  FindingRecord,
+  FindingStatus,
   GitHubInstallation,
   PrKey,
   PrReviewState,
   PrSettings,
+  PullRequest,
+  PullRequestState,
+  Repo,
   ReviewRun,
   ReviewRunStatus,
   Session,
+  StoredFinding,
   Tenant,
   User,
   WorkspaceMember,
   WorkspaceRole,
+  WorkspaceSettings,
   WorkspaceStats,
 } from './types.js';
 
@@ -129,6 +136,84 @@ CREATE TABLE IF NOT EXISTS finding_suppressions (
   suppressed_by TEXT,
   created_at TEXT NOT NULL,
   PRIMARY KEY (installation_id, owner, repo, fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS repos (
+  id TEXT PRIMARY KEY,
+  installation_id INTEGER NOT NULL,
+  tenant_id TEXT NOT NULL,
+  github_repo_id INTEGER NOT NULL,
+  owner TEXT NOT NULL,
+  name TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  private INTEGER NOT NULL DEFAULT 0,
+  default_branch TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  review_mode TEXT NOT NULL DEFAULT 'normal',
+  auto_apply INTEGER NOT NULL DEFAULT 0,
+  added_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (installation_id, github_repo_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_repos_tenant ON repos(tenant_id);
+
+CREATE TABLE IF NOT EXISTS pull_requests (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  installation_id INTEGER NOT NULL,
+  repo_full_name TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  author TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'open',
+  draft INTEGER NOT NULL DEFAULT 0,
+  head_sha TEXT NOT NULL,
+  url TEXT,
+  open_findings INTEGER NOT NULL DEFAULT 0,
+  opened_at TEXT,
+  closed_at TEXT,
+  merged_at TEXT,
+  last_reviewed_at TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE (installation_id, repo_full_name, number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pulls_tenant_state ON pull_requests(tenant_id, state);
+
+CREATE TABLE IF NOT EXISTS findings (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  installation_id INTEGER NOT NULL,
+  repo_full_name TEXT NOT NULL,
+  pr_number INTEGER NOT NULL,
+  fingerprint TEXT NOT NULL,
+  file TEXT NOT NULL,
+  line INTEGER,
+  severity TEXT NOT NULL,
+  category TEXT NOT NULL,
+  message TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  rule_id TEXT NOT NULL,
+  github_comment_id INTEGER,
+  first_seen_sha TEXT NOT NULL,
+  fixed_at_sha TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (installation_id, repo_full_name, pr_number, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_findings_tenant_status ON findings(tenant_id, status);
+CREATE INDEX IF NOT EXISTS idx_findings_pr ON findings(installation_id, repo_full_name, pr_number);
+
+CREATE TABLE IF NOT EXISTS workspace_settings (
+  tenant_id TEXT PRIMARY KEY,
+  default_review_mode TEXT NOT NULL DEFAULT 'normal',
+  auto_apply_default INTEGER NOT NULL DEFAULT 0,
+  min_confidence REAL NOT NULL DEFAULT 0.6,
+  max_comments INTEGER NOT NULL DEFAULT 8,
+  auto_enable_new_repos INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
 );
 `;
 
@@ -390,6 +475,18 @@ export class AppDatabase {
         state.lastReviewAt,
         state.lastSummaryCommentId ?? null,
       );
+
+    // keep the dashboard findings projection in sync with the operational blob
+    this.projectFindings(
+      {
+        tenantId: state.tenantId,
+        installationId: state.installationId,
+        owner: state.owner,
+        repo: state.repo,
+        pr: state.pr,
+      },
+      state.findings,
+    );
   }
 
   // ——— Users & sessions ———
@@ -732,9 +829,472 @@ export class AppDatabase {
     };
   }
 
+  // ——— Repos (selectable / enable-toggle) ———
+
+  upsertRepo(input: {
+    installationId: number;
+    tenantId: string;
+    githubRepoId: number;
+    owner: string;
+    name: string;
+    fullName: string;
+    private?: boolean;
+    defaultBranch?: string;
+    enabled?: boolean;
+  }): Repo {
+    const now = new Date().toISOString();
+    const existing = this.getRepoByGitHubId(input.installationId, input.githubRepoId);
+    // preserve an operator's explicit enable/disable choice across resyncs
+    const enabled = existing ? existing.enabled : (input.enabled ?? true);
+    this.db
+      .prepare(
+        `INSERT INTO repos
+         (id, installation_id, tenant_id, github_repo_id, owner, name, full_name, private,
+          default_branch, enabled, review_mode, auto_apply, added_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal', 0, ?, ?)
+         ON CONFLICT(installation_id, github_repo_id) DO UPDATE SET
+           owner = excluded.owner, name = excluded.name, full_name = excluded.full_name,
+           private = excluded.private, default_branch = excluded.default_branch,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        existing?.id ?? randomUUID(),
+        input.installationId,
+        input.tenantId,
+        input.githubRepoId,
+        input.owner,
+        input.name,
+        input.fullName,
+        input.private ? 1 : 0,
+        input.defaultBranch ?? null,
+        enabled ? 1 : 0,
+        existing?.addedAt ?? now,
+        now,
+      );
+    return this.getRepoByGitHubId(input.installationId, input.githubRepoId)!;
+  }
+
+  getRepoByGitHubId(installationId: number, githubRepoId: number): Repo | null {
+    const row = this.db
+      .prepare(`SELECT * FROM repos WHERE installation_id = ? AND github_repo_id = ?`)
+      .get(installationId, githubRepoId) as RepoRow | undefined;
+    return row ? mapRepo(row) : null;
+  }
+
+  getRepoByFullName(installationId: number, fullName: string): Repo | null {
+    const row = this.db
+      .prepare(`SELECT * FROM repos WHERE installation_id = ? AND lower(full_name) = lower(?)`)
+      .get(installationId, fullName) as RepoRow | undefined;
+    return row ? mapRepo(row) : null;
+  }
+
+  listRepos(tenantId: string): Repo[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM repos WHERE tenant_id = ? ORDER BY full_name`)
+      .all(tenantId) as RepoRow[];
+    return rows.map(mapRepo);
+  }
+
+  setRepoEnabled(repoId: string, enabled: boolean): void {
+    this.db
+      .prepare(`UPDATE repos SET enabled = ?, updated_at = ? WHERE id = ?`)
+      .run(enabled ? 1 : 0, new Date().toISOString(), repoId);
+  }
+
+  updateRepoSettings(repoId: string, patch: { reviewMode?: 'normal' | 'strict'; autoApply?: boolean }): void {
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    if (patch.reviewMode) {
+      sets.push('review_mode = ?');
+      vals.push(patch.reviewMode);
+    }
+    if (patch.autoApply !== undefined) {
+      sets.push('auto_apply = ?');
+      vals.push(patch.autoApply ? 1 : 0);
+    }
+    if (sets.length === 0) return;
+    sets.push('updated_at = ?');
+    vals.push(new Date().toISOString(), repoId);
+    this.db.prepare(`UPDATE repos SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  }
+
+  /**
+   * Whether Orvex should review this repo. Unknown repos default to enabled
+   * (honoring the workspace's auto_enable_new_repos), so reviews work before a
+   * user visits the dashboard; explicit disables are always respected.
+   */
+  isRepoEnabled(installationId: number, fullName: string): boolean {
+    const repo = this.getRepoByFullName(installationId, fullName);
+    return repo ? repo.enabled : true;
+  }
+
+  // ——— Pull request lifecycle ———
+
+  upsertPullRequest(input: {
+    tenantId: string;
+    installationId: number;
+    repoFullName: string;
+    number: number;
+    title: string;
+    author: string;
+    state: PullRequestState;
+    draft?: boolean;
+    headSha: string;
+    url?: string;
+    openedAt?: string;
+    closedAt?: string;
+    mergedAt?: string;
+  }): void {
+    const now = new Date().toISOString();
+    const existingId = (
+      this.db
+        .prepare(
+          `SELECT id FROM pull_requests WHERE installation_id = ? AND repo_full_name = ? AND number = ?`,
+        )
+        .get(input.installationId, input.repoFullName, input.number) as { id: string } | undefined
+    )?.id;
+    this.db
+      .prepare(
+        `INSERT INTO pull_requests
+         (id, tenant_id, installation_id, repo_full_name, number, title, author, state, draft,
+          head_sha, url, opened_at, closed_at, merged_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(installation_id, repo_full_name, number) DO UPDATE SET
+           title = excluded.title, author = excluded.author, state = excluded.state,
+           draft = excluded.draft, head_sha = excluded.head_sha, url = excluded.url,
+           closed_at = excluded.closed_at, merged_at = excluded.merged_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        existingId ?? randomUUID(),
+        input.tenantId,
+        input.installationId,
+        input.repoFullName,
+        input.number,
+        input.title,
+        input.author,
+        input.state,
+        input.draft ? 1 : 0,
+        input.headSha,
+        input.url ?? null,
+        input.openedAt ?? now,
+        input.closedAt ?? null,
+        input.mergedAt ?? null,
+        now,
+      );
+  }
+
+  markReviewedNow(installationId: number, repoFullName: string, prNumber: number, openFindings: number): void {
+    this.db
+      .prepare(
+        `UPDATE pull_requests SET last_reviewed_at = ?, open_findings = ?, updated_at = ?
+         WHERE installation_id = ? AND repo_full_name = ? AND number = ?`,
+      )
+      .run(new Date().toISOString(), openFindings, new Date().toISOString(), installationId, repoFullName, prNumber);
+  }
+
+  listPullRequests(tenantId: string, opts: { state?: PullRequestState; limit?: number } = {}): PullRequest[] {
+    const limit = opts.limit ?? 100;
+    const rows = opts.state
+      ? (this.db
+          .prepare(`SELECT * FROM pull_requests WHERE tenant_id = ? AND state = ? ORDER BY updated_at DESC LIMIT ?`)
+          .all(tenantId, opts.state, limit) as PullRequestRow[])
+      : (this.db
+          .prepare(`SELECT * FROM pull_requests WHERE tenant_id = ? ORDER BY updated_at DESC LIMIT ?`)
+          .all(tenantId, limit) as PullRequestRow[]);
+    return rows.map(mapPullRequest);
+  }
+
+  getPullRequestCounts(tenantId: string): { open: number; merged: number; closed: number } {
+    const rows = this.db
+      .prepare(`SELECT state, COUNT(*) AS n FROM pull_requests WHERE tenant_id = ? GROUP BY state`)
+      .all(tenantId) as Array<{ state: string; n: number }>;
+    const counts = { open: 0, merged: 0, closed: 0 };
+    for (const r of rows) if (r.state in counts) counts[r.state as keyof typeof counts] = r.n;
+    return counts;
+  }
+
+  // ——— Findings projection (dashboard bug list) ———
+
+  /** Replace the projected findings for one PR (called on every saveState). */
+  projectFindings(
+    key: { tenantId: string; installationId: number; owner: string; repo: string; pr: number },
+    findings: StoredFinding[],
+  ): void {
+    const fullName = `${key.owner}/${key.repo}`;
+    const now = new Date().toISOString();
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(`DELETE FROM findings WHERE installation_id = ? AND repo_full_name = ? AND pr_number = ?`)
+        .run(key.installationId, fullName, key.pr);
+      const insert = this.db.prepare(
+        `INSERT INTO findings
+         (id, tenant_id, installation_id, repo_full_name, pr_number, fingerprint, file, line,
+          severity, category, message, status, rule_id, github_comment_id, first_seen_sha,
+          fixed_at_sha, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const f of findings) {
+        insert.run(
+          randomUUID(),
+          key.tenantId,
+          key.installationId,
+          fullName,
+          key.pr,
+          f.fingerprint,
+          f.file,
+          f.line ?? null,
+          f.severity,
+          f.category,
+          f.message,
+          f.status,
+          f.ruleId,
+          f.githubCommentId ?? null,
+          f.firstSeenSha,
+          f.fixedAtSha ?? null,
+          now,
+          now,
+        );
+      }
+    });
+    tx();
+  }
+
+  listFindings(
+    tenantId: string,
+    opts: { status?: FindingStatus; repoFullName?: string; limit?: number } = {},
+  ): FindingRecord[] {
+    const clauses = ['tenant_id = ?'];
+    const vals: unknown[] = [tenantId];
+    if (opts.status) {
+      clauses.push('status = ?');
+      vals.push(opts.status);
+    }
+    if (opts.repoFullName) {
+      clauses.push('lower(repo_full_name) = lower(?)');
+      vals.push(opts.repoFullName);
+    }
+    vals.push(opts.limit ?? 200);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM findings WHERE ${clauses.join(' AND ')}
+         ORDER BY CASE severity WHEN 'P1' THEN 0 WHEN 'P2' THEN 1 WHEN 'P3' THEN 2 ELSE 3 END,
+                  updated_at DESC LIMIT ?`,
+      )
+      .all(...vals) as FindingRow[];
+    return rows.map(mapFinding);
+  }
+
+  getFindingCounts(tenantId: string): { open: number; fixed: number; ignored: number; bySeverity: Record<string, number> } {
+    const statusRows = this.db
+      .prepare(`SELECT status, COUNT(*) AS n FROM findings WHERE tenant_id = ? GROUP BY status`)
+      .all(tenantId) as Array<{ status: string; n: number }>;
+    const sevRows = this.db
+      .prepare(`SELECT severity, COUNT(*) AS n FROM findings WHERE tenant_id = ? AND status = 'open' GROUP BY severity`)
+      .all(tenantId) as Array<{ severity: string; n: number }>;
+    const counts = { open: 0, fixed: 0, ignored: 0, bySeverity: {} as Record<string, number> };
+    for (const r of statusRows) {
+      if (r.status === 'open' || r.status === 'fixed' || r.status === 'ignored') counts[r.status] = r.n;
+    }
+    for (const r of sevRows) counts.bySeverity[r.severity] = r.n;
+    return counts;
+  }
+
+  // ——— Workspace settings ———
+
+  getWorkspaceSettings(tenantId: string): WorkspaceSettings {
+    const row = this.db
+      .prepare(`SELECT * FROM workspace_settings WHERE tenant_id = ?`)
+      .get(tenantId) as WorkspaceSettingsRow | undefined;
+    if (!row) {
+      return {
+        tenantId,
+        defaultReviewMode: 'normal',
+        autoApplyDefault: false,
+        minConfidence: 0.6,
+        maxComments: 8,
+        autoEnableNewRepos: true,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    return mapWorkspaceSettings(row);
+  }
+
+  updateWorkspaceSettings(tenantId: string, patch: Partial<Omit<WorkspaceSettings, 'tenantId' | 'updatedAt'>>): WorkspaceSettings {
+    const current = this.getWorkspaceSettings(tenantId);
+    const next = { ...current, ...patch };
+    this.db
+      .prepare(
+        `INSERT INTO workspace_settings
+         (tenant_id, default_review_mode, auto_apply_default, min_confidence, max_comments, auto_enable_new_repos, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(tenant_id) DO UPDATE SET
+           default_review_mode = excluded.default_review_mode,
+           auto_apply_default = excluded.auto_apply_default,
+           min_confidence = excluded.min_confidence,
+           max_comments = excluded.max_comments,
+           auto_enable_new_repos = excluded.auto_enable_new_repos,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        tenantId,
+        next.defaultReviewMode,
+        next.autoApplyDefault ? 1 : 0,
+        next.minConfidence,
+        next.maxComments,
+        next.autoEnableNewRepos ? 1 : 0,
+        new Date().toISOString(),
+      );
+    return this.getWorkspaceSettings(tenantId);
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+interface RepoRow {
+  id: string;
+  installation_id: number;
+  tenant_id: string;
+  github_repo_id: number;
+  owner: string;
+  name: string;
+  full_name: string;
+  private: number;
+  default_branch: string | null;
+  enabled: number;
+  review_mode: string;
+  auto_apply: number;
+  added_at: string;
+  updated_at: string;
+}
+
+function mapRepo(r: RepoRow): Repo {
+  return {
+    id: r.id,
+    installationId: r.installation_id,
+    tenantId: r.tenant_id,
+    githubRepoId: r.github_repo_id,
+    owner: r.owner,
+    name: r.name,
+    fullName: r.full_name,
+    private: Boolean(r.private),
+    defaultBranch: r.default_branch ?? undefined,
+    enabled: Boolean(r.enabled),
+    reviewMode: r.review_mode === 'strict' ? 'strict' : 'normal',
+    autoApply: Boolean(r.auto_apply),
+    addedAt: r.added_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+interface PullRequestRow {
+  id: string;
+  tenant_id: string;
+  installation_id: number;
+  repo_full_name: string;
+  number: number;
+  title: string;
+  author: string;
+  state: string;
+  draft: number;
+  head_sha: string;
+  url: string | null;
+  open_findings: number;
+  opened_at: string | null;
+  closed_at: string | null;
+  merged_at: string | null;
+  last_reviewed_at: string | null;
+  updated_at: string;
+}
+
+function mapPullRequest(r: PullRequestRow): PullRequest {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    installationId: r.installation_id,
+    repoFullName: r.repo_full_name,
+    number: r.number,
+    title: r.title,
+    author: r.author,
+    state: r.state as PullRequestState,
+    draft: Boolean(r.draft),
+    headSha: r.head_sha,
+    url: r.url ?? undefined,
+    openFindings: r.open_findings,
+    openedAt: r.opened_at ?? undefined,
+    closedAt: r.closed_at ?? undefined,
+    mergedAt: r.merged_at ?? undefined,
+    lastReviewedAt: r.last_reviewed_at ?? undefined,
+    updatedAt: r.updated_at,
+  };
+}
+
+interface FindingRow {
+  id: string;
+  tenant_id: string;
+  installation_id: number;
+  repo_full_name: string;
+  pr_number: number;
+  fingerprint: string;
+  file: string;
+  line: number | null;
+  severity: string;
+  category: string;
+  message: string;
+  status: string;
+  rule_id: string;
+  github_comment_id: number | null;
+  first_seen_sha: string;
+  fixed_at_sha: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapFinding(r: FindingRow): FindingRecord {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    installationId: r.installation_id,
+    repoFullName: r.repo_full_name,
+    prNumber: r.pr_number,
+    fingerprint: r.fingerprint,
+    file: r.file,
+    line: r.line ?? undefined,
+    severity: r.severity,
+    category: r.category,
+    message: r.message,
+    status: r.status as FindingStatus,
+    ruleId: r.rule_id,
+    githubCommentId: r.github_comment_id ?? undefined,
+    firstSeenSha: r.first_seen_sha,
+    fixedAtSha: r.fixed_at_sha ?? undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+interface WorkspaceSettingsRow {
+  tenant_id: string;
+  default_review_mode: string;
+  auto_apply_default: number;
+  min_confidence: number;
+  max_comments: number;
+  auto_enable_new_repos: number;
+  updated_at: string;
+}
+
+function mapWorkspaceSettings(r: WorkspaceSettingsRow): WorkspaceSettings {
+  return {
+    tenantId: r.tenant_id,
+    defaultReviewMode: r.default_review_mode === 'strict' ? 'strict' : 'normal',
+    autoApplyDefault: Boolean(r.auto_apply_default),
+    minConfidence: r.min_confidence,
+    maxComments: r.max_comments,
+    autoEnableNewRepos: Boolean(r.auto_enable_new_repos),
+    updatedAt: r.updated_at,
+  };
 }
 
 interface UserRow {

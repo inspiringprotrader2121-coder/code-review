@@ -23,6 +23,8 @@ export {
   type CheckConclusion,
   fetchInstallationMeta,
   buildGitHubInstallUrl,
+  listInstallationRepos,
+  type InstallationRepo,
 } from './api.js';
 export {
   fetchPrHeadInfo,

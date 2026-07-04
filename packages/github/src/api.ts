@@ -92,4 +92,9 @@ export {
   type PullRequestReviewResult,
 } from './reviews.js';
 export { createCheckRun, type CheckConclusion } from './checks.js';
-export { fetchInstallationMeta, buildGitHubInstallUrl } from './install.js';
+export {
+  fetchInstallationMeta,
+  buildGitHubInstallUrl,
+  listInstallationRepos,
+  type InstallationRepo,
+} from './install.js';

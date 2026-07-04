@@ -40,12 +40,41 @@ interface PullRequestWebhook {
   installation?: WebhookInstallation;
   pull_request: {
     number: number;
+    title?: string;
+    state?: string;
+    draft?: boolean;
+    merged?: boolean;
+    html_url?: string;
+    user?: { login?: string };
     head: { sha: string };
+    created_at?: string;
+    closed_at?: string | null;
+    merged_at?: string | null;
   };
   repository: {
+    id?: number;
     name: string;
+    full_name?: string;
+    private?: boolean;
+    default_branch?: string;
     owner: { login: string };
   };
+}
+
+interface RepositoryLite {
+  id: number;
+  name: string;
+  full_name: string;
+  private?: boolean;
+  default_branch?: string;
+}
+
+interface InstallationRepositoriesWebhook {
+  action: string;
+  installation: WebhookInstallation;
+  repositories_added?: RepositoryLite[];
+  repositories_removed?: RepositoryLite[];
+  repositories?: RepositoryLite[];
 }
 
 interface InstallationWebhook {
@@ -74,6 +103,29 @@ export function webhookRoutes(queue: ReviewQueue) {
   const app = new Hono();
   const tenants = new TenantService();
   const db = createAppDatabase();
+
+  /** Upsert the repos an installation can access into the dashboard repo list. */
+  function syncReposFromPayload(installationId: number, repos: RepositoryLite[]): void {
+    if (repos.length === 0) return;
+    const installation = db.getInstallation(installationId);
+    if (!installation) return;
+    const settings = db.getWorkspaceSettings(installation.tenantId);
+    for (const r of repos) {
+      if (!r?.id || !r.name) continue;
+      const owner = r.full_name?.split('/')[0] ?? installation.accountLogin;
+      db.upsertRepo({
+        installationId,
+        tenantId: installation.tenantId,
+        githubRepoId: r.id,
+        owner,
+        name: r.name,
+        fullName: r.full_name ?? `${owner}/${r.name}`,
+        private: r.private,
+        defaultBranch: r.default_branch,
+        enabled: settings.autoEnableNewRepos,
+      });
+    }
+  }
 
   async function resolveActiveInstallation(
     payload: { installation?: WebhookInstallation },
@@ -375,13 +427,27 @@ export function webhookRoutes(queue: ReviewQueue) {
         suspendedAt: inst.suspended_at ?? null,
       });
 
+      // installation.created / .new_permissions_accepted carry the accessible repo list
+      syncReposFromPayload(
+        inst.id,
+        (payload as unknown as InstallationRepositoriesWebhook).repositories ?? [],
+      );
+
       console.log(`[webhook] installation ${data.action} id=${inst.id} account=${inst.account?.login}`);
       return c.json({ ok: true, action: data.action });
     }
 
     if (event === 'installation_repositories') {
+      const data = payload as unknown as InstallationRepositoriesWebhook;
+      const inst = data.installation;
+      if (inst?.id) {
+        syncReposFromPayload(inst.id, [
+          ...(data.repositories_added ?? []),
+          ...(data.repositories ?? []),
+        ]);
+      }
       console.log(`[webhook] installation_repositories ${payload.action}`);
-      return c.json({ ok: true });
+      return c.json({ ok: true, action: payload.action });
     }
 
     if (event === 'issue_comment') {
@@ -401,7 +467,9 @@ export function webhookRoutes(queue: ReviewQueue) {
     const prPayload = payload as unknown as PullRequestWebhook;
     const action = prPayload.action;
 
-    if (!REVIEW_ACTIONS.has(action)) {
+    // record lifecycle for open/close/merge/reopen/edit even when we don't re-review
+    const LIFECYCLE_ACTIONS = new Set([...REVIEW_ACTIONS, 'closed', 'edited', 'ready_for_review']);
+    if (!LIFECYCLE_ACTIONS.has(action)) {
       return c.json({ ok: true, ignored: action });
     }
 
@@ -414,6 +482,7 @@ export function webhookRoutes(queue: ReviewQueue) {
     const repo = prPayload.repository.name;
     const pr = prPayload.pull_request.number;
     const headSha = prPayload.pull_request.head.sha;
+    const fullName = prPayload.repository.full_name ?? `${owner}/${repo}`;
 
     if (githubConfig.allowedRepo && !isRepoAllowed(owner, repo, githubConfig.allowedRepo)) {
       console.log(`[webhook] ignored repo ${owner}/${repo} (legacy allowlist)`);
@@ -423,6 +492,51 @@ export function webhookRoutes(queue: ReviewQueue) {
     const installation = await resolveActiveInstallation(prPayload, owner);
     if (!installation) {
       return c.json({ ok: true, ignored: 'suspended_or_unknown_installation' });
+    }
+
+    // ensure the repo is tracked (first PR on a repo we haven't synced yet)
+    if (prPayload.repository.id && !db.getRepoByFullName(installationId, fullName)) {
+      syncReposFromPayload(installationId, [
+        {
+          id: prPayload.repository.id,
+          name: repo,
+          full_name: fullName,
+          private: prPayload.repository.private,
+          default_branch: prPayload.repository.default_branch,
+        },
+      ]);
+    }
+
+    // record the PR's current lifecycle state
+    const prState = prPayload.pull_request.merged
+      ? 'merged'
+      : action === 'closed' || prPayload.pull_request.state === 'closed'
+        ? 'closed'
+        : 'open';
+    db.upsertPullRequest({
+      tenantId: installation.tenantId,
+      installationId,
+      repoFullName: fullName,
+      number: pr,
+      title: prPayload.pull_request.title ?? `#${pr}`,
+      author: prPayload.pull_request.user?.login ?? 'unknown',
+      state: prState,
+      draft: prPayload.pull_request.draft,
+      headSha,
+      url: prPayload.pull_request.html_url,
+      openedAt: prPayload.pull_request.created_at ?? undefined,
+      closedAt: prPayload.pull_request.closed_at ?? undefined,
+      mergedAt: prPayload.pull_request.merged_at ?? undefined,
+    });
+
+    if (!REVIEW_ACTIONS.has(action)) {
+      return c.json({ ok: true, recorded: prState, reviewed: false });
+    }
+
+    // respect the per-repo enable toggle from the dashboard
+    if (!db.isRepoEnabled(installationId, fullName)) {
+      console.log(`[webhook] ${fullName} disabled for review — recorded PR only`);
+      return c.json({ ok: true, recorded: prState, reviewed: false, reason: 'repo_disabled' });
     }
 
     const job: ReviewJobPayload = {

@@ -362,6 +362,10 @@ async function executeReview(
   };
   config.store.saveState(state);
 
+  // update the dashboard PR row with the latest open-finding count
+  const openCount = finalFindings.filter((f) => f.status === 'open').length;
+  config.store.markReviewedNow(installationId, `${owner}/${repo}`, number, openCount);
+
   if (config.enableCheckRuns) {
     const openP1 = finalFindings.some((f) => f.status === 'open' && f.severity === 'P1');
     const openAny = finalFindings.some((f) => f.status === 'open');
