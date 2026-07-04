@@ -496,11 +496,6 @@
   .ghost:hover { border-color: var(--ink-3); }
 </style>
 
-<!-- view switcher -->
-<div class="switcher" role="tablist" aria-label="Design views">
-  <button id="tab-landing" aria-pressed="true" onclick="showView('landing')">Landing</button>
-  <button id="tab-dash" aria-pressed="false" onclick="showView('dash')">Dashboard</button>
-</div>
 
 <!-- ============================================================
      VIEW 1 — MARKETING LANDING
@@ -516,7 +511,7 @@
       <a href="#pricing">Pricing</a>
     </div>
     <a class="btn" href="/auth/login">Sign in</a>
-    <a class="btn primary" href="/dashboard">Install on GitHub</a>
+    <a class="btn primary" href="/auth/login">Start free</a>
   </nav>
 
   <header class="hero">
@@ -528,7 +523,7 @@
       “Fixed” when you actually fix it. No spam. No re-posted nits. Eight
       comments, max.</p>
       <div class="cta-row">
-        <a class="btn primary" href="/dashboard">Install on GitHub — free for 1 repo</a>
+        <a class="btn primary" href="/auth/login">Start free — sign in</a>
         <a class="btn" href="#how">See the pipeline</a>
       </div>
       <p class="fine">Installs as a GitHub App with scoped permissions —
@@ -701,7 +696,7 @@ cache.set(url, seg);</pre>
           <li><span class="tick">✓</span> Rules + LLM pipeline</li>
           <li><span class="tick">✓</span> Fingerprint dedup</li>
         </ul>
-        <a class="btn" href="/dashboard">Start free</a>
+        <a class="btn" href="/auth/login">Start free</a>
       </div>
       <div class="plan featured">
         <span class="name">Team</span>
@@ -712,7 +707,7 @@ cache.set(url, seg);</pre>
           <li><span class="tick">✓</span> Check runs + dashboard</li>
           <li><span class="tick">✓</span> Semgrep + custom rule packs</li>
         </ul>
-        <a class="btn primary" href="/dashboard">Start 14-day trial</a>
+        <a class="btn primary" href="/auth/login">Start 14-day trial</a>
       </div>
       <div class="plan">
         <span class="name">Enterprise</span>
@@ -723,7 +718,7 @@ cache.set(url, seg);</pre>
           <li><span class="tick">✓</span> SSO / SAML, audit log</li>
           <li><span class="tick">✓</span> SLA + priority support</li>
         </ul>
-        <a class="btn" href="/dashboard">Talk to us</a>
+        <a class="btn" href="/auth/login">Talk to us</a>
       </div>
     </div>
   </section>
@@ -736,252 +731,10 @@ cache.set(url, seg);</pre>
   </footer>
 </div>
 
-<!-- ============================================================
-     VIEW 2 — TENANT DASHBOARD
-     ============================================================ -->
-<div class="view" id="view-dash">
-  <div class="dash">
-
-    <aside class="sidebar">
-      <div class="ws">
-        <span class="avatar">AC</span>
-        <span class="meta">
-          <span class="n1">Acme Corp</span><br>
-          <span class="n2">acme · Team plan</span>
-        </span>
-        <span class="car">▾</span>
-      </div>
-
-      <button class="navitem active"><span class="ico">◧</span>Overview</button>
-      <button class="navitem"><span class="ico">⇄</span>Reviews <span class="count">128</span></button>
-      <button class="navitem"><span class="ico">⚑</span>Findings <span class="count">23</span></button>
-      <button class="navitem"><span class="ico">▤</span>Repositories <span class="count">12</span></button>
-
-      <div class="navlbl">Workspace</div>
-      <button class="navitem"><span class="ico">⚙</span>Rules &amp; config</button>
-      <button class="navitem"><span class="ico">◈</span>Installations</button>
-      <button class="navitem"><span class="ico">◔</span>Usage &amp; billing</button>
-      <button class="navitem"><span class="ico">◱</span>Members</button>
-
-      <div class="spacer"></div>
-      <button class="navitem"><span class="ico">✚</span>Add repositories</button>
-    </aside>
-
-    <main class="main">
-      <div class="topbar">
-        <div>
-          <div class="crumb">acme / overview</div>
-          <h2>Review activity</h2>
-        </div>
-        <div class="right">
-          <div class="range" role="group" aria-label="Date range">
-            <button aria-pressed="false">7d</button>
-            <button aria-pressed="true">14d</button>
-            <button aria-pressed="false">30d</button>
-          </div>
-          <button class="btn primary" style="padding:7px 13px; font-size:12.5px;">Run manual review</button>
-        </div>
-      </div>
-
-      <!-- stat tiles -->
-      <div class="tiles">
-        <div class="tile">
-          <div class="lbl">PRs reviewed · 14d</div>
-          <div class="val">128</div>
-          <div class="delta"><span class="up">▲ 18%</span> vs previous 14 days</div>
-        </div>
-        <div class="tile">
-          <div class="lbl">Findings fixed before merge</div>
-          <div class="val">72%</div>
-          <div class="delta"><span class="up">▲ 6 pts</span> — 89 of 124 findings</div>
-        </div>
-        <div class="tile">
-          <div class="lbl">Median time to review</div>
-          <div class="val">84s</div>
-          <div class="delta">webhook → posted comment</div>
-        </div>
-        <div class="tile">
-          <div class="lbl">LLM spend · 14d</div>
-          <div class="val">$14.62</div>
-          <div class="delta">$0.11 / PR · cap $50 <span class="up">on track</span></div>
-        </div>
-      </div>
-
-      <div class="grid2">
-        <!-- reviews per day -->
-        <div class="panel">
-          <h3>Reviews per day</h3>
-          <p class="sub">Completed reviews, last 14 days · hover for detail</p>
-          <div class="chart" id="chart">
-            <svg viewBox="0 0 640 220" role="img" aria-label="Bar chart of reviews per day over the last 14 days, ranging from 3 to 16 reviews">
-              <g id="gridlines"></g>
-              <g id="bars"></g>
-              <g id="xlabels"></g>
-              <g id="ylabels"></g>
-            </svg>
-            <div class="tip" id="tip"></div>
-          </div>
-        </div>
-
-        <!-- severity -->
-        <div class="panel">
-          <h3>Open findings by severity</h3>
-          <p class="sub">Across 12 repositories · 23 open</p>
-          <div class="sev-rows">
-            <div class="sev-row">
-              <span class="name"><span class="sq" style="background:var(--crit)"></span>P1 · critical</span>
-              <div class="track"><div class="fill" style="width:22%; background:var(--crit)"></div></div>
-              <span class="num">3</span>
-            </div>
-            <div class="sev-row">
-              <span class="name"><span class="sq" style="background:var(--warn)"></span>P2 · warning</span>
-              <div class="track"><div class="fill" style="width:64%; background:var(--warn)"></div></div>
-              <span class="num">9</span>
-            </div>
-            <div class="sev-row">
-              <span class="name"><span class="sq" style="background:var(--accent)"></span>P3 · info</span>
-              <div class="track"><div class="fill" style="width:78%; background:var(--accent)"></div></div>
-              <span class="num">11</span>
-            </div>
-          </div>
-          <p class="sub" style="margin:16px 0 0;">Fixed this period: <strong style="color:var(--good)">89</strong> ·
-          suppressed by confidence filter: 41</p>
-
-          <h3 style="margin-top:20px;">Finding sources</h3>
-          <div class="sev-rows" style="margin-top:10px;">
-            <div class="sev-row">
-              <span class="name">doc-audit</span>
-              <div class="track"><div class="fill" style="width:30%; background:var(--bar); opacity:.55"></div></div>
-              <span class="num">31</span>
-            </div>
-            <div class="sev-row">
-              <span class="name">semgrep</span>
-              <div class="track"><div class="fill" style="width:42%; background:var(--bar); opacity:.75"></div></div>
-              <span class="num">44</span>
-            </div>
-            <div class="sev-row">
-              <span class="name">llm</span>
-              <div class="track"><div class="fill" style="width:47%; background:var(--bar)"></div></div>
-              <span class="num">49</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- recent reviews table -->
-      <div class="panel" style="margin-bottom:16px;">
-        <h3>Recent reviews</h3>
-        <p class="sub">Latest webhook-triggered runs across the workspace</p>
-        <div class="tbl-wrap">
-          <table class="reviews">
-            <thead>
-              <tr>
-                <th>Repository</th><th>Pull request</th><th>Status</th>
-                <th>Findings</th><th>Head</th><th style="text-align:right">Duration</th><th>When</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td class="repo">streaming-edge</td>
-                <td class="pr-t">#67 fix: restream fallback on segment 404</td>
-                <td><span class="chip ok"><span class="dot"></span>Reviewed</span></td>
-                <td><span class="chip p1">1 P1</span> <span class="chip p2">1 P2</span></td>
-                <td class="mono">3f2c1ab</td>
-                <td class="mono num">78s</td>
-                <td class="mono">2 min ago</td>
-              </tr>
-              <tr>
-                <td class="repo">billing-api</td>
-                <td class="pr-t">#204 chore: migrate invoices to v2 schema</td>
-                <td><span class="chip ok"><span class="dot"></span>Reviewed</span></td>
-                <td><span class="chip p2">2 P2</span></td>
-                <td class="mono">a91d04e</td>
-                <td class="mono num">96s</td>
-                <td class="mono">18 min ago</td>
-              </tr>
-              <tr>
-                <td class="repo">web-console</td>
-                <td class="pr-t">#88 feat: workspace switcher</td>
-                <td><span class="chip info"><span class="dot"></span>In progress</span></td>
-                <td><span class="chip muted">—</span></td>
-                <td class="mono">51bb2f0</td>
-                <td class="mono num">—</td>
-                <td class="mono">just now</td>
-              </tr>
-              <tr>
-                <td class="repo">streaming-edge</td>
-                <td class="pr-t">#66 docs: audit October failover</td>
-                <td><span class="chip ok"><span class="dot"></span>Clean</span></td>
-                <td><span class="chip muted">0 findings</span></td>
-                <td class="mono">c02e911</td>
-                <td class="mono num">41s</td>
-                <td class="mono">1 h ago</td>
-              </tr>
-              <tr>
-                <td class="repo">infra</td>
-                <td class="pr-t">#310 bump terraform providers</td>
-                <td><span class="chip muted"><span class="dot"></span>Skipped · dependabot</span></td>
-                <td><span class="chip muted">—</span></td>
-                <td class="mono">7de9a33</td>
-                <td class="mono num">—</td>
-                <td class="mono">2 h ago</td>
-              </tr>
-              <tr>
-                <td class="repo">billing-api</td>
-                <td class="pr-t">#203 fix: webhook retry idempotency</td>
-                <td><span class="chip ok"><span class="dot"></span>3 fixed ✓</span></td>
-                <td><span class="chip ok">all resolved</span></td>
-                <td class="mono">f44c218</td>
-                <td class="mono num">88s</td>
-                <td class="mono">3 h ago</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- installations -->
-      <div class="panel">
-        <h3>GitHub installations</h3>
-        <p class="sub">Orgs where the Orvex Review app is installed for this workspace</p>
-        <div class="installs">
-          <div class="install-row">
-            <span class="avatar">AC</span>
-            <div>
-              <div class="org">acme-corp <span class="chip ok" style="margin-left:6px;"><span class="dot"></span>Active</span></div>
-              <div class="meta">Organization · 12 repos selected · installation #4821133</div>
-            </div>
-            <div class="right">
-              <button class="ghost">Configure on GitHub</button>
-            </div>
-          </div>
-          <div class="install-row">
-            <span class="avatar" style="background:var(--ink-3)">AL</span>
-            <div>
-              <div class="org">acme-labs <span class="chip p2" style="margin-left:6px;"><span class="dot"></span>Suspended</span></div>
-              <div class="meta">Organization · all repos · installation #4902710 · suspended 3 d ago</div>
-            </div>
-            <div class="right">
-              <button class="ghost">Resume</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </main>
-  </div>
-</div>
 
 <script>
   const motionOK = window.matchMedia('(prefers-reduced-motion: no-preference)').matches;
 
-  function showView(which) {
-    document.getElementById('view-landing').classList.toggle('active', which === 'landing');
-    document.getElementById('view-dash').classList.toggle('active', which === 'dash');
-    document.getElementById('tab-landing').setAttribute('aria-pressed', which === 'landing');
-    document.getElementById('tab-dash').setAttribute('aria-pressed', which === 'dash');
-    window.scrollTo(0, 0);
-    if (which === 'dash') animateDash();
-  }
 
   /* ---- scroll reveals (landing) ---- */
   if (motionOK && 'IntersectionObserver' in window) {
@@ -1006,150 +759,5 @@ cache.set(url, seg);</pre>
     document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
   }
 
-  /* ---- dashboard entrance: count-up tiles, growing bars ---- */
-  let dashAnimated = false;
-  function animateDash() {
-    if (dashAnimated) return;
-    dashAnimated = true;
-    if (!motionOK) return;
 
-    document.querySelectorAll('#view-dash .tile .val').forEach((el) => {
-      const m = el.textContent.trim().match(/^([^0-9]*)([0-9]+(?:\.[0-9]+)?)(.*)$/);
-      if (!m) return;
-      const pre = m[1], target = parseFloat(m[2]), post = m[3];
-      const decimals = (m[2].split('.')[1] || '').length;
-      const t0 = performance.now(), dur = 850;
-      const tick = (t) => {
-        const p = Math.min(1, (t - t0) / dur);
-        const eased = 1 - Math.pow(1 - p, 3);
-        el.textContent = pre + (target * eased).toFixed(decimals) + post;
-        if (p < 1) requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    });
-
-    document.querySelectorAll('#bars .bar-rect').forEach((rect, i) => {
-      const finalY = parseFloat(rect.getAttribute('y'));
-      const finalH = parseFloat(rect.getAttribute('height'));
-      const baseline = finalY + finalH;
-      rect.setAttribute('y', baseline);
-      rect.setAttribute('height', 0);
-      const t0 = performance.now() + i * 28, dur = 550;
-      const tick = (t) => {
-        const p = Math.min(1, Math.max(0, (t - t0) / dur));
-        const eased = 1 - Math.pow(1 - p, 3);
-        rect.setAttribute('height', Math.max(finalH * eased, 0.01));
-        rect.setAttribute('y', baseline - finalH * eased);
-        if (p < 1) requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    });
-
-    document.querySelectorAll('#view-dash .sev-row .fill').forEach((el, i) => {
-      const w = el.style.width;
-      el.style.transition = 'none';
-      el.style.width = '0%';
-      requestAnimationFrame(() =>
-        requestAnimationFrame(() => {
-          el.style.transition = 'width .7s cubic-bezier(.22,1,.36,1) ' + i * 60 + 'ms';
-          el.style.width = w;
-        }),
-      );
-    });
-  }
-
-  /* ---- reviews-per-day bar chart ---- */
-  (function () {
-    const data = [
-      { d: 'Jun 21', v: 6 },  { d: 'Jun 22', v: 4 },  { d: 'Jun 23', v: 9 },
-      { d: 'Jun 24', v: 11 }, { d: 'Jun 25', v: 8 },  { d: 'Jun 26', v: 13 },
-      { d: 'Jun 27', v: 3 },  { d: 'Jun 28', v: 5 },  { d: 'Jun 29', v: 12 },
-      { d: 'Jun 30', v: 14 }, { d: 'Jul 1', v: 10 },  { d: 'Jul 2', v: 16 },
-      { d: 'Jul 3', v: 12 },  { d: 'Jul 4', v: 5 },
-    ];
-    const W = 640, H = 220, padL = 30, padR = 8, padT = 12, padB = 26;
-    const plotW = W - padL - padR, plotH = H - padT - padB;
-    const maxV = 16, yTicks = [0, 4, 8, 12, 16];
-    const n = data.length;
-    const slot = plotW / n, barW = Math.min(26, slot * 0.62);
-
-    const ns = 'http://www.w3.org/2000/svg';
-    const el = (t, attrs) => {
-      const e = document.createElementNS(ns, t);
-      for (const k in attrs) e.setAttribute(k, attrs[k]);
-      return e;
-    };
-    const gGrid = document.getElementById('gridlines');
-    const gBars = document.getElementById('bars');
-    const gX = document.getElementById('xlabels');
-    const gY = document.getElementById('ylabels');
-    const tip = document.getElementById('tip');
-    const chart = document.getElementById('chart');
-
-    const y = v => padT + plotH - (v / maxV) * plotH;
-
-    yTicks.forEach(t => {
-      gGrid.appendChild(el('line', {
-        x1: padL, x2: W - padR, y1: y(t), y2: y(t),
-        stroke: t === 0 ? 'var(--ink-3)' : 'var(--grid)',
-        'stroke-width': 1,
-      }));
-      const lbl = el('text', {
-        x: padL - 7, y: y(t) + 3.5, 'text-anchor': 'end',
-        'font-size': 10, fill: 'var(--ink-3)',
-        'font-family': 'var(--mono)',
-      });
-      lbl.textContent = t;
-      gY.appendChild(lbl);
-    });
-
-    data.forEach((pt, i) => {
-      const cx = padL + slot * i + slot / 2;
-      const bh = (pt.v / maxV) * plotH;
-      const g = el('g', { class: 'bar-group' });
-      const rect = el('rect', {
-        class: 'bar-rect',
-        x: cx - barW / 2, y: y(pt.v),
-        width: barW, height: Math.max(bh, 2),
-        fill: 'var(--bar)', rx: 3,
-      });
-      const hit = el('rect', {
-        class: 'bar-hit',
-        x: padL + slot * i, y: padT, width: slot, height: plotH,
-      });
-      g.appendChild(rect);
-      g.appendChild(hit);
-      g.addEventListener('mousemove', () => {
-        const svgEl = chart.querySelector('svg');
-        const box = svgEl.getBoundingClientRect();
-        const sx = box.width / W;
-        tip.innerHTML = pt.d + ' · <strong>' + pt.v + '</strong> reviews';
-        tip.style.left = (cx * sx) + 'px';
-        tip.style.top = (y(pt.v) * (box.height / H)) + 'px';
-        tip.style.opacity = '1';
-      });
-      g.addEventListener('mouseleave', () => { tip.style.opacity = '0'; });
-      gBars.appendChild(g);
-
-      if (i % 2 === 0) {
-        const xl = el('text', {
-          x: cx, y: H - 8, 'text-anchor': 'middle',
-          'font-size': 10, fill: 'var(--ink-3)',
-        });
-        xl.textContent = pt.d;
-        gX.appendChild(xl);
-      }
-    });
-
-    // direct-label the peak
-    const peak = data.reduce((a, b) => (b.v > a.v ? b : a));
-    const pi = data.indexOf(peak);
-    const px = padL + slot * pi + slot / 2;
-    const plbl = el('text', {
-      x: px, y: y(peak.v) - 6, 'text-anchor': 'middle',
-      'font-size': 10.5, 'font-weight': 700, fill: 'var(--ink-2)',
-    });
-    plbl.textContent = peak.v;
-    gBars.appendChild(plbl);
-  })();
 </script>
