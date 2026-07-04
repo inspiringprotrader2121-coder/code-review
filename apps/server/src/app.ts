@@ -13,8 +13,7 @@ export function createApp(queue: ReviewQueue) {
       ok: true,
       service: 'orvex-review',
       mode: 'multi-tenant',
-      connect: '/dashboard',
-      install: '/connect',
+      connect: '/connect',
     }),
   );
 

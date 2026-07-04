@@ -5,7 +5,6 @@ import {
   TenantService,
   WorkspaceAccessError,
   verifyInstallState,
-  signInstallState,
   platformSecret,
 } from '@orvex-review/tenants';
 import { loginRedirect, sessionUser } from './session.js';
@@ -75,16 +74,8 @@ export function authRoutes() {
 
     const tenantSlug = c.req.query('tenant');
     const name = c.req.query('name') ?? undefined;
-    const access = c.req.query('access');
     if (!tenantSlug) {
       return c.redirect('/connect');
-    }
-    if (!access) {
-      return c.redirect(`/connect?tenant=${encodeURIComponent(tenantSlug)}${name ? `&name=${encodeURIComponent(name)}` : ''}`);
-    }
-    const payload = verifyInstallState(access, platformSecret());
-    if (!payload || payload.tenantSlug !== tenantSlug) {
-      return c.json({ error: 'trial_or_plan_required' }, 403);
     }
 
     try {
@@ -153,12 +144,6 @@ export function authRoutes() {
       // Direct install from GitHub (no connect flow): personal workspace.
       tenantSlug = user.login.toLowerCase();
     }
-
-    const payload = verifyInstallState(state, platformSecret());
-    if (!payload) {
-      return c.json({ error: 'invalid or expired state' }, 400);
-    }
-    const tenantSlug = payload.tenantSlug;
 
     try {
       // Ensures membership; claims/creates the slug for this user if needed.
@@ -236,8 +221,6 @@ export function authRoutes() {
       throw err;
     }
   });
-
-  app.get('/', (c) => c.redirect('/dashboard'));
 
   return app;
 }

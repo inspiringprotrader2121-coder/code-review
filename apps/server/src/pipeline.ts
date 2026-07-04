@@ -45,12 +45,11 @@ import {
   type StoredFinding,
 } from '@orvex-review/store';
 
-type AddedLineMap = Map<string, Set<number>>;
-
 export interface WorkerConfig {
   github: GitHubAppConfig;
   llmApiKey: string;
-  llmBaseUrl: string;
+  /** set for OpenAI-compatible providers (MiniMax); unset means Anthropic */
+  llmBaseUrl?: string;
   llmModel: string;
   maxFileBytes: number;
   maxFiles: number;
@@ -62,9 +61,12 @@ let sharedStore: AppDatabase | null = null;
 
 export function loadWorkerConfig(): WorkerConfig {
   const github = loadGitHubConfigFromEnv();
-  const llmApiKey = process.env.MINIMAX_API_KEY;
-  if (!llmApiKey) {
-    throw new Error('MINIMAX_API_KEY is required');
+
+  // MiniMax (OpenAI-compatible) takes precedence when configured; Anthropic otherwise.
+  const minimaxKey = process.env.MINIMAX_API_KEY;
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!minimaxKey && !anthropicKey) {
+    throw new Error('MINIMAX_API_KEY or ANTHROPIC_API_KEY is required');
   }
 
   if (!sharedStore) {
@@ -73,9 +75,11 @@ export function loadWorkerConfig(): WorkerConfig {
 
   return {
     github,
-    llmApiKey,
-    llmBaseUrl: process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1',
-    llmModel: process.env.MINIMAX_MODEL ?? 'MiniMax-M3',
+    llmApiKey: (minimaxKey ?? anthropicKey)!,
+    llmBaseUrl: minimaxKey ? (process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1') : undefined,
+    llmModel: minimaxKey
+      ? (process.env.MINIMAX_MODEL ?? 'MiniMax-M3')
+      : (process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514'),
     maxFileBytes: Number(process.env.MAX_FILE_BYTES ?? 120_000),
     maxFiles: Number(process.env.MAX_FILES ?? 40),
     enableCheckRuns: process.env.CHECK_RUNS_ENABLED === '1',
@@ -256,8 +260,13 @@ async function executeReview(
     merged.toPost = merged.toPost.filter((f) => !suppressed.has(fingerprintFinding(f)));
   }
 
+  // snap finding lines to lines actually added in the diff — GitHub rejects
+  // inline comments on unchanged lines; far-off guesses become summary-only
+  const addedLinesByFile = buildAddedLineIndex(files);
+  merged.toPost = merged.toPost.map((f) => normalizeFindingLine(f, addedLinesByFile));
+
   const allFixed = dedupeByFingerprint([...verifiedFixed, ...merged.newlyFixed]);
-  const { inline, summaryOnly } = filterAndCapFindings(normalizedToPost, reviewConfig);
+  const { inline, summaryOnly } = filterAndCapFindings(merged.toPost, reviewConfig);
 
   const stats = {
     newCount: merged.toPost.length,
@@ -313,7 +322,7 @@ async function executeReview(
     reviewId = review.reviewId;
   }
 
-  const newStored: StoredFinding[] = normalizedToPost.map((f) => {
+  const newStored: StoredFinding[] = merged.toPost.map((f) => {
     const stored = toStoredFinding(f, effectiveSha);
     const key = f.line ? `${f.file}:${f.line}` : null;
     if (key && commentIdMap.has(key)) {
@@ -440,9 +449,10 @@ function dedupeByFingerprint(findings: StoredFinding[]): StoredFinding[] {
   return [...byFp.values()];
 }
 
+type AddedLineMap = Map<string, Set<number>>;
+
 function buildAddedLineIndex(files: Array<{ filename: string; patch?: string }>): AddedLineMap {
   const map: AddedLineMap = new Map();
-
   for (const file of files) {
     if (!file.patch) continue;
     const lines = parseAddedLinesFromPatch(file.patch);
@@ -450,7 +460,6 @@ function buildAddedLineIndex(files: Array<{ filename: string; patch?: string }>)
       map.set(file.filename, lines);
     }
   }
-
   return map;
 }
 
@@ -465,17 +474,14 @@ function parseAddedLinesFromPatch(patch: string): Set<number> {
       newLine = Number(match[1]);
       continue;
     }
-
     if (line.startsWith('+') && !line.startsWith('+++')) {
       if (newLine > 0) added.add(newLine);
       newLine += 1;
       continue;
     }
-
     if (line.startsWith('-')) {
       continue;
     }
-
     if (newLine > 0) {
       newLine += 1;
     }
@@ -484,26 +490,20 @@ function parseAddedLinesFromPatch(patch: string): Set<number> {
   return added;
 }
 
-function normalizeFindingLine(
-  finding: ReviewFinding,
-  addedLinesByFile: AddedLineMap,
-): ReviewFinding {
+function normalizeFindingLine(finding: ReviewFinding, addedLinesByFile: AddedLineMap): ReviewFinding {
   if (!finding.line) return finding;
 
   const candidateLines = addedLinesByFile.get(finding.file);
   if (!candidateLines || candidateLines.size === 0) {
     return { ...finding, line: undefined };
   }
-
   if (candidateLines.has(finding.line)) {
     return finding;
   }
-
   const nearest = nearestAddedLine(candidateLines, finding.line);
   if (nearest === undefined) {
     return { ...finding, line: undefined };
   }
-
   return { ...finding, line: nearest };
 }
 
@@ -520,10 +520,10 @@ function nearestAddedLine(addedLines: Set<number>, requested: number): number | 
     }
   }
 
-  // If LLM guesses far from changed lines, keep it summary-only instead of risking an invalid inline position.
+  // If the LLM guesses far from changed lines, keep it summary-only instead of
+  // risking an invalid inline position.
   if (bestLine === undefined || bestDistance > 5) {
     return undefined;
   }
-
   return bestLine;
 }

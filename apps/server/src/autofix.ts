@@ -315,7 +315,7 @@ export async function processExplainJob(
       suggestion: finding.suggestion,
       severity: finding.severity,
     },
-    { apiKey: config.anthropicApiKey, model: config.anthropicModel },
+    { apiKey: config.llmApiKey, model: config.llmModel, baseUrl: config.llmBaseUrl },
   );
 
   await reply(explanation ?? formatFixSkippedReply('could not generate an explanation, try again.'));
@@ -357,7 +357,7 @@ async function resolveCodeFix(
       suggestion: finding.suggestion,
       instruction: fix.instruction,
     },
-    { apiKey: config.anthropicApiKey, model: config.anthropicModel },
+    { apiKey: config.llmApiKey, model: config.llmModel, baseUrl: config.llmBaseUrl },
   );
   return generated;
 }

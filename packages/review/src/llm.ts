@@ -1,13 +1,14 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { buildUserPrompt, loadOrvexRules } from './prompt.js';
 import { redactPatch } from './redact.js';
+import { llmChat } from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 
 export interface LlmReviewOptions {
   apiKey: string;
-  baseUrl: string;
   model: string;
+  /** OpenAI-compatible endpoint (e.g. MiniMax); omit to use Anthropic */
+  baseUrl?: string;
   maxTokens?: number;
 }
 
@@ -29,42 +30,18 @@ export async function runLlmReview(
     patch: redactPatch(f.patch),
   }));
 
-  const client = new Anthropic({ apiKey: opts.apiKey });
   const system = loadOrvexRules();
   const user = buildUserPrompt(redactedFiles);
 
-  const response = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${opts.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
+  const text = await llmChat(system, user, {
+    apiKey: opts.apiKey,
     model: opts.model,
-      max_completion_tokens: opts.maxTokens ?? 4096,
-      response_format: { type: 'json_object' },
-      thinking: { type: 'disabled' },
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-    }),
+    baseUrl: opts.baseUrl,
+    maxTokens: opts.maxTokens ?? 4096,
+    json: true,
   });
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`LLM request failed (${response.status}): ${errorBody.slice(0, 500)}`);
-  }
-
-  const completion = await response.json() as {
-    choices?: Array<{ message?: { content?: string | null } }>;
-  };
-  const text = completion.choices?.[0]?.message?.content;
-  if (!text) {
-    throw new Error('LLM returned no text content');
-  }
-
-  const json = extractJson(stripThinking(text));
+  const json = extractJson(text);
   const parsed = LlmReviewResponseSchema.parse(json);
 
   return {
@@ -95,10 +72,6 @@ function extractJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const raw = fenced ? fenced[1].trim() : text.trim();
   return JSON.parse(raw);
-}
-
-function stripThinking(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 }
 
 // backwards compat

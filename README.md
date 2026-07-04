@@ -15,9 +15,9 @@ Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** with
 ## Prerequisites
 
 1. **GitHub App** `Orvex Review` on Velatrixcloud org
-   - Permissions: `pull_requests` R/W, `contents` R, `metadata` R, `checks` W (optional)
-   - Events: `pull_request`
-2. **MiniMax API key**
+   - Permissions: `pull_requests` R/W, `contents` R/W (auto-fix commits), `metadata` R, `checks` W (optional)
+   - Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `installation`
+2. **LLM API key** — MiniMax (OpenAI-compatible, default) or Anthropic
 3. Node 20+, pnpm 9+
 4. Optional: `semgrep` CLI on PATH for deterministic scans
 
@@ -25,7 +25,8 @@ Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** with
 
 ```bash
 cp .env.example .env
-# GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_WEBHOOK_SECRET, MINIMAX_API_KEY
+# GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_WEBHOOK_SECRET,
+# MINIMAX_API_KEY (or ANTHROPIC_API_KEY)
 
 pnpm install
 pnpm dev
@@ -92,15 +93,6 @@ packages/review               LLM, fingerprints, merge, format
 packages/github               API client (diff, reviews, checks)
 packages/queue                Webhook job queue
 ```
-
-## Quick start dashboard
-
-1. Run the service (`pnpm dev`).
-2. Open `http://localhost:8787/dashboard`.
-3. Enter your workspace slug and connect the GitHub App.
-4. Copy your PR and installation is then available through the status endpoint or manual `/review` commands.
-
-You can also trigger review from a PR comment with `/review` or `@velatrix-review review`.
 
 ## Re-review behavior
 

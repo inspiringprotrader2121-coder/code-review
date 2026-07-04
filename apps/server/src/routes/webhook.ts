@@ -48,24 +48,6 @@ interface PullRequestWebhook {
   };
 }
 
-interface IssueCommentWebhook {
-  action: string;
-  installation?: WebhookInstallation;
-  comment?: {
-    id: number;
-    body?: string;
-    user?: { login?: string };
-  };
-  issue?: {
-    number: number;
-    pull_request?: Record<string, unknown>;
-  };
-  repository: {
-    name: string;
-    owner: { login: string };
-  };
-}
-
 interface InstallationWebhook {
   action: string;
   installation: WebhookInstallation;
@@ -386,15 +368,7 @@ export function webhookRoutes(queue: ReviewQueue) {
         return c.json({ ok: true, action: 'deleted' });
       }
 
-      const existing = tenants.resolveInstallation(inst.id);
-      if (!existing) {
-        console.warn(
-          `[webhook] ignored unclaimed installation ${data.action} id=${inst.id} account=${inst.account?.login}`,
-        );
-        return c.json({ ok: true, ignored: 'unclaimed_installation' });
-      }
-
-      await tenants.syncInstallationFromWebhook(inst.id, existing.tenantId, {
+      await tenants.syncInstallationFromWebhook(inst.id, null, {
         accountLogin: inst.account?.login ?? 'unknown',
         accountType: inst.account?.type ?? 'Organization',
         repositorySelection: inst.repository_selection ?? 'selected',
@@ -515,19 +489,4 @@ export function webhookRoutes(queue: ReviewQueue) {
   });
 
   return app;
-}
-
-function isReviewCommand(body: string, appSlug: string): boolean {
-  if (/\b\/(?:review|velatrix-review)\b/i.test(body)) {
-    return true;
-  }
-
-  const aliases = [...new Set([appSlug.toLowerCase(), 'velatrix-review', 'minimax', 'velatrixreview'])];
-  const escapedAliases = aliases.map(escapeRegExp).join('|');
-  const mention = new RegExp(`(?:^|[\\s\\W])@(?:${escapedAliases})\\s+review\\b`, 'i');
-  return mention.test(body);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
 }

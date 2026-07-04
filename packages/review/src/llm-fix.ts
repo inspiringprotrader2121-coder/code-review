@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
+import { llmChat } from './llm-client.js';
 import type { CodeFix } from './apply.js';
 
 const LlmFixSchema = z.object({
@@ -21,6 +21,8 @@ export interface GenerateFixInput {
 export interface GenerateFixOptions {
   apiKey: string;
   model: string;
+  /** OpenAI-compatible endpoint (e.g. MiniMax); omit to use Anthropic */
+  baseUrl?: string;
 }
 
 const MAX_FILE_CHARS = 60_000;
@@ -63,22 +65,21 @@ export async function generateFixWithLlm(
     '- If no safe fix is possible, respond {"originalCode": "", "fixedCode": ""}.',
   ].join('\n');
 
-  const client = new Anthropic({ apiKey: opts.apiKey });
-  const response = await client.messages.create({
-    model: opts.model,
-    max_tokens: 2048,
-    system:
+  let text: string;
+  try {
+    text = await llmChat(
       'You are Orvex Review, generating minimal, safe code fixes. You respond with strict JSON only.',
-    messages: [{ role: 'user', content: user }],
-  });
-
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') return null;
+      user,
+      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, maxTokens: 2048, json: true },
+    );
+  } catch {
+    return null;
+  }
 
   let parsed: z.infer<typeof LlmFixSchema>;
   try {
-    const fenced = textBlock.text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const raw = fenced ? fenced[1].trim() : textBlock.text.trim();
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const raw = fenced ? fenced[1].trim() : text.trim();
     parsed = LlmFixSchema.parse(JSON.parse(raw));
   } catch {
     return null;
@@ -131,17 +132,16 @@ export async function generateExplanationWithLlm(
     'Keep it under 250 words. No preamble, start directly with the explanation.',
   ].join('\n');
 
-  const client = new Anthropic({ apiKey: opts.apiKey });
-  const response = await client.messages.create({
-    model: opts.model,
-    max_tokens: 1024,
-    system: 'You are Orvex Review, explaining a code-review finding clearly and concretely.',
-    messages: [{ role: 'user', content: user }],
-  });
-
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') return null;
-  return textBlock.text.trim();
+  try {
+    const text = await llmChat(
+      'You are Orvex Review, explaining a code-review finding clearly and concretely.',
+      user,
+      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, maxTokens: 1024 },
+    );
+    return text.trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 function withLineNumbers(content: string, startLine: number): string {
