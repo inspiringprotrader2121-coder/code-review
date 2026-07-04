@@ -40,6 +40,7 @@ interface FixTarget {
 
 const SKIP_REASONS: Record<string, string> = {
   not_found: `the code changed since the review — re-run \`${commandTrigger()} review\` first`,
+  already_fixed: 'already fixed — the suggested change is already present in the file',
   ambiguous: 'the target code appears in several places and could not be located safely',
   noop: 'the fix is identical to the current code',
   no_fix: 'no safe fix could be generated',
@@ -170,7 +171,18 @@ export async function processFixJob(
         }
         const result = applyFixToContent(content, codeFix);
         if (!result.ok) {
-          skipped.push({ file, message: t.finding.message, reason: SKIP_REASONS[result.reason] });
+          // If the target snippet is gone but the replacement is already there,
+          // the issue was fixed already — report that, don't call it "changed".
+          const alreadyFixed =
+            result.reason === 'not_found' &&
+            codeFix.fixedCode.trim().length > 0 &&
+            content.includes(codeFix.fixedCode.trim());
+          const reason = alreadyFixed ? SKIP_REASONS.already_fixed : SKIP_REASONS[result.reason];
+          skipped.push({ file, message: t.finding.message, reason });
+          if (alreadyFixed) {
+            // reconcile store state: this finding is resolved
+            t.finding.status = 'fixed';
+          }
           continue;
         }
         content = result.content;
