@@ -54,6 +54,12 @@ export interface ReviewQueue {
 export function jobIdempotencyKey(job: ReviewJobPayload): string {
   const kind = job.kind ?? 'review';
   const base = `${job.installationId}/${job.owner}/${job.repo}#${job.pr}@${job.headSha}`;
+  // Explicit human triggers (`@orvex review` command, CLI manual) must ALWAYS
+  // run — never dedup them against an earlier automatic review of the same sha.
+  // Only automatic webhook events (opened/synchronize/reopened) dedup.
+  if (job.action === 'command' || job.action === 'manual') {
+    return `${base}:${kind}:${job.enqueuedAt}`;
+  }
   if (kind === 'review') return base;
   const fix = job.fix;
   // include instruction so two different free-form `@orvex <x>` replies on the
