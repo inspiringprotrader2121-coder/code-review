@@ -1,378 +1,204 @@
-# Velatrix Review — build plan
+# Orvex Review — improvement plan
 
-Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** (and other org repos) with deterministic rules first, LLM second, and intelligent re-review on push.
+**Product name: Orvex Review** (codebase still says `velatrix-review` everywhere — see Track 0).
+Goal: take the working single-app review bot and turn it into a proper multi-tenant
+code-review SaaS, while making the reviews themselves measurably better.
 
-**Host repo:** [Velatrixcloud/code-review](https://github.com/Velatrixcloud/code-review) (private).
-
-**Not in scope:** replacing CI, chat-with-codebase SaaS, multi-tenant product, or full-repo embeddings (until Phase 4).
-
-**Related tooling (already exists):** `~/.cursor/skills/pr-review-bot-loop/` — today this **consumes** other bots’ comments (fix, verify on HEAD, resolve). Velatrix Review is the **producer**: it posts findings. Phase 2–3 ports verification and dedup patterns from that skill.
-
----
-
-## What we’re building
-
-| Piece | Description |
-|-------|-------------|
-| **GitHub App** | `Velatrix Review` — org install, webhook secret |
-| **Triggers** | `pull_request`: `opened`, `synchronize`, `reopened` |
-| **Skips** | Draft PRs, `dependabot[bot]`, PRs from the app bot itself (configurable) |
-| **Pipeline** | diff → rules (doc-audit + Semgrep) → LLM → merge/cap → post review |
-| **Re-push** | Incremental diff since `last_sha`, fingerprint dedup, acknowledge fixes |
-| **Store** | `pr_number`, `last_sha`, `findings[]` in Postgres or KV |
-
-### Review pipeline (target state)
-
-```
-Webhook (opened | synchronize | reopened)
-  → enqueue job { owner, repo, pr, head_sha, action }
-  → skip if draft / excluded author / app bot author / label review-bot:ignore
-  → idempotency: skip if head_sha already reviewed (or job in-flight for same PR)
-  → concurrency: at most one active review per (repo, pr) — coalesce rapid pushes
-  → load .velatrix-review.yml (ignore paths, strict | normal)
-  → fetch diff (head vs merge base; on sync: old_head..new_head)
-  → deterministic: doc-audit-verify + Semgrep on changed paths
-  → LLM: changed hunks only, Velatrix rules, structured JSON output
-  → merge + dedup fingerprints + severity/confidence filter
-  → cap at 8 comments (summary always; inline P1/P2 only)
-  → POST .../pulls/{n}/reviews (summary + inline comments[])
-  → on sync: reply “fixed on {sha}” / mark outdated where applicable
-  → persist last_sha + findings[] + token spend
-```
-
-### Stack (recommended)
-
-| Layer | Choice |
-|-------|--------|
-| HTTP / webhook | Cloudflare Worker **or** small Node (Hono/Fastify) |
-| Queue | Redis list, Inngest, or Trigger.dev |
-| State | Postgres (findings history) + KV (fast `last_sha` / fingerprints) |
-| LLM | Anthropic (Sonnet review) + optional Haiku triage later |
-| Rules | Port `doc-audit-verify.mjs`; Semgrep CI rules in repo |
-
-**Cost ballpark:** ~$0.05–0.40/PR at 20–50 PRs/mo; hosting &lt;$20/mo.
+**Dashboard + landing design:** see the published mockup (landing page & tenant
+dashboard, light/dark) — build `apps/web` against it.
 
 ---
 
-## Phase 1 — “It works”
+## Where we are today (July 2026)
 
-**Time:** 3–5 days  
-**Goal:** Open a PR → bot posts one useful comment within ~1–2 min.
+Shipped (old phases 1–3):
 
-### Deliverables
+- Webhook → queue → diff → rules → LLM → capped inline review, via `apps/server/src/pipeline.ts`
+- SQLite store (`packages/store`): tenants, installations, PR state, findings
+- Fingerprint dedup, incremental `last_sha..head_sha` re-review, "✅ Fixed on sha" replies
+- Deterministic layer: doc-audit + Semgrep before LLM
+- `.velatrix-review.yml` per-repo config, `review-bot:ignore` label, check runs
+- Multi-tenant scaffolding: `packages/tenants`, `/connect` + install callback, per-installation scoping
+- CLI one-shot review, secret redaction pre-LLM
 
-1. **GitHub App registration**
-   - Name: `Velatrix Review`
-   - Permissions: `pull_requests: read/write`, `contents: read`, `metadata: read`
-   - Events: `pull_request`
-   - Org install on **Velatrixcloud**; restrict to **Velatrixcloud/Velatrix-Cloud** initially
+Gaps blocking a sellable product:
 
-2. **Webhook endpoint**
-   - Verify `X-Hub-Signature-256`
-   - Parse `pull_request` actions: `opened`, `synchronize`, `reopened`
-   - Log: `pr_number`, `head_sha`, `repo`, `action`
-   - Enqueue job (Redis / Inngest) — don’t review inline in webhook handler
-   - **Idempotency:** dedupe jobs by `(repo, pr, head_sha)` so GitHub retries don’t double-review
-   - **Concurrency:** if a review is in-flight for `(repo, pr)`, queue latest `head_sha` and run once when current job finishes (coalesce pushes)
-
-3. **Manual trigger (dev)**
-   - CLI or `POST /review` with `{ owner, repo, pr }` for local testing without webhook
-
-4. **Diff fetch**
-   - `GET /repos/{owner}/{repo}/pulls/{n}/files`
-   - Patch diff per file (or unified diff from compare API)
-   - Respect max file size; skip binary / generated paths (hardcoded list for now)
-
-5. **LLM review (v0)**
-   - System prompt: Velatrix rules (`RULES.md`, audit doc conventions, IPTV/security patterns)
-   - User payload: changed files + hunks only
-   - **Structured output** (JSON schema):
-     ```json
-     { "findings": [{ "file", "line", "severity", "category", "message", "suggestion", "confidence" }] }
-     ```
-   - Redact obvious secrets in diff before sending to LLM
-
-6. **Post one PR comment**
-   - Markdown summary table: severity | file | message
-   - No inline comments yet
-   - Skip draft PRs, `dependabot[bot]`, and PRs opened by the app’s own bot user (env flag)
-
-### Repo layout (suggested)
-
-```
-code-review/
-├── apps/
-│   ├── webhook/          # Worker or Node entry
-│   └── worker/           # job consumer
-├── packages/
-│   ├── github/           # App auth, diff fetch, comment post
-│   ├── review/           # prompt, LLM client, finding merge
-│   └── rules/            # doc-audit port, semgrep runner
-├── plan.md
-└── README.md
-```
-
-### Tickets
-
-| # | Task | Notes |
-|---|------|-------|
-| 1.1 | Create GitHub App + store credentials | App ID, private key, webhook secret in env |
-| 1.2 | Webhook route + signature verify | Return 200 fast; enqueue only |
-| 1.3 | Job queue + worker skeleton | Log job payload; retry on failure |
-| 1.4 | GitHub App installation token | JWT → installation access token |
-| 1.5 | `fetchPrDiff(owner, repo, pr)` | Files + patches; truncate large files |
-| 1.6 | `runLlmReview(diff, rules)` | Structured JSON; parse + validate schema |
-| 1.7 | `postPrComment(summaryMd)` | Single issue comment on PR |
-| 1.8 | Skip draft + dependabot + self | Config via env; skip `pull_request.user.login` matching app bot |
-| 1.9 | `velatrix-review review --pr N` CLI | Manual dev trigger |
-| 1.10 | Job idempotency key | `(owner, repo, pr, head_sha)` — ignore duplicate enqueue |
-| 1.11 | Per-PR review lock | One in-flight review; coalesce `synchronize` bursts to latest `head_sha` |
-
-### Exit criteria
-
-- [ ] Webhook fires on PR open/sync; worker logs job
-- [ ] Manual CLI reviews PR #N on Velatrixcloud/Velatrix-Cloud
-- [ ] Bot posts markdown findings within ~2 min
-- [ ] Draft PRs and Dependabot PRs skipped
-
-### Known limitation
-
-Re-push will re-post similar findings (noisy). Fixed in Phase 2.
+- No user accounts or login — anyone who knows a workspace slug can claim it via `/connect`
+- No web UI (no dashboard, no findings browser)
+- SQLite single-node; in-memory queue is the default; single worker
+- No usage metering (`review_runs` never persisted with duration/cost), no billing, no plan limits
+- No eval harness — review-quality changes can't be measured
+- GitHub App private key sits on local disk; no secret manager, no audit log
 
 ---
 
-## Phase 2 — “Re-review without spam”
+## Track 0 — Rename to Orvex (½–1 day, do first)
 
-**Time:** 3–5 days  
-**Goal:** Push 3× on one PR → bot updates intelligently, not 3× the same nit.
+**Status: ✅ done in code (2026-07-04).** Packages are `@orvex-review/*`, config is
+`.orvex-review.yml` (reads `.velatrix-review.yml` as fallback), check run / bot / db
+defaults renamed, legacy db path auto-detected. Remaining manual step: rename the
+GitHub App itself (slug + bot login) on GitHub, then update `.env` to match.
+Local `.env` still points at the old slug/pem on purpose so the current install keeps working.
 
-**Status:** ✅ Implemented in PR #1 (`packages/store`, incremental diff, fingerprints, fixed replies)
-
-## Phase 3 — “Feels professional”
-
-**Time:** 1–2 weeks  
-**Goal:** Trust it on real Velatrix PRs (#67-style code, audit docs).
-
-**Status:** ✅ Core implemented in PR #1 (inline reviews, `.velatrix-review.yml`, doc-audit, Semgrep, check runs optional)
-
-### Deliverables
-
-1. **Persist review state**
-   - Table/KV: `(repo, pr_number) → { last_sha, findings[], posted_at }`
-   - Each finding: `{ id, fingerprint, file, line, severity, category, message, github_comment_id? }`
-
-2. **Finding fingerprint**
-   - `hash(file + line + rule_id + normalized_message)`
-   - `rule_id` from deterministic rules; LLM findings use `category + message stem`
-
-3. **Incremental diff on `synchronize`**
-   - Compare `last_sha..head_sha` (or merge-base strategy — document choice)
-   - Re-run rules + LLM **only on files/hunks in new commit range**
-   - Summary line: “3 new issues, 2 prior issues fixed on `abc123`”
-
-4. **Dedup before post**
-   - Don’t re-post fingerprint still open on HEAD
-   - Drop findings below confidence threshold (configurable, default 0.6)
-
-5. **Acknowledge fixes** (port from `pr-review-bot-loop`)
-   - Re-check prior findings on HEAD (`thread-verify` pattern)
-   - Reply on old comment: “Fixed on `{short_sha}`” or mark review thread resolved
-   - Use `doc-audit-verify.mjs` logic for audit-doc findings
-
-6. **Deterministic rules (first slice)**
-   - Port `doc-audit-verify.mjs` into `packages/rules/`
-   - Run on changed `.md` audit docs before LLM (free, no hallucinations)
-
-### Tickets
-
-| # | Task | Notes |
-|---|------|-------|
-| 2.1 | Postgres/KV schema for PR state | Migrations or D1 |
-| 2.2 | `fingerprint(finding)` | Stable across minor message edits |
-| 2.3 | `diffSince(last_sha, head_sha)` | GitHub compare API or git |
-| 2.4 | Merge new + prior findings | New / still-open / fixed |
-| 2.5 | Suppress duplicate posts | Match on fingerprint |
-| 2.6 | `verifyFindingOnHead(finding, sha)` | Port HEAD check from `thread-verify.mjs` |
-| 2.7 | Reply “fixed on …” on superseded comments | GitHub API |
-| 2.8 | Wire `doc-audit-verify` pre-LLM | Findings get `rule_id: audit.*` |
-
-### Exit criteria
-
-- [ ] Push 3 commits fixing issues → bot does not triple-post same finding
-- [ ] Fixed issues get “fixed on `{sha}`” acknowledgment
-- [ ] Audit doc table/pipe issues caught without LLM
-- [ ] State survives worker restart
-
-### Port from existing skill
-
-| Module | Use |
-|--------|-----|
-| `doc-audit-verify.mjs` | Deterministic audit markdown rules |
-| `thread-verify.mjs` | HEAD re-check pattern for own findings |
-| `readFileAtRef` (qodo-verify) | Read file at `head_sha` via git/API |
+| # | Task |
+|---|------|
+| 0.1 | Rename packages `@velatrix-review/*` → `@orvex-review/*`; update imports, `pnpm-workspace`, tsconfig paths |
+| 0.2 | Config file becomes `.orvex-review.yml`; keep reading `.velatrix-review.yml` as a deprecated fallback for one release |
+| 0.3 | Register/rename GitHub App → slug `orvex-review`, bot `orvex-review[bot]`; update `GITHUB_APP_SLUG`, `GITHUB_APP_BOT_LOGIN` |
+| 0.4 | Check run name → `orvex-review`; default `STORE_PATH` → `.data/orvex-review.db` (migrate/rename existing db) |
+| 0.5 | README / docs / examples renamed; `docs/SAAS_SETUP.md` updated |
 
 ---
 
-## Phase 3 — “Feels professional”
+## Track 1 — SaaS foundation (critical path)
 
-**Time:** 1–2 weeks  
-**Goal:** Trust it on real Velatrix PRs (#67-style code, audit docs).
+### A. Identity & onboarding (1–2 weeks)
 
-### Deliverables
+**Status: ✅ scaffolded (2026-07-04).** GitHub OAuth login (`/auth/login`,
+`/auth/oauth/callback`, `/auth/logout`, `/api/me`), `users`/`sessions`/`workspace_members`
+tables, session cookies, membership-guarded `/connect` + install callback, and the
+slug-claiming hole is closed (`WorkspaceAccessError`). `AUTH_DISABLED=1` gives a dev
+bypass. To go live: create the GitHub App's Client secret, set
+`GITHUB_OAUTH_CLIENT_ID/SECRET`, and set the app's Callback URL to
+`{APP_URL}/auth/oauth/callback`.
 
-1. **GitHub Review API (inline comments)**
-   - `POST .../pulls/{n}/reviews` with `event: COMMENT` or `REQUEST_CHANGES` (P1 only)
-   - Inline on diff lines for P1/P2; summary comment for rest
-   - **Cap: 8 comments/PR** (configurable)
+- GitHub OAuth **user** login (distinct from the App installation)
+- Tables: `users`, `workspace_members(user_id, tenant_id, role)`
+- Sessions (signed cookie or Lucia/Auth.js); every dashboard/API request resolves an authenticated `tenant_id`
+- Onboarding flow: sign in → create/name workspace → install GitHub App → land on dashboard with first repo connected
+- Close the slug-claiming hole in `TenantService.startConnect` (workspace creation requires an authenticated user; install `state` binds user + tenant)
 
-2. **Rules-before-LLM (full deterministic layer)**
-   - `doc-audit-verify.mjs` — audit docs
-   - Semgrep on changed paths (Velatrix ruleset)
-   - Custom scripts: restream fail-closed, route-registration patterns, etc.
-   - LLM runs only on hunks with no deterministic hit **or** `strict` mode
+**Exit:** a stranger cannot see or claim another workspace; new user reaches "first review posted" in <10 min.
 
-3. **`.velatrix-review.yml` in target repo**
-   ```yaml
-   mode: normal          # strict | normal
-   ignore:
-     - "**/package-lock.json"
-     - "**/dist/**"
-   include_docs: false   # skip docs/audits unless true
-   max_comments: 8
-   max_tokens: 50000
-   ```
+### B. Postgres + metrics (≈1 week)
 
-4. **Severity / confidence filter**
-   - Post inline only ≥ medium severity and ≥ 0.7 confidence
-   - P1 → may use `REQUEST_CHANGES`; P2+ → `COMMENT`
+**Status: metrics half ✅ (2026-07-04), Postgres pending.** `review_runs` table exists
+and `pipeline.ts` records every run (completed / skipped / failed, duration, finding
+counts); `getWorkspaceStats` + `listReviewRuns` power `/api/workspaces/:slug/{stats,reviews}`.
+Also: better-sqlite3 bumped to v12 (Node 24 prebuilds). Postgres migration still to do.
 
-5. **Cost & safety**
-   - Token budget per PR; truncate large files (“reviewed first 200 lines”)
-   - Never send `.env` contents; redact `AKIA…`, `ghp_…`, JWT patterns in diff
+- Migrate `packages/store` SQLite → Postgres (Drizzle recommended; store is already a thin interface)
+- New tables:
+  - `review_runs(id, tenant_id, installation_id, repo, pr, head_sha, status, skip_reason, duration_ms, input_tokens, output_tokens, cost_usd, findings_new, findings_fixed, created_at)`
+  - monthly usage roll-up per workspace
+- Emit one `review_runs` row from `pipeline.ts` — this single change powers every dashboard tile/chart
+- Migration CI (drizzle-kit) + seed script
 
-6. **Optional GitHub Check**
-   - Check run `velatrix-review`: `success` | `neutral` (warnings) | `failure` (P1 open)
-   - Useful for branch protection later; not a merge gate by default
+**Exit:** dashboard stats computable from SQL; state survives horizontal workers.
 
-7. **Human override (simple)**
-   - Label `review-bot:ignore` → skip PR
-   - Keyword blocklist in config for repeated false positives
+### C. Dashboard web app (2–3 weeks)
 
-8. **Ops baseline** (ongoing after ship)
-   - Alert on webhook 5xx, queue backlog, LLM timeout
-   - Metrics: cost/PR, findings count, time-to-review
-   - Prompt version pin; eval on 10–20 past Velatrix PRs
+- New `apps/web` (Next.js or Vite + Hono API), built from the published design
+- Screens: Overview (tiles, reviews/day chart, severity + source breakdowns), Reviews list, Findings browser (filter by repo/severity/status/source), Repositories, Rules & config, Installations, Usage & billing, Members
+- API: `GET /api/workspaces/:slug/{stats,reviews,findings,installations}` — all tenant-scoped by session
+- Manual "Run review" button → enqueue job (same path as CLI)
 
-### Tickets
+**Exit:** a customer can self-serve from install to browsing findings without touching a terminal.
 
-| # | Task | Notes |
-|---|------|-------|
-| 3.1 | `postPullRequestReview(summary, inline[])` | Line must be in diff |
-| 3.2 | Semgrep runner in worker | Changed paths only; parse SARIF → findings |
-| 3.3 | Merge deterministic + LLM findings | Dedup by file+line |
-| 3.4 | Load `.velatrix-review.yml` from PR head | Fallback defaults |
-| 3.5 | Path filter + generated file skip | Respect `ignore` globs |
-| 3.6 | Token cap + diff truncation | Log truncated files in summary |
-| 3.7 | Secret redaction pre-LLM | Regex pass on patch text |
-| 3.8 | Check run integration | Optional per repo |
-| 3.9 | Label `review-bot:ignore` | Early exit in worker |
-| 3.10 | README: install app, config, local dry-run | |
-| 3.11 | Eval harness: replay N past PRs | Compare to CodeRabbit/Greptile |
+### D. Queue & workers hardening (a few days)
 
-### Exit criteria
+- Redis queue (`packages/queue/redis.ts` → default in prod; BullMQ or keep custom)
+- Move idempotency key `(repo, pr, head_sha)` and per-PR lock into Postgres so N workers coalesce correctly
+- Retries with backoff, dead-letter queue, alert on DLQ growth / queue depth
 
-- [ ] Inline comments on real Velatrix PR with ≤8 total
-- [ ] Semgrep + doc-audit catch issues without LLM
-- [ ] `.velatrix-review.yml` honored
-- [ ] You’d use it daily instead of paying for CodeRabbit on Velatrix-Cloud
-- [ ] Runs 2+ weeks without manual babysitting
+### E. Billing & plan limits (1–2 weeks)
 
-### Don’t replace CI
+- Stripe subscriptions per workspace: Solo $0 (1 repo, 50 reviews/mo) · Team $49 (unlimited repos, 500 reviews/mo then metered) · Enterprise (BYOK, self-host, SSO)
+- `tenants.plan` + limits enforced **at enqueue time**; over-limit surfaces as neutral check run + dashboard banner, never a silent drop
+- Meter from `review_runs`; webhook-driven subscription state sync
 
-Bot **suggests**; Semgrep CI + tests still gate merge. Check run is informational unless you opt in.
+**Exit:** a workspace can pay, hit a limit, see why, and upgrade — all self-serve.
 
 ---
 
-## Phase 4 — “Greptile-lite” (optional)
+## Track 2 — Review quality (the moat)
 
-**Time:** 2–4 weeks  
-**Goal:** Cross-file context when diff-only misses bugs.
+**Status update (2026-07-04): interactive fixes shipped.**
 
-**Skip until Phase 3 feels limiting** — indexing is where scope explodes.
+- Findings now carry `originalCode`/`fixedCode`; inline comments render native
+  ```suggestion blocks (per-issue *Commit suggestion* button + diff preview) and
+  an Orvex `Apply fix` checkbox per finding.
+- Comment commands: `@orvex review | fix | fix all | fix this | <instructions> | auto-apply on/off | help`
+  (trigger configurable via `ORVEX_TRIGGER`). Commands ack with 👀, results with 🚀.
+- Fix engine (`apps/server/src/autofix.ts`): commits to the PR branch via the
+  Contents API with a three-layer concurrency guard — per-PR fix lock in SQLite,
+  head-sha re-check before every file commit, and content-anchor verification
+  (`applyFixToContent` refuses when the code drifted). Fork PRs are declined.
+- `@orvex auto-apply on` persists per-PR (`pr_settings`) and auto-commits ready
+  fixes after each future review — Orvex's own findings only.
+- Fix runs are recorded in `review_runs` (`action = fix:<scope>`).
+- **Manual step:** GitHub App needs `Contents: Read & write` + subscribe to
+  **Issue comment** and **Pull request review comment** events.
+- Also shipped: `@orvex ignore` (per-repo fingerprint suppression, filtered pre-post),
+  `@orvex explain` (LLM deep-dive reply on a finding), fix commits co-authored with
+  the requester, fix-rate cap (`ORVEX_MAX_FIX_RUNS_PER_DAY`, default 30), and a
+  styled onboarding flow (`/connect` → install → success, friendly error pages).
+- Not yet: single-commit batching via the Git Trees API (currently one commit per
+  file), validating `originalCode` against the diff at review time.
 
-### Deliverables
+Ordered; 2.1 comes first because nothing else can be judged without it.
 
-1. Index `main` (embeddings or symbol graph) — Velatrix-Cloud only at first
-2. On PR: retrieve related files for changed imports/symbols (e.g. auth middleware)
-3. Multi-model routing: Haiku triage → Sonnet deep review on flagged hunks
-4. Optional: multi-repo dashboard
+| # | Feature | Notes |
+|---|---------|-------|
+| 2.1 | **Eval harness** | Replay 10–20 past PRs with known-good findings; score precision/recall + cost per prompt/model change. Old ticket 3.11 — now mandatory before any prompt work |
+| 2.2 | **False-positive feedback loop** | 👎 reaction or `/orvex ignore` reply on a finding → per-repo suppression list (by fingerprint/rule); dashboard shows suppressed count |
+| 2.3 | **Comment commands** | `/orvex review` (force re-run), `/orvex explain` (expand a finding), `/orvex ignore` |
+| 2.4 | **GitHub suggested changes** | Emit ```suggestion blocks for one-line fixes so authors can 1-click apply |
+| 2.5 | **PR summary upgrade** | Risk-ranked "what changed" digest + test-coverage note at top of review |
+| 2.6 | **Multi-model routing** | Haiku triage pass → flagship model only on flagged hunks; target cost <$0.05/PR median |
+| 2.7 | **Confidence calibration** | Fit the 0.6/0.7 thresholds against the eval set instead of guessing |
+| 2.8 | **Custom rule packs** | Workspace-editable rules (markdown) in dashboard, versioned, injected into the prompt; Semgrep pack upload |
+| 2.9 | **Cross-file context** (old Phase 4) | Symbol-graph / changed-imports retrieval so a 5-line diff can flag the breakage in `middleware/auth.js`; keep scoped — no full-repo embeddings until this proves limiting |
+| 2.10 | **Monorepo awareness** | Path-scoped configs (`apps/web` vs `packages/*` rules), per-path reviewers |
 
-### Exit criteria
-
-- [ ] Catches “this breaks auth in `middleware/auth.js`” on a 5-line diff in a caller
-
----
-
-## Cross-cutting requirements (all phases)
-
-| Requirement | Phase introduced |
-|-------------|------------------|
-| Structured JSON from LLM | 1 |
-| Rules before LLM | 2 (doc-audit), 3 (Semgrep + custom) |
-| HEAD verify before “fixed” | 2 |
-| Incremental re-review | 2 |
-| Webhook idempotency (`head_sha` dedupe) | 1 |
-| Per-PR concurrency / push coalescing | 1 |
-| Skip self-authored PRs (app bot) | 1 |
-| Ignore `edited` / title-only (no `synchronize`) | 1 |
-| `.velatrix-review.yml` | 3 |
-| Cost cap + secret redaction | 1 (basic), 3 (full) |
-| Status check | 3 |
-| Human override (label) | 3 |
-
----
-
-## Timeline summary
-
-| Phase | What | Time | Must-have? |
-|-------|------|------|------------|
-| **1** | GitHub + queue + first comment | 3–5 days | ✅ |
-| **2** | Re-review + dedup + doc-audit | 3–5 days | ✅ |
-| **3** | Inline + Semgrep + config + ops | 1–2 weeks | ✅ for daily use |
-| **4** | Repo index / cross-file | 2–4 weeks | ❌ optional |
-
-**To “GitHub connect + review on open + re-review on push”:** Phases 1–2 (~2 weeks part-time).
-
-**To “daily driver” you’d actually trust:** Phases 1–3 (~4–6 weeks part-time, ~2 weeks full-time if reusing pr-review-bot-loop).
-
-**To “mini Greptile”:** add Phase 4 → ~2–3 months total.
+**Exit:** eval precision ≥ 80% at current recall; false-positive rate visibly trending down in dashboard.
 
 ---
 
-## Phase 1 — start tomorrow (ticket order)
+## Track 3 — Platform & ops
 
-1. **GitHub App** — create app, note App ID, generate private key, set webhook URL (ngrok/Worker preview), install on **Velatrixcloud**, restrict to **Velatrixcloud/Velatrix-Cloud**
-2. **Scaffold repo** — `apps/webhook`, `apps/worker`, `packages/github`, env template
-3. **Webhook** — signature verify, parse payload, push to queue
-4. **Worker** — pop job, log `{ pr, head_sha, action }`
-5. **GitHub client** — installation token, list PR files, get patch
-6. **LLM** — prompt + JSON schema + Velatrix rules file
-7. **Post comment** — format findings as markdown table
-8. **CLI** — `pnpm review --repo Velatrixcloud/Velatrix-Cloud --pr 67`
-9. **Smoke test** — open test PR, confirm comment within 2 min
+- Structured logs (pino) + metrics: time-to-review, cost/PR, queue depth, GitHub API budget; alerts on webhook 5xx, DLQ, LLM timeout
+- Handle GitHub secondary rate limits (retry-after, per-installation throttling)
+- Deploy story: Dockerfile + fly.io/Railway/ECS; staging environment; health/readiness endpoints (health route exists)
+- Prompt version pinning + changelog; roll back via env
+- Status page (public)
+
+## Track 4 — Security & trust
+
+- App private key + webhook secret into a secret manager (not repo dir); rotation procedure documented
+- Encrypt BYOK Anthropic keys at rest (per-tenant data key)
+- Audit log per workspace (installs, config changes, member changes, manual runs)
+- Data retention: never store raw diffs; purge findings/runs after N days (configurable); document what the LLM sees
+- Tenant-isolation tests: cross-tenant access attempts in CI
+- Market the existing secret-redaction pass — it is a real differentiator
+
+## Track 5 — DX & docs
+
+- README rewrite for Orvex (SaaS + self-host paths)
+- CLI: `orvex review --pr N`, `orvex replay` (eval), `orvex doctor` (env/webhook checks)
+- OpenAPI spec for the dashboard API; typed client shared with `apps/web`
+- Public docs site: install guide, config reference, command reference
 
 ---
 
-## MVP vs Greptile
+## Milestones
 
-| Greptile has | MVP needs? |
-|--------------|------------|
-| Full repo embeddings | ❌ |
-| Chat with codebase | ❌ |
-| Multi-tenant SaaS | ❌ |
-| 36 review workers @ scale | ❌ |
-| Multi-model router | ⚠️ Phase 4 |
-| PR open + re-push review | ✅ |
-| GitHub integration | ✅ |
+| Milestone | Contents | Target |
+|-----------|----------|--------|
+| **M0** | Track 0 rename + 2.1 eval harness | week 1 |
+| **M1** | 1A auth/onboarding + 1B Postgres/metrics | weeks 2–4 |
+| **M2** | 1C dashboard + 1D queue hardening | weeks 5–7 |
+| **M3 (GA)** | 1E billing + Track 3 ops baseline + Track 4 secrets/audit | weeks 8–10 |
+| **M4** | Quality moat: 2.2–2.6 | weeks 10–14 |
+| **M5** | 2.8–2.10 cross-file & rule packs | after M4 proves demand |
 
-**~30% of Greptile’s product, ~5% of their infra complexity.**
+Critical path: **M0 → M1 → M2 → M3**. Track 2 items can interleave whenever pipeline work is blocked.
+
+### GA exit criteria
+
+- [ ] Stranger cannot read or claim another workspace
+- [ ] Install → first review → dashboard, fully self-serve, <10 min
+- [ ] Two workers + Redis + Postgres survive a worker kill mid-review with no double-post
+- [ ] Plan limits enforced and visible; Stripe upgrade works end-to-end
+- [ ] Eval harness green on every prompt/model change
+- [ ] No secrets on disk in production; audit log live

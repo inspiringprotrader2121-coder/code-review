@@ -7,6 +7,10 @@ export interface ReviewFinding {
   category: string;
   message: string;
   suggestion?: string;
+  /** exact source snippet the fix replaces (anchor for safe auto-apply) */
+  originalCode?: string;
+  /** machine-applicable replacement for originalCode */
+  fixedCode?: string;
   confidence: number;
   ruleId: string;
 }

@@ -12,29 +12,7 @@ build/
 !.env.example
 *.pem
 *.key
-*.p12
-*.pfx
-*.crt
-*.cert
-*.keystore
-*.jks
-id_rsa*
-id_dsa*
-id_ecdsa*
-id_ed25519*
-velatrix-review.pem
 orvex-review.pem
-secrets.json
-credentials.json
-service-account*.json
-generated-keys*
-.aws/
-.gcloud/
-.kube/
-.docker/config.json
-.netrc
-.npmrc
-.pypirc
 
 # Logs & runtime data
 *.log

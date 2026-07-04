@@ -1,5 +1,5 @@
-import type { StoredFinding } from '@velatrix-review/store';
-import { auditDocIssuesOpenOnHead } from '@velatrix-review/rules';
+import type { StoredFinding } from '@orvex-review/store';
+import { auditDocIssuesOpenOnHead } from '@orvex-review/rules';
 import type { ReviewFinding } from './finding.js';
 import { fingerprintFinding } from './finding.js';
 
@@ -93,6 +93,8 @@ export function toStoredFinding(f: ReviewFinding, headSha: string): StoredFindin
     category: f.category,
     message: f.message,
     suggestion: f.suggestion,
+    originalCode: f.originalCode,
+    fixedCode: f.fixedCode,
     confidence: f.confidence,
     ruleId: f.ruleId,
     status: 'open',

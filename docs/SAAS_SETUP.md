@@ -8,10 +8,10 @@ One **GitHub App** powers all customers. Each customer **installs** it on their 
 
 | Field | Value |
 |-------|--------|
-| **Name** | Velatrix Review |
+| **Name** | Orvex Review |
 | **Homepage URL** | Your marketing site or `APP_URL` |
 | **Callback URL** | Not used (leave default) |
-| **Setup URL** | `{APP_URL}/auth/github/callback` e.g. `https://api.velatrixreview.com/auth/github/callback` |
+| **Setup URL** | `{APP_URL}/auth/github/callback` e.g. `https://api.orvexreview.com/auth/github/callback` |
 | **Webhook URL** | `{APP_URL}/webhooks/github` |
 | **Webhook secret** | Same as `GITHUB_WEBHOOK_SECRET` in `.env` |
 | **Active** | Yes |
@@ -41,8 +41,8 @@ Uncheck everything else unless you need it.
 | `GITHUB_APP_ID` | **App ID** (top of settings) |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | **Generate a private key** → download `.pem` |
 | `GITHUB_WEBHOOK_SECRET` | **Webhook** → Secret |
-| `GITHUB_APP_SLUG` | URL slug: `github.com/apps/**velatrix-review**` |
-| `GITHUB_APP_BOT_LOGIN` | After install: `velatrix-review[bot]` |
+| `GITHUB_APP_SLUG` | URL slug: `github.com/apps/**orvex-review**` |
+| `GITHUB_APP_BOT_LOGIN` | After install: `orvex-review[bot]` |
 
 ## 2. Platform `.env`
 
@@ -50,13 +50,11 @@ Uncheck everything else unless you need it.
 APP_URL=https://api.yourproduct.com   # must match Setup URL host
 PLATFORM_SECRET=<openssl rand -hex 32>
 GITHUB_APP_ID=...
-GITHUB_APP_PRIVATE_KEY_PATH=./velatrix-review.pem
+GITHUB_APP_PRIVATE_KEY_PATH=./orvex-review.pem
 GITHUB_WEBHOOK_SECRET=...
-GITHUB_APP_SLUG=velatrix-review
-MINIMAX_API_KEY=...
-MINIMAX_BASE_URL=https://api.minimax.io/v1
-MINIMAX_MODEL=MiniMax-M3
-STORE_PATH=./.data/velatrix-review.db
+GITHUB_APP_SLUG=orvex-review
+ANTHROPIC_API_KEY=...
+STORE_PATH=./.data/orvex-review.db
 ```
 
 Do **not** set `GITHUB_ALLOWED_REPO` in production SaaS (that’s legacy single-tenant dev only).

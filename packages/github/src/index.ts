@@ -24,3 +24,13 @@ export {
   fetchInstallationMeta,
   buildGitHubInstallUrl,
 } from './api.js';
+export {
+  fetchPrHeadInfo,
+  commitFileUpdate,
+  addCommentReaction,
+  updateReviewCommentBody,
+  getReviewComment,
+  type PrHeadInfo,
+  type CommitFileResult,
+  type CommentReaction,
+} from './fixes.js';

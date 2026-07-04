@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
-import type { ReviewQueue } from '@velatrix-review/queue';
+import type { ReviewQueue } from '@orvex-review/queue';
+import { apiRoutes } from './routes/api.js';
 import { authRoutes } from './routes/auth.js';
+import { sessionRoutes } from './routes/session.js';
 import { webhookRoutes } from './routes/webhook.js';
 
 export function createApp(queue: ReviewQueue) {
@@ -9,14 +11,16 @@ export function createApp(queue: ReviewQueue) {
   app.get('/health', (c) =>
     c.json({
       ok: true,
-      service: 'velatrix-review',
+      service: 'orvex-review',
       mode: 'multi-tenant',
       connect: '/dashboard',
       install: '/connect',
     }),
   );
 
+  app.route('/', sessionRoutes());
   app.route('/', authRoutes());
+  app.route('/', apiRoutes());
   app.route('/', webhookRoutes(queue));
 
   return app;

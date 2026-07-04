@@ -7,6 +7,8 @@ export const FindingSchema = z.object({
   category: z.string(),
   message: z.string(),
   suggestion: z.string().optional(),
+  originalCode: z.string().optional(),
+  fixedCode: z.string().optional(),
   confidence: z.number().min(0).max(1),
   ruleId: z.string().optional(),
 });

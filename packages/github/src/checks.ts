@@ -17,7 +17,7 @@ export async function createCheckRun(
   const { data } = await octokit.rest.checks.create({
     owner: ref.owner,
     repo: ref.repo,
-    name: opts.name ?? 'velatrix-review',
+    name: opts.name ?? 'orvex-review',
     head_sha: headSha,
     status: 'completed',
     conclusion: opts.conclusion,

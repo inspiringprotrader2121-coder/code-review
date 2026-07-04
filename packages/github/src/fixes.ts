@@ -1,0 +1,139 @@
+import type { Octokit } from '@octokit/rest';
+import type { PrRef } from './types.js';
+
+export interface PrHeadInfo {
+  sha: string;
+  /** head branch name */
+  ref: string;
+  /** false when the head lives in a fork we cannot push to */
+  sameRepo: boolean;
+  headRepoFullName: string;
+  state: 'open' | 'closed';
+}
+
+export async function fetchPrHeadInfo(octokit: Octokit, ref: PrRef): Promise<PrHeadInfo> {
+  const { data } = await octokit.rest.pulls.get({
+    owner: ref.owner,
+    repo: ref.repo,
+    pull_number: ref.number,
+  });
+  const baseFull = `${ref.owner}/${ref.repo}`.toLowerCase();
+  const headFull = (data.head.repo?.full_name ?? '').toLowerCase();
+  return {
+    sha: data.head.sha,
+    ref: data.head.ref,
+    sameRepo: headFull === baseFull,
+    headRepoFullName: data.head.repo?.full_name ?? 'unknown',
+    state: data.state as 'open' | 'closed',
+  };
+}
+
+export interface CommitFileResult {
+  commitSha: string;
+}
+
+/**
+ * Commit a single-file change to the PR branch via the Contents API.
+ * GitHub rejects the update with a 409 if the file's blob changed between our
+ * read and write — that conflict is surfaced as `concurrent_update` so callers
+ * can abort instead of overwriting someone's in-flight edit.
+ */
+export async function commitFileUpdate(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string,
+  path: string,
+  newContent: string,
+  message: string,
+): Promise<CommitFileResult> {
+  const { data: current } = await octokit.rest.repos.getContent({ owner, repo, path, ref: branch });
+  if (Array.isArray(current) || current.type !== 'file') {
+    throw new Error(`cannot update ${path}: not a file on ${branch}`);
+  }
+
+  try {
+    const { data } = await octokit.rest.repos.createOrUpdateFileContents({
+      owner,
+      repo,
+      path,
+      branch,
+      message,
+      content: Buffer.from(newContent, 'utf8').toString('base64'),
+      sha: current.sha,
+    });
+    return { commitSha: data.commit.sha ?? '' };
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 409 || status === 422) {
+      throw new Error('concurrent_update');
+    }
+    throw err;
+  }
+}
+
+export type CommentReaction = 'eyes' | 'rocket' | '+1' | 'confused';
+
+/** Ack a command comment so the requester knows Orvex saw it. */
+export async function addCommentReaction(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  commentId: number,
+  reaction: CommentReaction,
+  isReviewComment: boolean,
+): Promise<void> {
+  try {
+    if (isReviewComment) {
+      await octokit.rest.reactions.createForPullRequestReviewComment({
+        owner,
+        repo,
+        comment_id: commentId,
+        content: reaction,
+      });
+    } else {
+      await octokit.rest.reactions.createForIssueComment({
+        owner,
+        repo,
+        comment_id: commentId,
+        content: reaction,
+      });
+    }
+  } catch {
+    // reactions are best-effort
+  }
+}
+
+export async function updateReviewCommentBody(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  commentId: number,
+  body: string,
+): Promise<void> {
+  await octokit.rest.pulls.updateReviewComment({ owner, repo, comment_id: commentId, body });
+}
+
+export async function getReviewComment(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  commentId: number,
+): Promise<{ id: number; body: string; path: string; line?: number; inReplyTo?: number } | null> {
+  try {
+    const { data } = await octokit.rest.pulls.getReviewComment({
+      owner,
+      repo,
+      comment_id: commentId,
+    });
+    return {
+      id: data.id,
+      body: data.body,
+      path: data.path,
+      line: data.line ?? data.original_line ?? undefined,
+      inReplyTo: data.in_reply_to_id,
+    };
+  } catch {
+    return null;
+  }
+}

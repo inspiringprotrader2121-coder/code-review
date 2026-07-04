@@ -7,11 +7,11 @@ import {
   type ReviewQueue,
 } from './types.js';
 
-const QUEUE_KEY = 'velatrix-review:jobs';
-const SEEN_PREFIX = 'velatrix-review:seen:';
-const DONE_PREFIX = 'velatrix-review:done:';
-const INFLIGHT_PREFIX = 'velatrix-review:inflight:';
-const PENDING_PREFIX = 'velatrix-review:pending:';
+const QUEUE_KEY = 'orvex-review:jobs';
+const SEEN_PREFIX = 'orvex-review:seen:';
+const DONE_PREFIX = 'orvex-review:done:';
+const INFLIGHT_PREFIX = 'orvex-review:inflight:';
+const PENDING_PREFIX = 'orvex-review:pending:';
 
 export class RedisReviewQueue implements ReviewQueue {
   private redis: Redis;

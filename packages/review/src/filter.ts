@@ -1,4 +1,4 @@
-import type { ReviewConfig } from '@velatrix-review/rules';
+import type { ReviewConfig } from '@orvex-review/rules';
 import type { ReviewFinding } from './finding.js';
 
 const SEVERITY_RANK: Record<string, number> = { P1: 0, P2: 1, P3: 2, info: 3 };

@@ -14,19 +14,22 @@ import {
   shouldSkipPr,
   type GitHubAppConfig,
   type InlineReviewComment,
-} from '@velatrix-review/github';
-import type { ReviewJobPayload } from '@velatrix-review/queue';
+} from '@orvex-review/github';
+import type { ReviewJobPayload } from '@orvex-review/queue';
 import {
   auditFindingsFromContent,
   parseReviewConfigYaml,
   runSemgrepOnPaths,
   shouldIgnorePath,
   type ReviewConfig,
-} from '@velatrix-review/rules';
+} from '@orvex-review/rules';
 import {
+  commandTrigger,
   dedupeByFileLine,
   filterAndCapFindings,
+  fingerprintFinding,
   formatFixedReply,
+  formatInlineFinding,
   formatReviewBody,
   llmFindingsToReviewFindings,
   mergeFindings,
@@ -34,13 +37,13 @@ import {
   runLlmReview,
   toStoredFinding,
   type ReviewFinding,
-} from '@velatrix-review/review';
+} from '@orvex-review/review';
 import {
   createAppDatabase,
   type AppDatabase,
   type PrReviewState,
   type StoredFinding,
-} from '@velatrix-review/store';
+} from '@orvex-review/store';
 
 type AddedLineMap = Map<string, Set<number>>;
 
@@ -85,9 +88,48 @@ export interface ProcessResult {
   newCount: number;
   fixedCount: number;
   reviewId?: number;
+  skipReason?: string;
 }
 
 export async function processReviewJob(
+  job: ReviewJobPayload,
+  config: WorkerConfig,
+): Promise<ProcessResult> {
+  const startedAt = Date.now();
+  const runBase = {
+    tenantId: job.tenantId,
+    installationId: job.installationId,
+    owner: job.owner,
+    repo: job.repo,
+    pr: job.pr,
+    headSha: job.headSha,
+    action: job.action,
+  };
+
+  try {
+    const result = await executeReview(job, config);
+    config.store.recordReviewRun({
+      ...runBase,
+      status: result.skipReason ? 'skipped' : 'completed',
+      skipReason: result.skipReason,
+      durationMs: Date.now() - startedAt,
+      findingsNew: result.newCount,
+      findingsFixed: result.fixedCount,
+      findingsOpen: result.findingCount,
+    });
+    return result;
+  } catch (err) {
+    config.store.recordReviewRun({
+      ...runBase,
+      status: 'failed',
+      error: err instanceof Error ? err.message : String(err),
+      durationMs: Date.now() - startedAt,
+    });
+    throw err;
+  }
+}
+
+async function executeReview(
   job: ReviewJobPayload,
   config: WorkerConfig,
 ): Promise<ProcessResult> {
@@ -111,24 +153,21 @@ export async function processReviewJob(
   const effectiveSha = pr.headSha;
 
   const labels = await fetchPrLabels(octokit, ref);
-  const repoConfigYaml = await fetchRepoFile(
-    octokit,
-    owner,
-    repo,
-    '.velatrix-review.yml',
-    effectiveSha,
-  );
+  const repoConfigYaml =
+    (await fetchRepoFile(octokit, owner, repo, '.orvex-review.yml', effectiveSha)) ??
+    // deprecated pre-rename config filename; remove after customers migrate
+    (await fetchRepoFile(octokit, owner, repo, '.velatrix-review.yml', effectiveSha));
   const reviewConfig = parseReviewConfigYaml(repoConfigYaml);
 
   if (hasIgnoreLabel(labels, reviewConfig.ignore_labels)) {
     console.log(`[worker] skip PR #${number}: label ${reviewConfig.ignore_labels.join('/')}`);
-    return { findingCount: 0, newCount: 0, fixedCount: 0 };
+    return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: 'ignore_label' };
   }
 
   const skipReason = shouldSkipPr(pr, { botLogin: config.github.botLogin });
   if (skipReason) {
     console.log(`[worker] skip PR #${number}: ${skipReason}`);
-    return { findingCount: 0, newCount: 0, fixedCount: 0 };
+    return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason };
   }
 
   const priorState = config.store.getState({ installationId, owner, repo, pr: number });
@@ -211,10 +250,11 @@ export async function processReviewJob(
     minConfidence: reviewConfig.min_confidence,
   });
 
-  const addedLinesByFile = buildAddedLineIndex(files);
-  const normalizedToPost = merged.toPost.map((finding) =>
-    normalizeFindingLine(finding, addedLinesByFile),
-  );
+  // drop findings the team suppressed with `@orvex ignore`
+  const suppressed = config.store.getSuppressedFingerprints(installationId, owner, repo);
+  if (suppressed.size > 0) {
+    merged.toPost = merged.toPost.filter((f) => !suppressed.has(fingerprintFinding(f)));
+  }
 
   const allFixed = dedupeByFingerprint([...verifiedFixed, ...merged.newlyFixed]);
   const { inline, summaryOnly } = filterAndCapFindings(normalizedToPost, reviewConfig);
@@ -318,7 +358,7 @@ export async function processReviewJob(
     const openAny = finalFindings.some((f) => f.status === 'open');
     await createCheckRun(octokit, ref, effectiveSha, {
       conclusion: openP1 ? 'failure' : openAny ? 'neutral' : 'success',
-      title: 'Velatrix Review',
+      title: 'Orvex Review',
       summary: `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open`,
     });
   }
@@ -378,9 +418,18 @@ async function runDeterministicRules(
 }
 
 function formatInlineBody(f: ReviewFinding): string {
-  const parts = [`**${f.severity}** · \`${f.ruleId}\``, '', f.message];
-  if (f.suggestion) parts.push('', f.suggestion);
-  return parts.join('\n');
+  return formatInlineFinding({
+    finding: {
+      severity: f.severity,
+      ruleId: f.ruleId,
+      message: f.message,
+      suggestion: f.suggestion,
+      originalCode: f.originalCode,
+      fixedCode: f.fixedCode,
+      fingerprint: fingerprintFinding(f),
+    },
+    trigger: commandTrigger(),
+  });
 }
 
 function dedupeByFingerprint(findings: StoredFinding[]): StoredFinding[] {

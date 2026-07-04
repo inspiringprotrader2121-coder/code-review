@@ -1,14 +1,14 @@
 {
-  "name": "velatrix-review",
+  "name": "orvex-review",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --filter @velatrix-review/server dev",
+    "dev": "pnpm --filter @orvex-review/server dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "review": "tsx apps/cli/src/review.ts",
-    "start": "pnpm --filter @velatrix-review/server start"
+    "start": "pnpm --filter @orvex-review/server start"
   },
   "devDependencies": {
     "tsx": "^4.19.4",
