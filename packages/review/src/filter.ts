@@ -16,12 +16,10 @@ export function filterAndCapFindings(
   const summaryOnly: ReviewFinding[] = [];
 
   for (const f of capped) {
-    const canInline =
-      (f.severity === 'P1' || f.severity === 'P2') &&
-      f.confidence >= config.inline_min_confidence &&
-      typeof f.line === 'number';
-
-    if (canInline) inline.push(f);
+    // Any finding anchored to a changed line gets an inline comment so it
+    // carries its own apply-fix checkbox. Only findings we couldn't anchor to
+    // the diff (no line) fall back to the summary list.
+    if (typeof f.line === 'number') inline.push(f);
     else summaryOnly.push(f);
   }
 

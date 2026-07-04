@@ -495,39 +495,36 @@ function parseAddedLinesFromPatch(patch: string): Set<number> {
 }
 
 function normalizeFindingLine(finding: ReviewFinding, addedLinesByFile: AddedLineMap): ReviewFinding {
-  if (!finding.line) return finding;
-
   const candidateLines = addedLinesByFile.get(finding.file);
+  // file not part of the diff's added lines (pure deletion / unchanged) → summary-only
   if (!candidateLines || candidateLines.size === 0) {
     return { ...finding, line: undefined };
   }
-  if (candidateLines.has(finding.line)) {
+  // exact hit
+  if (finding.line && candidateLines.has(finding.line)) {
     return finding;
   }
-  const nearest = nearestAddedLine(candidateLines, finding.line);
-  if (nearest === undefined) {
-    return { ...finding, line: undefined };
-  }
-  return { ...finding, line: nearest };
+  // Anchor to the nearest changed line in the same file so the finding still
+  // gets an inline comment (and its fix checkbox). GitHub only accepts inline
+  // comments on changed lines; a slightly-off anchor is far better than hiding
+  // the finding — and its fix button — in a summary table.
+  const anchor = nearestAddedLine(candidateLines, finding.line);
+  return { ...finding, line: anchor };
 }
 
-function nearestAddedLine(addedLines: Set<number>, requested: number): number | undefined {
-  let bestLine: number | undefined;
+/** Nearest changed line to `requested`, or the first changed line if no hint. */
+function nearestAddedLine(addedLines: Set<number>, requested?: number): number {
+  const sorted = [...addedLines];
+  if (!requested) return Math.min(...sorted);
+  let bestLine = sorted[0];
   let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (const addedLine of addedLines) {
+  for (const addedLine of sorted) {
     const distance = Math.abs(addedLine - requested);
     if (distance < bestDistance) {
       bestDistance = distance;
       bestLine = addedLine;
       if (distance === 0) break;
     }
-  }
-
-  // If the LLM guesses far from changed lines, keep it summary-only instead of
-  // risking an invalid inline position.
-  if (bestLine === undefined || bestDistance > 5) {
-    return undefined;
   }
   return bestLine;
 }
