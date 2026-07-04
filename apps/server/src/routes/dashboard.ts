@@ -23,6 +23,15 @@ export function dashboardRoutes() {
 
   app.get('/dashboard/:slug', (c) => {
     const slug = c.req.param('slug');
+    // require login (unless in legacy no-auth mode); members only
+    if (!legacyAuthMode()) {
+      const user = sessionUser(c, db);
+      if (!user) return c.redirect(`/auth/login?next=/dashboard/${encodeURIComponent(slug)}`);
+      const tenant = db.getTenantBySlug(slug);
+      if (!tenant || !db.getMembership(tenant.id, user.id)) {
+        return c.redirect('/dashboard');
+      }
+    }
     return c.html(dashboardHtml(slug));
   });
 
