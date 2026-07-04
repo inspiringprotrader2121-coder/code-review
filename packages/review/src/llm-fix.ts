@@ -16,6 +16,8 @@ export interface GenerateFixInput {
   suggestion?: string;
   /** free-form user instruction from `@orvex <prompt>` */
   instruction?: string;
+  /** files imported by filePath — context so the fix respects cross-file contracts */
+  relatedFiles?: Array<{ path: string; content: string }>;
 }
 
 export interface GenerateFixOptions {
@@ -44,6 +46,11 @@ export async function generateFixWithLlm(
     : `Fix this code-review finding: ${input.findingMessage}` +
       (input.suggestion ? `\nReviewer suggestion: ${input.suggestion}` : '');
 
+  const related = (input.relatedFiles ?? [])
+    .slice(0, 4)
+    .map((r) => `### ${r.path} (imported by the file — context only, do NOT edit)\n\`\`\`\n${r.content.slice(0, 12_000)}\n\`\`\``)
+    .join('\n');
+
   const user = [
     `File: ${input.filePath}`,
     input.findingLine ? `Finding is anchored at line ${input.findingLine}.` : '',
@@ -54,7 +61,7 @@ export async function generateFixWithLlm(
     '```',
     numbered,
     '```',
-    '',
+    related ? `\nCross-file context (respect these signatures and contracts):\n${related}\n` : '',
     'Respond with JSON only:',
     '{ "originalCode": "<exact contiguous snippet copied verbatim from the file, WITHOUT line numbers>",',
     '  "fixedCode": "<replacement snippet>",',

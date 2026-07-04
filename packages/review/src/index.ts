@@ -1,7 +1,7 @@
 export type { Finding, LlmReviewResponse, ReviewableFile } from './types.js';
 export { FindingSchema, LlmReviewResponseSchema } from './types.js';
 export { redactSecrets, redactPatch } from './redact.js';
-export { loadOrvexRules, buildUserPrompt } from './prompt.js';
+export { loadOrvexRules, buildUserPrompt, type ReviewPromptContext } from './prompt.js';
 export {
   runLlmReview,
   llmFindingsToReviewFindings,

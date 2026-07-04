@@ -1,4 +1,5 @@
 import {
+  buildRepoContext,
   createInstallationOctokit,
   createCheckRun,
   fetchFileContent,
@@ -239,11 +240,32 @@ async function executeReview(
   let llmFindings: ReviewFinding[] = [];
 
   if (filesForLlm.length > 0) {
+    // Deep context: repo tree + files the changed code imports, so the model
+    // can reason across files instead of judging hunks blind. ORVEX_DEEP_CONTEXT=0 disables.
+    let reviewContext;
+    if (process.env.ORVEX_DEEP_CONTEXT !== '0') {
+      try {
+        reviewContext = await buildRepoContext(
+          octokit,
+          owner,
+          repo,
+          effectiveSha,
+          filesForLlm.map((f) => f.filename),
+        );
+        console.log(
+          `[worker] deep context: ${reviewContext.related.length} imported files, tree=${reviewContext.treePaths.length} paths`,
+        );
+      } catch (err) {
+        console.warn('[worker] deep context unavailable, reviewing diff-only:', err);
+      }
+    }
+
     const llm = await runLlmReview(filesForLlm, {
       apiKey: config.llmApiKey,
       baseUrl: config.llmBaseUrl,
       model: config.llmModel,
       maxTokens: Math.min(4096, Math.floor(reviewConfig.max_tokens / 10)),
+      context: reviewContext,
     });
     llmSummary = llm.summary;
     llmFindings = llmFindingsToReviewFindings(llm.findings);

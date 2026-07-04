@@ -27,6 +27,14 @@ export {
   type InstallationRepo,
 } from './api.js';
 export {
+  buildRepoContext,
+  fetchRepoTree,
+  parseRelativeImports,
+  resolveImportToTreePath,
+  type RelatedFile,
+  type RepoContext,
+} from './repo-context.js';
+export {
   fetchPrHeadInfo,
   fetchBranchSha,
   commitFileUpdate,

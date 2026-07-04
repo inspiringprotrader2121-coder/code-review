@@ -1,4 +1,4 @@
-import { buildUserPrompt, loadOrvexRules } from './prompt.js';
+import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch } from './redact.js';
 import { llmChat } from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
@@ -10,6 +10,8 @@ export interface LlmReviewOptions {
   /** OpenAI-compatible endpoint (e.g. MiniMax); omit to use Anthropic */
   baseUrl?: string;
   maxTokens?: number;
+  /** cross-file context: repo tree + imported files */
+  context?: ReviewPromptContext;
 }
 
 export async function runLlmReview(
@@ -31,7 +33,7 @@ export async function runLlmReview(
   }));
 
   const system = loadOrvexRules();
-  const user = buildUserPrompt(redactedFiles);
+  const user = buildUserPrompt(redactedFiles, opts.context);
 
   const text = await llmChat(system, user, {
     apiKey: opts.apiKey,

@@ -1,5 +1,6 @@
 import {
   addCommentReaction,
+  buildRepoContext,
   commitFilesAtomic,
   createInstallationOctokit,
   fetchBranchSha,
@@ -151,6 +152,24 @@ export async function processFixJob(
       byFile.set(finding.file, list);
     }
 
+    // Cross-file context for LLM-generated fixes: the files the target code
+    // imports, so generated fixes respect signatures/contracts elsewhere.
+    const needsLlm =
+      Boolean(fix.instruction) ||
+      targets.some((t) => !(t.originalCode && t.fixedCode !== undefined));
+    let relatedByFile = new Map<string, Array<{ path: string; content: string }>>();
+    if (needsLlm && process.env.ORVEX_DEEP_CONTEXT !== '0') {
+      try {
+        const ctx = await buildRepoContext(octokit, owner, repo, expectedHead, [...byFile.keys()], {
+          maxRelated: 6,
+        });
+        // give every target file the same small related set (they share a PR)
+        relatedByFile = new Map([...byFile.keys()].map((f) => [f, ctx.related]));
+      } catch {
+        // context is best-effort
+      }
+    }
+
     // Phase 1: build every file change in memory. No writes yet.
     const fileChanges: Array<{ path: string; content: string }> = [];
     const pendingFindings: StoredFinding[] = [];
@@ -164,7 +183,7 @@ export async function processFixJob(
       }
       const appliedHere: StoredFinding[] = [];
       for (const t of fileTargets) {
-        const codeFix = await resolveCodeFix(t.finding, content, fix, config);
+        const codeFix = await resolveCodeFix(t.finding, content, fix, config, relatedByFile.get(file));
         if (!codeFix) {
           skipped.push({ file, message: t.finding.message, reason: SKIP_REASONS.no_fix });
           continue;
@@ -545,6 +564,7 @@ async function resolveCodeFix(
   fileContent: string,
   fix: FixRequest,
   config: WorkerConfig,
+  relatedFiles?: Array<{ path: string; content: string }>,
 ): Promise<CodeFix | null> {
   // custom instruction always regenerates, even when a ready fix exists
   if (!fix.instruction && finding.originalCode && finding.fixedCode !== undefined) {
@@ -558,6 +578,7 @@ async function resolveCodeFix(
       findingLine: finding.line,
       suggestion: finding.suggestion,
       instruction: fix.instruction,
+      relatedFiles,
     },
     { apiKey: config.llmApiKey, model: config.llmModel, baseUrl: config.llmBaseUrl },
   );
