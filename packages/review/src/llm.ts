@@ -90,6 +90,20 @@ function coerceSeverity(v: unknown): 'P1' | 'P2' | 'P3' | 'info' {
   return SEVERITY_MAP[String(v ?? '').toLowerCase().trim()] ?? 'P3';
 }
 
+/** Reduce a category to a short kebab slug (≤3 words); default 'general'. */
+function normalizeCategory(raw: string | undefined): string {
+  if (!raw) return 'general';
+  const slug = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .split('-')
+    .filter(Boolean)
+    .slice(0, 3)
+    .join('-');
+  return slug || 'general';
+}
+
 function pickString(o: Record<string, unknown>, ...keys: string[]): string | undefined {
   for (const k of keys) {
     const val = o[k];
@@ -131,7 +145,9 @@ export function normalizeLlmResponse(json: unknown): unknown {
         file,
         line: line && line > 0 ? line : undefined,
         severity: coerceSeverity(f.severity ?? f.priority ?? f.level ?? f.impact),
-        category: pickString(f, 'category', 'type', 'rule', 'ruleId', 'rule_id', 'kind') ?? 'general',
+        // category is a short slug, not a sentence — models sometimes stuff the
+        // whole title here, which mangles the ruleId (llm.<category>) and header.
+        category: normalizeCategory(pickString(f, 'category', 'type', 'rule', 'kind')),
         message,
         suggestion: pickString(f, 'suggestion', 'fix', 'recommendation', 'remediation'),
         originalCode: pickString(f, 'originalCode', 'original_code', 'original', 'before'),

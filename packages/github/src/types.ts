@@ -16,6 +16,8 @@ export interface PrRef {
 export interface PullRequestMeta {
   number: number;
   title: string;
+  /** PR description — states author intent; key for not flagging intentional changes */
+  body?: string;
   headSha: string;
   baseSha: string;
   draft: boolean;

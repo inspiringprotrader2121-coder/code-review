@@ -242,10 +242,13 @@ async function executeReview(
   // full-file contents used by both the review call and the verification pass
   let reviewContextFiles: Array<{ path: string; content: string }> = [];
 
+  // author intent — critical for not flagging deliberate changes as bugs
+  const prIntent = [pr.title, pr.body].filter(Boolean).join('\n\n').slice(0, 4000);
+
   if (filesForLlm.length > 0) {
     // Deep context: repo tree + files the changed code imports, so the model
     // can reason across files instead of judging hunks blind. ORVEX_DEEP_CONTEXT=0 disables.
-    let reviewContext;
+    let reviewContext: Awaited<ReturnType<typeof buildRepoContext>> | undefined;
     if (process.env.ORVEX_DEEP_CONTEXT !== '0') {
       try {
         reviewContext = await buildRepoContext(
@@ -275,7 +278,7 @@ async function executeReview(
       baseUrl: config.llmBaseUrl,
       model: config.llmModel,
       maxTokens: Math.min(4096, Math.floor(reviewConfig.max_tokens / 10)),
-      context: reviewContext,
+      context: { ...(reviewContext ?? {}), prTitle: pr.title, prBody: pr.body },
     });
     llmSummary = llm.summary;
     llmFindings = llmFindingsToReviewFindings(llm.findings);
@@ -299,6 +302,7 @@ async function executeReview(
       apiKey: config.llmApiKey,
       model: config.llmModel,
       baseUrl: config.llmBaseUrl,
+      prIntent,
     });
     if (verified.dropped.length > 0) {
       console.log(

@@ -7,6 +7,8 @@ export interface VerifierOptions {
   apiKey: string;
   model: string;
   baseUrl?: string;
+  /** PR title + description, so the verifier can reject intentional-change findings */
+  prIntent?: string;
 }
 
 const VerdictSchema = z.object({
@@ -63,6 +65,7 @@ export async function verifyFindings(
   }
 
   const user = [
+    opts.prIntent ? `## What this PR intends to do\n${opts.prIntent.slice(0, 3000)}\n` : '',
     'Candidate code-review findings:',
     '',
     findingList,
@@ -70,12 +73,15 @@ export async function verifyFindings(
     'Full source files:',
     ...fileBlocks,
     '',
-    'For EACH finding, actively try to refute it using the code above:',
-    '- Is the claimed hazard already handled elsewhere in the file (guards, runners, error handling, idempotency)?',
-    '- Does the claim depend on code or behavior you cannot see? If yes → rejected.',
-    '- Is it a duplicate of another finding, or a style/documentation nit dressed up as a bug? If yes → rejected.',
-    '- Is the stated failure scenario actually reachable with concrete inputs? If you cannot construct one → rejected.',
-    'If it survives, you may also correct the severity (P1 = provable security/data-loss/outage only).',
+    'For EACH finding, actively try to REFUTE it using the code above. Reject if ANY apply:',
+    '- The finding describes a change that IS the point of this PR (intentional removal/behavior change).',
+    '- The claimed hazard is already handled elsewhere in the file (guards, runners, error handling, idempotency).',
+    "- The claim is factually wrong about the code — e.g. it attributes a pre-existing throw/behavior to this PR,",
+    '  or claims code exists/does something the source does not show.',
+    '- It depends on code, callers, config, or deployment/runtime state you cannot see in the source.',
+    '- The failure scenario is not reachable with concrete inputs you can name.',
+    '- It is a duplicate, or a style/docs/release-note observation dressed up as a bug.',
+    'If it survives, you may correct the severity (P1 = provable security/data-loss/outage with a named trigger).',
     '',
     'Respond with JSON only: { "verdicts": [{ "id": <number>, "verdict": "confirmed"|"rejected", "reason": "<short>", "severity"?: "P1"|"P2"|"P3"|"info" }] }',
     'Include a verdict for every id. When in doubt, reject — a missed nit is cheaper than a false alarm.',

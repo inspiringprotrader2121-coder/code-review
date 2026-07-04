@@ -48,6 +48,10 @@ export function loadOrvexRules(): string {
 }
 
 export interface ReviewPromptContext {
+  /** PR title — the author's stated intent */
+  prTitle?: string;
+  /** PR description — behavior changes it describes are intentional, not bugs */
+  prBody?: string;
   /** repo file paths at the reviewed sha */
   treePaths?: string[];
   /** files the changed code imports, for cross-file reasoning */
@@ -74,9 +78,22 @@ export function buildUserPrompt(
   const parts = [
     'Review these changed files from a pull request.',
     'Return JSON: { "findings": [...], "summary": "one paragraph" }',
-    '',
-    ...sections,
   ];
+
+  if (context?.prTitle || context?.prBody) {
+    parts.push(
+      '',
+      '## What this PR is trying to do (author intent)',
+      context.prTitle ? `Title: ${context.prTitle}` : '',
+      context.prBody ? context.prBody.slice(0, 4000) : '',
+      '',
+      'A change that does what this PR set out to do is NOT a bug. Do not report',
+      '"you removed X" / "behavior changed" when removing/changing X is the point of the PR.',
+      'Release-note-worthy behavior changes belong in the summary, not as findings.',
+    );
+  }
+
+  parts.push('', ...sections);
 
   if (context?.changedContents?.length) {
     parts.push(

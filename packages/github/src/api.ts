@@ -44,6 +44,7 @@ export async function fetchPullRequest(
   return {
     number: data.number,
     title: data.title,
+    body: data.body ?? undefined,
     headSha: data.head.sha,
     baseSha: data.base.sha,
     draft: data.draft ?? false,
