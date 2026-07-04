@@ -51,7 +51,7 @@ export async function runLlmReview(
   const system = loadOrvexRules();
   const user = buildUserPrompt(redactedFiles, context);
 
-  const call = (thinking?: boolean) =>
+  const call = (thinking: boolean) =>
     llmChat(system, user, {
       apiKey: opts.apiKey,
       model: opts.model,
@@ -61,12 +61,17 @@ export async function runLlmReview(
       thinking,
     });
 
+  // The initial review prompt carries full files + repo context, which is too
+  // large for reasoning to finish inside the timeout — it always fell back
+  // anyway. Do the broad review WITHOUT reasoning (fast, reliable); the
+  // adversarial verification pass runs reasoning on its smaller, focused prompt,
+  // which is where careful thinking actually pays off. Opt back in with
+  // ORVEX_REVIEW_THINKING=1.
+  const reviewThinking = process.env.ORVEX_REVIEW_THINKING === '1';
   let text: string;
   try {
-    text = await call();
+    text = await call(reviewThinking);
   } catch (err) {
-    // reasoning can truncate/time out on huge prompts — retry once without it
-    // so a review still lands rather than failing outright.
     console.warn('[llm] review call failed, retrying without reasoning:', (err as Error).message);
     text = await call(false);
   }
