@@ -253,7 +253,9 @@ async function executeReview(
           filesForLlm.map((f) => f.filename),
         );
         console.log(
-          `[worker] deep context: ${reviewContext.related.length} imported files, tree=${reviewContext.treePaths.length} paths`,
+          `[worker] deep context: ${reviewContext.changedContents.length} full files, ` +
+            `${reviewContext.related.length} imports, ${reviewContext.dependents.length} dependents, ` +
+            `tree=${reviewContext.treePaths.length}`,
         );
       } catch (err) {
         console.warn('[worker] deep context unavailable, reviewing diff-only:', err);

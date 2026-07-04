@@ -28,6 +28,7 @@ export {
 } from './api.js';
 export {
   buildRepoContext,
+  fetchRepoSnapshot,
   fetchRepoTree,
   parseRelativeImports,
   resolveImportToTreePath,

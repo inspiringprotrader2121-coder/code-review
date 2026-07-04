@@ -32,11 +32,15 @@ export async function runLlmReview(
     patch: redactPatch(f.patch),
   }));
 
-  // related file contents leave the box too — same secret redaction as patches
+  // all file contents leave the box — same secret redaction as patches
+  const redactAll = (files?: Array<{ path: string; content: string }>) =>
+    files?.map((f) => ({ ...f, content: redactSecrets(f.content) }));
   const context = opts.context
     ? {
         treePaths: opts.context.treePaths,
-        related: opts.context.related?.map((r) => ({ ...r, content: redactSecrets(r.content) })),
+        related: redactAll(opts.context.related),
+        dependents: redactAll(opts.context.dependents),
+        changedContents: redactAll(opts.context.changedContents),
       }
     : undefined;
 

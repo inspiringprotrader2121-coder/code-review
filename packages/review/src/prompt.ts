@@ -52,10 +52,15 @@ export interface ReviewPromptContext {
   treePaths?: string[];
   /** files the changed code imports, for cross-file reasoning */
   related?: Array<{ path: string; content: string }>;
+  /** files that import the changed code (reverse dependencies) */
+  dependents?: Array<{ path: string; content: string }>;
+  /** full contents of the changed files (hunks lack surrounding logic) */
+  changedContents?: Array<{ path: string; content: string }>;
 }
 
 const MAX_TREE_PATHS = 300;
-const MAX_RELATED_CHARS = 130_000;
+const MAX_CHANGED_CHARS = 160_000;
+const MAX_RELATED_CHARS = 110_000;
 
 export function buildUserPrompt(
   files: Array<{ filename: string; status: string; patch?: string }>,
@@ -73,17 +78,38 @@ export function buildUserPrompt(
     ...sections,
   ];
 
-  if (context?.related?.length) {
+  if (context?.changedContents?.length) {
     parts.push(
       '',
-      '## Related files (imported by the changed code — CONTEXT ONLY)',
-      'Use these to check cross-file correctness: broken callers, mismatched signatures,',
-      'violated invariants, missed call sites. Only report findings whose *cause* is in the',
-      'diff above; anchor every finding to a changed file.',
+      '## Full content of the changed files',
+      'The diff above shows only hunks. Read the full files before judging: logic elsewhere',
+      'in the same file (runners, guards, error handling) often changes whether a hunk is a bug.',
     );
     let used = 0;
-    for (const r of context.related) {
-      const block = `\n### ${r.path} (context)\n\`\`\`\n${r.content}\n\`\`\``;
+    for (const f of context.changedContents) {
+      const block = `\n### ${f.path} (full file)\n\`\`\`\n${f.content}\n\`\`\``;
+      if (used + block.length > MAX_CHANGED_CHARS) break;
+      parts.push(block);
+      used += block.length;
+    }
+  }
+
+  if (context?.related?.length || context?.dependents?.length) {
+    parts.push(
+      '',
+      '## Cross-file context (CONTEXT ONLY — do not report issues in these files themselves)',
+      'Imported files show callee contracts; dependent files show callers the diff may break.',
+      'Only report findings whose *cause* is in the diff; anchor every finding to a changed file.',
+    );
+    let used = 0;
+    for (const r of context.related ?? []) {
+      const block = `\n### ${r.path} (imported by changed code)\n\`\`\`\n${r.content}\n\`\`\``;
+      if (used + block.length > MAX_RELATED_CHARS) break;
+      parts.push(block);
+      used += block.length;
+    }
+    for (const d of context.dependents ?? []) {
+      const block = `\n### ${d.path} (imports the changed code — check for breakage)\n\`\`\`\n${d.content}\n\`\`\``;
       if (used + block.length > MAX_RELATED_CHARS) break;
       parts.push(block);
       used += block.length;
