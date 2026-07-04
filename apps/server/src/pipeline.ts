@@ -592,28 +592,24 @@ function normalizeFindingLine(finding: ReviewFinding, addedLinesByFile: AddedLin
   if (finding.line && candidateLines.has(finding.line)) {
     return finding;
   }
-  // Anchor to a NEARBY changed line so the finding keeps its inline comment +
-  // fix checkbox. But if the nearest changed line is far away (or the finding
-  // has no line at all), don't misattribute it to unrelated code — leave it
-  // summary-only. ORVEX_ANCHOR_MAX_DIST tunes the window.
-  const maxDist = Number(process.env.ORVEX_ANCHOR_MAX_DIST ?? 8);
-  const anchor = nearestAddedLine(candidateLines, finding.line, maxDist);
+  // Anchor to the nearest changed line in the same file so the finding still
+  // gets an inline comment (and its fix checkbox). GitHub only accepts inline
+  // comments on changed lines; a slightly-off anchor is far better than hiding
+  // the finding — and its fix button — in a summary table. Only a finding whose
+  // file has no changed lines at all stays summary-only (handled above).
+  const anchor = nearestAddedLine(candidateLines, finding.line);
   return { ...finding, line: anchor };
 }
 
-/**
- * Nearest changed line within `maxDist` of `requested`, else undefined.
- * A line-less finding is never force-anchored (returns undefined).
- */
-function nearestAddedLine(
-  addedLines: Set<number>,
-  requested: number | undefined,
-  maxDist: number,
-): number | undefined {
-  if (!requested) return undefined;
-  let bestLine: number | undefined;
+/** Nearest changed line to `requested`, or the first changed line if no hint. */
+function nearestAddedLine(addedLines: Set<number>, requested?: number): number {
+  let bestLine = Number.POSITIVE_INFINITY;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const addedLine of addedLines) {
+    if (requested === undefined) {
+      if (addedLine < bestLine) bestLine = addedLine;
+      continue;
+    }
     const distance = Math.abs(addedLine - requested);
     if (distance < bestDistance) {
       bestDistance = distance;
@@ -621,5 +617,5 @@ function nearestAddedLine(
       if (distance === 0) break;
     }
   }
-  return bestLine !== undefined && bestDistance <= maxDist ? bestLine : undefined;
+  return Number.isFinite(bestLine) ? bestLine : (requested ?? 1);
 }
