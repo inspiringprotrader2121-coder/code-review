@@ -42,10 +42,13 @@ import {
   type StoredFinding,
 } from '@velatrix-review/store';
 
+type AddedLineMap = Map<string, Set<number>>;
+
 export interface WorkerConfig {
   github: GitHubAppConfig;
-  anthropicApiKey: string;
-  anthropicModel: string;
+  llmApiKey: string;
+  llmBaseUrl: string;
+  llmModel: string;
   maxFileBytes: number;
   maxFiles: number;
   enableCheckRuns: boolean;
@@ -56,9 +59,9 @@ let sharedStore: AppDatabase | null = null;
 
 export function loadWorkerConfig(): WorkerConfig {
   const github = loadGitHubConfigFromEnv();
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-  if (!anthropicApiKey) {
-    throw new Error('ANTHROPIC_API_KEY is required');
+  const llmApiKey = process.env.MINIMAX_API_KEY;
+  if (!llmApiKey) {
+    throw new Error('MINIMAX_API_KEY is required');
   }
 
   if (!sharedStore) {
@@ -67,8 +70,9 @@ export function loadWorkerConfig(): WorkerConfig {
 
   return {
     github,
-    anthropicApiKey,
-    anthropicModel: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
+    llmApiKey,
+    llmBaseUrl: process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1',
+    llmModel: process.env.MINIMAX_MODEL ?? 'MiniMax-M3',
     maxFileBytes: Number(process.env.MAX_FILE_BYTES ?? 120_000),
     maxFiles: Number(process.env.MAX_FILES ?? 40),
     enableCheckRuns: process.env.CHECK_RUNS_ENABLED === '1',
@@ -193,8 +197,9 @@ export async function processReviewJob(
 
   if (filesForLlm.length > 0) {
     const llm = await runLlmReview(filesForLlm, {
-      apiKey: config.anthropicApiKey,
-      model: config.anthropicModel,
+      apiKey: config.llmApiKey,
+      baseUrl: config.llmBaseUrl,
+      model: config.llmModel,
       maxTokens: Math.min(4096, Math.floor(reviewConfig.max_tokens / 10)),
     });
     llmSummary = llm.summary;
@@ -206,8 +211,13 @@ export async function processReviewJob(
     minConfidence: reviewConfig.min_confidence,
   });
 
+  const addedLinesByFile = buildAddedLineIndex(files);
+  const normalizedToPost = merged.toPost.map((finding) =>
+    normalizeFindingLine(finding, addedLinesByFile),
+  );
+
   const allFixed = dedupeByFingerprint([...verifiedFixed, ...merged.newlyFixed]);
-  const { inline, summaryOnly } = filterAndCapFindings(merged.toPost, reviewConfig);
+  const { inline, summaryOnly } = filterAndCapFindings(normalizedToPost, reviewConfig);
 
   const stats = {
     newCount: merged.toPost.length,
@@ -263,7 +273,7 @@ export async function processReviewJob(
     reviewId = review.reviewId;
   }
 
-  const newStored: StoredFinding[] = merged.toPost.map((f) => {
+  const newStored: StoredFinding[] = normalizedToPost.map((f) => {
     const stored = toStoredFinding(f, effectiveSha);
     const key = f.line ? `${f.file}:${f.line}` : null;
     if (key && commentIdMap.has(key)) {
@@ -379,4 +389,92 @@ function dedupeByFingerprint(findings: StoredFinding[]): StoredFinding[] {
     byFp.set(f.fingerprint, f);
   }
   return [...byFp.values()];
+}
+
+function buildAddedLineIndex(files: Array<{ filename: string; patch?: string }>): AddedLineMap {
+  const map: AddedLineMap = new Map();
+
+  for (const file of files) {
+    if (!file.patch) continue;
+    const lines = parseAddedLinesFromPatch(file.patch);
+    if (lines.size > 0) {
+      map.set(file.filename, lines);
+    }
+  }
+
+  return map;
+}
+
+function parseAddedLinesFromPatch(patch: string): Set<number> {
+  const added = new Set<number>();
+  let newLine = 0;
+
+  for (const rawLine of patch.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    const match = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+    if (match) {
+      newLine = Number(match[1]);
+      continue;
+    }
+
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      if (newLine > 0) added.add(newLine);
+      newLine += 1;
+      continue;
+    }
+
+    if (line.startsWith('-')) {
+      continue;
+    }
+
+    if (newLine > 0) {
+      newLine += 1;
+    }
+  }
+
+  return added;
+}
+
+function normalizeFindingLine(
+  finding: ReviewFinding,
+  addedLinesByFile: AddedLineMap,
+): ReviewFinding {
+  if (!finding.line) return finding;
+
+  const candidateLines = addedLinesByFile.get(finding.file);
+  if (!candidateLines || candidateLines.size === 0) {
+    return { ...finding, line: undefined };
+  }
+
+  if (candidateLines.has(finding.line)) {
+    return finding;
+  }
+
+  const nearest = nearestAddedLine(candidateLines, finding.line);
+  if (nearest === undefined) {
+    return { ...finding, line: undefined };
+  }
+
+  return { ...finding, line: nearest };
+}
+
+function nearestAddedLine(addedLines: Set<number>, requested: number): number | undefined {
+  let bestLine: number | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const addedLine of addedLines) {
+    const distance = Math.abs(addedLine - requested);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestLine = addedLine;
+      if (distance === 0) break;
+    }
+  }
+
+  // If LLM guesses far from changed lines, keep it summary-only instead of risking an invalid inline position.
+  if (bestLine === undefined || bestDistance > 5) {
+    return undefined;
+  }
+
+  return bestLine;
 }

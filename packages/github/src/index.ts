@@ -13,6 +13,7 @@ export {
   fetchPrLabels,
   hasIgnoreLabel,
   postPrComment,
+  addIssueCommentReaction,
   postPullRequestReview,
   replyToReviewComment,
   replyToIssueComment,

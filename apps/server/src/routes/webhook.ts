@@ -2,8 +2,11 @@ import { Hono } from 'hono';
 import type { ReviewQueue } from '@velatrix-review/queue';
 import type { ReviewJobPayload } from '@velatrix-review/queue';
 import {
+  createInstallationOctokit,
   isRepoAllowed,
   loadGitHubConfigFromEnv,
+  addIssueCommentReaction,
+  postPrComment,
   verifyWebhookSignature,
 } from '@velatrix-review/github';
 import { TenantService } from '@velatrix-review/tenants';
@@ -25,6 +28,24 @@ interface PullRequestWebhook {
   pull_request: {
     number: number;
     head: { sha: string };
+  };
+  repository: {
+    name: string;
+    owner: { login: string };
+  };
+}
+
+interface IssueCommentWebhook {
+  action: string;
+  installation?: WebhookInstallation;
+  comment?: {
+    id: number;
+    body?: string;
+    user?: { login?: string };
+  };
+  issue?: {
+    number: number;
+    pull_request?: Record<string, unknown>;
   };
   repository: {
     name: string;
@@ -71,7 +92,15 @@ export function webhookRoutes(queue: ReviewQueue) {
         return c.json({ ok: true, action: 'deleted' });
       }
 
-      await tenants.syncInstallationFromWebhook(inst.id, null, {
+      const existing = tenants.resolveInstallation(inst.id);
+      if (!existing) {
+        console.warn(
+          `[webhook] ignored unclaimed installation ${data.action} id=${inst.id} account=${inst.account?.login}`,
+        );
+        return c.json({ ok: true, ignored: 'unclaimed_installation' });
+      }
+
+      await tenants.syncInstallationFromWebhook(inst.id, existing.tenantId, {
         accountLogin: inst.account?.login ?? 'unknown',
         accountType: inst.account?.type ?? 'Organization',
         repositorySelection: inst.repository_selection ?? 'selected',
@@ -85,6 +114,99 @@ export function webhookRoutes(queue: ReviewQueue) {
     if (event === 'installation_repositories') {
       console.log(`[webhook] installation_repositories ${payload.action}`);
       return c.json({ ok: true });
+    }
+
+    if (event === 'issue_comment') {
+      const data = payload as unknown as IssueCommentWebhook;
+      if (data.action !== 'created') {
+        return c.json({ ok: true, ignored: `issue_comment:${data.action}` });
+      }
+
+      const body = data.comment?.body ?? '';
+      const actor = data.comment?.user?.login ?? '';
+      if (!body || !actor) {
+        return c.json({ ok: true, ignored: 'missing_comment_or_author' });
+      }
+
+      const appSlug = githubConfig.appSlug ?? 'velatrix-review';
+      if (!isReviewCommand(body, appSlug)) {
+        return c.json({ ok: true, ignored: 'no_review_command' });
+      }
+
+      if (actor.toLowerCase().endsWith('[bot]')) {
+        return c.json({ ok: true, ignored: 'bot_comment' });
+      }
+
+      if (!data.issue?.pull_request) {
+        return c.json({ ok: true, ignored: 'not_pull_request' });
+      }
+
+      const installationId = data.installation?.id;
+      if (!installationId) {
+        return c.json({ error: 'missing installation on issue_comment event' }, 400);
+      }
+      const installation = tenants.resolveInstallation(installationId);
+      if (!installation || installation.suspendedAt) {
+        console.warn(`[webhook] ignored manual review for unclaimed installation ${installationId}`);
+        return c.json({ ok: true, ignored: 'unclaimed_installation' });
+      }
+
+      const owner = data.repository.owner.login;
+      const repo = data.repository.name;
+      const pr = data.issue.number;
+      const commentId = data.comment?.id;
+      if (!commentId) {
+        return c.json({ error: 'missing issue_comment id' }, 400);
+      }
+
+      if (githubConfig.allowedRepo && !isRepoAllowed(owner, repo, githubConfig.allowedRepo)) {
+        return c.json({ ok: true, ignored: 'repo' });
+      }
+
+      const octokit = createInstallationOctokit(githubConfig, installationId);
+      let job: ReviewJobPayload;
+      try {
+        job = await enqueueManualReview(queue, {
+          owner,
+          repo,
+          pr,
+          installationId,
+        });
+        await postPrComment(
+          octokit,
+          { owner, repo, number: pr },
+          `✅ Review request accepted for #${pr} with action ${job.action} on ${job.headSha.slice(0, 7)}.`,
+        );
+        try {
+          await addIssueCommentReaction(octokit, owner, repo, commentId, 'rocket');
+        } catch (reactionErr) {
+          console.warn('[webhook] failed to add acknowledgement reaction', {
+            owner,
+            repo,
+            pr,
+            commentId,
+            err: reactionErr instanceof Error ? reactionErr.message : String(reactionErr),
+          });
+        }
+      } catch (err) {
+        try {
+          await postPrComment(
+            octokit,
+            { owner, repo, number: pr },
+            '⚠️ Review request could not be queued right now. I could not access this PR right now.',
+          );
+        } catch (notifyErr) {
+          console.warn('[webhook] failed to post review queue error comment', {
+            owner,
+            repo,
+            pr,
+            err: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+          });
+        }
+        throw err;
+      }
+
+      return c.json({ ok: true, triggeredBy: actor, action: 'review', jobId: job.headSha });
     }
 
     if (event !== 'pull_request') {
@@ -115,15 +237,8 @@ export function webhookRoutes(queue: ReviewQueue) {
 
     let installation = tenants.resolveInstallation(installationId);
     if (!installation) {
-      installation = await tenants.syncInstallationFromWebhook(
-        installationId,
-        null,
-        {
-          accountLogin: prPayload.installation?.account?.login ?? owner,
-          accountType: prPayload.installation?.account?.type ?? 'Organization',
-          repositorySelection: prPayload.installation?.repository_selection ?? 'selected',
-        },
-      );
+      console.warn(`[webhook] ignored PR for unclaimed installation ${installationId} ${owner}/${repo}#${pr}`);
+      return c.json({ ok: true, ignored: 'unclaimed_installation' });
     }
 
     if (!installation || installation.suspendedAt) {
@@ -194,4 +309,19 @@ export function webhookRoutes(queue: ReviewQueue) {
   });
 
   return app;
+}
+
+function isReviewCommand(body: string, appSlug: string): boolean {
+  if (/\b\/(?:review|velatrix-review)\b/i.test(body)) {
+    return true;
+  }
+
+  const aliases = [...new Set([appSlug.toLowerCase(), 'velatrix-review', 'minimax', 'velatrixreview'])];
+  const escapedAliases = aliases.map(escapeRegExp).join('|');
+  const mention = new RegExp(`(?:^|[\\s\\W])@(?:${escapedAliases})\\s+review\\b`, 'i');
+  return mention.test(body);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
 }

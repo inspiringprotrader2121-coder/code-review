@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { buildUserPrompt, loadVelatrixRules } from './prompt.js';
 import { redactPatch } from './redact.js';
 import type { ReviewFinding } from './finding.js';
@@ -6,6 +5,7 @@ import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } 
 
 export interface LlmReviewOptions {
   apiKey: string;
+  baseUrl: string;
   model: string;
   maxTokens?: number;
 }
@@ -28,23 +28,41 @@ export async function runLlmReview(
     patch: redactPatch(f.patch),
   }));
 
-  const client = new Anthropic({ apiKey: opts.apiKey });
   const system = loadVelatrixRules();
   const user = buildUserPrompt(redactedFiles);
 
-  const response = await client.messages.create({
+  const response = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${opts.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
     model: opts.model,
-    max_tokens: opts.maxTokens ?? 4096,
-    system,
-    messages: [{ role: 'user', content: user }],
+      max_completion_tokens: opts.maxTokens ?? 4096,
+      response_format: { type: 'json_object' },
+      thinking: { type: 'disabled' },
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    }),
   });
 
-  const textBlock = response.content.find((b) => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`LLM request failed (${response.status}): ${errorBody.slice(0, 500)}`);
+  }
+
+  const completion = await response.json() as {
+    choices?: Array<{ message?: { content?: string | null } }>;
+  };
+  const text = completion.choices?.[0]?.message?.content;
+  if (!text) {
     throw new Error('LLM returned no text content');
   }
 
-  const json = extractJson(textBlock.text);
+  const json = extractJson(stripThinking(text));
   const parsed = LlmReviewResponseSchema.parse(json);
 
   return {
@@ -73,6 +91,10 @@ function extractJson(text: string): unknown {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const raw = fenced ? fenced[1].trim() : text.trim();
   return JSON.parse(raw);
+}
+
+function stripThinking(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 }
 
 // backwards compat

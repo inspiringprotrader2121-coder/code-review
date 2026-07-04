@@ -66,6 +66,21 @@ export async function postPrComment(
   return data.id;
 }
 
+export async function addIssueCommentReaction(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  commentId: number,
+  content: '+1' | 'rocket' | 'eyes' | 'heart' | 'laugh',
+): Promise<void> {
+  await octokit.rest.reactions.createForIssueComment({
+    owner,
+    repo,
+    comment_id: commentId,
+    content,
+  });
+}
+
 export { fetchPrDiff, fetchCompareDiff } from './diff.js';
 export { fetchFileContent, fetchRepoFile } from './content.js';
 export { fetchPrLabels, hasIgnoreLabel } from './labels.js';

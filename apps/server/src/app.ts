@@ -11,7 +11,8 @@ export function createApp(queue: ReviewQueue) {
       ok: true,
       service: 'velatrix-review',
       mode: 'multi-tenant',
-      connect: '/connect',
+      connect: '/dashboard',
+      install: '/connect',
     }),
   );
 
