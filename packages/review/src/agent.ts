@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { llmChat } from './llm-client.js';
+import { redactSecrets } from './redact.js';
 
 export interface AgentFile {
   path: string;
@@ -89,7 +90,8 @@ function renderFiles(heading: string, files: AgentFile[], budget: number): strin
   const parts = [`### ${heading}`];
   let used = 0;
   for (const f of files) {
-    const body = f.content.length > 20_000 ? `${f.content.slice(0, 20_000)}\n… (truncated)` : f.content;
+    const raw = f.content.length > 20_000 ? `${f.content.slice(0, 20_000)}\n… (truncated)` : f.content;
+    const body = redactSecrets(raw); // file contents leave the box — strip secrets
     const block = `\n\`${f.path}\`:\n\`\`\`\n${body}\n\`\`\``;
     if (used + block.length > budget) {
       parts.push(`\n(${files.length} files total; remaining omitted for size)`);

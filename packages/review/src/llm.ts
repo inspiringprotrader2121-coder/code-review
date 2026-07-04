@@ -1,5 +1,5 @@
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
-import { redactPatch } from './redact.js';
+import { redactPatch, redactSecrets } from './redact.js';
 import { llmChat } from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
@@ -32,8 +32,16 @@ export async function runLlmReview(
     patch: redactPatch(f.patch),
   }));
 
+  // related file contents leave the box too — same secret redaction as patches
+  const context = opts.context
+    ? {
+        treePaths: opts.context.treePaths,
+        related: opts.context.related?.map((r) => ({ ...r, content: redactSecrets(r.content) })),
+      }
+    : undefined;
+
   const system = loadOrvexRules();
-  const user = buildUserPrompt(redactedFiles, opts.context);
+  const user = buildUserPrompt(redactedFiles, context);
 
   const text = await llmChat(system, user, {
     apiKey: opts.apiKey,

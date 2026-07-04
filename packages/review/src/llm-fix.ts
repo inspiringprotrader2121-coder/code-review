@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { llmChat } from './llm-client.js';
+import { redactSecrets } from './redact.js';
 import type { CodeFix } from './apply.js';
 
 const LlmFixSchema = z.object({
@@ -38,7 +39,9 @@ export async function generateFixWithLlm(
   input: GenerateFixInput,
   opts: GenerateFixOptions,
 ): Promise<(CodeFix & { explanation?: string }) | null> {
-  const windowed = truncateAroundLine(input.fileContent, input.findingLine);
+  // file contents leave the box — redact secrets first. If a fix would target a
+  // redacted line, its anchor won't match the real file and it fails closed.
+  const windowed = truncateAroundLine(redactSecrets(input.fileContent), input.findingLine);
   const numbered = withLineNumbers(windowed.text, windowed.startLine);
 
   const task = input.instruction
@@ -48,7 +51,7 @@ export async function generateFixWithLlm(
 
   const related = (input.relatedFiles ?? [])
     .slice(0, 4)
-    .map((r) => `### ${r.path} (imported by the file — context only, do NOT edit)\n\`\`\`\n${r.content.slice(0, 12_000)}\n\`\`\``)
+    .map((r) => `### ${r.path} (imported by the file — context only, do NOT edit)\n\`\`\`\n${redactSecrets(r.content.slice(0, 12_000))}\n\`\`\``)
     .join('\n');
 
   const user = [
@@ -116,7 +119,7 @@ export async function generateExplanationWithLlm(
   input: ExplainInput,
   opts: GenerateFixOptions,
 ): Promise<string | null> {
-  const windowed = truncateAroundLine(input.fileContent, input.findingLine);
+  const windowed = truncateAroundLine(redactSecrets(input.fileContent), input.findingLine);
   const numbered = withLineNumbers(windowed.text, windowed.startLine);
 
   const user = [
