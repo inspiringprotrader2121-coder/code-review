@@ -7,13 +7,17 @@ export function createInstallationOctokit(
   config: GitHubAppConfig,
   installationId: number,
 ): Octokit {
-  const auth = createAppAuth({
-    appId: config.appId,
-    privateKey: config.privateKey,
-    installationId,
+  // Octokit's default auth strategy treats `auth` as a token string; app auth
+  // must be wired via `authStrategy` + an options object, or it throws
+  // "Token passed to createTokenAuth is not a string".
+  return new Octokit({
+    authStrategy: createAppAuth,
+    auth: {
+      appId: config.appId,
+      privateKey: config.privateKey,
+      installationId,
+    },
   });
-
-  return new Octokit({ auth });
 }
 
 export async function getInstallationIdForRepo(
@@ -22,10 +26,11 @@ export async function getInstallationIdForRepo(
   repo: string,
 ): Promise<number> {
   const appOctokit = new Octokit({
-    auth: createAppAuth({
+    authStrategy: createAppAuth,
+    auth: {
       appId: config.appId,
       privateKey: config.privateKey,
-    }),
+    },
   });
 
   const { data } = await appOctokit.rest.apps.getRepoInstallation({ owner, repo });

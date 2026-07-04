@@ -42,7 +42,7 @@ export async function runLlmReview(
   });
 
   const json = extractJson(text);
-  const parsed = LlmReviewResponseSchema.parse(json);
+  const parsed = LlmReviewResponseSchema.parse(normalizeLlmResponse(json));
 
   return {
     ...parsed,
@@ -51,6 +51,72 @@ export async function runLlmReview(
       ruleId: f.ruleId ?? `llm.${f.category}`,
     })),
   };
+}
+
+const SEVERITY_MAP: Record<string, 'P1' | 'P2' | 'P3' | 'info'> = {
+  p1: 'P1', critical: 'P1', blocker: 'P1', severe: 'P1', error: 'P1',
+  p2: 'P2', high: 'P2', major: 'P2', warning: 'P2', warn: 'P2',
+  p3: 'P3', medium: 'P3', moderate: 'P3', low: 'P3', minor: 'P3',
+  info: 'info', informational: 'info', note: 'info', nit: 'info', suggestion: 'info',
+};
+
+function coerceSeverity(v: unknown): 'P1' | 'P2' | 'P3' | 'info' {
+  return SEVERITY_MAP[String(v ?? '').toLowerCase().trim()] ?? 'P3';
+}
+
+function pickString(o: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const val = o[k];
+    if (typeof val === 'string' && val.trim()) return val;
+  }
+  return undefined;
+}
+
+/**
+ * Normalize a raw LLM response into our schema. Models (MiniMax especially)
+ * vary the severity vocabulary (critical/high/medium…) and field names
+ * (description/type/…), so map the common variants and drop unusable items
+ * instead of hard-failing schema validation on the whole review.
+ */
+export function normalizeLlmResponse(json: unknown): unknown {
+  const root = (json ?? {}) as Record<string, unknown>;
+  const rawFindings = Array.isArray(root.findings)
+    ? root.findings
+    : Array.isArray(json)
+      ? (json as unknown[])
+      : Array.isArray(root.issues)
+        ? root.issues
+        : [];
+
+  const findings = (rawFindings as unknown[])
+    .map((raw) => {
+      if (!raw || typeof raw !== 'object') return null;
+      const f = raw as Record<string, unknown>;
+      const message = pickString(f, 'message', 'description', 'detail', 'title', 'issue', 'problem', 'summary', 'comment');
+      const file = pickString(f, 'file', 'path', 'filename', 'filePath', 'file_path');
+      if (!message || !file) return null;
+
+      const lineRaw = f.line ?? f.line_number ?? f.lineNumber ?? f.startLine;
+      const line = typeof lineRaw === 'number' ? lineRaw : Number.isFinite(Number(lineRaw)) ? Number(lineRaw) : undefined;
+      const confRaw = f.confidence ?? f.score;
+      const confidence = typeof confRaw === 'number' ? confRaw : Number.isFinite(Number(confRaw)) ? Number(confRaw) : 0.7;
+
+      return {
+        file,
+        line: line && line > 0 ? line : undefined,
+        severity: coerceSeverity(f.severity ?? f.priority ?? f.level ?? f.impact),
+        category: pickString(f, 'category', 'type', 'rule', 'ruleId', 'rule_id', 'kind') ?? 'general',
+        message,
+        suggestion: pickString(f, 'suggestion', 'fix', 'recommendation', 'remediation'),
+        originalCode: pickString(f, 'originalCode', 'original_code', 'original', 'before'),
+        fixedCode: pickString(f, 'fixedCode', 'fixed_code', 'replacement', 'after'),
+        confidence: Math.max(0, Math.min(1, confidence)),
+        ruleId: pickString(f, 'ruleId', 'rule_id'),
+      };
+    })
+    .filter((f): f is NonNullable<typeof f> => f !== null);
+
+  return { findings, summary: pickString(root, 'summary', 'overview') };
 }
 
 export function llmFindingsToReviewFindings(findings: LlmReviewResponse['findings']): ReviewFinding[] {

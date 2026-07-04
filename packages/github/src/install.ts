@@ -12,7 +12,8 @@ export async function fetchInstallationMeta(
   suspendedAt?: string;
 }> {
   const appOctokit = new Octokit({
-    auth: createAppAuth({ appId: config.appId, privateKey: config.privateKey }),
+    authStrategy: createAppAuth,
+    auth: { appId: config.appId, privateKey: config.privateKey },
   });
   const { data } = await appOctokit.rest.apps.getInstallation({ installation_id: installationId });
 
