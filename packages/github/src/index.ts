@@ -30,6 +30,8 @@ export {
   fetchPrHeadInfo,
   fetchBranchSha,
   commitFileUpdate,
+  commitFilesAtomic,
+  type FileChange,
   addCommentReaction,
   updateReviewCommentBody,
   getReviewComment,

@@ -170,7 +170,7 @@ export function formatFixSummaryComment(input: FixSummaryInput): string {
   if (input.headMoved) {
     lines.push(
       '',
-      '> ⚠️ The branch received new commits while fixes were being applied — remaining fixes were aborted to avoid overwriting concurrent edits. Re-run when the branch is quiet.',
+      '> ⚠️ The branch got a new commit while Orvex was preparing these fixes, so **nothing was committed** — the fixes are applied all-at-once or not at all, and Orvex backed off to avoid overwriting the concurrent change. Re-run `@orvex fix` and it will pick up the new head.',
     );
   }
   return lines.join('\n');

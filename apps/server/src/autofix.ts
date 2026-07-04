@@ -1,9 +1,9 @@
 import {
   addCommentReaction,
-  commitFileUpdate,
+  commitFilesAtomic,
   createInstallationOctokit,
-  fetchFileContent,
   fetchBranchSha,
+  fetchFileContent,
   fetchPrHeadInfo,
   getReviewComment,
   replyToIssueComment,
@@ -119,8 +119,14 @@ export async function processFixJob(
     const applied: Array<{ file: string; message: string; sha: string }> = [];
     const skipped: Array<{ file: string; message: string; reason: string }> = [];
     let permissionDenied = false;
-    let expectedHead = head.sha;
     let headMoved = false;
+
+    // The branch tip we anchor everything to. Read from the git ref (strongly
+    // consistent) rather than the PR object (which lags), so we don't false-abort.
+    // All files are read at this sha and the final commit's parent is this sha,
+    // so the atomic ref update below is a true compare-and-swap: any concurrent
+    // push makes the whole thing fail cleanly rather than half-applying.
+    const expectedHead = await fetchBranchSha(octokit, owner, repo, head.ref);
 
     const byFile = new Map<string, FixTarget[]>();
     for (const finding of targets) {
@@ -129,34 +135,17 @@ export async function processFixJob(
       byFile.set(finding.file, list);
     }
 
+    // Phase 1: build every file change in memory. No writes yet.
+    const fileChanges: Array<{ path: string; content: string }> = [];
+    const pendingFindings: StoredFinding[] = [];
     for (const [file, fileTargets] of byFile) {
-      if (headMoved) {
-        for (const t of fileTargets) {
-          skipped.push({ file, message: t.finding.message, reason: 'branch moved — aborted' });
-        }
-        continue;
-      }
-
-      // concurrency guard, part 2: did an EXTERNAL push land while we worked?
-      // read the branch ref (strongly consistent) so Orvex's own prior commit
-      // in this same run doesn't count as an external move.
-      const branchSha = await fetchBranchSha(octokit, owner, repo, head.ref);
-      if (branchSha !== expectedHead) {
-        headMoved = true;
-        for (const t of fileTargets) {
-          skipped.push({ file, message: t.finding.message, reason: 'branch moved — aborted' });
-        }
-        continue;
-      }
-
-      let content = await fetchFileContent(octokit, owner, repo, file, head.ref);
+      let content = await fetchFileContent(octokit, owner, repo, file, expectedHead);
       if (content === null) {
         for (const t of fileTargets) {
           skipped.push({ file, message: t.finding.message, reason: SKIP_REASONS.file_missing });
         }
         continue;
       }
-
       const appliedHere: StoredFinding[] = [];
       for (const t of fileTargets) {
         const codeFix = await resolveCodeFix(t.finding, content, fix, config);
@@ -172,56 +161,58 @@ export async function processFixJob(
         content = result.content;
         appliedHere.push(t.finding);
       }
+      if (appliedHere.length > 0) {
+        fileChanges.push({ path: file, content });
+        pendingFindings.push(...appliedHere);
+      }
+    }
 
-      if (appliedHere.length === 0) continue;
-
-      const first = appliedHere[0].message;
+    // Phase 2: commit all changes atomically (all-or-nothing).
+    let commitSha: string | null = null;
+    if (fileChanges.length > 0) {
+      const lead = pendingFindings[0].message;
       const coAuthor = fix.requestedBy
         ? `\nCo-authored-by: ${fix.requestedBy} <${fix.requestedBy}@users.noreply.github.com>`
         : '';
       const commitMessage =
-        `fix: ${first.slice(0, 60)}${appliedHere.length > 1 ? ` (+${appliedHere.length - 1} more)` : ''}` +
+        `fix: ${lead.slice(0, 60)}${pendingFindings.length > 1 ? ` (+${pendingFindings.length - 1} more)` : ''}` +
         `\n\nApplied by Orvex Review${fix.requestedBy ? ` for @${fix.requestedBy}` : ''}\n${coAuthor}`;
 
-      let commitSha: string;
       try {
-        const commit = await commitFileUpdate(
+        const commit = await commitFilesAtomic(
           octokit,
           owner,
           repo,
           head.ref,
-          file,
-          content,
+          expectedHead,
+          fileChanges,
           commitMessage,
         );
         commitSha = commit.commitSha;
       } catch (err) {
-        // concurrency guard, part 3: GitHub rejected because the file changed under us
-        if (err instanceof Error && err.message === 'concurrent_update') {
+        if (err instanceof Error && err.message === 'branch_moved') {
           headMoved = true;
-          for (const t of appliedHere) {
-            skipped.push({ file, message: t.message, reason: 'file edited concurrently — aborted' });
+          for (const t of pendingFindings) {
+            skipped.push({ file: t.file, message: t.message, reason: 'branch moved — nothing applied' });
           }
-          continue;
-        }
-        // permission not yet accepted — report clearly instead of crashing the job
-        if (err instanceof Error && err.message === 'contents_write_denied') {
+        } else if (err instanceof Error && err.message === 'contents_write_denied') {
           permissionDenied = true;
-          for (const t of appliedHere) {
-            skipped.push({ file, message: t.message, reason: 'commit blocked — see note below' });
+          for (const t of pendingFindings) {
+            skipped.push({ file: t.file, message: t.message, reason: 'commit blocked — see note below' });
           }
-          break;
+        } else {
+          throw err;
         }
-        throw err;
       }
+    }
 
-      expectedHead = commitSha;
-
-      for (const finding of appliedHere) {
-        applied.push({ file, message: finding.message, sha: commitSha });
+    // Phase 3: on success, mark findings fixed and reply on their comments.
+    if (commitSha) {
+      const shortSha = commitSha;
+      for (const finding of pendingFindings) {
+        applied.push({ file: finding.file, message: finding.message, sha: shortSha });
         finding.status = 'fixed';
-        finding.fixedAtSha = commitSha;
-
+        finding.fixedAtSha = shortSha;
         if (finding.githubCommentId) {
           try {
             await replyToReviewComment(
@@ -230,9 +221,9 @@ export async function processFixJob(
               repo,
               pr,
               finding.githubCommentId,
-              formatFixAppliedReply(commitSha.slice(0, 7), fix.requestedBy),
+              formatFixAppliedReply(shortSha.slice(0, 7), fix.requestedBy),
             );
-            await markApplyCheckboxDone(octokit, owner, repo, finding.githubCommentId, commitSha);
+            await markApplyCheckboxDone(octokit, owner, repo, finding.githubCommentId, shortSha);
           } catch (err) {
             console.warn(`[autofix] could not reply on comment ${finding.githubCommentId}:`, err);
           }
@@ -277,7 +268,7 @@ export async function processFixJob(
       owner,
       repo,
       pr,
-      headSha: expectedHead,
+      headSha: commitSha ?? expectedHead,
       action: `fix:${fix.scope}`,
       status: 'completed',
       durationMs: Date.now() - startedAt,

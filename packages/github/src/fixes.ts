@@ -92,6 +92,77 @@ export async function commitFileUpdate(
   }
 }
 
+export interface FileChange {
+  path: string;
+  content: string;
+}
+
+/**
+ * Commit several file changes as ONE commit, atomically. The ref update uses
+ * `force: false`, so if the branch advanced since `expectedHeadSha` (a
+ * concurrent push) GitHub rejects it as a non-fast-forward and NOTHING is
+ * applied — the built commit is simply orphaned. This gives all-or-nothing
+ * semantics: the branch never ends up half-fixed, and a concurrent edit can
+ * never be overwritten.
+ */
+export async function commitFilesAtomic(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string,
+  expectedHeadSha: string,
+  files: FileChange[],
+  message: string,
+): Promise<CommitFileResult> {
+  const { data: baseCommit } = await octokit.rest.git.getCommit({
+    owner,
+    repo,
+    commit_sha: expectedHeadSha,
+  });
+
+  const tree: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string }> = [];
+  for (const f of files) {
+    const { data: blob } = await octokit.rest.git.createBlob({
+      owner,
+      repo,
+      content: Buffer.from(f.content, 'utf8').toString('base64'),
+      encoding: 'base64',
+    });
+    tree.push({ path: f.path, mode: '100644', type: 'blob', sha: blob.sha });
+  }
+
+  const { data: newTree } = await octokit.rest.git.createTree({
+    owner,
+    repo,
+    base_tree: baseCommit.tree.sha,
+    tree,
+  });
+
+  const { data: commit } = await octokit.rest.git.createCommit({
+    owner,
+    repo,
+    message,
+    tree: newTree.sha,
+    parents: [expectedHeadSha],
+  });
+
+  try {
+    await octokit.rest.git.updateRef({
+      owner,
+      repo,
+      ref: `heads/${branch}`,
+      sha: commit.sha,
+      force: false, // reject if the branch moved — compare-and-swap
+    });
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 422) throw new Error('branch_moved');
+    if (status === 403) throw new Error('contents_write_denied');
+    throw err;
+  }
+  return { commitSha: commit.sha };
+}
+
 export type CommentReaction = 'eyes' | 'rocket' | '+1' | 'confused';
 
 /** Ack a command comment so the requester knows Orvex saw it. */
