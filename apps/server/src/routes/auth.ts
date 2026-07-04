@@ -27,7 +27,6 @@ export function authRoutes() {
   const tenants = new TenantService(db);
 
   // Old entry points (marketing links, GitHub App homepage) → connect flow.
-  app.get('/dashboard', (c) => c.redirect('/connect'));
   app.get('/start', (c) => c.redirect('/connect'));
   app.post('/start', (c) => c.redirect('/connect', 303));
 

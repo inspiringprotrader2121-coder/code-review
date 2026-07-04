@@ -277,6 +277,14 @@ export class AppDatabase {
     return this.getTenantBySlug(slug) ?? this.createTenant(slug, name);
   }
 
+  /** Slug of the earliest-created tenant, or null. Used by the legacy dashboard. */
+  firstTenantSlug(): string | null {
+    const row = this.db
+      .prepare(`SELECT slug FROM tenants ORDER BY created_at LIMIT 1`)
+      .get() as { slug: string } | undefined;
+    return row?.slug ?? null;
+  }
+
   getTenantById(id: string): Tenant | null {
     const row = this.db
       .prepare(`SELECT id, slug, name, created_at FROM tenants WHERE id = ?`)

@@ -1,20 +1,39 @@
 import { Hono, type Context } from 'hono';
 import { listInstallationRepos, loadGitHubConfigFromEnv } from '@orvex-review/github';
 import { createAppDatabase, type Tenant } from '@orvex-review/store';
-import { TenantService, WorkspaceAccessError } from '@orvex-review/tenants';
+import {
+  TenantService,
+  WorkspaceAccessError,
+  authDisabled,
+  loadOAuthConfigFromEnv,
+} from '@orvex-review/tenants';
 import { sessionUser } from './session.js';
+
+/** True while user login is not configured — dashboard is viewable without auth. */
+function legacyMode(): boolean {
+  return !loadOAuthConfigFromEnv() && !authDisabled();
+}
 
 export function apiRoutes() {
   const app = new Hono();
   const db = createAppDatabase();
   const tenants = new TenantService(db);
 
-  /** Resolve authenticated user + membership-checked tenant, or an error response. */
+  /** Resolve the membership-checked tenant, or (in legacy no-login mode) any tenant by slug. */
   function workspace(c: Context): { tenant: Tenant } | Response {
-    const user = sessionUser(c, db);
-    if (!user) return c.json({ error: 'not signed in' }, 401);
     const slug = c.req.param('slug');
     if (!slug) return c.json({ error: 'workspace slug required' }, 400);
+
+    // Legacy mode (no OAuth configured): allow read access by slug so the
+    // dashboard works before login is set up. Locks down once OAuth is on.
+    if (legacyMode()) {
+      const tenant = db.getTenantBySlug(slug);
+      if (!tenant) return c.json({ error: 'workspace not found' }, 404);
+      return { tenant };
+    }
+
+    const user = sessionUser(c, db);
+    if (!user) return c.json({ error: 'not signed in' }, 401);
     try {
       const { tenant } = tenants.getTenantStatusForUser(slug, user.id);
       return { tenant };
