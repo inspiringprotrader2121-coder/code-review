@@ -257,6 +257,8 @@ async function executeReview(
           repo,
           effectiveSha,
           filesForLlm.map((f) => f.filename),
+          // right-sized so the reasoning pass fits the timeout on large PRs
+          { maxRelated: 6, maxDependents: 4, maxFileBytes: 10_000 },
         );
         console.log(
           `[worker] deep context: ${reviewContext.changedContents.length} full files, ` +
