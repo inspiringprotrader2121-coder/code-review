@@ -68,6 +68,11 @@ export async function commitFileUpdate(
     if (status === 409 || status === 422) {
       throw new Error('concurrent_update');
     }
+    if (status === 403) {
+      // App has contents:write in its definition but this installation hasn't
+      // accepted the upgraded permission yet.
+      throw new Error('contents_write_denied');
+    }
     throw err;
   }
 }

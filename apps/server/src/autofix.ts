@@ -117,6 +117,7 @@ export async function processFixJob(
 
     const applied: Array<{ file: string; message: string; sha: string }> = [];
     const skipped: Array<{ file: string; message: string; reason: string }> = [];
+    let permissionDenied = false;
     let expectedHead = head.sha;
     let headMoved = false;
 
@@ -200,6 +201,14 @@ export async function processFixJob(
           }
           continue;
         }
+        // permission not yet accepted — report clearly instead of crashing the job
+        if (err instanceof Error && err.message === 'contents_write_denied') {
+          permissionDenied = true;
+          for (const t of appliedHere) {
+            skipped.push({ file, message: t.message, reason: 'commit blocked — see note below' });
+          }
+          break;
+        }
         throw err;
       }
 
@@ -232,10 +241,15 @@ export async function processFixJob(
       config.store.saveState(state);
     }
 
+    const permissionNote = permissionDenied
+      ? `\n\n> ⚠️ **Orvex can't commit yet.** The GitHub App has \`Contents: Read & write\`, but this installation is still on the old permissions. An org/account owner must **accept the updated permissions** at **Settings → Applications → Orvex Review → Review request** (or https://github.com/settings/installations). Once accepted, ticking the box or \`${commandTrigger()} fix\` will commit automatically.`
+      : '';
+
     // Per-thread single fixes already replied inline; command-level runs get a summary.
-    const singleInlineReply = fix.scope === 'one' && applied.length === 1 && skipped.length === 0;
+    const singleInlineReply =
+      fix.scope === 'one' && applied.length === 1 && skipped.length === 0 && !permissionDenied;
     if (!singleInlineReply) {
-      const summary = formatFixSummaryComment({ applied, skipped, headMoved });
+      const summary = formatFixSummaryComment({ applied, skipped, headMoved }) + permissionNote;
       if (fix.scope === 'one' && fix.replyToCommentId && fix.isReviewComment) {
         await replyToReviewComment(octokit, owner, repo, pr, fix.replyToCommentId, summary);
       } else {

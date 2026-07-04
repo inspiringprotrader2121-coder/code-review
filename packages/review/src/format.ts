@@ -123,13 +123,14 @@ export function formatInlineFinding(r: InlineFindingRender): string {
     parts.push('', f.suggestion);
   }
 
-  if (f.fixedCode !== undefined || f.originalCode !== undefined) {
-    parts.push('', `- [ ] ${applyMarker(f.fingerprint)} **Apply fix** — Orvex commits this change`);
-  }
+  // Always offer the fix checkbox. If no fix was pre-generated, Orvex generates
+  // one on demand when the box is ticked (or `@orvex fix this` is replied).
+  const label = fixedCode !== undefined ? 'Apply this fix' : 'Fix this with Orvex';
+  parts.push('', `- [ ] ${applyMarker(f.fingerprint)} **${label}** — Orvex commits to this PR branch`);
 
   parts.push(
     '',
-    `<sub>Reply \`${r.trigger} fix this\` to apply · \`${r.trigger} <instructions>\` for a custom fix</sub>`,
+    `<sub>Tick the box above, or reply \`${r.trigger} fix this\` · \`${r.trigger} <instructions>\` for a custom fix · \`${r.trigger} explain\` · \`${r.trigger} ignore\`</sub>`,
   );
 
   return parts.join('\n');
