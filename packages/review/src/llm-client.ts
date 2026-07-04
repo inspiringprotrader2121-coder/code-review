@@ -45,7 +45,8 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
           // leave headroom for reasoning tokens when thinking is on
           max_completion_tokens: thinkingEnabled(opts) ? Math.max(opts.maxTokens ?? 4096, 16_000) : (opts.maxTokens ?? 4096),
           ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
-          thinking: { type: thinkingEnabled(opts) ? 'enabled' : 'disabled' },
+          // MiniMax reasoning: 'adaptive' (think when useful) or 'disabled'
+          thinking: { type: thinkingEnabled(opts) ? 'adaptive' : 'disabled' },
           messages: [
             { role: 'system', content: system },
             { role: 'user', content: user },
