@@ -47,13 +47,25 @@ export async function runLlmReview(
   const system = loadOrvexRules();
   const user = buildUserPrompt(redactedFiles, context);
 
-  const text = await llmChat(system, user, {
-    apiKey: opts.apiKey,
-    model: opts.model,
-    baseUrl: opts.baseUrl,
-    maxTokens: opts.maxTokens ?? 4096,
-    json: true,
-  });
+  const call = (thinking?: boolean) =>
+    llmChat(system, user, {
+      apiKey: opts.apiKey,
+      model: opts.model,
+      baseUrl: opts.baseUrl,
+      maxTokens: opts.maxTokens ?? 4096,
+      json: true,
+      thinking,
+    });
+
+  let text: string;
+  try {
+    text = await call();
+  } catch (err) {
+    // reasoning can truncate/time out on huge prompts — retry once without it
+    // so a review still lands rather than failing outright.
+    console.warn('[llm] review call failed, retrying without reasoning:', (err as Error).message);
+    text = await call(false);
+  }
 
   const json = extractJson(text);
   const parsed = LlmReviewResponseSchema.parse(normalizeLlmResponse(json));

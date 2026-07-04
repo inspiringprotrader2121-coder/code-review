@@ -42,8 +42,11 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
         },
         body: JSON.stringify({
           model: opts.model,
-          // leave headroom for reasoning tokens when thinking is on
-          max_completion_tokens: thinkingEnabled(opts) ? Math.max(opts.maxTokens ?? 4096, 16_000) : (opts.maxTokens ?? 4096),
+          // Reasoning burns output tokens before the answer, so give it plenty
+          // of headroom or the JSON gets truncated ('Unexpected end of JSON input').
+          max_completion_tokens: thinkingEnabled(opts)
+            ? Math.max(opts.maxTokens ?? 4096, 40_000)
+            : (opts.maxTokens ?? 4096),
           ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
           // MiniMax reasoning: 'adaptive' (think when useful) or 'disabled'
           thinking: { type: thinkingEnabled(opts) ? 'adaptive' : 'disabled' },
@@ -68,11 +71,20 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
     }
 
     const completion = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string | null } }>;
+      choices?: Array<{
+        finish_reason?: string;
+        message?: { content?: string | null; reasoning_content?: string | null };
+      }>;
     };
-    const text = completion.choices?.[0]?.message?.content;
+    const choice = completion.choices?.[0];
+    const text = choice?.message?.content;
     if (!text) {
+      // reasoning-only response with no answer, or empty content
       throw new Error('LLM returned no text content');
+    }
+    if (choice?.finish_reason === 'length') {
+      // ran out of output tokens mid-answer — surface a clear, retryable error
+      throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
     }
     return stripThinking(text);
   }
