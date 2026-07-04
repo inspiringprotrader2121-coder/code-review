@@ -5,9 +5,10 @@ export type OrvexCommand =
   | { kind: 'fix_this' } // thread reply on one finding
   | { kind: 'ignore' } // thread reply: suppress this finding permanently
   | { kind: 'explain' } // thread reply: deep-dive explanation of the finding
+  | { kind: 'resolve_conflicts' } // attempt to resolve merge conflicts
   | { kind: 'auto_apply'; enabled: boolean }
   | { kind: 'help' }
-  | { kind: 'prompt'; instruction: string }; // free-form AI fix instruction
+  | { kind: 'prompt'; instruction: string }; // free-form AI instruction (ask / change)
 
 export function commandTrigger(): string {
   return process.env.ORVEX_TRIGGER ?? '@orvex';
@@ -49,6 +50,15 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
   }
   if (normalized === 'explain' || normalized === 'explain this' || normalized === 'why') {
     return { kind: 'explain' };
+  }
+  if (
+    normalized === 'resolve conflicts' ||
+    normalized === 'resolve conflict' ||
+    normalized === 'fix conflicts' ||
+    normalized === 'fix merge conflicts' ||
+    normalized === 'resolve merge conflicts'
+  ) {
+    return { kind: 'resolve_conflicts' };
   }
   if (/^auto[- ]?apply (on|enable|enabled)$/.test(normalized)) {
     return { kind: 'auto_apply', enabled: true };

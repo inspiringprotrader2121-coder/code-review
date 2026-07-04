@@ -48,3 +48,4 @@ export {
   type GenerateFixOptions,
   type ExplainInput,
 } from './llm-fix.js';
+export { runAgent, type AgentFile, type AgentOptions, type AgentResponse } from './agent.js';

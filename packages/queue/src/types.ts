@@ -1,6 +1,6 @@
 export type JobId = string;
 
-export type JobKind = 'review' | 'fix' | 'explain';
+export type JobKind = 'review' | 'fix' | 'explain' | 'ask' | 'resolve';
 
 /** Which findings a fix job targets. */
 export type FixScope =

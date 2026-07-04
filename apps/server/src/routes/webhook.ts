@@ -152,7 +152,7 @@ export function webhookRoutes(queue: ReviewQueue) {
     owner: string,
     repo: string,
     pr: number,
-    kind: 'review' | 'fix' | 'explain',
+    kind: 'review' | 'fix' | 'explain' | 'ask' | 'resolve',
     fix?: FixRequest,
   ): Promise<void> {
     const octokit = createInstallationOctokit(githubConfig, installation.installationId);
@@ -231,15 +231,25 @@ export function webhookRoutes(queue: ReviewQueue) {
         }
         return 'auto_apply_set';
       }
+      case 'resolve_conflicts':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'resolve', { ...baseFix, scope: 'all' });
+        return 'resolve_enqueued';
+      case 'prompt':
+        // free-form "@orvex <anything>" at PR level → agent answers or edits
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'ask', {
+          ...baseFix,
+          scope: 'all',
+          instruction: command.instruction,
+        });
+        return 'ask_enqueued';
       case 'fix_this':
       case 'ignore':
       case 'explain':
-      case 'prompt':
         await replyToIssueComment(
           octokit,
           ref,
           formatFixSkippedReply(
-            `reply directly on one of Orvex's inline findings to use \`${commandTrigger()} fix this\`, \`ignore\`, \`explain\`, or a custom instruction.`,
+            `reply directly on one of Orvex's inline findings to use \`${commandTrigger()} fix this\`, \`ignore\`, or \`explain\`.`,
           ),
         );
         return 'needs_thread_context';
@@ -384,6 +394,14 @@ export function webhookRoutes(queue: ReviewQueue) {
         );
         return 'auto_apply_set';
       }
+      case 'resolve_conflicts':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'resolve', {
+          scope: 'all',
+          replyToCommentId: threadRootId,
+          isReviewComment: true,
+          requestedBy,
+        });
+        return 'resolve_enqueued';
       case 'help':
       default:
         await replyToReviewComment(octokit, owner, repo, pr, threadRootId, formatHelpComment(commandTrigger()));

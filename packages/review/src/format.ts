@@ -195,6 +195,8 @@ export function formatHelpComment(trigger: string): string {
     `| \`${trigger} <instructions>\` | (reply on a finding) AI fix following your instructions |`,
     `| \`${trigger} explain\` | (reply on a finding) deep-dive explanation of the issue |`,
     `| \`${trigger} ignore\` | (reply on a finding) never report this finding again on the repo |`,
+    `| \`${trigger} resolve conflicts\` | Merge the base branch in to clear conflicts git can auto-resolve |`,
+    `| \`${trigger} <anything>\` | Ask a question about the PR, or describe a change to make |`,
     `| \`${trigger} auto-apply on/off\` | Auto-commit Orvex's ready fixes after each future review of this PR |`,
     '',
     '<sub>Fixes are committed to the PR branch. Before committing, Orvex verifies the branch head has not moved and the target code is unchanged; if someone is editing concurrently, the fix is aborted rather than applied blindly.</sub>',

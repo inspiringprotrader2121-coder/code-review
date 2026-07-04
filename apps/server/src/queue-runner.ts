@@ -7,7 +7,7 @@ import {
 } from '@orvex-review/github';
 import { TenantService } from '@orvex-review/tenants';
 import { processReviewJob, loadWorkerConfig } from './worker.js';
-import { processExplainJob, processFixJob } from './autofix.js';
+import { processAskJob, processExplainJob, processFixJob, processResolveJob } from './autofix.js';
 
 const POLL_MS = 500;
 
@@ -32,6 +32,10 @@ export function startWorkerLoop(queue: ReviewQueue): () => void {
         await processFixJob(job, config);
       } else if (kind === 'explain') {
         await processExplainJob(job, config);
+      } else if (kind === 'ask') {
+        await processAskJob(job, config);
+      } else if (kind === 'resolve') {
+        await processResolveJob(job, config);
       } else {
         const result = await processReviewJob(job, config);
         // auto-apply mode: commit Orvex's ready fixes right after each review

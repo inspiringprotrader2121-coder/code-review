@@ -39,10 +39,19 @@ test('parseOrvexCommand', async (t) => {
     });
   });
 
+  await t.test('parses resolve-conflicts variants', () => {
+    assert.deepEqual(parseOrvexCommand('@orvex resolve conflicts', '@orvex'), { kind: 'resolve_conflicts' });
+    assert.deepEqual(parseOrvexCommand('@orvex fix merge conflicts', '@orvex'), { kind: 'resolve_conflicts' });
+  });
+
   await t.test('anything else becomes a free-form instruction', () => {
     assert.deepEqual(parseOrvexCommand('@orvex use a Set here instead of an array', '@orvex'), {
       kind: 'prompt',
       instruction: 'use a Set here instead of an array',
+    });
+    assert.deepEqual(parseOrvexCommand('@orvex add null checks to the auth handler', '@orvex'), {
+      kind: 'prompt',
+      instruction: 'add null checks to the auth handler',
     });
   });
 

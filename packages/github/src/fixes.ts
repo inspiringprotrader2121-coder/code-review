@@ -5,27 +5,49 @@ export interface PrHeadInfo {
   sha: string;
   /** head branch name */
   ref: string;
+  /** base branch name (merge target) */
+  baseRef: string;
   /** false when the head lives in a fork we cannot push to */
   sameRepo: boolean;
   headRepoFullName: string;
   state: 'open' | 'closed';
+  /** null while GitHub is still computing mergeability */
+  mergeable: boolean | null;
+  /** 'clean' | 'dirty' (conflicts) | 'behind' | 'blocked' | 'unstable' | 'unknown' | … */
+  mergeableState: string;
 }
 
 export async function fetchPrHeadInfo(octokit: Octokit, ref: PrRef): Promise<PrHeadInfo> {
-  const { data } = await octokit.rest.pulls.get({
+  // mergeable is computed asynchronously by GitHub; poll briefly until it settles
+  let data = (await octokit.rest.pulls.get({
     owner: ref.owner,
     repo: ref.repo,
     pull_number: ref.number,
-  });
+  })).data;
+  for (let i = 0; i < 3 && data.mergeable === null && data.state === 'open'; i++) {
+    await sleep(1200);
+    data = (await octokit.rest.pulls.get({
+      owner: ref.owner,
+      repo: ref.repo,
+      pull_number: ref.number,
+    })).data;
+  }
   const baseFull = `${ref.owner}/${ref.repo}`.toLowerCase();
   const headFull = (data.head.repo?.full_name ?? '').toLowerCase();
   return {
     sha: data.head.sha,
     ref: data.head.ref,
+    baseRef: data.base.ref,
     sameRepo: headFull === baseFull,
     headRepoFullName: data.head.repo?.full_name ?? 'unknown',
     state: data.state as 'open' | 'closed',
+    mergeable: data.mergeable ?? null,
+    mergeableState: data.mergeable_state ?? 'unknown',
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export interface CommitFileResult {
@@ -161,6 +183,43 @@ export async function commitFilesAtomic(
     throw err;
   }
   return { commitSha: commit.sha };
+}
+
+export type MergeResult =
+  | { status: 'merged'; sha: string }
+  | { status: 'up_to_date' }
+  | { status: 'conflict' };
+
+/**
+ * Merge `fromBranch` (usually the base, e.g. main) into `intoBranch` (the PR
+ * head). Resolves conflicts that git can auto-merge — the common "PR is behind
+ * base" case. Returns 'conflict' when git can't merge cleanly (real overlapping
+ * edits) without touching anything, so the caller can escalate safely.
+ */
+export async function mergeBranchInto(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  intoBranch: string,
+  fromBranch: string,
+): Promise<MergeResult> {
+  try {
+    const res = await octokit.rest.repos.merge({
+      owner,
+      repo,
+      base: intoBranch,
+      head: fromBranch,
+      commit_message: `Merge ${fromBranch} into ${intoBranch} (Orvex conflict resolution)`,
+    });
+    // 204 = nothing to merge (already up to date); 201 = merge commit created
+    if ((res.status as number) === 204 || !res.data?.sha) return { status: 'up_to_date' };
+    return { status: 'merged', sha: res.data.sha };
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if (status === 409) return { status: 'conflict' };
+    if (status === 403) throw new Error('contents_write_denied');
+    throw err;
+  }
 }
 
 export type CommentReaction = 'eyes' | 'rocket' | '+1' | 'confused';
