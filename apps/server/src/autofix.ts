@@ -3,6 +3,7 @@ import {
   commitFileUpdate,
   createInstallationOctokit,
   fetchFileContent,
+  fetchBranchSha,
   fetchPrHeadInfo,
   getReviewComment,
   replyToIssueComment,
@@ -136,9 +137,11 @@ export async function processFixJob(
         continue;
       }
 
-      // concurrency guard, part 2: someone pushed while we were working?
-      const headNow = await fetchPrHeadInfo(octokit, ref);
-      if (headNow.sha !== expectedHead) {
+      // concurrency guard, part 2: did an EXTERNAL push land while we worked?
+      // read the branch ref (strongly consistent) so Orvex's own prior commit
+      // in this same run doesn't count as an external move.
+      const branchSha = await fetchBranchSha(octokit, owner, repo, head.ref);
+      if (branchSha !== expectedHead) {
         headMoved = true;
         for (const t of fileTargets) {
           skipped.push({ file, message: t.finding.message, reason: 'branch moved — aborted' });

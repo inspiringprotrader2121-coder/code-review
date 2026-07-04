@@ -28,6 +28,7 @@ export {
 } from './api.js';
 export {
   fetchPrHeadInfo,
+  fetchBranchSha,
   commitFileUpdate,
   addCommentReaction,
   updateReviewCommentBody,

@@ -33,6 +33,21 @@ export interface CommitFileResult {
 }
 
 /**
+ * Current tip sha of a branch, read from the git ref (strongly consistent right
+ * after a commit — unlike the PR object, which lags a few seconds). Use this for
+ * the between-commits concurrency check so Orvex's own commits don't trip it.
+ */
+export async function fetchBranchSha(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  branch: string,
+): Promise<string> {
+  const { data } = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+  return data.object.sha;
+}
+
+/**
  * Commit a single-file change to the PR branch via the Contents API.
  * GitHub rejects the update with a 409 if the file's blob changed between our
  * read and write — that conflict is surfaced as `concurrent_update` so callers
