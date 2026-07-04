@@ -12,7 +12,7 @@ build/
 !.env.example
 *.pem
 *.key
-velatrix-review.pem
+orvex-review.pem
 
 # Logs & runtime data
 *.log

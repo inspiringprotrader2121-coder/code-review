@@ -1,13 +1,13 @@
 #!/usr/bin/env tsx
 import 'dotenv/config';
 import { parseArgs } from 'node:util';
-import { createReviewQueue } from '@velatrix-review/queue';
+import { createReviewQueue } from '@orvex-review/queue';
 import {
   createInstallationOctokit,
   fetchPullRequest,
   getInstallationIdForRepo,
   parseRepoSlug,
-} from '@velatrix-review/github';
+} from '@orvex-review/github';
 import { enqueueManualReview, startWorkerLoop } from '../../server/src/queue-runner.js';
 import { loadWorkerConfig, processReviewJob } from '../../server/src/worker.js';
 

@@ -4,8 +4,8 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@velatrix-review/rules": ["../rules/src/index.ts"],
-      "@velatrix-review/store": ["../store/src/index.ts"]
+      "@orvex-review/rules": ["../rules/src/index.ts"],
+      "@orvex-review/store": ["../store/src/index.ts"]
     }
   },
   "include": ["src"]

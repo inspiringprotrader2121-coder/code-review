@@ -3,6 +3,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 export interface InstallStatePayload {
   tenantSlug: string;
   ts: number;
+  /** user who initiated the connect flow; absent on pre-auth legacy states */
+  userId?: string;
 }
 
 export function signInstallState(payload: InstallStatePayload, secret: string): string {

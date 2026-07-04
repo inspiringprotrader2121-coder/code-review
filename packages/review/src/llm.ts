@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { buildUserPrompt, loadVelatrixRules } from './prompt.js';
+import { buildUserPrompt, loadOrvexRules } from './prompt.js';
 import { redactPatch } from './redact.js';
 import type { ReviewFinding } from './finding.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
@@ -29,7 +29,7 @@ export async function runLlmReview(
   }));
 
   const client = new Anthropic({ apiKey: opts.apiKey });
-  const system = loadVelatrixRules();
+  const system = loadOrvexRules();
   const user = buildUserPrompt(redactedFiles);
 
   const response = await client.messages.create({
@@ -64,6 +64,8 @@ export function llmFindingsToReviewFindings(findings: LlmReviewResponse['finding
     category: f.category,
     message: f.message,
     suggestion: f.suggestion,
+    originalCode: f.originalCode,
+    fixedCode: f.fixedCode,
     confidence: f.confidence,
     ruleId: f.ruleId ?? `llm.${f.category}`,
   }));

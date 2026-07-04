@@ -1,4 +1,4 @@
-# Velatrix Review
+# Orvex Review
 
 Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** with deterministic rules first, LLM second, and intelligent re-review on push.
 
@@ -10,11 +10,11 @@ Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** with
 |-------|------------|
 | **1** | Webhook → queue → diff → LLM → PR comment |
 | **2** | SQLite state, fingerprints, incremental diff, “fixed on sha” replies |
-| **3** | Inline P1/P2 comments, `.velatrix-review.yml`, doc-audit + Semgrep, check runs |
+| **3** | Inline P1/P2 comments, `.orvex-review.yml`, doc-audit + Semgrep, check runs |
 
 ## Prerequisites
 
-1. **GitHub App** `Velatrix Review` on Velatrixcloud org
+1. **GitHub App** `Orvex Review` on Velatrixcloud org
    - Permissions: `pull_requests` R/W, `contents` R, `metadata` R, `checks` W (optional)
    - Events: `pull_request`
 2. **Anthropic API key**
@@ -37,9 +37,41 @@ pnpm dev
 pnpm review --pr 67 --sync
 ```
 
+## PR commands & auto-fix
+
+Anyone with write access can drive Orvex from PR comments (trigger word
+configurable via `ORVEX_TRIGGER`, default `@orvex`):
+
+| Command | Where | Effect |
+|---------|-------|--------|
+| `@orvex review` | PR comment | Re-run the review on the current head |
+| `@orvex fix` | PR comment | Commit all of Orvex's ready fix suggestions |
+| `@orvex fix all` | PR comment | Ready fixes + AI-generate fixes for remaining findings |
+| `@orvex fix this` | reply on a finding | Fix just that finding |
+| `@orvex <instructions>` | reply on a finding | AI fix following your instructions |
+| `@orvex explain` | reply on a finding | Deep-dive explanation of the issue |
+| `@orvex ignore` | reply on a finding | Suppress this finding permanently for the repo |
+| `@orvex auto-apply on/off` | PR comment | Auto-commit ready fixes after every future review of this PR (Orvex's findings only) |
+| `@orvex help` | anywhere | Show the command list |
+
+Each inline finding also carries:
+
+- a native GitHub **```suggestion** block — GitHub shows the exact diff and its
+  own *Commit suggestion* button per issue (and batching for several at once)
+- an **`Apply fix` checkbox** — tick it and Orvex commits that one fix, then
+  replies `✅ Fix applied in <sha>` and marks the checkbox done
+
+**Safety:** fixes are only committed when the PR branch head hasn't moved since
+the command, the exact target code still exists at HEAD, and no other Orvex fix
+is running on the PR (per-PR lock). Concurrent edits abort the fix instead of
+overwriting. Fork PRs are never pushed to — use the native suggestion buttons.
+
+**GitHub App requirements:** `Contents: Read & write` permission, plus the
+**Issue comment** and **Pull request review comment** event subscriptions.
+
 ## Per-repo config
 
-Copy `examples/velatrix-review.yml` to **Velatrix-Cloud** as `.velatrix-review.yml`:
+Copy `examples/orvex-review.yml` to **Velatrix-Cloud** as `.orvex-review.yml`:
 
 ```yaml
 mode: normal
@@ -87,5 +119,5 @@ State persists in `.data/reviews.db` (or `STORE_PATH`).
 See `.env.example` for full list. Key vars:
 
 - `STORE_PATH` — SQLite database
-- `CHECK_RUNS_ENABLED=1` — GitHub check `velatrix-review`
+- `CHECK_RUNS_ENABLED=1` — GitHub check `orvex-review`
 - `SEMGREP_DISABLED=1` — skip Semgrep layer

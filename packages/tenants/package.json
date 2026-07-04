@@ -1,5 +1,5 @@
 {
-  "name": "@velatrix-review/tenants",
+  "name": "@orvex-review/tenants",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@octokit/rest": "^21.1.1",
-    "@velatrix-review/github": "workspace:*",
-    "@velatrix-review/store": "workspace:*"
+    "@orvex-review/github": "workspace:*",
+    "@orvex-review/store": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

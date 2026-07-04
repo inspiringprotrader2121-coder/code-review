@@ -5,6 +5,14 @@ export type {
   FindingStatus,
   Tenant,
   GitHubInstallation,
+  User,
+  Session,
+  WorkspaceRole,
+  WorkspaceMember,
+  ReviewRun,
+  ReviewRunStatus,
+  WorkspaceStats,
+  PrSettings,
 } from './types.js';
 export {
   AppDatabase,

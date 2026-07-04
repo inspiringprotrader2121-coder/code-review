@@ -1,5 +1,5 @@
 {
-  "name": "@velatrix-review/server",
+  "name": "@orvex-review/server",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -16,12 +16,12 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.4",
-    "@velatrix-review/github": "workspace:*",
-    "@velatrix-review/queue": "workspace:*",
-    "@velatrix-review/review": "workspace:*",
-    "@velatrix-review/rules": "workspace:*",
-    "@velatrix-review/store": "workspace:*",
-    "@velatrix-review/tenants": "workspace:*",
+    "@orvex-review/github": "workspace:*",
+    "@orvex-review/queue": "workspace:*",
+    "@orvex-review/review": "workspace:*",
+    "@orvex-review/rules": "workspace:*",
+    "@orvex-review/store": "workspace:*",
+    "@orvex-review/tenants": "workspace:*",
     "dotenv": "^16.5.0",
     "hono": "^4.7.11"
   },

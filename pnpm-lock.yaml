@@ -20,22 +20,22 @@ importers:
       '@hono/node-server':
         specifier: ^1.14.4
         version: 1.19.14(hono@4.12.27)
-      '@velatrix-review/github':
+      '@orvex-review/github':
         specifier: workspace:*
         version: link:../../packages/github
-      '@velatrix-review/queue':
+      '@orvex-review/queue':
         specifier: workspace:*
         version: link:../../packages/queue
-      '@velatrix-review/review':
+      '@orvex-review/review':
         specifier: workspace:*
         version: link:../../packages/review
-      '@velatrix-review/rules':
+      '@orvex-review/rules':
         specifier: workspace:*
         version: link:../../packages/rules
-      '@velatrix-review/store':
+      '@orvex-review/store':
         specifier: workspace:*
         version: link:../../packages/store
-      '@velatrix-review/tenants':
+      '@orvex-review/tenants':
         specifier: workspace:*
         version: link:../../packages/tenants
       dotenv:
@@ -92,10 +92,10 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.52.0
         version: 0.52.0
-      '@velatrix-review/rules':
+      '@orvex-review/rules':
         specifier: workspace:*
         version: link:../rules
-      '@velatrix-review/store':
+      '@orvex-review/store':
         specifier: workspace:*
         version: link:../store
       zod:
@@ -137,8 +137,8 @@ importers:
   packages/store:
     dependencies:
       better-sqlite3:
-        specifier: ^11.10.0
-        version: 11.10.0
+        specifier: ^12.2.0
+        version: 12.11.1
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.13
@@ -146,6 +146,9 @@ importers:
       '@types/node':
         specifier: ^22.15.21
         version: 22.20.0
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.4
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
@@ -155,10 +158,10 @@ importers:
       '@octokit/rest':
         specifier: ^21.1.1
         version: 21.1.1
-      '@velatrix-review/github':
+      '@orvex-review/github':
         specifier: workspace:*
         version: link:../github
-      '@velatrix-review/store':
+      '@orvex-review/store':
         specifier: workspace:*
         version: link:../store
     devDependencies:
@@ -441,8 +444,9 @@ packages:
   before-after-hook@3.0.2:
     resolution: {integrity: sha512-Nik3Sc0ncrMK4UUdXQmAnRtzmNQTAAXmXIopizwZ1W1t8QmfJj+zL4OA2I7XPTPW5z5TDqv4hRo/JzouDJnX3A==}
 
-  better-sqlite3@11.10.0:
-    resolution: {integrity: sha512-EwhOpyXiOEL/lKzHz9AW1msWFNzGc/z+LzeB3/jnFJpxu+th2yqvzsSWas1v9jgs9+xiXJcD5A8CJxAG2TaghQ==}
+  better-sqlite3@12.11.1:
+    resolution: {integrity: sha512-dq9AtApgg5PGFtBzPFSBl3HZQjHok5gaQCM6zh2Yk0aSmDCs1CbnVI8/HgASQkNKsWFpseIO9beg5xxpYhbIfA==}
+    engines: {node: 20.x || 22.x || 23.x || 24.x || 25.x || 26.x}
 
   bindings@1.5.0:
     resolution: {integrity: sha512-p2q/t/mhvuOj/UeLlV6566GD/guowlr0hHxClI0W9m7MWYkL1F0hLo+0Aexs9HSPCtR1SXQ0TD3MMKrXZajbiQ==}
@@ -875,7 +879,7 @@ snapshots:
 
   before-after-hook@3.0.2: {}
 
-  better-sqlite3@11.10.0:
+  better-sqlite3@12.11.1:
     dependencies:
       bindings: 1.5.0
       prebuild-install: 7.1.3

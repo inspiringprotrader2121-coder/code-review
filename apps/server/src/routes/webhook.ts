@@ -1,16 +1,32 @@
 import { Hono } from 'hono';
-import type { ReviewQueue } from '@velatrix-review/queue';
-import type { ReviewJobPayload } from '@velatrix-review/queue';
+import type { ReviewQueue } from '@orvex-review/queue';
+import type { FixRequest, ReviewJobPayload } from '@orvex-review/queue';
 import {
+  addCommentReaction,
+  createInstallationOctokit,
+  fetchPullRequest,
   isRepoAllowed,
   loadGitHubConfigFromEnv,
+  replyToIssueComment,
+  replyToReviewComment,
   verifyWebhookSignature,
-} from '@velatrix-review/github';
-import { TenantService } from '@velatrix-review/tenants';
-import { createAppDatabase } from '@velatrix-review/store';
+  type GitHubAppConfig,
+} from '@orvex-review/github';
+import {
+  applyCheckboxChecked,
+  commandTrigger,
+  formatAutoApplyReply,
+  formatFixSkippedReply,
+  formatHelpComment,
+  parseApplyMarker,
+  parseOrvexCommand,
+} from '@orvex-review/review';
+import { TenantService } from '@orvex-review/tenants';
+import { createAppDatabase, type GitHubInstallation } from '@orvex-review/store';
 import { enqueueManualReview } from '../queue-runner.js';
 
 const REVIEW_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
+const WRITE_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 interface WebhookInstallation {
   id: number;
@@ -37,10 +53,291 @@ interface InstallationWebhook {
   installation: WebhookInstallation;
 }
 
+interface CommentWebhook {
+  action: string;
+  installation?: WebhookInstallation;
+  comment: {
+    id: number;
+    body: string;
+    user: { login: string; type?: string };
+    author_association?: string;
+    in_reply_to_id?: number;
+  };
+  changes?: { body?: { from?: string } };
+  issue?: { number: number; pull_request?: unknown };
+  pull_request?: { number: number };
+  repository: { name: string; owner: { login: string } };
+  sender: { login: string };
+}
+
 export function webhookRoutes(queue: ReviewQueue) {
   const app = new Hono();
   const tenants = new TenantService();
   const db = createAppDatabase();
+
+  async function resolveActiveInstallation(
+    payload: { installation?: WebhookInstallation },
+    owner: string,
+  ): Promise<GitHubInstallation | null> {
+    const installationId = payload.installation?.id;
+    if (!installationId) return null;
+
+    let installation = tenants.resolveInstallation(installationId);
+    if (!installation) {
+      installation = await tenants.syncInstallationFromWebhook(installationId, null, {
+        accountLogin: payload.installation?.account?.login ?? owner,
+        accountType: payload.installation?.account?.type ?? 'Organization',
+        repositorySelection: payload.installation?.repository_selection ?? 'selected',
+      });
+    }
+    if (!installation || installation.suspendedAt) return null;
+    return installation;
+  }
+
+  async function enqueueCommandJob(
+    githubConfig: GitHubAppConfig,
+    installation: GitHubInstallation,
+    owner: string,
+    repo: string,
+    pr: number,
+    kind: 'review' | 'fix' | 'explain',
+    fix?: FixRequest,
+  ): Promise<void> {
+    const octokit = createInstallationOctokit(githubConfig, installation.installationId);
+    const prMeta = await fetchPullRequest(octokit, { owner, repo, number: pr });
+    const job: ReviewJobPayload = {
+      kind,
+      installationId: installation.installationId,
+      tenantId: installation.tenantId,
+      owner,
+      repo,
+      pr,
+      headSha: prMeta.headSha,
+      action: 'command',
+      fix,
+      enqueuedAt: new Date().toISOString(),
+    };
+    const result = await queue.enqueue(job);
+    console.log(
+      `[webhook] command ${kind}${fix ? `:${fix.scope}` : ''} ${owner}/${repo}#${pr} → ${result.reason ?? 'queued'}`,
+    );
+  }
+
+  /** `@orvex …` in a PR-level (issue) comment. */
+  async function handleIssueComment(
+    githubConfig: GitHubAppConfig,
+    data: CommentWebhook,
+  ): Promise<string> {
+    if (data.action !== 'created') return 'ignored_action';
+    if (!data.issue?.pull_request) return 'not_a_pr';
+    if (data.comment.user.login === githubConfig.botLogin) return 'own_comment';
+
+    const command = parseOrvexCommand(data.comment.body);
+    if (!command) return 'no_command';
+
+    if (!WRITE_ASSOCIATIONS.has(data.comment.author_association ?? '')) {
+      return 'insufficient_permissions';
+    }
+
+    const owner = data.repository.owner.login;
+    const repo = data.repository.name;
+    const pr = data.issue.number;
+    const installation = await resolveActiveInstallation(data, owner);
+    if (!installation) return 'no_installation';
+
+    const octokit = createInstallationOctokit(githubConfig, installation.installationId);
+    const ref = { owner, repo, number: pr };
+    await addCommentReaction(octokit, owner, repo, data.comment.id, 'eyes', false);
+
+    const requestedBy = data.sender.login;
+    const baseFix = { replyToCommentId: data.comment.id, isReviewComment: false, requestedBy };
+
+    switch (command.kind) {
+      case 'review':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review');
+        return 'review_enqueued';
+      case 'fix':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+          ...baseFix,
+          scope: 'ready',
+        });
+        return 'fix_enqueued';
+      case 'fix_all':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+          ...baseFix,
+          scope: 'all',
+        });
+        return 'fix_all_enqueued';
+      case 'auto_apply': {
+        db.setPrAutoApply({ installationId: installation.installationId, owner, repo, pr }, command.enabled);
+        await replyToIssueComment(octokit, ref, formatAutoApplyReply(command.enabled, commandTrigger()));
+        if (command.enabled) {
+          await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+            ...baseFix,
+            scope: 'ready',
+          });
+        }
+        return 'auto_apply_set';
+      }
+      case 'fix_this':
+      case 'ignore':
+      case 'explain':
+      case 'prompt':
+        await replyToIssueComment(
+          octokit,
+          ref,
+          formatFixSkippedReply(
+            `reply directly on one of Orvex's inline findings to use \`${commandTrigger()} fix this\`, \`ignore\`, \`explain\`, or a custom instruction.`,
+          ),
+        );
+        return 'needs_thread_context';
+      case 'help':
+      default:
+        await replyToIssueComment(octokit, ref, formatHelpComment(commandTrigger()));
+        return 'help_posted';
+    }
+  }
+
+  /** `@orvex …` replies and apply-checkbox toggles on inline review comments. */
+  async function handleReviewComment(
+    githubConfig: GitHubAppConfig,
+    data: CommentWebhook,
+  ): Promise<string> {
+    const owner = data.repository.owner.login;
+    const repo = data.repository.name;
+    const pr = data.pull_request?.number;
+    if (!pr) return 'no_pr';
+
+    // checkbox toggled on one of our own finding comments
+    if (data.action === 'edited' && data.comment.user.login === githubConfig.botLogin) {
+      if (data.sender.login === githubConfig.botLogin) return 'own_edit';
+      if (!applyCheckboxChecked(data.changes?.body?.from, data.comment.body)) return 'not_a_check';
+      const fingerprint = parseApplyMarker(data.comment.body);
+      if (!fingerprint) return 'no_marker';
+
+      const installation = await resolveActiveInstallation(data, owner);
+      if (!installation) return 'no_installation';
+
+      await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+        scope: 'one',
+        fingerprint,
+        replyToCommentId: data.comment.id,
+        isReviewComment: true,
+        requestedBy: data.sender.login,
+      });
+      return 'checkbox_fix_enqueued';
+    }
+
+    if (data.action !== 'created') return 'ignored_action';
+    if (data.comment.user.login === githubConfig.botLogin) return 'own_comment';
+
+    const command = parseOrvexCommand(data.comment.body);
+    if (!command) return 'no_command';
+    if (!WRITE_ASSOCIATIONS.has(data.comment.author_association ?? '')) {
+      return 'insufficient_permissions';
+    }
+
+    const installation = await resolveActiveInstallation(data, owner);
+    if (!installation) return 'no_installation';
+
+    const octokit = createInstallationOctokit(githubConfig, installation.installationId);
+    await addCommentReaction(octokit, owner, repo, data.comment.id, 'eyes', true);
+
+    // the thread root is Orvex's finding comment
+    const threadRootId = data.comment.in_reply_to_id ?? data.comment.id;
+    const requestedBy = data.sender.login;
+
+    switch (command.kind) {
+      case 'review':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review');
+        return 'review_enqueued';
+      case 'fix':
+      case 'fix_this':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+          scope: 'one',
+          replyToCommentId: threadRootId,
+          isReviewComment: true,
+          requestedBy,
+        });
+        return 'thread_fix_enqueued';
+      case 'fix_all':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+          scope: 'all',
+          replyToCommentId: threadRootId,
+          isReviewComment: true,
+          requestedBy,
+        });
+        return 'fix_all_enqueued';
+      case 'prompt':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+          scope: 'one',
+          instruction: command.instruction,
+          replyToCommentId: threadRootId,
+          isReviewComment: true,
+          requestedBy,
+        });
+        return 'prompt_fix_enqueued';
+      case 'ignore': {
+        const key = { installationId: installation.installationId, owner, repo, pr };
+        const state = db.getState(key);
+        const finding = state?.findings.find((f) => f.githubCommentId === threadRootId);
+        if (!finding) {
+          await replyToReviewComment(
+            octokit,
+            owner,
+            repo,
+            pr,
+            threadRootId,
+            formatFixSkippedReply('could not match this thread to an Orvex finding.'),
+          );
+          return 'ignore_no_finding';
+        }
+        db.addSuppression({
+          installationId: installation.installationId,
+          owner,
+          repo,
+          fingerprint: finding.fingerprint,
+          ruleId: finding.ruleId,
+          suppressedBy: requestedBy,
+        });
+        finding.status = 'ignored';
+        if (state) db.saveState(state);
+        await replyToReviewComment(
+          octokit,
+          owner,
+          repo,
+          pr,
+          threadRootId,
+          `🙈 **Ignored** — Orvex won't report this finding again on \`${owner}/${repo}\` (suppressed by @${requestedBy}).`,
+        );
+        return 'finding_ignored';
+      }
+      case 'explain':
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'explain', {
+          scope: 'one',
+          replyToCommentId: threadRootId,
+          isReviewComment: true,
+          requestedBy,
+        });
+        return 'explain_enqueued';
+      case 'auto_apply': {
+        db.setPrAutoApply({ installationId: installation.installationId, owner, repo, pr }, command.enabled);
+        await replyToReviewComment(
+          octokit,
+          owner,
+          repo,
+          pr,
+          threadRootId,
+          formatAutoApplyReply(command.enabled, commandTrigger()),
+        );
+        return 'auto_apply_set';
+      }
+      case 'help':
+      default:
+        await replyToReviewComment(octokit, owner, repo, pr, threadRootId, formatHelpComment(commandTrigger()));
+        return 'help_posted';
+    }
+  }
 
   app.post('/webhooks/github', async (c) => {
     const githubConfig = loadGitHubConfigFromEnv();
@@ -87,6 +384,16 @@ export function webhookRoutes(queue: ReviewQueue) {
       return c.json({ ok: true });
     }
 
+    if (event === 'issue_comment') {
+      const outcome = await handleIssueComment(githubConfig, payload as unknown as CommentWebhook);
+      return c.json({ ok: true, outcome });
+    }
+
+    if (event === 'pull_request_review_comment') {
+      const outcome = await handleReviewComment(githubConfig, payload as unknown as CommentWebhook);
+      return c.json({ ok: true, outcome });
+    }
+
     if (event !== 'pull_request') {
       return c.json({ ok: true, ignored: event ?? 'unknown' });
     }
@@ -113,20 +420,8 @@ export function webhookRoutes(queue: ReviewQueue) {
       return c.json({ ok: true, ignored: 'repo' });
     }
 
-    let installation = tenants.resolveInstallation(installationId);
+    const installation = await resolveActiveInstallation(prPayload, owner);
     if (!installation) {
-      installation = await tenants.syncInstallationFromWebhook(
-        installationId,
-        null,
-        {
-          accountLogin: prPayload.installation?.account?.login ?? owner,
-          accountType: prPayload.installation?.account?.type ?? 'Organization',
-          repositorySelection: prPayload.installation?.repository_selection ?? 'selected',
-        },
-      );
-    }
-
-    if (!installation || installation.suspendedAt) {
       return c.json({ ok: true, ignored: 'suspended_or_unknown_installation' });
     }
 

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const DEFAULT_RULES = `You are Velatrix Review, a code review bot for Velatrix-Cloud (IPTV / streaming SaaS).
+const DEFAULT_RULES = `You are Orvex Review, a code review bot for Velatrix-Cloud (IPTV / streaming SaaS).
 
 Focus on real defects and security issues. Skip style nits unless they hide bugs.
 
@@ -26,12 +26,16 @@ Focus on real defects and security issues. Skip style nits unless they hide bugs
 - Only report issues in the provided diff hunks
 - Max 8 findings; prefer fewer, higher-quality items
 - confidence 0.0–1.0; omit low-confidence noise
+- When you can propose a concrete code fix, include "originalCode" (the EXACT
+  affected source line(s), copied verbatim from the diff's new side) and
+  "fixedCode" (the replacement). Keep originalCode as small as possible —
+  ideally the single flagged line. Omit both when unsure.
 - Respond with JSON only, matching the schema`;
 
-export function loadVelatrixRules(): string {
+export function loadOrvexRules(): string {
   const candidates = [
-    path.resolve(process.cwd(), 'rules/velatrix-rules.md'),
-    path.resolve(__dirname, '../../../rules/velatrix-rules.md'),
+    path.resolve(process.cwd(), 'rules/orvex-rules.md'),
+    path.resolve(__dirname, '../../../rules/orvex-rules.md'),
   ];
 
   for (const file of candidates) {

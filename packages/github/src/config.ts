@@ -37,7 +37,7 @@ export function loadGitHubConfigFromEnv(): GitHubAppConfig {
   const privateKeyPath = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
   const privateKeyInline = process.env.GITHUB_APP_PRIVATE_KEY;
   const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET ?? '';
-  const botLogin = process.env.GITHUB_APP_BOT_LOGIN ?? 'velatrix-review[bot]';
+  const botLogin = process.env.GITHUB_APP_BOT_LOGIN ?? 'orvex-review[bot]';
   const allowedRepo = process.env.GITHUB_ALLOWED_REPO;
   const appSlug = process.env.GITHUB_APP_SLUG;
 

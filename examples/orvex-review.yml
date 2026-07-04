@@ -1,4 +1,4 @@
-# Velatrix Review — per-repo config (place in repo root)
+# Orvex Review — per-repo config (place in repo root)
 mode: normal # strict | normal
 include_docs: false
 

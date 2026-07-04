@@ -1,12 +1,13 @@
-import type { ReviewQueue, ReviewJobPayload } from '@velatrix-review/queue';
-import { prKey } from '@velatrix-review/queue';
+import type { ReviewQueue, ReviewJobPayload } from '@orvex-review/queue';
+import { prKey } from '@orvex-review/queue';
 import {
   createInstallationOctokit,
   fetchPullRequest,
   getInstallationIdForRepo,
-} from '@velatrix-review/github';
-import { TenantService } from '@velatrix-review/tenants';
+} from '@orvex-review/github';
+import { TenantService } from '@orvex-review/tenants';
 import { processReviewJob, loadWorkerConfig } from './worker.js';
+import { processExplainJob, processFixJob } from './autofix.js';
 
 const POLL_MS = 500;
 
@@ -20,13 +21,34 @@ export function startWorkerLoop(queue: ReviewQueue): () => void {
     if (!job) return;
 
     const pk = prKey(job);
+    const kind = job.kind ?? 'review';
     console.log(
-      `[worker] start inst=${job.installationId} ${pk} @ ${job.headSha.slice(0, 7)} action=${job.action}`,
+      `[worker] start inst=${job.installationId} ${pk} @ ${job.headSha.slice(0, 7)} kind=${kind} action=${job.action}`,
     );
 
     try {
       const config = loadWorkerConfig();
-      await processReviewJob(job, config);
+      if (kind === 'fix') {
+        await processFixJob(job, config);
+      } else if (kind === 'explain') {
+        await processExplainJob(job, config);
+      } else {
+        const result = await processReviewJob(job, config);
+        // auto-apply mode: commit Orvex's ready fixes right after each review
+        if (!result.skipReason && result.newCount > 0) {
+          const settings = config.store.getPrSettings(job);
+          if (settings.autoApply) {
+            await queue.enqueue({
+              ...job,
+              kind: 'fix',
+              action: 'command',
+              fix: { scope: 'ready', requestedBy: undefined },
+              enqueuedAt: new Date().toISOString(),
+            });
+            console.log(`[worker] auto-apply queued for ${pk}`);
+          }
+        }
+      }
       await queue.markCompleted(job);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
