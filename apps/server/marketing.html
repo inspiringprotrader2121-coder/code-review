@@ -1,0 +1,1155 @@
+<title>Orvex Review — Site &amp; Tenant Dashboard Design</title>
+<style>
+  /* ---------- tokens ---------- */
+  :root {
+    --page: #f4f4f7;
+    --surface: #ffffff;
+    --surface-2: #ececf1;
+    --ink: #17181f;
+    --ink-2: #55575f;
+    --ink-3: #86888f;
+    --border: rgba(23, 24, 31, 0.12);
+    --border-soft: rgba(23, 24, 31, 0.07);
+    --accent: #4f58d6;
+    --accent-ink: #3d45b8;
+    --accent-wash: rgba(79, 88, 214, 0.09);
+    --good: #0b7c2a;
+    --good-wash: rgba(12, 163, 12, 0.10);
+    --warn: #8a5c00;
+    --warn-wash: rgba(250, 178, 25, 0.16);
+    --crit: #b32f2f;
+    --crit-wash: rgba(208, 59, 59, 0.10);
+    --diff-add: rgba(12, 163, 12, 0.09);
+    --diff-del: rgba(208, 59, 59, 0.08);
+    --grid: #e3e3e9;
+    --bar: #4f58d6;
+    --shadow: 0 1px 2px rgba(23,24,31,.05), 0 8px 28px rgba(23,24,31,.06);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --body: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --display: "Avenir Next", Avenir, Seravek, "Segoe UI Variable Display", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0e0f14;
+      --surface: #171821;
+      --surface-2: #1f2029;
+      --ink: #f0f0f4;
+      --ink-2: #b4b6c1;
+      --ink-3: #797b87;
+      --border: rgba(240, 240, 244, 0.12);
+      --border-soft: rgba(240, 240, 244, 0.07);
+      --accent: #99a2ff;
+      --accent-ink: #b1b8ff;
+      --accent-wash: rgba(153, 162, 255, 0.11);
+      --good: #4fc06a;
+      --good-wash: rgba(12, 163, 12, 0.16);
+      --warn: #e5a93d;
+      --warn-wash: rgba(250, 178, 25, 0.13);
+      --crit: #e66767;
+      --crit-wash: rgba(230, 103, 103, 0.13);
+      --diff-add: rgba(46, 160, 67, 0.14);
+      --diff-del: rgba(230, 103, 103, 0.12);
+      --grid: #262732;
+      --bar: #99a2ff;
+      --shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 32px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --page: #f4f4f7; --surface: #ffffff; --surface-2: #ececf1;
+    --ink: #17181f; --ink-2: #55575f; --ink-3: #86888f;
+    --border: rgba(23,24,31,.12); --border-soft: rgba(23,24,31,.07);
+    --accent: #4f58d6; --accent-ink: #3d45b8; --accent-wash: rgba(79,88,214,.09);
+    --good: #0b7c2a; --good-wash: rgba(12,163,12,.10);
+    --warn: #8a5c00; --warn-wash: rgba(250,178,25,.16);
+    --crit: #b32f2f; --crit-wash: rgba(208,59,59,.10);
+    --diff-add: rgba(12,163,12,.09); --diff-del: rgba(208,59,59,.08);
+    --grid: #e3e3e9; --bar: #4f58d6;
+    --shadow: 0 1px 2px rgba(23,24,31,.05), 0 8px 28px rgba(23,24,31,.06);
+  }
+  :root[data-theme="dark"] {
+    --page: #0e0f14; --surface: #171821; --surface-2: #1f2029;
+    --ink: #f0f0f4; --ink-2: #b4b6c1; --ink-3: #797b87;
+    --border: rgba(240,240,244,.12); --border-soft: rgba(240,240,244,.07);
+    --accent: #99a2ff; --accent-ink: #b1b8ff; --accent-wash: rgba(153,162,255,.11);
+    --good: #4fc06a; --good-wash: rgba(12,163,12,.16);
+    --warn: #e5a93d; --warn-wash: rgba(250,178,25,.13);
+    --crit: #e66767; --crit-wash: rgba(230,103,103,.13);
+    --diff-add: rgba(46,160,67,.14); --diff-del: rgba(230,103,103,.12);
+    --grid: #262732; --bar: #99a2ff;
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 10px 32px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+  a { color: var(--accent-ink); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  button { font: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  code { font-family: var(--mono); font-size: 0.92em; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+
+  /* ---------- motion (only when the viewer allows it) ---------- */
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(14px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes breathe {
+      from { opacity: .13; transform: scale(1); }
+      to   { opacity: .26; transform: scale(1.06); }
+    }
+    @keyframes popIn {
+      0% { opacity: 0; transform: translateY(6px) scale(.98); }
+      100% { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    /* hero entrance sequence */
+    .hero > div:first-child { animation: rise .55s cubic-bezier(.22,1,.36,1) both; }
+    .pr-card { animation: rise .6s cubic-bezier(.22,1,.36,1) .15s both; }
+    .diff .row { opacity: 0; animation: rise .4s ease-out both; }
+    .diff .row:nth-child(1) { animation-delay: .55s; }
+    .diff .row:nth-child(2) { animation-delay: .68s; }
+    .diff .row:nth-child(3) { animation-delay: .81s; }
+    .diff .row:nth-child(4) { animation-delay: .94s; }
+    .diff .row:nth-child(5) { animation-delay: 1.07s; }
+    .bot-comment { opacity: 0; animation: popIn .5s cubic-bezier(.22,1,.36,1) 1.45s both; }
+    .bc-reply { opacity: 0; animation: popIn .45s ease-out 2.3s both; }
+
+    /* ambient glow behind the hero card */
+    .hero-visual { position: relative; }
+    .hero-visual::before {
+      content: ""; position: absolute; inset: -36px -30px;
+      background: radial-gradient(closest-side, var(--accent) 0%, transparent 72%);
+      filter: blur(46px); opacity: .18; z-index: -1;
+      animation: breathe 6s ease-in-out infinite alternate;
+      pointer-events: none;
+    }
+
+    /* scroll reveals */
+    .reveal { opacity: 0; transform: translateY(18px); }
+    .reveal.in {
+      opacity: 1; transform: none;
+      transition: opacity .6s cubic-bezier(.22,1,.36,1), transform .6s cubic-bezier(.22,1,.36,1);
+      transition-delay: var(--reveal-delay, 0s);
+    }
+
+    /* hover micro-interactions */
+    .btn { transition: transform .18s ease, box-shadow .18s ease, filter .18s ease; }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(23,24,31,.14); }
+    .step, .plan, .tile { transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease; }
+    .step:hover, .plan:hover { transform: translateY(-3px); box-shadow: var(--shadow); border-color: var(--accent); }
+    .tile:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+    .navitem { transition: background .15s ease; }
+    .tl-item::before { transition: transform .2s ease, background .2s ease; }
+    .tl-item:hover::before { transform: scale(1.35); background: var(--accent); }
+    .switcher button { transition: background .18s ease, color .18s ease; }
+  }
+
+  /* ---------- view switcher ---------- */
+  .switcher {
+    position: fixed; top: 14px; right: 16px; z-index: 90;
+    display: flex; gap: 2px; padding: 3px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 999px; box-shadow: var(--shadow);
+  }
+  .switcher button {
+    border: 0; background: transparent; color: var(--ink-2);
+    padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+  }
+  .switcher button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  :root[data-theme="dark"] .switcher button[aria-pressed="true"],
+  .switcher button[aria-pressed="true"] { color: #fff; }
+  @media (prefers-color-scheme: dark) {
+    .switcher button[aria-pressed="true"] { color: #14151c; }
+  }
+  :root[data-theme="dark"] .switcher button[aria-pressed="true"] { color: #14151c; }
+  :root[data-theme="light"] .switcher button[aria-pressed="true"] { color: #fff; }
+
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* ---------- shared bits ---------- */
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11.5px; font-weight: 700; letter-spacing: .02em;
+    padding: 2px 9px; border-radius: 999px; white-space: nowrap;
+  }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .chip.p1 { color: var(--crit); background: var(--crit-wash); }
+  .chip.p2 { color: var(--warn); background: var(--warn-wash); }
+  .chip.ok { color: var(--good); background: var(--good-wash); }
+  .chip.info { color: var(--accent-ink); background: var(--accent-wash); }
+  .chip.muted { color: var(--ink-3); background: var(--surface-2); }
+
+  .eyebrow {
+    font-size: 11.5px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent-ink);
+  }
+
+  /* =====================================================
+     LANDING
+     ===================================================== */
+  .land-nav {
+    max-width: 1080px; margin: 0 auto; padding: 20px 24px;
+    display: flex; align-items: center; gap: 28px;
+  }
+  .logo { display: flex; align-items: center; gap: 9px; font-family: var(--display); font-weight: 700; font-size: 16.5px; color: var(--ink); }
+  .logo .mark {
+    width: 26px; height: 26px; border-radius: 7px; background: var(--accent);
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #fff; font-family: var(--mono); font-size: 13px; font-weight: 700;
+  }
+  :root[data-theme="dark"] .logo .mark { color: #14151c; }
+  @media (prefers-color-scheme: dark) { .logo .mark { color: #14151c; } }
+  :root[data-theme="light"] .logo .mark { color: #fff; }
+  .land-nav .links { display: flex; gap: 22px; margin-left: auto; font-size: 13.5px; font-weight: 500; }
+  .land-nav .links a { color: var(--ink-2); }
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    border-radius: 8px; padding: 9px 16px; font-size: 13.5px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+    text-decoration: none;
+  }
+  .btn:hover { text-decoration: none; border-color: var(--ink-3); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  @media (prefers-color-scheme: dark) { .btn.primary { color: #14151c; } }
+  :root[data-theme="dark"] .btn.primary { color: #14151c; }
+  :root[data-theme="light"] .btn.primary { color: #fff; }
+  .btn.primary:hover { filter: brightness(1.06); }
+
+  .hero {
+    max-width: 1080px; margin: 0 auto; padding: 56px 24px 30px;
+    display: grid; grid-template-columns: minmax(320px, 460px) 1fr; gap: 48px;
+    align-items: start;
+  }
+  @media (max-width: 900px) { .hero { grid-template-columns: 1fr; } }
+  .hero h1 {
+    font-size: clamp(34px, 4.6vw, 46px); line-height: 1.08;
+    font-weight: 700; letter-spacing: -0.015em; margin: 14px 0 18px;
+  }
+  .hero .sub { font-size: 16.5px; color: var(--ink-2); max-width: 42ch; margin: 0 0 26px; }
+  .hero .cta-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .hero .fine { margin-top: 14px; font-size: 12.5px; color: var(--ink-3); }
+  .hero .fine code { background: var(--surface-2); padding: 1px 6px; border-radius: 5px; }
+
+  /* PR mockup card */
+  .pr-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow); overflow: hidden;
+    font-size: 13px; min-width: 0;
+  }
+  .pr-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 16px; border-bottom: 1px solid var(--border-soft);
+    color: var(--ink-2); flex-wrap: wrap;
+  }
+  .pr-head strong { color: var(--ink); font-weight: 650; }
+  .diff { font-family: var(--mono); font-size: 12px; line-height: 1.75; overflow-x: auto; }
+  .diff .row { display: flex; min-width: max-content; padding: 0 0; }
+  .diff .gut {
+    flex: 0 0 44px; text-align: right; padding-right: 10px;
+    color: var(--ink-3); user-select: none; border-right: 1px solid var(--border-soft);
+  }
+  .diff .txt { padding: 0 14px; white-space: pre; }
+  .diff .row.add { background: var(--diff-add); }
+  .diff .row.del { background: var(--diff-del); }
+  .diff .hunk { background: var(--accent-wash); color: var(--accent-ink); }
+  .bot-comment {
+    margin: 10px 14px 14px 58px; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--page); overflow: hidden;
+  }
+  .bot-comment .bc-head {
+    display: flex; align-items: center; gap: 8px; padding: 9px 13px;
+    border-bottom: 1px solid var(--border-soft); font-size: 12.5px; color: var(--ink-2);
+    flex-wrap: wrap;
+  }
+  .avatar {
+    width: 20px; height: 20px; border-radius: 6px; background: var(--accent);
+    color: #fff; font-family: var(--mono); font-size: 10px; font-weight: 700;
+    display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  }
+  @media (prefers-color-scheme: dark) { .avatar { color: #14151c; } }
+  :root[data-theme="dark"] .avatar { color: #14151c; }
+  :root[data-theme="light"] .avatar { color: #fff; }
+  .bot-comment .bc-body { padding: 11px 13px; font-size: 13px; }
+  .bot-comment .bc-body p { margin: 0 0 8px; }
+  .bot-comment .bc-body pre {
+    margin: 0; background: var(--surface); border: 1px solid var(--border-soft);
+    border-radius: 7px; padding: 8px 11px; font-family: var(--mono); font-size: 12px;
+    overflow-x: auto;
+  }
+  .bc-reply {
+    display: flex; align-items: center; gap: 8px; padding: 9px 13px;
+    border-top: 1px solid var(--border-soft); font-size: 12.5px; color: var(--good);
+    font-weight: 600;
+  }
+
+  /* sections with gutter motif */
+  .section { max-width: 1080px; margin: 0 auto; padding: 58px 24px; }
+  .section-head { max-width: 60ch; margin-bottom: 34px; }
+  .section-head h2 { font-size: 27px; font-weight: 700; letter-spacing: -0.01em; margin: 10px 0 10px; }
+  .section-head p { color: var(--ink-2); margin: 0; }
+
+  .pipeline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 900px) { .pipeline { grid-template-columns: 1fr; } }
+  .step {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; position: relative;
+  }
+  .step .n {
+    font-family: var(--mono); font-size: 11.5px; color: var(--accent-ink);
+    background: var(--accent-wash); border-radius: 6px; padding: 2px 8px;
+    display: inline-block; margin-bottom: 12px; font-weight: 700;
+  }
+  .step h3 { font-size: 16px; font-weight: 650; margin-bottom: 7px; }
+  .step p { margin: 0; color: var(--ink-2); font-size: 13.5px; }
+  .step code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 44px; align-items: center; }
+  @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+  .timeline { border-left: 2px solid var(--grid); padding-left: 22px; display: grid; gap: 20px; }
+  .tl-item { position: relative; }
+  .tl-item::before {
+    content: ""; position: absolute; left: -28px; top: 5px;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--surface); border: 2px solid var(--accent);
+  }
+  .tl-item .when { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+  .tl-item .what { font-weight: 600; margin: 2px 0 3px; }
+  .tl-item p { margin: 0; color: var(--ink-2); font-size: 13.5px; max-width: 46ch; }
+
+  .code-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .code-card .cc-head {
+    padding: 10px 16px; border-bottom: 1px solid var(--border-soft);
+    font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+  }
+  .code-card pre {
+    margin: 0; padding: 16px 18px; font-family: var(--mono); font-size: 12.5px;
+    line-height: 1.7; overflow-x: auto;
+  }
+  .code-card .k { color: var(--accent-ink); }
+  .code-card .s { color: var(--good); }
+  .code-card .c { color: var(--ink-3); }
+
+  .feature-list { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+  .feature-list li { display: flex; gap: 11px; align-items: baseline; color: var(--ink-2); }
+  .feature-list li strong { color: var(--ink); font-weight: 650; }
+  .tick { color: var(--good); font-weight: 700; flex: 0 0 auto; }
+
+  .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 900px) { .plans { grid-template-columns: 1fr; } }
+  .plan {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    padding: 24px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .plan.featured { border-color: var(--accent); box-shadow: var(--shadow); }
+  .plan .name { font-weight: 700; font-family: var(--display); font-size: 16px; }
+  .plan .price { font-size: 30px; font-weight: 700; font-family: var(--display); letter-spacing: -0.01em; }
+  .plan .price span { font-size: 13px; font-weight: 500; color: var(--ink-3); }
+  .plan ul { margin: 10px 0 18px; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 13.5px; color: var(--ink-2); }
+  .plan ul li { display: flex; gap: 8px; }
+  .plan .btn { margin-top: auto; justify-content: center; }
+
+  .footer {
+    border-top: 1px solid var(--border-soft); margin-top: 30px;
+    padding: 30px 24px 90px; color: var(--ink-3); font-size: 12.5px;
+  }
+  .footer .inner { max-width: 1080px; margin: 0 auto; display: flex; gap: 24px; flex-wrap: wrap; justify-content: space-between; }
+
+  /* =====================================================
+     DASHBOARD
+     ===================================================== */
+  .dash { display: grid; grid-template-columns: 224px 1fr; min-height: 100vh; }
+  @media (max-width: 900px) { .dash { grid-template-columns: 1fr; } .sidebar { display: none; } }
+  .sidebar {
+    background: var(--surface); border-right: 1px solid var(--border-soft);
+    padding: 18px 14px; display: flex; flex-direction: column; gap: 4px;
+  }
+  .ws {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px;
+    background: var(--page);
+  }
+  .ws .avatar { border-radius: 8px; width: 24px; height: 24px; font-size: 11px; }
+  .ws .meta { line-height: 1.2; min-width: 0; }
+  .ws .meta .n1 { font-weight: 650; font-size: 13px; }
+  .ws .meta .n2 { font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
+  .ws .car { margin-left: auto; color: var(--ink-3); font-size: 10px; }
+  .navlbl { font-size: 10.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); padding: 12px 10px 5px; }
+  .navitem {
+    display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+    border-radius: 8px; color: var(--ink-2); font-size: 13.5px; font-weight: 500;
+    text-decoration: none; border: 0; background: none; text-align: left; width: 100%;
+  }
+  .navitem:hover { background: var(--surface-2); text-decoration: none; }
+  .navitem.active { background: var(--accent-wash); color: var(--accent-ink); font-weight: 650; }
+  .navitem .ico { width: 17px; text-align: center; opacity: .85; }
+  .navitem .count { margin-left: auto; font-size: 11px; font-family: var(--mono); color: var(--ink-3); }
+  .sidebar .spacer { flex: 1; }
+
+  .main { padding: 22px 28px 60px; min-width: 0; }
+  .topbar { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; flex-wrap: wrap; }
+  .topbar h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+  .topbar .crumb { color: var(--ink-3); font-size: 13px; }
+  .topbar .right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+  .range {
+    display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    background: var(--surface);
+  }
+  .range button {
+    border: 0; background: transparent; padding: 6px 12px; font-size: 12.5px;
+    color: var(--ink-2); font-weight: 500;
+  }
+  .range button + button { border-left: 1px solid var(--border-soft); }
+  .range button[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent-ink); font-weight: 650; }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+  @media (max-width: 1100px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .tiles { grid-template-columns: 1fr; } }
+  .tile {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 15px 17px;
+  }
+  .tile .lbl { font-size: 12px; color: var(--ink-2); font-weight: 550; }
+  .tile .val { font-size: 27px; font-weight: 700; font-family: var(--display); letter-spacing: -0.01em; margin: 3px 0 2px; }
+  .tile .delta { font-size: 12px; color: var(--ink-3); }
+  .tile .delta .up { color: var(--good); font-weight: 650; }
+  .tile .delta .down { color: var(--crit); font-weight: 650; }
+
+  .grid2 { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; margin-bottom: 16px; }
+  @media (max-width: 1100px) { .grid2 { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 17px 18px; min-width: 0;
+  }
+  .panel h3 { font-size: 14px; font-weight: 650; margin-bottom: 3px; }
+  .panel .sub { font-size: 12px; color: var(--ink-3); margin: 0 0 14px; }
+
+  /* bar chart */
+  .chart { position: relative; }
+  .chart svg { display: block; width: 100%; height: auto; }
+  .chart .tip {
+    position: absolute; pointer-events: none; z-index: 5;
+    background: var(--ink); color: var(--page);
+    font-size: 11.5px; line-height: 1.4; padding: 6px 9px; border-radius: 7px;
+    transform: translate(-50%, -110%); white-space: nowrap; opacity: 0;
+    transition: opacity .1s;
+  }
+  .chart .tip strong { font-family: var(--mono); }
+  .bar-rect { rx: 3; }
+  .bar-hit { fill: transparent; }
+  .bar-hit:hover + .bar-rect, .bar-group:hover .bar-rect { opacity: .85; }
+
+  /* severity rows */
+  .sev-rows { display: grid; gap: 13px; }
+  .sev-row { display: grid; grid-template-columns: 118px 1fr 40px; gap: 10px; align-items: center; }
+  .sev-row .name { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; }
+  .sev-row .name .sq { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+  .sev-row .track { height: 9px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
+  .sev-row .fill { height: 100%; border-radius: 5px; }
+  .sev-row .num { font-family: var(--mono); font-size: 12px; text-align: right; color: var(--ink-2); }
+
+  /* table */
+  .tbl-wrap { overflow-x: auto; }
+  table.reviews { border-collapse: collapse; width: 100%; min-width: 720px; font-size: 13px; }
+  table.reviews th {
+    text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--ink-3); padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.reviews td { padding: 10px 12px; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+  table.reviews tr:last-child td { border-bottom: 0; }
+  table.reviews tbody tr:hover { background: var(--surface-2); }
+  table.reviews .repo { font-weight: 600; }
+  table.reviews .pr-t { color: var(--ink-2); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.reviews .mono { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+  table.reviews .num { font-variant-numeric: tabular-nums; text-align: right; }
+
+  .installs { display: grid; gap: 10px; }
+  .install-row {
+    display: flex; align-items: center; gap: 12px; padding: 11px 13px;
+    border: 1px solid var(--border); border-radius: 10px;
+  }
+  .install-row .org { font-weight: 650; font-size: 13.5px; }
+  .install-row .meta { font-size: 12px; color: var(--ink-3); font-family: var(--mono); }
+  .install-row .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .ghost {
+    border: 1px solid var(--border); background: transparent; color: var(--ink-2);
+    border-radius: 7px; padding: 5px 11px; font-size: 12px; font-weight: 600;
+  }
+  .ghost:hover { border-color: var(--ink-3); }
+</style>
+
+<!-- view switcher -->
+<div class="switcher" role="tablist" aria-label="Design views">
+  <button id="tab-landing" aria-pressed="true" onclick="showView('landing')">Landing</button>
+  <button id="tab-dash" aria-pressed="false" onclick="showView('dash')">Dashboard</button>
+</div>
+
+<!-- ============================================================
+     VIEW 1 — MARKETING LANDING
+     ============================================================ -->
+<div class="view active" id="view-landing">
+
+  <nav class="land-nav">
+    <span class="logo"><span class="mark">±</span>Orvex Review</span>
+    <div class="links">
+      <a href="#how">How it works</a>
+      <a href="#rereview">Re-review</a>
+      <a href="#config">Config</a>
+      <a href="#pricing">Pricing</a>
+    </div>
+    <a class="btn" href="/auth/login">Sign in</a>
+    <a class="btn primary" href="/dashboard">Install on GitHub</a>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <span class="eyebrow">GitHub App · Automated PR Review</span>
+      <h1>Code review that never repeats itself.</h1>
+      <p class="sub">Orvex Review runs deterministic rules before a single
+      token is spent, reviews only the hunks that changed, and replies
+      “Fixed” when you actually fix it. No spam. No re-posted nits. Eight
+      comments, max.</p>
+      <div class="cta-row">
+        <a class="btn primary" href="/dashboard">Install on GitHub — free for 1 repo</a>
+        <a class="btn" href="#how">See the pipeline</a>
+      </div>
+      <p class="fine">Installs as a GitHub App with scoped permissions —
+      <code>pull_requests</code> read/write, <code>contents</code> read.
+      Your team never pastes a password.</p>
+    </div>
+
+    <!-- hero thesis: the product IS a PR comment -->
+    <div class="hero-visual">
+    <div class="pr-card" aria-label="Example pull request review">
+      <div class="pr-head">
+        <span class="chip info"><span class="dot"></span>Review</span>
+        <strong>fix: restream fallback on segment 404</strong>
+        <span>#67 · acme/streaming-edge</span>
+      </div>
+      <div class="diff" aria-hidden="true">
+        <div class="row hunk"><span class="gut">…</span><span class="txt">@@ -41,6 +41,9 @@ export async function restream(req) {</span></div>
+        <div class="row"><span class="gut">41</span><span class="txt">  const seg = await fetchSegment(url);</span></div>
+        <div class="row del"><span class="gut">42</span><span class="txt">- if (!seg) return null;</span></div>
+        <div class="row add"><span class="gut">42</span><span class="txt">+ if (!seg) return retryWithFallback(url);</span></div>
+        <div class="row add"><span class="gut">43</span><span class="txt">+ cache.set(url, seg);</span></div>
+      </div>
+      <div class="bot-comment">
+        <div class="bc-head">
+          <span class="avatar">±</span>
+          <strong>orvex-review</strong> <span>bot</span>
+          <span class="chip p1"><span class="dot"></span>P1 · reliability</span>
+        </div>
+        <div class="bc-body">
+          <p><code>retryWithFallback</code> can return <code>null</code> on
+          exhausted retries — the next line caches it and every later request
+          serves a dead segment. Guard before caching:</p>
+          <pre>if (!seg) return null;
+cache.set(url, seg);</pre>
+        </div>
+        <div class="bc-reply">✅ Fixed on <code>&nbsp;3f2c1ab</code> — thread resolved</div>
+      </div>
+    </div>
+    </div>
+  </header>
+
+  <!-- pipeline -->
+  <section class="section" id="how">
+    <div class="section-head">
+      <span class="eyebrow">Pipeline</span>
+      <h2>Deterministic rules first. LLM second.</h2>
+      <p>Every review runs the same order of operations, so results are
+      reproducible and cheap. The model only sees hunks the rules couldn’t
+      already judge — with secrets redacted before anything leaves your queue.</p>
+    </div>
+    <div class="pipeline">
+      <div class="step">
+        <span class="n">01 · webhook</span>
+        <h3>PR opened or pushed</h3>
+        <p>Signature-verified webhook enqueues one job per
+        <code>head_sha</code>. Duplicate deliveries and rapid push bursts
+        coalesce into a single review — never two bots racing on one PR.</p>
+      </div>
+      <div class="step">
+        <span class="n">02 · rules</span>
+        <h3>Static checks run free</h3>
+        <p>Doc-audit and Semgrep sweep the changed paths first. Deterministic
+        findings cost nothing, never hallucinate, and carry a stable
+        <code>rule_id</code> for exact dedup.</p>
+      </div>
+      <div class="step">
+        <span class="n">03 · LLM review</span>
+        <h3>Model reads only the diff</h3>
+        <p>Changed hunks plus your rules file go to the model; structured JSON
+        comes back. Findings below your confidence threshold are dropped
+        before anyone sees them.</p>
+      </div>
+      <div class="step">
+        <span class="n">04 · dedup</span>
+        <h3>Fingerprints, not vibes</h3>
+        <p>Every finding hashes to a fingerprint. If it’s already open on the
+        PR, it is not posted again — push twelve times, hear about each issue
+        once.</p>
+      </div>
+      <div class="step">
+        <span class="n">05 · post</span>
+        <h3>One review, capped</h3>
+        <p>Inline comments for P1/P2 on the exact diff line, a summary for the
+        rest, hard-capped at 8 comments per PR (yours to configure).</p>
+      </div>
+      <div class="step">
+        <span class="n">06 · verify</span>
+        <h3>Fixes acknowledged</h3>
+        <p>On the next push, prior findings are re-checked against HEAD.
+        Resolved ones get a “Fixed on <code>sha</code>” reply — the thread
+        closes itself.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- re-review -->
+  <section class="section" id="rereview">
+    <div class="split">
+      <div>
+        <span class="eyebrow">Re-review</span>
+        <h2 style="font-size:27px; margin:10px 0 12px;">Push three times.<br>Get zero repeated nits.</h2>
+        <p style="color:var(--ink-2); max-width:46ch;">Most review bots re-read
+        the whole diff on every push and re-post everything they find. Orvex
+        Review diffs only <code>last_sha..head_sha</code>, re-checks its own
+        prior findings on HEAD, and speaks only when something is new.</p>
+      </div>
+      <div class="timeline">
+        <div class="tl-item">
+          <span class="when">push 1 · 9:14 am</span>
+          <div class="what">Initial review posted</div>
+          <p>2 inline comments (1 P1, 1 P2) + summary. 6 low-confidence findings suppressed.</p>
+        </div>
+        <div class="tl-item">
+          <span class="when">push 2 · 9:31 am</span>
+          <div class="what">Incremental pass on new hunks only</div>
+          <p>P1 verified fixed → “✅ Fixed on <code>3f2c1ab</code>”. 1 new finding on the added file. Nothing re-posted.</p>
+        </div>
+        <div class="tl-item">
+          <span class="when">push 3 · 9:48 am</span>
+          <div class="what">All clear</div>
+          <p>Check run <code>orvex-review</code> flips to <strong>success</strong>. Summary: “3 issues found, 3 fixed.”</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- config -->
+  <section class="section" id="config">
+    <div class="split">
+      <div class="code-card">
+        <div class="cc-head">.orvex-review.yml — lives in your repo</div>
+        <pre><span class="k">mode</span>: <span class="s">normal</span>          <span class="c"># strict | normal</span>
+<span class="k">max_comments</span>: <span class="s">8</span>
+<span class="k">ignore</span>:
+  - <span class="s">"**/dist/**"</span>
+  - <span class="s">"**/package-lock.json"</span>
+<span class="k">ignore_labels</span>:
+  - <span class="s">review-bot:ignore</span>
+<span class="k">min_confidence</span>: <span class="s">0.7</span></pre>
+      </div>
+      <div>
+        <span class="eyebrow">Control</span>
+        <h2 style="font-size:27px; margin:10px 0 16px;">Your repo sets the rules.</h2>
+        <ul class="feature-list">
+          <li><span class="tick">✓</span><span><strong>Per-repo config in git</strong> — reviewed and versioned like everything else.</span></li>
+          <li><span class="tick">✓</span><span><strong>Label to silence</strong> — add <code>review-bot:ignore</code> and the bot skips the PR entirely.</span></li>
+          <li><span class="tick">✓</span><span><strong>Secrets never leave</strong> — key patterns and <code>.env</code> content are redacted from the diff before the model sees it.</span></li>
+          <li><span class="tick">✓</span><span><strong>Suggests, never gates</strong> — the check run is informational; your CI still decides what merges.</span></li>
+          <li><span class="tick">✓</span><span><strong>Drafts &amp; bots skipped</strong> — draft PRs and dependabot don’t burn your budget.</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- pricing -->
+  <section class="section" id="pricing">
+    <div class="section-head">
+      <span class="eyebrow">Pricing</span>
+      <h2>Priced per workspace, not per seat.</h2>
+      <p>Reviews are metered work, so plans scale with pull requests — nobody
+      audits your headcount.</p>
+    </div>
+    <div class="plans">
+      <div class="plan">
+        <span class="name">Solo</span>
+        <span class="price">$0 <span>/ month</span></span>
+        <ul>
+          <li><span class="tick">✓</span> 1 repository</li>
+          <li><span class="tick">✓</span> 50 PR reviews / month</li>
+          <li><span class="tick">✓</span> Rules + LLM pipeline</li>
+          <li><span class="tick">✓</span> Fingerprint dedup</li>
+        </ul>
+        <a class="btn" href="/dashboard">Start free</a>
+      </div>
+      <div class="plan featured">
+        <span class="name">Team</span>
+        <span class="price">$49 <span>/ workspace / month</span></span>
+        <ul>
+          <li><span class="tick">✓</span> Unlimited repositories</li>
+          <li><span class="tick">✓</span> 500 PR reviews / month, then metered</li>
+          <li><span class="tick">✓</span> Check runs + dashboard</li>
+          <li><span class="tick">✓</span> Semgrep + custom rule packs</li>
+        </ul>
+        <a class="btn primary" href="/dashboard">Start 14-day trial</a>
+      </div>
+      <div class="plan">
+        <span class="name">Enterprise</span>
+        <span class="price">Custom</span>
+        <ul>
+          <li><span class="tick">✓</span> Bring your own LLM key</li>
+          <li><span class="tick">✓</span> Self-hosted or private cloud</li>
+          <li><span class="tick">✓</span> SSO / SAML, audit log</li>
+          <li><span class="tick">✓</span> SLA + priority support</li>
+        </ul>
+        <a class="btn" href="/dashboard">Talk to us</a>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="inner">
+      <span>© 2026 Orvex Review · Reviews are suggestions — your CI gates the merge.</span>
+      <span><a href="/dashboard">Docs</a> · <a href="/dashboard">Status</a> · <a href="/dashboard">Security</a> · <a href="/dashboard">GitHub</a></span>
+    </div>
+  </footer>
+</div>
+
+<!-- ============================================================
+     VIEW 2 — TENANT DASHBOARD
+     ============================================================ -->
+<div class="view" id="view-dash">
+  <div class="dash">
+
+    <aside class="sidebar">
+      <div class="ws">
+        <span class="avatar">AC</span>
+        <span class="meta">
+          <span class="n1">Acme Corp</span><br>
+          <span class="n2">acme · Team plan</span>
+        </span>
+        <span class="car">▾</span>
+      </div>
+
+      <button class="navitem active"><span class="ico">◧</span>Overview</button>
+      <button class="navitem"><span class="ico">⇄</span>Reviews <span class="count">128</span></button>
+      <button class="navitem"><span class="ico">⚑</span>Findings <span class="count">23</span></button>
+      <button class="navitem"><span class="ico">▤</span>Repositories <span class="count">12</span></button>
+
+      <div class="navlbl">Workspace</div>
+      <button class="navitem"><span class="ico">⚙</span>Rules &amp; config</button>
+      <button class="navitem"><span class="ico">◈</span>Installations</button>
+      <button class="navitem"><span class="ico">◔</span>Usage &amp; billing</button>
+      <button class="navitem"><span class="ico">◱</span>Members</button>
+
+      <div class="spacer"></div>
+      <button class="navitem"><span class="ico">✚</span>Add repositories</button>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <div class="crumb">acme / overview</div>
+          <h2>Review activity</h2>
+        </div>
+        <div class="right">
+          <div class="range" role="group" aria-label="Date range">
+            <button aria-pressed="false">7d</button>
+            <button aria-pressed="true">14d</button>
+            <button aria-pressed="false">30d</button>
+          </div>
+          <button class="btn primary" style="padding:7px 13px; font-size:12.5px;">Run manual review</button>
+        </div>
+      </div>
+
+      <!-- stat tiles -->
+      <div class="tiles">
+        <div class="tile">
+          <div class="lbl">PRs reviewed · 14d</div>
+          <div class="val">128</div>
+          <div class="delta"><span class="up">▲ 18%</span> vs previous 14 days</div>
+        </div>
+        <div class="tile">
+          <div class="lbl">Findings fixed before merge</div>
+          <div class="val">72%</div>
+          <div class="delta"><span class="up">▲ 6 pts</span> — 89 of 124 findings</div>
+        </div>
+        <div class="tile">
+          <div class="lbl">Median time to review</div>
+          <div class="val">84s</div>
+          <div class="delta">webhook → posted comment</div>
+        </div>
+        <div class="tile">
+          <div class="lbl">LLM spend · 14d</div>
+          <div class="val">$14.62</div>
+          <div class="delta">$0.11 / PR · cap $50 <span class="up">on track</span></div>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <!-- reviews per day -->
+        <div class="panel">
+          <h3>Reviews per day</h3>
+          <p class="sub">Completed reviews, last 14 days · hover for detail</p>
+          <div class="chart" id="chart">
+            <svg viewBox="0 0 640 220" role="img" aria-label="Bar chart of reviews per day over the last 14 days, ranging from 3 to 16 reviews">
+              <g id="gridlines"></g>
+              <g id="bars"></g>
+              <g id="xlabels"></g>
+              <g id="ylabels"></g>
+            </svg>
+            <div class="tip" id="tip"></div>
+          </div>
+        </div>
+
+        <!-- severity -->
+        <div class="panel">
+          <h3>Open findings by severity</h3>
+          <p class="sub">Across 12 repositories · 23 open</p>
+          <div class="sev-rows">
+            <div class="sev-row">
+              <span class="name"><span class="sq" style="background:var(--crit)"></span>P1 · critical</span>
+              <div class="track"><div class="fill" style="width:22%; background:var(--crit)"></div></div>
+              <span class="num">3</span>
+            </div>
+            <div class="sev-row">
+              <span class="name"><span class="sq" style="background:var(--warn)"></span>P2 · warning</span>
+              <div class="track"><div class="fill" style="width:64%; background:var(--warn)"></div></div>
+              <span class="num">9</span>
+            </div>
+            <div class="sev-row">
+              <span class="name"><span class="sq" style="background:var(--accent)"></span>P3 · info</span>
+              <div class="track"><div class="fill" style="width:78%; background:var(--accent)"></div></div>
+              <span class="num">11</span>
+            </div>
+          </div>
+          <p class="sub" style="margin:16px 0 0;">Fixed this period: <strong style="color:var(--good)">89</strong> ·
+          suppressed by confidence filter: 41</p>
+
+          <h3 style="margin-top:20px;">Finding sources</h3>
+          <div class="sev-rows" style="margin-top:10px;">
+            <div class="sev-row">
+              <span class="name">doc-audit</span>
+              <div class="track"><div class="fill" style="width:30%; background:var(--bar); opacity:.55"></div></div>
+              <span class="num">31</span>
+            </div>
+            <div class="sev-row">
+              <span class="name">semgrep</span>
+              <div class="track"><div class="fill" style="width:42%; background:var(--bar); opacity:.75"></div></div>
+              <span class="num">44</span>
+            </div>
+            <div class="sev-row">
+              <span class="name">llm</span>
+              <div class="track"><div class="fill" style="width:47%; background:var(--bar)"></div></div>
+              <span class="num">49</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- recent reviews table -->
+      <div class="panel" style="margin-bottom:16px;">
+        <h3>Recent reviews</h3>
+        <p class="sub">Latest webhook-triggered runs across the workspace</p>
+        <div class="tbl-wrap">
+          <table class="reviews">
+            <thead>
+              <tr>
+                <th>Repository</th><th>Pull request</th><th>Status</th>
+                <th>Findings</th><th>Head</th><th style="text-align:right">Duration</th><th>When</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="repo">streaming-edge</td>
+                <td class="pr-t">#67 fix: restream fallback on segment 404</td>
+                <td><span class="chip ok"><span class="dot"></span>Reviewed</span></td>
+                <td><span class="chip p1">1 P1</span> <span class="chip p2">1 P2</span></td>
+                <td class="mono">3f2c1ab</td>
+                <td class="mono num">78s</td>
+                <td class="mono">2 min ago</td>
+              </tr>
+              <tr>
+                <td class="repo">billing-api</td>
+                <td class="pr-t">#204 chore: migrate invoices to v2 schema</td>
+                <td><span class="chip ok"><span class="dot"></span>Reviewed</span></td>
+                <td><span class="chip p2">2 P2</span></td>
+                <td class="mono">a91d04e</td>
+                <td class="mono num">96s</td>
+                <td class="mono">18 min ago</td>
+              </tr>
+              <tr>
+                <td class="repo">web-console</td>
+                <td class="pr-t">#88 feat: workspace switcher</td>
+                <td><span class="chip info"><span class="dot"></span>In progress</span></td>
+                <td><span class="chip muted">—</span></td>
+                <td class="mono">51bb2f0</td>
+                <td class="mono num">—</td>
+                <td class="mono">just now</td>
+              </tr>
+              <tr>
+                <td class="repo">streaming-edge</td>
+                <td class="pr-t">#66 docs: audit October failover</td>
+                <td><span class="chip ok"><span class="dot"></span>Clean</span></td>
+                <td><span class="chip muted">0 findings</span></td>
+                <td class="mono">c02e911</td>
+                <td class="mono num">41s</td>
+                <td class="mono">1 h ago</td>
+              </tr>
+              <tr>
+                <td class="repo">infra</td>
+                <td class="pr-t">#310 bump terraform providers</td>
+                <td><span class="chip muted"><span class="dot"></span>Skipped · dependabot</span></td>
+                <td><span class="chip muted">—</span></td>
+                <td class="mono">7de9a33</td>
+                <td class="mono num">—</td>
+                <td class="mono">2 h ago</td>
+              </tr>
+              <tr>
+                <td class="repo">billing-api</td>
+                <td class="pr-t">#203 fix: webhook retry idempotency</td>
+                <td><span class="chip ok"><span class="dot"></span>3 fixed ✓</span></td>
+                <td><span class="chip ok">all resolved</span></td>
+                <td class="mono">f44c218</td>
+                <td class="mono num">88s</td>
+                <td class="mono">3 h ago</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- installations -->
+      <div class="panel">
+        <h3>GitHub installations</h3>
+        <p class="sub">Orgs where the Orvex Review app is installed for this workspace</p>
+        <div class="installs">
+          <div class="install-row">
+            <span class="avatar">AC</span>
+            <div>
+              <div class="org">acme-corp <span class="chip ok" style="margin-left:6px;"><span class="dot"></span>Active</span></div>
+              <div class="meta">Organization · 12 repos selected · installation #4821133</div>
+            </div>
+            <div class="right">
+              <button class="ghost">Configure on GitHub</button>
+            </div>
+          </div>
+          <div class="install-row">
+            <span class="avatar" style="background:var(--ink-3)">AL</span>
+            <div>
+              <div class="org">acme-labs <span class="chip p2" style="margin-left:6px;"><span class="dot"></span>Suspended</span></div>
+              <div class="meta">Organization · all repos · installation #4902710 · suspended 3 d ago</div>
+            </div>
+            <div class="right">
+              <button class="ghost">Resume</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script>
+  const motionOK = window.matchMedia('(prefers-reduced-motion: no-preference)').matches;
+
+  function showView(which) {
+    document.getElementById('view-landing').classList.toggle('active', which === 'landing');
+    document.getElementById('view-dash').classList.toggle('active', which === 'dash');
+    document.getElementById('tab-landing').setAttribute('aria-pressed', which === 'landing');
+    document.getElementById('tab-dash').setAttribute('aria-pressed', which === 'dash');
+    window.scrollTo(0, 0);
+    if (which === 'dash') animateDash();
+  }
+
+  /* ---- scroll reveals (landing) ---- */
+  if (motionOK && 'IntersectionObserver' in window) {
+    ['.pipeline .step', '.plans .plan', '.timeline .tl-item', '.feature-list li'].forEach((sel) => {
+      document.querySelectorAll(sel).forEach((el, i) => {
+        el.classList.add('reveal');
+        el.style.setProperty('--reveal-delay', ((i % 6) * 0.07).toFixed(2) + 's');
+      });
+    });
+    document.querySelectorAll('.section-head, .code-card').forEach((el) => el.classList.add('reveal'));
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            e.target.classList.add('in');
+            io.unobserve(e.target);
+          }
+        });
+      },
+      { threshold: 0.12 },
+    );
+    document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+  }
+
+  /* ---- dashboard entrance: count-up tiles, growing bars ---- */
+  let dashAnimated = false;
+  function animateDash() {
+    if (dashAnimated) return;
+    dashAnimated = true;
+    if (!motionOK) return;
+
+    document.querySelectorAll('#view-dash .tile .val').forEach((el) => {
+      const m = el.textContent.trim().match(/^([^0-9]*)([0-9]+(?:\.[0-9]+)?)(.*)$/);
+      if (!m) return;
+      const pre = m[1], target = parseFloat(m[2]), post = m[3];
+      const decimals = (m[2].split('.')[1] || '').length;
+      const t0 = performance.now(), dur = 850;
+      const tick = (t) => {
+        const p = Math.min(1, (t - t0) / dur);
+        const eased = 1 - Math.pow(1 - p, 3);
+        el.textContent = pre + (target * eased).toFixed(decimals) + post;
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
+    document.querySelectorAll('#bars .bar-rect').forEach((rect, i) => {
+      const finalY = parseFloat(rect.getAttribute('y'));
+      const finalH = parseFloat(rect.getAttribute('height'));
+      const baseline = finalY + finalH;
+      rect.setAttribute('y', baseline);
+      rect.setAttribute('height', 0);
+      const t0 = performance.now() + i * 28, dur = 550;
+      const tick = (t) => {
+        const p = Math.min(1, Math.max(0, (t - t0) / dur));
+        const eased = 1 - Math.pow(1 - p, 3);
+        rect.setAttribute('height', Math.max(finalH * eased, 0.01));
+        rect.setAttribute('y', baseline - finalH * eased);
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
+    document.querySelectorAll('#view-dash .sev-row .fill').forEach((el, i) => {
+      const w = el.style.width;
+      el.style.transition = 'none';
+      el.style.width = '0%';
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          el.style.transition = 'width .7s cubic-bezier(.22,1,.36,1) ' + i * 60 + 'ms';
+          el.style.width = w;
+        }),
+      );
+    });
+  }
+
+  /* ---- reviews-per-day bar chart ---- */
+  (function () {
+    const data = [
+      { d: 'Jun 21', v: 6 },  { d: 'Jun 22', v: 4 },  { d: 'Jun 23', v: 9 },
+      { d: 'Jun 24', v: 11 }, { d: 'Jun 25', v: 8 },  { d: 'Jun 26', v: 13 },
+      { d: 'Jun 27', v: 3 },  { d: 'Jun 28', v: 5 },  { d: 'Jun 29', v: 12 },
+      { d: 'Jun 30', v: 14 }, { d: 'Jul 1', v: 10 },  { d: 'Jul 2', v: 16 },
+      { d: 'Jul 3', v: 12 },  { d: 'Jul 4', v: 5 },
+    ];
+    const W = 640, H = 220, padL = 30, padR = 8, padT = 12, padB = 26;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    const maxV = 16, yTicks = [0, 4, 8, 12, 16];
+    const n = data.length;
+    const slot = plotW / n, barW = Math.min(26, slot * 0.62);
+
+    const ns = 'http://www.w3.org/2000/svg';
+    const el = (t, attrs) => {
+      const e = document.createElementNS(ns, t);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      return e;
+    };
+    const gGrid = document.getElementById('gridlines');
+    const gBars = document.getElementById('bars');
+    const gX = document.getElementById('xlabels');
+    const gY = document.getElementById('ylabels');
+    const tip = document.getElementById('tip');
+    const chart = document.getElementById('chart');
+
+    const y = v => padT + plotH - (v / maxV) * plotH;
+
+    yTicks.forEach(t => {
+      gGrid.appendChild(el('line', {
+        x1: padL, x2: W - padR, y1: y(t), y2: y(t),
+        stroke: t === 0 ? 'var(--ink-3)' : 'var(--grid)',
+        'stroke-width': 1,
+      }));
+      const lbl = el('text', {
+        x: padL - 7, y: y(t) + 3.5, 'text-anchor': 'end',
+        'font-size': 10, fill: 'var(--ink-3)',
+        'font-family': 'var(--mono)',
+      });
+      lbl.textContent = t;
+      gY.appendChild(lbl);
+    });
+
+    data.forEach((pt, i) => {
+      const cx = padL + slot * i + slot / 2;
+      const bh = (pt.v / maxV) * plotH;
+      const g = el('g', { class: 'bar-group' });
+      const rect = el('rect', {
+        class: 'bar-rect',
+        x: cx - barW / 2, y: y(pt.v),
+        width: barW, height: Math.max(bh, 2),
+        fill: 'var(--bar)', rx: 3,
+      });
+      const hit = el('rect', {
+        class: 'bar-hit',
+        x: padL + slot * i, y: padT, width: slot, height: plotH,
+      });
+      g.appendChild(rect);
+      g.appendChild(hit);
+      g.addEventListener('mousemove', () => {
+        const svgEl = chart.querySelector('svg');
+        const box = svgEl.getBoundingClientRect();
+        const sx = box.width / W;
+        tip.innerHTML = pt.d + ' · <strong>' + pt.v + '</strong> reviews';
+        tip.style.left = (cx * sx) + 'px';
+        tip.style.top = (y(pt.v) * (box.height / H)) + 'px';
+        tip.style.opacity = '1';
+      });
+      g.addEventListener('mouseleave', () => { tip.style.opacity = '0'; });
+      gBars.appendChild(g);
+
+      if (i % 2 === 0) {
+        const xl = el('text', {
+          x: cx, y: H - 8, 'text-anchor': 'middle',
+          'font-size': 10, fill: 'var(--ink-3)',
+        });
+        xl.textContent = pt.d;
+        gX.appendChild(xl);
+      }
+    });
+
+    // direct-label the peak
+    const peak = data.reduce((a, b) => (b.v > a.v ? b : a));
+    const pi = data.indexOf(peak);
+    const px = padL + slot * pi + slot / 2;
+    const plbl = el('text', {
+      x: px, y: y(peak.v) - 6, 'text-anchor': 'middle',
+      'font-size': 10.5, 'font-weight': 700, fill: 'var(--ink-2)',
+    });
+    plbl.textContent = peak.v;
+    gBars.appendChild(plbl);
+  })();
+</script>

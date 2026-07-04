@@ -3,6 +3,7 @@ import type { ReviewQueue } from '@orvex-review/queue';
 import { apiRoutes } from './routes/api.js';
 import { authRoutes } from './routes/auth.js';
 import { dashboardRoutes } from './routes/dashboard.js';
+import { marketingRoutes } from './routes/marketing.js';
 import { sessionRoutes } from './routes/session.js';
 import { webhookRoutes } from './routes/webhook.js';
 
@@ -18,6 +19,7 @@ export function createApp(queue: ReviewQueue) {
     }),
   );
 
+  app.route('/', marketingRoutes());
   app.route('/', sessionRoutes());
   app.route('/', dashboardRoutes());
   app.route('/', authRoutes());
