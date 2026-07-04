@@ -162,7 +162,10 @@ export async function processFixJob(
     if (needsLlm && process.env.ORVEX_DEEP_CONTEXT !== '0') {
       try {
         const ctx = await buildRepoContext(octokit, owner, repo, expectedHead, [...byFile.keys()], {
-          maxRelated: 6,
+          maxSourceFiles: 60,
+          maxRelated: 18,
+          maxDependents: 12,
+          maxFileBytes: 24_000,
         });
         // give every target file the same small related set (they share a PR)
         relatedByFile = new Map([...byFile.keys()].map((f) => [f, ctx.related]));

@@ -80,7 +80,7 @@ export async function generateFixWithLlm(
     text = await llmChat(
       'You are Orvex Review, generating minimal, safe code fixes. You respond with strict JSON only.',
       user,
-      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, maxTokens: 2048, json: true },
+      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, json: true },
     );
   } catch {
     return null;
@@ -146,7 +146,7 @@ export async function generateExplanationWithLlm(
     const text = await llmChat(
       'You are Orvex Review, explaining a code-review finding clearly and concretely.',
       user,
-      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, maxTokens: 1024 },
+      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl },
     );
     return text.trim() || null;
   } catch {

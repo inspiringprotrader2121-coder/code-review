@@ -258,8 +258,10 @@ async function executeReview(
           repo,
           effectiveSha,
           filesForLlm.map((f) => f.filename),
-          // right-sized so the reasoning pass fits the timeout on large PRs
-          { maxRelated: 6, maxDependents: 4, maxFileBytes: 10_000 },
+          // Deep, whole-repo context. Streaming + no token cap removed the
+          // timeout pressure that used to force this small, so give the reviewer
+          // every changed file in full plus a wide net of imports/dependents.
+          { maxSourceFiles: 60, maxRelated: 18, maxDependents: 12, maxFileBytes: 24_000 },
         );
         console.log(
           `[worker] deep context: ${reviewContext.changedContents.length} full files, ` +
