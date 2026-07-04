@@ -313,11 +313,20 @@ async function executeReview(
   merged.toPost = denoised.kept;
 
   // adversarial verification pass: a skeptical second model call tries to
-  // refute each finding against the full files; only survivors are posted.
-  // Skip when we have no source to verify against — with no files the verifier
-  // would (correctly) reject everything, silently blanking a valid review.
-  if (merged.toPost.length > 0 && process.env.ORVEX_VERIFY !== '0' && reviewContextFiles.length > 0) {
-    const verified = await verifyFindings(merged.toPost, reviewContextFiles, {
+  // refute each finding against the source. Give it the changed code for EVERY
+  // finding — full file content where deep-context fetched it, else the file's
+  // diff — so it never rejects a real finding just because it "can't see the
+  // source" (that was silently blanking valid reviews on large PRs).
+  const verifyFiles = [...reviewContextFiles];
+  const haveContent = new Set(reviewContextFiles.map((f) => f.path));
+  for (const file of filesForLlm) {
+    if (!haveContent.has(file.filename) && file.patch) {
+      verifyFiles.push({ path: file.filename, content: `Diff (changed lines) for this file:\n${file.patch}` });
+      haveContent.add(file.filename);
+    }
+  }
+  if (merged.toPost.length > 0 && process.env.ORVEX_VERIFY !== '0' && verifyFiles.length > 0) {
+    const verified = await verifyFindings(merged.toPost, verifyFiles, {
       apiKey: config.llmApiKey,
       model: config.llmModel,
       baseUrl: config.llmBaseUrl,
