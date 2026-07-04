@@ -37,6 +37,10 @@ export async function runLlmReview(
     files?.map((f) => ({ ...f, content: redactSecrets(f.content) }));
   const context = opts.context
     ? {
+        // PR intent must survive the rebuild — it's what stops "you removed X"
+        // findings on deliberate changes. (Was silently dropped here before.)
+        prTitle: opts.context.prTitle,
+        prBody: opts.context.prBody,
         treePaths: opts.context.treePaths,
         related: redactAll(opts.context.related),
         dependents: redactAll(opts.context.dependents),

@@ -35,6 +35,7 @@ import {
   llmFindingsToReviewFindings,
   mergeFindings,
   reconcileFixedOnHead,
+  dropSelfNegatingFindings,
   runLlmReview,
   toStoredFinding,
   verifyFindings,
@@ -297,9 +298,22 @@ async function executeReview(
     merged.toPost = merged.toPost.filter((f) => !suppressed.has(fingerprintFinding(f)));
   }
 
+  // drop self-negating findings ("impact is nil", "harmless", "nitpick") — the
+  // model padding its count with things it admits don't matter.
+  const denoised = dropSelfNegatingFindings(merged.toPost);
+  if (denoised.dropped.length > 0) {
+    console.log(
+      `[worker] noise filter dropped ${denoised.dropped.length}: ` +
+        denoised.dropped.map((f) => `${f.severity} ${f.file}`).join(', '),
+    );
+  }
+  merged.toPost = denoised.kept;
+
   // adversarial verification pass: a skeptical second model call tries to
   // refute each finding against the full files; only survivors are posted.
-  if (merged.toPost.length > 0 && process.env.ORVEX_VERIFY !== '0') {
+  // Skip when we have no source to verify against — with no files the verifier
+  // would (correctly) reject everything, silently blanking a valid review.
+  if (merged.toPost.length > 0 && process.env.ORVEX_VERIFY !== '0' && reviewContextFiles.length > 0) {
     const verified = await verifyFindings(merged.toPost, reviewContextFiles, {
       apiKey: config.llmApiKey,
       model: config.llmModel,

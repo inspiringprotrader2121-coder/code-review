@@ -56,3 +56,4 @@ export {
   type VerifiedFindings,
   type FixCandidate,
 } from './verifier.js';
+export { dropSelfNegatingFindings } from './noise.js';
