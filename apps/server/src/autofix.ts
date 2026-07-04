@@ -23,6 +23,7 @@ import {
   generateExplanationWithLlm,
   generateFixWithLlm,
   runAgent,
+  verifyFixes,
   type AgentFile,
   type CodeFix,
 } from '@orvex-review/review';
@@ -170,47 +171,96 @@ export async function processFixJob(
       }
     }
 
-    // Phase 1: build every file change in memory. No writes yet.
-    const fileChanges: Array<{ path: string; content: string }> = [];
-    const pendingFindings: StoredFinding[] = [];
+    // Phase 1a: resolve a candidate fix per finding against pristine content.
+    // Nothing is applied yet — candidates go through verification first.
+    interface Candidate {
+      file: string;
+      finding: StoredFinding;
+      codeFix: CodeFix;
+    }
+    const pristine = new Map<string, string>();
+    const candidates: Candidate[] = [];
     for (const [file, fileTargets] of byFile) {
-      let content = await fetchFileContent(octokit, owner, repo, file, expectedHead);
+      const content = await fetchFileContent(octokit, owner, repo, file, expectedHead);
       if (content === null) {
         for (const t of fileTargets) {
           skipped.push({ file, message: t.finding.message, reason: SKIP_REASONS.file_missing });
         }
         continue;
       }
-      const appliedHere: StoredFinding[] = [];
+      pristine.set(file, content);
       for (const t of fileTargets) {
         const codeFix = await resolveCodeFix(t.finding, content, fix, config, relatedByFile.get(file));
         if (!codeFix) {
           skipped.push({ file, message: t.finding.message, reason: SKIP_REASONS.no_fix });
           continue;
         }
-        const result = applyFixToContent(content, codeFix);
-        if (!result.ok) {
-          // If the target snippet is gone but the replacement is already there,
-          // the issue was fixed already — report that, don't call it "changed".
+        // validity pre-check against the CURRENT code (not the review-time code)
+        const probe = applyFixToContent(content, codeFix);
+        if (!probe.ok) {
           const alreadyFixed =
-            result.reason === 'not_found' &&
+            probe.reason === 'not_found' &&
             codeFix.fixedCode.trim().length > 0 &&
             content.includes(codeFix.fixedCode.trim());
-          const reason = alreadyFixed ? SKIP_REASONS.already_fixed : SKIP_REASONS[result.reason];
-          skipped.push({ file, message: t.finding.message, reason });
-          if (alreadyFixed) {
-            // reconcile store state: this finding is resolved
-            t.finding.status = 'fixed';
-          }
+          skipped.push({
+            file,
+            message: t.finding.message,
+            reason: alreadyFixed ? SKIP_REASONS.already_fixed : SKIP_REASONS[probe.reason],
+          });
+          if (alreadyFixed) t.finding.status = 'fixed';
           continue;
         }
-        content = result.content;
-        appliedHere.push(t.finding);
+        candidates.push({ file, finding: t.finding, codeFix });
       }
-      if (appliedHere.length > 0) {
-        fileChanges.push({ path: file, content });
-        pendingFindings.push(...appliedHere);
+    }
+
+    // Phase 1b: adversarial verification — a skeptical model call gates every
+    // candidate against the full file before anything is committed.
+    let approvedCandidates = candidates;
+    if (candidates.length > 0 && process.env.ORVEX_VERIFY !== '0') {
+      const { approved, rejected } = await verifyFixes(
+        candidates.map((c) => ({
+          file: c.file,
+          findingMessage: c.finding.message,
+          originalCode: c.codeFix.originalCode,
+          fixedCode: c.codeFix.fixedCode,
+        })),
+        [...pristine.entries()].map(([path, content]) => ({ path, content })),
+        { apiKey: config.llmApiKey, model: config.llmModel, baseUrl: config.llmBaseUrl },
+      );
+      for (const r of rejected) {
+        const c = candidates[r.index];
+        skipped.push({
+          file: c.file,
+          message: c.finding.message,
+          reason: `failed verification — ${r.reason}`,
+        });
       }
+      approvedCandidates = approved.map((i) => candidates[i]);
+      if (rejected.length > 0) {
+        console.log(`[autofix] fix verification rejected ${rejected.length}/${candidates.length}`);
+      }
+    }
+
+    // Phase 1c: apply approved fixes in memory, re-checking anchors as content mutates.
+    const fileChanges: Array<{ path: string; content: string }> = [];
+    const pendingFindings: StoredFinding[] = [];
+    const working = new Map<string, string>(pristine);
+    const touchedFiles = new Set<string>();
+    for (const c of approvedCandidates) {
+      const content = working.get(c.file);
+      if (content === undefined) continue;
+      const result = applyFixToContent(content, c.codeFix);
+      if (!result.ok) {
+        skipped.push({ file: c.file, message: c.finding.message, reason: SKIP_REASONS[result.reason] });
+        continue;
+      }
+      working.set(c.file, result.content);
+      touchedFiles.add(c.file);
+      pendingFindings.push(c.finding);
+    }
+    for (const file of touchedFiles) {
+      fileChanges.push({ path: file, content: working.get(file)! });
     }
 
     // Phase 2: commit all changes atomically (all-or-nothing).

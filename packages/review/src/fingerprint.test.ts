@@ -15,15 +15,23 @@ describe('fingerprintFinding', () => {
     assert.equal(a, b);
   });
 
-  it('differs when line changes', () => {
+  it('is stable when only the line shifts (pushes move code around)', () => {
     const base = {
       file: 'a.ts',
       ruleId: 'llm.security',
       message: 'Missing auth check',
     };
-    assert.notEqual(
+    assert.equal(
       fingerprintFinding({ ...base, line: 1 }),
       fingerprintFinding({ ...base, line: 2 }),
+    );
+  });
+
+  it('differs when the message differs', () => {
+    const base = { file: 'a.ts', line: 1, ruleId: 'llm.security' };
+    assert.notEqual(
+      fingerprintFinding({ ...base, message: 'Missing auth check' }),
+      fingerprintFinding({ ...base, message: 'SQL injection in query builder' }),
     );
   });
 

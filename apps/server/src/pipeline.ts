@@ -37,6 +37,7 @@ import {
   reconcileFixedOnHead,
   runLlmReview,
   toStoredFinding,
+  verifyFindings,
   type ReviewFinding,
 } from '@orvex-review/review';
 import {
@@ -238,6 +239,8 @@ async function executeReview(
 
   let llmSummary: string | undefined;
   let llmFindings: ReviewFinding[] = [];
+  // full-file contents used by both the review call and the verification pass
+  let reviewContextFiles: Array<{ path: string; content: string }> = [];
 
   if (filesForLlm.length > 0) {
     // Deep context: repo tree + files the changed code imports, so the model
@@ -257,6 +260,11 @@ async function executeReview(
             `${reviewContext.related.length} imports, ${reviewContext.dependents.length} dependents, ` +
             `tree=${reviewContext.treePaths.length}`,
         );
+        reviewContextFiles = [
+          ...reviewContext.changedContents,
+          ...reviewContext.related,
+          ...reviewContext.dependents,
+        ];
       } catch (err) {
         console.warn('[worker] deep context unavailable, reviewing diff-only:', err);
       }
@@ -284,13 +292,44 @@ async function executeReview(
     merged.toPost = merged.toPost.filter((f) => !suppressed.has(fingerprintFinding(f)));
   }
 
+  // adversarial verification pass: a skeptical second model call tries to
+  // refute each finding against the full files; only survivors are posted.
+  if (merged.toPost.length > 0 && process.env.ORVEX_VERIFY !== '0') {
+    const verified = await verifyFindings(merged.toPost, reviewContextFiles, {
+      apiKey: config.llmApiKey,
+      model: config.llmModel,
+      baseUrl: config.llmBaseUrl,
+    });
+    if (verified.dropped.length > 0) {
+      console.log(
+        `[worker] verification dropped ${verified.dropped.length}/${merged.toPost.length}: ` +
+          verified.dropped.map((d) => `${d.finding.file} (${d.reason.slice(0, 60)})`).join(' | '),
+      );
+    }
+    merged.toPost = verified.kept;
+  }
+
   // snap finding lines to lines actually added in the diff — GitHub rejects
   // inline comments on unchanged lines; far-off guesses become summary-only
   const addedLinesByFile = buildAddedLineIndex(files);
   merged.toPost = merged.toPost.map((f) => normalizeFindingLine(f, addedLinesByFile));
 
   const allFixed = dedupeByFingerprint([...verifiedFixed, ...merged.newlyFixed]);
-  const { inline, summaryOnly } = filterAndCapFindings(merged.toPost, reviewConfig);
+  let { inline, summaryOnly } = filterAndCapFindings(merged.toPost, reviewConfig);
+
+  // cumulative cap: repeated re-reviews must never bury a PR in comments.
+  // Once ORVEX_MAX_INLINE_PER_PR (default 20) inline comments exist across the
+  // PR's lifetime, further findings go to the summary table only.
+  const maxInlinePerPr = Number(process.env.ORVEX_MAX_INLINE_PER_PR ?? 20);
+  const priorInline = (priorState?.findings ?? []).filter((f) => f.githubCommentId).length;
+  const inlineBudget = Math.max(0, maxInlinePerPr - priorInline);
+  if (inline.length > inlineBudget) {
+    summaryOnly = [...summaryOnly, ...inline.slice(inlineBudget)];
+    inline = inline.slice(0, inlineBudget);
+    console.log(
+      `[worker] inline budget: ${priorInline} existing, capping new inline to ${inlineBudget}`,
+    );
+  }
 
   const stats = {
     newCount: merged.toPost.length,

@@ -49,3 +49,10 @@ export {
   type ExplainInput,
 } from './llm-fix.js';
 export { runAgent, type AgentFile, type AgentOptions, type AgentResponse } from './agent.js';
+export {
+  verifyFindings,
+  verifyFixes,
+  type VerifierOptions,
+  type VerifiedFindings,
+  type FixCandidate,
+} from './verifier.js';

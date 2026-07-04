@@ -8,6 +8,17 @@ export interface LlmClientOptions {
   maxTokens?: number;
   /** ask the provider for a JSON object response where supported */
   json?: boolean;
+  /** force-disable reasoning for this call (default: reasoning ON) */
+  thinking?: boolean;
+}
+
+/** Hard ceiling on any single LLM call so a hung provider can't wedge a job. */
+const LLM_TIMEOUT_MS = Number(process.env.ORVEX_LLM_TIMEOUT_MS ?? 240_000);
+
+/** Reasoning models think before answering — slower, materially more accurate. */
+function thinkingEnabled(opts: LlmClientOptions): boolean {
+  if (opts.thinking !== undefined) return opts.thinking;
+  return process.env.ORVEX_LLM_THINKING !== '0';
 }
 
 /**
@@ -15,8 +26,6 @@ export interface LlmClientOptions {
  * - `baseUrl` set → OpenAI-compatible `/chat/completions` (MiniMax, etc.)
  * - otherwise → Anthropic SDK
  */
-/** Hard ceiling on any single LLM call so a hung provider can't wedge a job. */
-const LLM_TIMEOUT_MS = Number(process.env.ORVEX_LLM_TIMEOUT_MS ?? 90_000);
 
 export async function llmChat(system: string, user: string, opts: LlmClientOptions): Promise<string> {
   if (opts.baseUrl) {
@@ -33,9 +42,10 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
         },
         body: JSON.stringify({
           model: opts.model,
-          max_completion_tokens: opts.maxTokens ?? 4096,
+          // leave headroom for reasoning tokens when thinking is on
+          max_completion_tokens: thinkingEnabled(opts) ? Math.max(opts.maxTokens ?? 4096, 16_000) : (opts.maxTokens ?? 4096),
           ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
-          thinking: { type: 'disabled' },
+          thinking: { type: thinkingEnabled(opts) ? 'enabled' : 'disabled' },
           messages: [
             { role: 'system', content: system },
             { role: 'user', content: user },
