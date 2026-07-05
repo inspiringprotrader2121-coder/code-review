@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { llmChat } from './llm-client.js';
+import { llmChat, extractJsonLoose } from './llm-client.js';
 import { redactSecrets } from './redact.js';
 
 export interface AgentFile {
@@ -28,7 +28,7 @@ const AgentResponseSchema = z.object({
 
 export type AgentResponse = z.infer<typeof AgentResponseSchema>;
 
-const MAX_CTX_CHARS = 90_000;
+const MAX_CTX_CHARS = Number(process.env.ORVEX_AGENT_CTX_CHARS ?? 240_000);
 
 /**
  * Free-form `@orvex <instruction>` handler. Given a PR's changed files and any
@@ -71,16 +71,16 @@ export async function runAgent(
     text = await llmChat(
       'You are Orvex Review acting on a developer request in a pull request. You respond with strict JSON only.',
       user,
-      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, maxTokens: 4096, json: true },
+      // no maxTokens — inherit the client's high ceiling so long answers/edits
+      // (and reasoning) are never truncated
+      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, json: true },
     );
   } catch {
     return null;
   }
 
   try {
-    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const raw = fenced ? fenced[1].trim() : text.trim();
-    return AgentResponseSchema.parse(JSON.parse(raw));
+    return AgentResponseSchema.parse(extractJsonLoose(text));
   } catch {
     return null;
   }
@@ -90,7 +90,7 @@ function renderFiles(heading: string, files: AgentFile[], budget: number): strin
   const parts = [`### ${heading}`];
   let used = 0;
   for (const f of files) {
-    const raw = f.content.length > 20_000 ? `${f.content.slice(0, 20_000)}\n… (truncated)` : f.content;
+    const raw = f.content.length > 48_000 ? `${f.content.slice(0, 48_000)}\n… (truncated)` : f.content;
     const body = redactSecrets(raw); // file contents leave the box — strip secrets
     const block = `\n\`${f.path}\`:\n\`\`\`\n${body}\n\`\`\``;
     if (used + block.length > budget) {

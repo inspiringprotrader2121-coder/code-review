@@ -55,11 +55,33 @@ export class MemoryReviewQueue implements ReviewQueue {
   }
 
   async dequeue(): Promise<ReviewJobPayload | null> {
-    const job = this.state.queue.shift();
-    if (!job) return null;
+    // Mirror the Redis queue: skip already-completed SHAs, and never start a
+    // second review while one is already in-flight for the same PR (coalesce it
+    // to pending instead).
+    for (let i = 0; i < 50; i++) {
+      const job = this.state.queue.shift();
+      if (!job) return null;
+      const pk = prKey(job);
 
-    this.state.inFlight.set(prKey(job), job);
-    return job;
+      if (this.state.completed.has(jobIdempotencyKey(job))) continue;
+
+      if (this.state.inFlight.has(pk)) {
+        const list = this.state.pending.get(pk) ?? [];
+        const kind = job.kind ?? 'review';
+        const last = list[list.length - 1];
+        if (kind === 'review' && last && (last.kind ?? 'review') === 'review') {
+          list[list.length - 1] = job; // keep only the latest review
+        } else {
+          list.push(job);
+        }
+        this.state.pending.set(pk, list);
+        continue;
+      }
+
+      this.state.inFlight.set(pk, job);
+      return job;
+    }
+    return null;
   }
 
   async markCompleted(job: ReviewJobPayload): Promise<void> {
@@ -84,6 +106,15 @@ export class MemoryReviewQueue implements ReviewQueue {
 
     this.state.queue.push(next);
     return next;
+  }
+
+  async recoverOrphans(): Promise<number> {
+    // In-memory state is lost on restart, so there is nothing stale to recover.
+    return 0;
+  }
+
+  async ping(): Promise<boolean> {
+    return true; // in-process — always reachable
   }
 
   async close(): Promise<void> {

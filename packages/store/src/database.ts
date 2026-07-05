@@ -102,10 +102,31 @@ CREATE TABLE IF NOT EXISTS review_runs (
   findings_new INTEGER NOT NULL DEFAULT 0,
   findings_fixed INTEGER NOT NULL DEFAULT 0,
   findings_open INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_tenant_time ON review_runs(tenant_id, created_at);
+-- Every billing check runs countAccountReviews (owner-scoped, lower(owner)) up
+-- to 3× per review; this expression index keeps it off a full table scan as the
+-- table grows. IF NOT EXISTS + always-run schema → created on existing DBs too.
+CREATE INDEX IF NOT EXISTS idx_runs_owner_lower ON review_runs(lower(owner), status, created_at);
+
+-- Anti-abuse signal log: one row per notable onboarding event (a GitHub account
+-- connecting, a login), tagged with the client IP. Used to spot one machine
+-- farming many free trials by connecting many GitHub accounts.
+CREATE TABLE IF NOT EXISTS abuse_signals (
+  id TEXT PRIMARY KEY,
+  ip TEXT,
+  account_login TEXT,
+  tenant_slug TEXT,
+  kind TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_abuse_ip_time ON abuse_signals(ip, created_at);
 
 CREATE TABLE IF NOT EXISTS pr_settings (
   installation_id INTEGER NOT NULL,
@@ -151,6 +172,8 @@ CREATE TABLE IF NOT EXISTS repos (
   enabled INTEGER NOT NULL DEFAULT 1,
   review_mode TEXT NOT NULL DEFAULT 'normal',
   auto_apply INTEGER NOT NULL DEFAULT 0,
+  review_on_open INTEGER NOT NULL DEFAULT 1,
+  review_on_push INTEGER NOT NULL DEFAULT 1,
   added_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE (installation_id, github_repo_id)
@@ -227,6 +250,219 @@ export class AppDatabase {
     this.db.exec(SCHEMA_V2);
     this.migrateLegacyPrReviews();
     this.migrateUserAuthColumns();
+    this.migrateTenantPlan();
+    this.migrateRepoAutomationToggles();
+    this.migrateReviewRunCostColumns();
+  }
+
+  /** Add token/cost columns to review_runs on existing DBs (fresh DBs get them
+   *  from SCHEMA_V2). Enables per-review + per-owner spend visibility. */
+  private migrateReviewRunCostColumns(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(review_runs)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('input_tokens')) {
+      this.db.exec(`ALTER TABLE review_runs ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!names.has('output_tokens')) {
+      this.db.exec(`ALTER TABLE review_runs ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!names.has('cost_usd')) {
+      this.db.exec(`ALTER TABLE review_runs ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`);
+    }
+  }
+
+  /** Add the subscription plan column to an existing tenants table.
+   *  Column default is 'free' so any insert that omits the plan can never
+   *  silently grant a paid tier (createTenant sets it explicitly regardless). */
+  private migrateTenantPlan(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(tenants)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'plan')) {
+      this.db.exec(`ALTER TABLE tenants ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'`);
+    }
+  }
+
+  /** Split the single `enabled` repo toggle into two: review on PR open
+   *  (opened/reopened) and review on each push (synchronize) — the dashboard
+   *  settings section. Both default to on (matches today's behavior for
+   *  existing repos: `enabled` covered both cases at once before this). */
+  private migrateRepoAutomationToggles(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(repos)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('review_on_open')) {
+      this.db.exec(`ALTER TABLE repos ADD COLUMN review_on_open INTEGER NOT NULL DEFAULT 1`);
+    }
+    if (!names.has('review_on_push')) {
+      this.db.exec(`ALTER TABLE repos ADD COLUMN review_on_push INTEGER NOT NULL DEFAULT 1`);
+    }
+  }
+
+  /** Current plan id for a tenant (raw string; resolve via planFeatures()). */
+  getTenantPlan(tenantId: string): string | null {
+    const row = this.db
+      .prepare(`SELECT plan FROM tenants WHERE id = ?`)
+      .get(tenantId) as { plan?: string } | undefined;
+    return row?.plan ?? null;
+  }
+
+  /** Set a tenant's plan (billing/admin). Returns false if the tenant is unknown. */
+  setTenantPlan(tenantId: string, plan: string): boolean {
+    const res = this.db.prepare(`UPDATE tenants SET plan = ? WHERE id = ?`).run(plan, tenantId);
+    return res.changes > 0;
+  }
+
+  /**
+   * Count reviews for a GitHub account (repo owner), for enforcing the free-trial
+   * lifetime cap and hourly rate limit. Anchored to `owner` (globally unique per
+   * GitHub account, matched case-insensitively) rather than the tenant, so a
+   * second workspace or a reinstall can't reset the trial.
+   *
+   * Counts 'running' AND 'completed' so that concurrently in-flight reviews see
+   * each other — this is what makes a check paired with startReviewRun reserve
+   * the slot atomically and stops a concurrent-PR burst slipping past the cap. A
+   * 'failed'/'skipped' run is NOT counted, so a failed or blocked attempt never
+   * burns a credit. `fix:*` runs are excluded; only reviews count.
+   */
+  countAccountReviews(owner: string, opts: { sinceMs?: number } = {}): number {
+    const params: unknown[] = [owner];
+    // Exclude fix commits ('fix:%') AND interactive commands ('cmd:%') — only
+    // actual reviews count toward the trial/hourly/monthly review caps.
+    let where =
+      "lower(owner) = lower(?) AND status IN ('running', 'completed') AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'";
+    if (opts.sinceMs !== undefined) {
+      where += ' AND created_at >= ?';
+      params.push(new Date(Date.now() - opts.sinceMs).toISOString());
+    }
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM review_runs WHERE ${where}`)
+      .get(...params) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Count interactive `@orvex` commands (explain/ask/resolve, recorded as
+   * 'cmd:%') for an account within `sinceMs`. These are paid-only LLM calls that
+   * are NOT reviews, so they get their own generous hourly ceiling — the fix for
+   * the "unmetered explain/ask lets a flat-fee account run unbounded LLM spend"
+   * hole. Owner-scoped, case-insensitive (same anti-farming anchor as reviews).
+   */
+  countAccountCommandRuns(owner: string, sinceMs = 3_600_000): number {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM review_runs
+         WHERE lower(owner) = lower(?) AND action LIKE 'cmd:%'
+           AND status IN ('running', 'completed') AND created_at >= ?`,
+      )
+      .get(owner, since) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Seconds since a COMPLETED review of this exact commit (installation+PR+SHA),
+   * or null if there isn't one. Used to cool down repeated command/manual
+   * re-review requests on an unchanged commit — a new push always gets a fresh
+   * SHA and is never affected by this. This is the direct fix for a real
+   * incident: with no cooldown, a human (or a script) re-issuing `@orvex review`
+   * / `POST /review` on the same commit runs the full expensive review again
+   * every time, with nothing to stop it — inflating both cost and any usage
+   * numbers derived from review_runs.
+   */
+  secondsSinceLastCompletedReview(
+    installationId: number,
+    owner: string,
+    repo: string,
+    pr: number,
+    headSha: string,
+  ): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT created_at FROM review_runs
+         WHERE installation_id = ? AND owner = ? AND repo = ? AND pr = ? AND head_sha = ?
+           AND status = 'completed' AND action NOT LIKE 'fix:%'
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(installationId, owner, repo, pr, headSha) as { created_at: string } | undefined;
+    if (!row) return null;
+    return Math.floor((Date.now() - new Date(row.created_at).getTime()) / 1000);
+  }
+
+  /** Log an onboarding event (a GitHub account connecting, a login) with the
+   *  client IP, for abuse analysis. Best-effort — never throws into the flow. */
+  recordAbuseSignal(input: {
+    ip?: string | null;
+    accountLogin?: string | null;
+    tenantSlug?: string | null;
+    kind: 'install' | 'login';
+  }): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO abuse_signals (id, ip, account_login, tenant_slug, kind, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          input.ip ?? null,
+          input.accountLogin ?? null,
+          input.tenantSlug ?? null,
+          input.kind,
+          new Date().toISOString(),
+        );
+    } catch {
+      /* signal logging must never break onboarding */
+    }
+  }
+
+  /** How many DISTINCT GitHub accounts have connected from this IP recently —
+   *  the core "one machine farming many free trials" signal. */
+  countDistinctAccountsFromIp(ip: string, sinceMs: number): number {
+    if (!ip || ip === 'unknown') return 0;
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT account_login) AS n FROM abuse_signals
+         WHERE ip = ? AND created_at >= ? AND account_login IS NOT NULL`,
+      )
+      .get(ip, since) as { n: number };
+    return row.n;
+  }
+
+  /** Cheap liveness probe for /ready — throws if the DB is unreachable/locked. */
+  pingDb(): void {
+    this.db.prepare('SELECT 1').get();
+  }
+
+  /** Clear rows left 'running' by a crash/restart so the dashboard doesn't show a
+   *  stuck spinner. Marked 'skipped' (not 'failed') because graceful restarts
+   *  re-queue the job — the interrupted attempt is retried, not a real failure. */
+  failStaleRunningRuns(): number {
+    const res = this.db
+      .prepare(
+        `UPDATE review_runs SET status = 'skipped', skip_reason = 'interrupted by restart — retried'
+         WHERE status = 'running'`,
+      )
+      .run();
+    return res.changes;
+  }
+
+  /**
+   * Bounded retention. Deletes only EPHEMERAL rows — never 'completed' reviews,
+   * which the lifetime trial cap counts forever (pruning those would let a
+   * farmer reset their trial by waiting). Targets the fastest-growing junk: the
+   * 'skipped'/'failed' rows that every cooldown/limit/misfire inserts, expired
+   * sessions, and old abuse signals. Safe to run on a schedule.
+   */
+  pruneEphemeralData(opts: { runRetentionMs?: number; abuseRetentionMs?: number } = {}): number {
+    const runCutoff = new Date(Date.now() - (opts.runRetentionMs ?? 30 * 24 * 3_600_000)).toISOString();
+    const abuseCutoff = new Date(Date.now() - (opts.abuseRetentionMs ?? 90 * 24 * 3_600_000)).toISOString();
+    const now = new Date().toISOString();
+    let n = 0;
+    n += this.db
+      .prepare(`DELETE FROM review_runs WHERE status IN ('skipped', 'failed') AND created_at < ?`)
+      .run(runCutoff).changes;
+    n += this.db.prepare(`DELETE FROM sessions WHERE expires_at < ?`).run(now).changes;
+    n += this.db.prepare(`DELETE FROM abuse_signals WHERE created_at < ?`).run(abuseCutoff).changes;
+    return n;
   }
 
   /** Add email/password columns to an existing users table (email/password login). */
@@ -269,9 +505,13 @@ export class AppDatabase {
     const id = randomUUID();
     const now = new Date().toISOString();
     const normalized = slug.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+    // New signups start on the FREE trial, not the paid default. Overridable via
+    // ORVEX_DEFAULT_PLAN for dev/self-host. (The column default stays 'review' for
+    // backward compatibility with tenants created before plans existed.)
+    const plan = process.env.ORVEX_DEFAULT_PLAN || 'free';
     this.db
-      .prepare(`INSERT INTO tenants (id, slug, name, created_at) VALUES (?, ?, ?, ?)`)
-      .run(id, normalized, name ?? normalized, now);
+      .prepare(`INSERT INTO tenants (id, slug, name, created_at, plan) VALUES (?, ?, ?, ?, ?)`)
+      .run(id, normalized, name ?? normalized, now, plan);
     return { id, slug: normalized, name: name ?? normalized, createdAt: now };
   }
 
@@ -846,9 +1086,13 @@ export class AppDatabase {
     findingsNew?: number;
     findingsFixed?: number;
     findingsOpen?: number;
+    /** Test seam only — backdate the row to exercise time-windowed limit checks
+     *  (e.g. reviewsPerMonth vs reviewsPerHour) without waiting real time.
+     *  Production code never passes this; it always defaults to now. */
+    createdAt?: string;
   }): ReviewRun {
     const id = randomUUID();
-    const now = new Date().toISOString();
+    const now = input.createdAt ?? new Date().toISOString();
     this.db
       .prepare(
         `INSERT INTO review_runs
@@ -894,6 +1138,95 @@ export class AppDatabase {
     };
   }
 
+  /**
+   * Insert a 'running' row the moment a job starts, so the dashboard shows the
+   * run immediately instead of only after it finishes. Returns the row id to
+   * pass to completeReviewRun when the job ends.
+   */
+  startReviewRun(input: {
+    tenantId: string;
+    installationId: number;
+    owner: string;
+    repo: string;
+    pr: number;
+    headSha: string;
+    action: string;
+  }): string {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO review_runs
+         (id, tenant_id, installation_id, owner, repo, pr, head_sha, action, status,
+          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, 0, 0, 0, 0, ?)`,
+      )
+      .run(
+        id,
+        input.tenantId,
+        input.installationId,
+        input.owner,
+        input.repo,
+        input.pr,
+        input.headSha,
+        input.action,
+        now,
+      );
+    return id;
+  }
+
+  /** Finalize a row created by startReviewRun with its terminal status + counts. */
+  completeReviewRun(
+    id: string,
+    patch: {
+      status: ReviewRunStatus;
+      skipReason?: string;
+      error?: string;
+      durationMs: number;
+      findingsNew?: number;
+      findingsFixed?: number;
+      findingsOpen?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      costUsd?: number;
+    },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE review_runs
+         SET status = ?, skip_reason = ?, error = ?, duration_ms = ?,
+             findings_new = ?, findings_fixed = ?, findings_open = ?,
+             input_tokens = ?, output_tokens = ?, cost_usd = ?
+         WHERE id = ?`,
+      )
+      .run(
+        patch.status,
+        patch.skipReason ?? null,
+        patch.error ?? null,
+        patch.durationMs,
+        patch.findingsNew ?? 0,
+        patch.findingsFixed ?? 0,
+        patch.findingsOpen ?? 0,
+        patch.inputTokens ?? 0,
+        patch.outputTokens ?? 0,
+        patch.costUsd ?? 0,
+        id,
+      );
+  }
+
+  /** Total LLM cost (USD) for an account over `sinceMs` — for owner spend
+   *  visibility and quota/budget alerting. */
+  sumAccountCost(owner: string, sinceMs = 30 * 24 * 3_600_000): { costUsd: number; reviews: number } {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(cost_usd), 0) AS cost, COUNT(*) AS n FROM review_runs
+         WHERE lower(owner) = lower(?) AND cost_usd > 0 AND created_at >= ?`,
+      )
+      .get(owner, since) as { cost: number; n: number };
+    return { costUsd: row.cost, reviews: row.n };
+  }
+
   listReviewRuns(tenantId: string, limit = 50): ReviewRun[] {
     const rows = this.db
       .prepare(`SELECT * FROM review_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`)
@@ -912,6 +1245,7 @@ export class AppDatabase {
            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS runs_failed,
            SUM(findings_new) AS findings_new,
            SUM(findings_fixed) AS findings_fixed,
+           SUM(cost_usd) AS cost_usd,
            AVG(CASE WHEN status = 'completed' THEN duration_ms END) AS avg_duration_ms
          FROM review_runs WHERE tenant_id = ? AND created_at >= ?`,
       )
@@ -922,6 +1256,7 @@ export class AppDatabase {
         runs_failed: number | null;
         findings_new: number | null;
         findings_fixed: number | null;
+        cost_usd: number | null;
         avg_duration_ms: number | null;
       };
     return {
@@ -932,6 +1267,7 @@ export class AppDatabase {
       runsFailed: row.runs_failed ?? 0,
       findingsNew: row.findings_new ?? 0,
       findingsFixed: row.findings_fixed ?? 0,
+      costUsd: row.cost_usd ?? 0,
       avgDurationMs: row.avg_duration_ms,
     };
   }
@@ -1002,13 +1338,54 @@ export class AppDatabase {
     return rows.map(mapRepo);
   }
 
+  /** Enabled repos across ALL active installations, each tagged with its tenant's
+   *  plan. The nightly-scan scheduler filters these by planFeatures(plan) so only
+   *  eligible (Verify+) tenants are scanned. */
+  listScanTargets(): Array<{
+    installationId: number;
+    tenantId: string;
+    owner: string;
+    name: string;
+    fullName: string;
+    defaultBranch: string | null;
+    plan: string;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT r.installation_id AS installationId, r.tenant_id AS tenantId, r.owner AS owner,
+                r.name AS name, r.full_name AS fullName, r.default_branch AS defaultBranch, t.plan AS plan
+         FROM repos r
+         JOIN tenants t ON t.id = r.tenant_id
+         JOIN github_installations gi ON gi.installation_id = r.installation_id
+         WHERE r.enabled = 1 AND gi.suspended_at IS NULL`,
+      )
+      .all() as Array<{
+      installationId: number;
+      tenantId: string;
+      owner: string;
+      name: string;
+      fullName: string;
+      defaultBranch: string | null;
+      plan: string;
+    }>;
+    return rows;
+  }
+
   setRepoEnabled(repoId: string, enabled: boolean): void {
     this.db
       .prepare(`UPDATE repos SET enabled = ?, updated_at = ? WHERE id = ?`)
       .run(enabled ? 1 : 0, new Date().toISOString(), repoId);
   }
 
-  updateRepoSettings(repoId: string, patch: { reviewMode?: 'normal' | 'strict'; autoApply?: boolean }): void {
+  updateRepoSettings(
+    repoId: string,
+    patch: {
+      reviewMode?: 'normal' | 'strict';
+      autoApply?: boolean;
+      reviewOnOpen?: boolean;
+      reviewOnPush?: boolean;
+    },
+  ): void {
     const sets: string[] = [];
     const vals: unknown[] = [];
     if (patch.reviewMode) {
@@ -1018,6 +1395,14 @@ export class AppDatabase {
     if (patch.autoApply !== undefined) {
       sets.push('auto_apply = ?');
       vals.push(patch.autoApply ? 1 : 0);
+    }
+    if (patch.reviewOnOpen !== undefined) {
+      sets.push('review_on_open = ?');
+      vals.push(patch.reviewOnOpen ? 1 : 0);
+    }
+    if (patch.reviewOnPush !== undefined) {
+      sets.push('review_on_push = ?');
+      vals.push(patch.reviewOnPush ? 1 : 0);
     }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');
@@ -1033,6 +1418,20 @@ export class AppDatabase {
   isRepoEnabled(installationId: number, fullName: string): boolean {
     const repo = this.getRepoByFullName(installationId, fullName);
     return repo ? repo.enabled : true;
+  }
+
+  /**
+   * Whether Orvex should auto-review THIS specific trigger — the dashboard
+   * settings-section toggles. `opened`/`reopened` are gated by reviewOnOpen;
+   * `synchronize` (a new push to an open PR) by reviewOnPush. An unknown repo
+   * defaults to true for both (same "on before the dashboard is visited"
+   * reasoning as isRepoEnabled) so a fresh install isn't silently inert.
+   */
+  isRepoActionEnabled(installationId: number, fullName: string, action: string): boolean {
+    const repo = this.getRepoByFullName(installationId, fullName);
+    if (!repo) return true;
+    if (action === 'synchronize') return repo.reviewOnPush;
+    return repo.reviewOnOpen; // opened, reopened
   }
 
   // ——— Pull request lifecycle ———
@@ -1273,6 +1672,8 @@ interface RepoRow {
   enabled: number;
   review_mode: string;
   auto_apply: number;
+  review_on_open: number;
+  review_on_push: number;
   added_at: string;
   updated_at: string;
 }
@@ -1291,6 +1692,11 @@ function mapRepo(r: RepoRow): Repo {
     enabled: Boolean(r.enabled),
     reviewMode: r.review_mode === 'strict' ? 'strict' : 'normal',
     autoApply: Boolean(r.auto_apply),
+    // Existing DBs default both to true via the migration (matches the old
+    // single `enabled` toggle's behavior), so nothing changes until a user
+    // explicitly flips one off in the dashboard.
+    reviewOnOpen: Boolean(r.review_on_open ?? 1),
+    reviewOnPush: Boolean(r.review_on_push ?? 1),
     addedAt: r.added_at,
     updatedAt: r.updated_at,
   };

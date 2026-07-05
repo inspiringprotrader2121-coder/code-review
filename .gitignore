@@ -12,6 +12,25 @@ build/
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
+secrets.json
+credentials.json
+service-account*.json
+generated-keys*
+.aws/
+.gcloud/
+.kube/
+.docker/config.json
+.netrc
+.npmrc
+.pypirc
 orvex-review.pem
 
 # Logs & runtime data

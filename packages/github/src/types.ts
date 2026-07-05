@@ -23,6 +23,8 @@ export interface PullRequestMeta {
   draft: boolean;
   authorLogin: string;
   htmlUrl: string;
+  /** 'open' | 'closed' — GitHub's raw PR state (a merged PR is also 'closed') */
+  state: string;
 }
 
 export interface ChangedFile {

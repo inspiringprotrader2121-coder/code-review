@@ -69,7 +69,7 @@ async function reviewPr(c: EvalCase): Promise<ReviewFinding[]> {
 
   const resp = await runLlmReview(
     reviewable.map((f) => ({ filename: f.filename, status: f.status, patch: f.patch })),
-    { ...llm, maxTokens: 4096, context: { ...(context ?? {}), prTitle: pr.title, prBody: pr.body ?? undefined } },
+    { ...llm, context: { ...(context ?? {}), prTitle: pr.title, prBody: pr.body ?? undefined } },
   );
   let findings = llmFindingsToReviewFindings(resp.findings);
 

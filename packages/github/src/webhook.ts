@@ -7,8 +7,16 @@ export function verifyWebhookSignature(
   signatureHeader: string | undefined,
 ): boolean {
   if (!config.webhookSecret) {
-    console.warn('[webhook] GITHUB_WEBHOOK_SECRET not set — skipping signature verify (dev only)');
-    return true;
+    // FAIL CLOSED: with no secret we can't verify signatures, so an unsigned
+    // request could forge any event (spoof author_association:OWNER → drive
+    // commits/reviews). Reject by default; only accept unsigned in explicit dev
+    // via ORVEX_ALLOW_UNSIGNED_WEBHOOKS=1.
+    if (process.env.ORVEX_ALLOW_UNSIGNED_WEBHOOKS === '1') {
+      console.warn('[webhook] GITHUB_WEBHOOK_SECRET not set — accepting unsigned (ORVEX_ALLOW_UNSIGNED_WEBHOOKS=1)');
+      return true;
+    }
+    console.error('[webhook] GITHUB_WEBHOOK_SECRET not set — REJECTING (set the secret, or ORVEX_ALLOW_UNSIGNED_WEBHOOKS=1 for local dev)');
+    return false;
   }
   if (!signatureHeader?.startsWith('sha256=')) {
     return false;

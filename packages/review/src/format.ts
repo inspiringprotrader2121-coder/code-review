@@ -7,7 +7,20 @@ export interface ReviewCommentMeta {
   headSha: string;
   stats?: { newCount: number; fixedCount: number; openCount: number };
   summary?: string;
+  /** files Orvex read for this review (shown so a clean review isn't silent) */
+  filesReviewed?: string[];
 }
+
+const MAX_FILES_LISTED = 25;
+
+/** The categories every Orvex review inspects — shown so authors know the scope. */
+const CHECKLIST = [
+  'Security — auth/permission bypass, injection, SSRF/XSS, secrets in code',
+  'Correctness — logic bugs, wrong conditions, off-by-one, unhandled cases',
+  'Concurrency — race conditions, missing locks, unsafe shared state',
+  'Error handling — swallowed errors, missing validation, edge cases',
+  'Cross-file impact — callers/dependencies the change could break',
+];
 
 export function formatReviewBody(
   inline: ReviewFinding[],
@@ -33,27 +46,51 @@ export function formatReviewBody(
     lines.push('', meta.summary);
   }
 
+  // Files reviewed — so a clean review still shows exactly what was examined.
+  if (meta.filesReviewed && meta.filesReviewed.length > 0) {
+    const shown = meta.filesReviewed.slice(0, MAX_FILES_LISTED);
+    const extra = meta.filesReviewed.length - shown.length;
+    lines.push(
+      '',
+      `**Files reviewed (${meta.filesReviewed.length})**`,
+      ...shown.map((f) => `- \`${f}\``),
+      ...(extra > 0 ? [`- …and ${extra} more`] : []),
+    );
+  }
+
   const tableFindings = [...inline, ...summaryOnly];
   if (tableFindings.length === 0) {
-    lines.push('', 'No new issues in the reviewed hunks.');
-    return lines.join('\n');
-  }
-
-  lines.push('', '| Severity | File | Message |', '| --- | --- | --- |');
-  for (const f of tableFindings) {
-    const file = f.line ? `\`${f.file}:${f.line}\`` : `\`${f.file}\``;
-    const msg = f.message.replace(/\|/g, '\\|').replace(/\n/g, ' ');
-    lines.push(`| ${f.severity} | ${file} | ${msg} |`);
-  }
-
-  const withSuggestions = tableFindings.filter((f) => f.suggestion);
-  if (withSuggestions.length > 0) {
-    lines.push('', '<details><summary>Suggestions</summary>', '');
-    for (const f of withSuggestions) {
-      lines.push(`**${f.file}** — ${f.message}`, '', f.suggestion!, '');
+    lines.push(
+      '',
+      '✅ **No issues found.** Nothing in this change looked unsafe or incorrect on this pass — it looks good to merge.',
+    );
+  } else {
+    lines.push('', '| Severity | File | Message |', '| --- | --- | --- |');
+    for (const f of tableFindings) {
+      const file = f.line ? `\`${f.file}:${f.line}\`` : `\`${f.file}\``;
+      const msg = f.message.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+      lines.push(`| ${f.severity} | ${file} | ${msg} |`);
     }
-    lines.push('</details>');
+
+    const withSuggestions = tableFindings.filter((f) => f.suggestion);
+    if (withSuggestions.length > 0) {
+      lines.push('', '<details><summary>Suggestions</summary>', '');
+      for (const f of withSuggestions) {
+        lines.push(`**${f.file}** — ${f.message}`, '', f.suggestion!, '');
+      }
+      lines.push('</details>');
+    }
   }
+
+  // Always show what was checked for — turns a "0 findings" review into a
+  // meaningful "here's what I verified" report instead of silence.
+  lines.push(
+    '',
+    '<details><summary>What Orvex checked for</summary>',
+    '',
+    ...CHECKLIST.map((c) => `- ${c}`),
+    '</details>',
+  );
 
   return lines.join('\n');
 }
@@ -70,9 +107,51 @@ export function applyMarker(fingerprint: string): string {
   return `${APPLY_MARKER_PREFIX}${fingerprint}-->`;
 }
 
+// A fingerprint is `v<version>-<16 hex>` (e.g. v2-a1b2c3d4e5f60718). Match the
+// whole family — NOT just [a-f0-9]{16}, which silently fails on the `v2-` prefix
+// and was the reason the apply-fix button never updated.
+const FINGERPRINT_CHARS = '[a-zA-Z0-9_-]{6,64}';
+
+/**
+ * Matches the WHOLE line carrying an apply marker, in ANY state (unchecked
+ * checkbox, checked, applying, applied, failed). The marker is the stable anchor
+ * so the button can be transitioned between states regardless of its label.
+ */
+export const APPLY_LINE_RE = new RegExp(`^.*<!--orvex:apply:${FINGERPRINT_CHARS}-->.*$`, 'm');
+
+/** The idle button line (an actionable task-list checkbox). */
+export function applyCheckboxLine(fingerprint: string, hasFix: boolean): string {
+  const label = hasFix ? 'Apply this fix' : 'Fix this with Orvex';
+  return `- [ ] ${applyMarker(fingerprint)} **${label}** — Orvex commits to this PR branch`;
+}
+
+/** "⏳ Applying…" — shown immediately when the box is ticked, for instant feedback. */
+export function applyingLine(fingerprint: string, requestedBy?: string): string {
+  const by = requestedBy ? ` (requested by @${requestedBy})` : '';
+  return `⏳ ${applyMarker(fingerprint)} **Applying fix…**${by}`;
+}
+
+/** "✅ Fix applied in <sha>" — the terminal success state on the button itself. */
+export function appliedLine(fingerprint: string, shortSha: string): string {
+  return `✅ ${applyMarker(fingerprint)} **Fix applied** in \`${shortSha}\``;
+}
+
+/** Failure state — re-offers the checkbox so the user can retry. */
+export function failedApplyLine(fingerprint: string, reason: string): string {
+  return `- [ ] ${applyMarker(fingerprint)} **Apply this fix** — last attempt failed (${reason}); tick to retry`;
+}
+
+/** Swap whichever apply-line the comment currently has for a new state line. */
+export function replaceApplyLine(body: string, newLine: string): string {
+  // Function replacement (not a string) so `$`-sequences in newLine — e.g. a
+  // failure reason carrying LLM text with `$\`` / `$&` — are inserted literally
+  // rather than interpreted as replacement patterns and corrupting the comment.
+  return body.replace(APPLY_LINE_RE, () => newLine);
+}
+
 /** Extract the finding fingerprint from a comment carrying an apply checkbox. */
 export function parseApplyMarker(body: string): string | null {
-  const m = body.match(/<!--orvex:apply:([a-f0-9]{16})-->/);
+  const m = body.match(new RegExp(`<!--orvex:apply:(${FINGERPRINT_CHARS})-->`));
   return m ? m[1] : null;
 }
 
@@ -96,6 +175,13 @@ export interface InlineFindingRender {
   };
   /** trigger word shown in the footer, e.g. "@orvex" */
   trigger: string;
+  /**
+   * Whether this tenant's plan can commit fixes. When false (free trial), the
+   * apply-checkbox is NOT rendered — ticking it would only hit the paid gate and
+   * leave the button stuck on "Applying". Free tier still gets the inline
+   * suggestion to apply by hand. Defaults to true (paid) for back-compat.
+   */
+  canAutofix?: boolean;
 }
 
 /**
@@ -123,15 +209,22 @@ export function formatInlineFinding(r: InlineFindingRender): string {
     parts.push('', f.suggestion);
   }
 
-  // Always offer the fix checkbox. If no fix was pre-generated, Orvex generates
-  // one on demand when the box is ticked (or `@orvex fix this` is replied).
-  const label = fixedCode !== undefined ? 'Apply this fix' : 'Fix this with Orvex';
-  parts.push('', `- [ ] ${applyMarker(f.fingerprint)} **${label}** — Orvex commits to this PR branch`);
-
-  parts.push(
-    '',
-    `<sub>Tick the box above, or reply \`${r.trigger} fix this\` · \`${r.trigger} <instructions>\` for a custom fix · \`${r.trigger} explain\` · \`${r.trigger} ignore\`</sub>`,
-  );
+  if (r.canAutofix !== false) {
+    // Offer the fix checkbox (paid plans). If no fix was pre-generated, Orvex
+    // generates one on demand when the box is ticked (or `@orvex fix this`).
+    parts.push('', applyCheckboxLine(f.fingerprint, fixedCode !== undefined));
+    parts.push(
+      '',
+      `<sub>Tick the box above, or reply \`${r.trigger} fix this\` · \`${r.trigger} <instructions>\` for a custom fix · \`${r.trigger} explain\` · \`${r.trigger} ignore\`</sub>`,
+    );
+  } else {
+    // Free trial: no commit-a-fix checkbox (that's paid) — the suggestion above
+    // is applied by hand. Don't render a button that can only be rejected.
+    parts.push(
+      '',
+      `<sub>Apply the suggested change above by hand, or [upgrade](https://useorvex.com/pricing) to let Orvex commit fixes · \`${r.trigger} ignore\` to dismiss.</sub>`,
+    );
+  }
 
   return parts.join('\n');
 }

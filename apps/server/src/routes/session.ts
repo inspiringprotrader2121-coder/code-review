@@ -145,7 +145,12 @@ function oauthCallbackUrl(): string {
 
 /** Only allow same-site relative redirect targets. */
 function safeNext(next: string | undefined): string {
-  if (!next || !next.startsWith('/') || next.startsWith('//')) return '/dashboard';
+  // Reject anything not starting with a single '/', protocol-relative '//…', OR
+  // containing a backslash — several browsers normalize '\' → '/', so '/\evil.com'
+  // becomes protocol-relative and redirects off-site after login.
+  if (!next || !next.startsWith('/') || next.startsWith('//') || next.includes('\\')) {
+    return '/dashboard';
+  }
   return next;
 }
 

@@ -23,6 +23,10 @@ export function shouldSkipPr(
   pr: PullRequestMeta,
   opts: { botLogin: string; skipDependabot?: boolean },
 ): string | null {
+  // Checked first: a closed/merged PR should never spend a deep review — this
+  // was a real incident (backlog jobs queued while a PR was open finally
+  // running long after it was closed/merged, burning tokens for nothing).
+  if (pr.state !== 'open') return 'PR is closed';
   if (pr.draft) return 'draft PR';
   if (opts.skipDependabot !== false && pr.authorLogin === 'dependabot[bot]') {
     return 'dependabot PR';
@@ -50,7 +54,19 @@ export async function fetchPullRequest(
     draft: data.draft ?? false,
     authorLogin: data.user?.login ?? 'unknown',
     htmlUrl: data.html_url,
+    state: data.state,
   };
+}
+
+/** Cheap, single-purpose re-check for mid-run abort — avoids re-fetching the
+ *  full PR object (diff-adjacent fields) just to ask "is it still open?". */
+export async function isPrStillOpen(octokit: Octokit, ref: PrRef): Promise<boolean> {
+  const { data } = await octokit.rest.pulls.get({
+    owner: ref.owner,
+    repo: ref.repo,
+    pull_number: ref.number,
+  });
+  return data.state === 'open';
 }
 
 export async function postPrComment(

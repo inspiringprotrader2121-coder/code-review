@@ -15,19 +15,24 @@ import {
 } from '@orvex-review/github';
 import type { ReviewJobPayload, FixRequest } from '@orvex-review/queue';
 import {
+  appliedLine,
   applyFixToContent,
   commandTrigger,
+  failedApplyLine,
   formatFixAppliedReply,
   formatFixSkippedReply,
   formatFixSummaryComment,
   generateExplanationWithLlm,
   generateFixWithLlm,
+  parseApplyMarker,
+  replaceApplyLine,
   runAgent,
   verifyFixes,
   type AgentFile,
   type CodeFix,
 } from '@orvex-review/review';
 import type { StoredFinding } from '@orvex-review/store';
+import { planFeatures } from '@orvex-review/tenants';
 import type { WorkerConfig } from './pipeline.js';
 
 export interface FixResult {
@@ -38,6 +43,39 @@ export interface FixResult {
 
 interface FixTarget {
   finding: StoredFinding;
+}
+
+/**
+ * Generous per-account hourly ceiling on interactive `@orvex` commands
+ * (explain / ask / resolve). These are paid-only LLM calls that the review cost
+ * caps don't cover, so without this a single flat-fee account (or any
+ * write-collaborator on it) could script thousands of `@orvex ask` calls into
+ * unbounded provider spend. A real user never approaches this — it's a runaway
+ * backstop, same idea as the review hourly ceiling.
+ */
+const COMMANDS_PER_HOUR = Math.max(1, Number(process.env.ORVEX_COMMANDS_PER_HOUR ?? 60));
+
+/** True when this account has exhausted its hourly interactive-command budget. */
+function commandOverRateLimit(store: WorkerConfig['store'], owner: string, planId: string): boolean {
+  if (planId === 'enterprise') return false; // custom-contract tier
+  return store.countAccountCommandRuns(owner, 3_600_000) >= COMMANDS_PER_HOUR;
+}
+
+/** Record an interactive command as a `cmd:*` run so it counts toward the
+ *  hourly ceiling (and is excluded from the review caps). Reserved BEFORE the
+ *  LLM call so concurrent commands see each other. */
+function recordCommandRun(config: WorkerConfig, job: ReviewJobPayload, kind: string): void {
+  config.store.recordReviewRun({
+    tenantId: job.tenantId,
+    installationId: job.installationId,
+    owner: job.owner,
+    repo: job.repo,
+    pr: job.pr,
+    headSha: job.headSha,
+    action: `cmd:${kind}`,
+    status: 'completed',
+    durationMs: 0,
+  });
 }
 
 const SKIP_REASONS: Record<string, string> = {
@@ -65,73 +103,84 @@ export async function processFixJob(
       ? replyToReviewComment(octokit, owner, repo, pr, fix.replyToCommentId, body)
       : replyToIssueComment(octokit, ref, body).then(() => undefined);
 
+  // A ticked apply-checkbox was optimistically flipped to "⏳ Applying…" in the
+  // webhook for instant feedback. EVERY exit below that doesn't commit must
+  // revert it to a tickable retry checkbox — otherwise the button is stuck on
+  // "Applying" forever (the recurring apply-fix bug). `skip()` does the revert +
+  // the reply + the zero-result return in one call, so no gate can forget it.
+  const skip = async (msg: string, buttonReason: string): Promise<FixResult> => {
+    if (fix.isReviewComment && fix.replyToCommentId) {
+      await setApplyButtonState(octokit, owner, repo, fix.replyToCommentId, (fp) =>
+        failedApplyLine(fp, buttonReason),
+      );
+    }
+    await respond(formatFixSkippedReply(msg));
+    return { applied: 0, skipped: 0, headMoved: false };
+  };
+
+  // Plan gate: committing fixes (`@orvex fix`, apply-fix checkbox) is a paid
+  // capability. Free-tier still gets findings + inline suggestions to apply by
+  // hand, but Orvex won't push commits for them.
+  const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
+  if (!plan.autofix) {
+    return skip(
+      `committing fixes is available on paid plans. You can still apply the suggested change from the inline comment, or [upgrade](https://useorvex.com/pricing) to let Orvex commit fixes for you.`,
+      'paid plan required',
+    );
+  }
+
   const state = config.store.getState(prKeyObj);
   const openFindings = (state?.findings ?? []).filter((f) => f.status === 'open');
   if (openFindings.length === 0) {
-    await respond(
-      formatFixSkippedReply(
-        `no open Orvex findings on this PR. Run \`${commandTrigger()} review\` first.`,
-      ),
-    );
-    return { applied: 0, skipped: 0, headMoved: false };
+    return skip(`no open Orvex findings on this PR. Run \`${commandTrigger()} review\` first.`, 'no open findings');
   }
 
   const head = await fetchPrHeadInfo(octokit, ref);
   if (head.state !== 'open') {
-    await respond(formatFixSkippedReply('this pull request is closed.'));
-    return { applied: 0, skipped: 0, headMoved: false };
+    return skip('this pull request is closed.', 'PR is closed');
   }
   if (!head.sameRepo) {
-    await respond(
-      formatFixSkippedReply(
-        `this PR comes from a fork (\`${head.headRepoFullName}\`), which Orvex cannot push to. Use the **Commit suggestion** buttons on the inline comments instead.`,
-      ),
+    return skip(
+      `this PR comes from a fork (\`${head.headRepoFullName}\`), which Orvex cannot push to. Use the **Commit suggestion** buttons on the inline comments instead.`,
+      'fork PR — cannot push',
     );
-    return { applied: 0, skipped: 0, headMoved: false };
   }
 
   // merge-conflict guard: never apply fixes onto a branch with conflicts —
   // committing on top would entrench a broken merge and muddy the resolution.
   if (head.mergeable === false || head.mergeableState === 'dirty') {
-    await respond(
-      formatFixSkippedReply(
-        `this PR has **merge conflicts** with \`${head.baseRef}\`, so Orvex won't apply fixes on top of a conflicted branch. Resolve the conflicts (or comment \`${commandTrigger()} resolve conflicts\` to let Orvex try), then re-run \`${commandTrigger()} fix\`.`,
-      ),
+    return skip(
+      `this PR has **merge conflicts** with \`${head.baseRef}\`, so Orvex won't apply fixes on top of a conflicted branch. Resolve the conflicts (or comment \`${commandTrigger()} resolve conflicts\` to let Orvex try), then re-run \`${commandTrigger()} fix\`.`,
+      'merge conflicts',
     );
-    return { applied: 0, skipped: 0, headMoved: false };
   }
 
   // runaway guard: cap fix commits per PR per day
   const maxFixRuns = Number(process.env.ORVEX_MAX_FIX_RUNS_PER_DAY ?? 30);
   if (config.store.countRecentFixRuns(prKeyObj) >= maxFixRuns) {
-    await respond(
-      formatFixSkippedReply(
-        `this PR hit the auto-fix limit (${maxFixRuns} fix runs in 24 h). Apply the remaining fixes manually or raise ORVEX_MAX_FIX_RUNS_PER_DAY.`,
-      ),
+    return skip(
+      `this PR hit the auto-fix limit (${maxFixRuns} fix runs in 24 h). Apply the remaining fixes manually or raise ORVEX_MAX_FIX_RUNS_PER_DAY.`,
+      'daily fix limit reached',
     );
-    return { applied: 0, skipped: 0, headMoved: false };
   }
 
   // one fix operation per PR at a time — the concurrency guard, part 1
   const holder = `${job.enqueuedAt}:${fix.scope}`;
   if (!config.store.acquireFixLock(prKeyObj, holder)) {
-    await respond(
-      formatFixSkippedReply('another Orvex fix is already running on this PR — try again in a minute.'),
-    );
-    return { applied: 0, skipped: 0, headMoved: false };
+    return skip('another Orvex fix is already running on this PR — try again in a minute.', 'another fix is running');
   }
 
   try {
     const targets = selectTargets(openFindings, fix);
     if (targets.length === 0) {
-      await respond(
-        formatFixSkippedReply(
-          fix.scope === 'one'
-            ? 'could not match this thread to an open Orvex finding.'
-            : `no findings with ready fixes. Try \`${commandTrigger()} fix all\` to let Orvex generate fixes.`,
-        ),
+      // still inside the lock's try — `skip` reverts the button; the finally
+      // below releases the lock.
+      return skip(
+        fix.scope === 'one'
+          ? 'could not match this thread to an open Orvex finding.'
+          : `no findings with ready fixes. Try \`${commandTrigger()} fix all\` to let Orvex generate fixes.`,
+        'no matching fix found',
       );
-      return { applied: 0, skipped: 0, headMoved: false };
     }
 
     const applied: Array<{ file: string; message: string; sha: string }> = [];
@@ -162,13 +211,15 @@ export async function processFixJob(
     if (needsLlm && process.env.ORVEX_DEEP_CONTEXT !== '0') {
       try {
         const ctx = await buildRepoContext(octokit, owner, repo, expectedHead, [...byFile.keys()], {
-          maxSourceFiles: 60,
-          maxRelated: 18,
-          maxDependents: 12,
-          maxFileBytes: 24_000,
+          maxSourceFiles: Number(process.env.ORVEX_CTX_SOURCE ?? 100),
+          maxRelated: Number(process.env.ORVEX_CTX_RELATED ?? 30),
+          maxDependents: Number(process.env.ORVEX_CTX_DEPENDENTS ?? 20),
+          maxFileBytes: Number(process.env.ORVEX_CTX_FILE_BYTES ?? 32_000),
+          maxOthers: Number(process.env.ORVEX_CTX_OTHERS ?? 20),
         });
-        // give every target file the same small related set (they share a PR)
-        relatedByFile = new Map([...byFile.keys()].map((f) => [f, ctx.related]));
+        // give every target file the same repo-wide context set (they share a PR)
+        const ctxFiles = [...ctx.related, ...ctx.dependents, ...ctx.others];
+        relatedByFile = new Map([...byFile.keys()].map((f) => [f, ctxFiles]));
       } catch {
         // context is best-effort
       }
@@ -350,6 +401,17 @@ export async function processFixJob(
       }
     }
 
+    // If a ticked apply-checkbox produced no fix, revert its "⏳ Applying…" line
+    // back to a retry checkbox so it isn't stuck showing "Applying" forever.
+    if (fix.isReviewComment && fix.replyToCommentId && applied.length === 0) {
+      const why = headMoved
+        ? 'the branch moved'
+        : permissionDenied
+          ? 'commit permission needed'
+          : (skipped[0]?.reason ?? 'could not apply');
+      await setApplyButtonState(octokit, owner, repo, fix.replyToCommentId, (fp) => failedApplyLine(fp, why));
+    }
+
     if (fix.replyToCommentId) {
       await addCommentReaction(
         octokit,
@@ -399,6 +461,25 @@ export async function processExplainJob(
       ? replyToReviewComment(octokit, owner, repo, pr, fix.replyToCommentId, body)
       : replyToIssueComment(octokit, { owner, repo, number: pr }, body).then(() => undefined);
 
+  // Paid gate: `@orvex explain` is an LLM call. Like the other interactive
+  // commands it's paid-only, so a free/trial account can't call it unmetered.
+  const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
+  if (!plan.autofix) {
+    return void (await reply(
+      formatFixSkippedReply(
+        'explanations are available on paid plans — your free trial includes automated reviews. [Upgrade](https://useorvex.com/pricing).',
+      ),
+    ));
+  }
+  if (commandOverRateLimit(config.store, owner, plan.id)) {
+    return void (await reply(
+      formatFixSkippedReply(
+        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+      ),
+    ));
+  }
+  recordCommandRun(config, job, 'explain');
+
   const state = config.store.getState({ installationId, owner, repo, pr });
   const finding = (state?.findings ?? []).find(
     (f) =>
@@ -441,6 +522,25 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
     fix.replyToCommentId && fix.isReviewComment
       ? replyToReviewComment(octokit, owner, repo, pr, fix.replyToCommentId, body)
       : replyToIssueComment(octokit, ref, body).then(() => undefined);
+
+  // Paid gate: free trial gets automated reviews only; free-form `@orvex <ask>`
+  // is an agentic LLM call reserved for paid plans.
+  const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
+  if (!plan.autofix) {
+    return void (await reply(
+      formatFixSkippedReply(
+        'interactive `@orvex` commands are available on paid plans — your free trial includes automated reviews. [Upgrade](https://useorvex.com/pricing).',
+      ),
+    ));
+  }
+  if (commandOverRateLimit(config.store, owner, plan.id)) {
+    return void (await reply(
+      formatFixSkippedReply(
+        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+      ),
+    ));
+  }
+  recordCommandRun(config, job, 'ask');
 
   const head = await fetchPrHeadInfo(octokit, ref);
   if (head.state !== 'open') return void (await reply(formatFixSkippedReply('this pull request is closed.')));
@@ -564,6 +664,22 @@ export async function processResolveJob(job: ReviewJobPayload, config: WorkerCon
       ? replyToReviewComment(octokit, owner, repo, pr, fix.replyToCommentId, body)
       : replyToIssueComment(octokit, ref, body).then(() => undefined);
 
+  // Paid gate: conflict resolution is an agentic write operation, paid plans only.
+  const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
+  if (!plan.autofix) {
+    return void (await reply(
+      formatFixSkippedReply('conflict resolution is a paid feature — [upgrade](https://useorvex.com/pricing).'),
+    ));
+  }
+  if (commandOverRateLimit(config.store, owner, plan.id)) {
+    return void (await reply(
+      formatFixSkippedReply(
+        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+      ),
+    ));
+  }
+  recordCommandRun(config, job, 'resolve');
+
   const head = await fetchPrHeadInfo(octokit, ref);
   if (head.state !== 'open') return void (await reply(formatFixSkippedReply('this pull request is closed.')));
   if (!head.sameRepo) {
@@ -639,24 +755,36 @@ async function resolveCodeFix(
 }
 
 /** Flip the apply checkbox to done so it can't be re-triggered. */
-async function markApplyCheckboxDone(
+/** Transition the apply-button comment to a new state (applied ✅ / failed).
+ *  Anchored on the apply marker so it works whatever state the line is in
+ *  (idle checkbox, "⏳ Applying…", etc.). */
+async function setApplyButtonState(
   octokit: Parameters<typeof updateReviewCommentBody>[0],
   owner: string,
   repo: string,
   commentId: number,
-  commitSha: string,
+  makeLine: (fingerprint: string) => string,
 ): Promise<void> {
   try {
     const comment = await getReviewComment(octokit, owner, repo, commentId);
-    if (!comment || !comment.body.includes('<!--orvex:apply:')) return;
-    const updated = comment.body.replace(
-      /- \[[ x]\] (<!--orvex:apply:[a-f0-9]{16}-->) \*\*Apply fix\*\*[^\n]*/i,
-      `✅ $1 **Fix applied** in \`${commitSha.slice(0, 7)}\``,
-    );
+    if (!comment) return;
+    const fingerprint = parseApplyMarker(comment.body);
+    if (!fingerprint) return;
+    const updated = replaceApplyLine(comment.body, makeLine(fingerprint));
     if (updated !== comment.body) {
       await updateReviewCommentBody(octokit, owner, repo, commentId, updated);
     }
   } catch {
     // cosmetic — ignore failures
   }
+}
+
+function markApplyCheckboxDone(
+  octokit: Parameters<typeof updateReviewCommentBody>[0],
+  owner: string,
+  repo: string,
+  commentId: number,
+  commitSha: string,
+): Promise<void> {
+  return setApplyButtonState(octokit, owner, repo, commentId, (fp) => appliedLine(fp, commitSha.slice(0, 7)));
 }

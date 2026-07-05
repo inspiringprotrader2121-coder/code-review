@@ -118,12 +118,27 @@ export function apiRoutes() {
     const repo = db.listRepos(ws.tenant.id).find((r) => r.id === repoId);
     if (!repo) return c.json({ error: 'repo not found in this workspace' }, 404);
 
-    const body: { enabled?: boolean; reviewMode?: 'normal' | 'strict'; autoApply?: boolean } =
-      await c.req.json().catch(() => ({}));
+    const body: {
+      enabled?: boolean;
+      reviewMode?: 'normal' | 'strict';
+      autoApply?: boolean;
+      reviewOnOpen?: boolean;
+      reviewOnPush?: boolean;
+    } = await c.req.json().catch(() => ({}));
 
     if (typeof body.enabled === 'boolean') db.setRepoEnabled(repoId, body.enabled);
-    if (body.reviewMode || typeof body.autoApply === 'boolean') {
-      db.updateRepoSettings(repoId, { reviewMode: body.reviewMode, autoApply: body.autoApply });
+    if (
+      body.reviewMode ||
+      typeof body.autoApply === 'boolean' ||
+      typeof body.reviewOnOpen === 'boolean' ||
+      typeof body.reviewOnPush === 'boolean'
+    ) {
+      db.updateRepoSettings(repoId, {
+        reviewMode: body.reviewMode,
+        autoApply: body.autoApply,
+        reviewOnOpen: body.reviewOnOpen,
+        reviewOnPush: body.reviewOnPush,
+      });
     }
     const updated = db.listRepos(ws.tenant.id).find((r) => r.id === repoId);
     return c.json({ ok: true, repo: updated });

@@ -23,6 +23,10 @@ export function filterAndCapFindings(
     else summaryOnly.push(f);
   }
 
+  // Findings past max_comments are surfaced in the summary table rather than
+  // silently discarded — never drop a real finding, even when capping noise.
+  summaryOnly.push(...sorted.slice(config.max_comments));
+
   return { inline, summaryOnly };
 }
 

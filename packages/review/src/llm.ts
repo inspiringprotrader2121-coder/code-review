@@ -1,8 +1,29 @@
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch, redactSecrets } from './redact.js';
-import { llmChat } from './llm-client.js';
+import { llmChat, extractJsonLoose } from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
+
+/**
+ * A rate-limit / transport failure (429, token-plan quota, network, timeout) —
+ * retryable, and crucially NOT a clean review. Callers should FAIL the review on
+ * these (so it retries when quota recovers) rather than posting an empty result.
+ * A model returning unparseable text is a different case (degrade to empty).
+ */
+export function isTransientLlmError(message: string): boolean {
+  return /\b429\b|rate.?limit|quota|token plan|request failed|fetch failed|stalled|timed?\s?out|econn|socket hang/i.test(
+    message,
+  );
+}
+
+/**
+ * Summary returned when the model produced an UNPARSEABLE response (not a clean
+ * review). Callers check for this to avoid posting a contradictory
+ * "could not be completed" + "✅ no issues found" review: if every pass degrades
+ * to this, the whole review should FAIL/retry, not report a false clean pass.
+ */
+export const REVIEW_INCOMPLETE_SUMMARY =
+  'Review could not be completed: the model returned an unparseable response. Re-run `@orvex review` to try again.';
 
 export interface LlmReviewOptions {
   apiKey: string;
@@ -12,6 +33,8 @@ export interface LlmReviewOptions {
   maxTokens?: number;
   /** cross-file context: repo tree + imported files */
   context?: ReviewPromptContext;
+  /** token-usage callback for cost tracking (per model call) */
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
 }
 
 export async function runLlmReview(
@@ -45,6 +68,7 @@ export async function runLlmReview(
         related: redactAll(opts.context.related),
         dependents: redactAll(opts.context.dependents),
         changedContents: redactAll(opts.context.changedContents),
+        others: redactAll(opts.context.others),
       }
     : undefined;
 
@@ -61,29 +85,46 @@ export async function runLlmReview(
       maxTokens: opts.maxTokens,
       json: true,
       thinking,
+      onUsage: opts.onUsage,
     });
 
-  // The initial review prompt carries full files + repo context, which is too
-  // large for reasoning to finish inside the timeout — it always fell back
-  // anyway. Do the broad review WITHOUT reasoning (fast, reliable); the
-  // adversarial verification pass runs reasoning on its smaller, focused prompt,
-  // which is where careful thinking actually pays off. Opt back in with
-  // ORVEX_REVIEW_THINKING=1.
-  const reviewThinking = process.env.ORVEX_REVIEW_THINKING === '1';
-  let text: string;
+  // Deep reasoning ON by default: both provider branches stream with an
+  // inactivity/keep-alive timer, so a long think can't drop the connection.
+  // ORVEX_REVIEW_THINKING=0 opts out; a failed reasoning call still retries
+  // once without reasoning below so a review is never lost to a thinking bug.
+  const reviewThinking = process.env.ORVEX_REVIEW_THINKING !== '0';
+  const parseReview = (text: string) =>
+    LlmReviewResponseSchema.parse(normalizeLlmResponse(extractJsonLoose(text)));
+
+  // Both the model call AND the JSON extraction/validation are inside the retry:
+  // an unparseable payload (e.g. the model wrapping its answer in a ```bash
+  // block) must retry without reasoning, then degrade gracefully — never crash
+  // the whole review job the way an uncaught JSON.parse used to.
+  let parsed: LlmReviewResponse;
   try {
-    text = await call(reviewThinking);
+    parsed = parseReview(await call(reviewThinking));
   } catch (err) {
-    console.warn('[llm] review call failed, retrying without reasoning:', (err as Error).message);
-    text = await call(false);
+    console.warn('[llm] review call/parse failed, retrying without reasoning:', (err as Error).message);
+    try {
+      parsed = parseReview(await call(false));
+    } catch (err2) {
+      const msg = (err2 as Error).message;
+      // A rate-limit / transport failure is NOT a clean review — propagate it so
+      // the job FAILS (and can be retried when quota recovers) instead of silently
+      // posting an empty "0 findings" review. Only a genuine unparseable model
+      // payload degrades to empty.
+      if (isTransientLlmError(msg)) throw err2;
+      console.error('[llm] review unparseable after retry — returning empty:', msg);
+      return { findings: [], summary: REVIEW_INCOMPLETE_SUMMARY };
+    }
   }
 
-  const json = extractJson(text);
-  const parsed = LlmReviewResponseSchema.parse(normalizeLlmResponse(json));
-
+  // Generous backstop against a runaway model, not a quality gate — the rules
+  // prompt and the noise/verification passes control real finding volume.
+  const maxFindings = Number(process.env.ORVEX_MAX_FINDINGS ?? 25);
   return {
     ...parsed,
-    findings: parsed.findings.slice(0, 8).map((f) => ({
+    findings: parsed.findings.slice(0, maxFindings).map((f) => ({
       ...f,
       ruleId: f.ruleId ?? `llm.${f.category}`,
     })),
@@ -185,12 +226,6 @@ export function llmFindingsToReviewFindings(findings: LlmReviewResponse['finding
     confidence: f.confidence,
     ruleId: f.ruleId ?? `llm.${f.category}`,
   }));
-}
-
-function extractJson(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const raw = fenced ? fenced[1].trim() : text.trim();
-  return JSON.parse(raw);
 }
 
 // backwards compat

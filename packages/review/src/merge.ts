@@ -42,7 +42,19 @@ export function mergeFindings(
   incoming: ReviewFinding[],
   prior: StoredFinding[],
   headSha: string,
-  opts: { minConfidence: number },
+  opts: {
+    minConfidence: number;
+    /**
+     * The set of file paths ACTUALLY reviewed this run. A prior finding is only
+     * eligible to be marked "fixed" (by not being re-detected) if its file was
+     * reviewed. On an incremental `synchronize` push the diff — and therefore the
+     * reviewed set — is only the newly-pushed files, so without this a prior P1
+     * in an un-touched file would be silently marked fixed. When omitted (e.g.
+     * unit tests, a full review), every file is treated as reviewed (legacy
+     * behavior).
+     */
+    reviewedFiles?: Set<string>;
+  },
 ): MergeResult {
   const incomingFp = new Set<string>();
   const toPost: ReviewFinding[] = [];
@@ -65,6 +77,11 @@ export function mergeFindings(
     if (p.status !== 'open') continue;
     if (incomingFp.has(p.fingerprint)) {
       stillOpen.push({ ...p, lastSeenSha: headSha });
+    } else if (opts.reviewedFiles && !opts.reviewedFiles.has(p.file)) {
+      // This run didn't review the finding's file (an incremental push that
+      // didn't touch it), so its absence from `incoming` proves nothing —
+      // carry it forward unchanged rather than falsely reporting it fixed.
+      stillOpen.push({ ...p });
     } else {
       newlyFixed.push({ ...p, status: 'fixed', fixedAtSha: headSha });
     }

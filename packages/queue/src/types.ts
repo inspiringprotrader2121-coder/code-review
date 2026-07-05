@@ -1,6 +1,6 @@
 export type JobId = string;
 
-export type JobKind = 'review' | 'fix' | 'explain' | 'ask' | 'resolve';
+export type JobKind = 'review' | 'fix' | 'explain' | 'ask' | 'resolve' | 'scan';
 
 /** Which findings a fix job targets. */
 export type FixScope =
@@ -48,6 +48,10 @@ export interface ReviewQueue {
   markCompleted(job: ReviewJobPayload): Promise<void>;
   markFailed(job: ReviewJobPayload, error: string): Promise<void>;
   releaseLockAndDrain(prKey: string): Promise<ReviewJobPayload | null>;
+  /** Startup cleanup: clear stale in-flight locks + requeue pending. Returns count. */
+  recoverOrphans(): Promise<number>;
+  /** Liveness probe for /health — true if the backing store is reachable. */
+  ping(): Promise<boolean>;
   close(): Promise<void>;
 }
 

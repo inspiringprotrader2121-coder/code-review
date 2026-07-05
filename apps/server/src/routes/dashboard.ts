@@ -21,6 +21,9 @@ export function dashboardRoutes() {
 
   app.get('/dashboard/:slug', (c) => {
     const slug = c.req.param('slug');
+    // slugs are [a-zA-Z0-9-] everywhere they're created; reject anything else
+    // before it reaches the inline <script> below (XSS defense in depth)
+    if (!/^[a-zA-Z0-9-]{1,40}$/.test(slug)) return c.redirect('/dashboard');
     if (!legacyAuthMode()) {
       const user = sessionUser(c, db);
       if (!user) return c.redirect(`/auth/login?next=/dashboard/${encodeURIComponent(slug)}`);
@@ -34,7 +37,12 @@ export function dashboardRoutes() {
 }
 
 function dashboardHtml(slug: string): string {
-  const s = JSON.stringify(slug);
+  // JSON.stringify alone leaves `</script>` intact — escape for an inline <script> sink
+  const s = JSON.stringify(slug)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
   return `<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8" />
@@ -71,6 +79,7 @@ function dashboardHtml(slug: string): string {
   .chip.p1{color:var(--crit);background:var(--crit-wash)} .chip.p2{color:var(--warn);background:var(--warn-wash)}
   .chip.p3{color:var(--accent-ink);background:var(--accent-wash)} .chip.ok{color:var(--good);background:var(--good-wash)}
   .chip.info{color:var(--accent-ink);background:var(--accent-wash)} .chip.muted{color:var(--ink-3);background:var(--surface-2)}
+  @media (prefers-reduced-motion: no-preference){.chip.info .dot{animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}}
   .dash{display:grid;grid-template-columns:224px 1fr;min-height:100vh}
   @media(max-width:900px){.dash{grid-template-columns:1fr}.sidebar{display:none}}
   .sidebar{background:var(--surface);border-right:1px solid var(--border-soft);padding:18px 14px;display:flex;flex-direction:column;gap:4px}
@@ -124,6 +133,13 @@ function dashboardHtml(slug: string): string {
   .toggle{position:relative;width:38px;height:22px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border);cursor:pointer;transition:background .15s}
   .toggle[aria-checked="true"]{background:var(--accent);border-color:var(--accent)}
   .toggle::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s} .toggle[aria-checked="true"]::after{left:18px}
+  .settings-row{padding:14px 2px;border-bottom:1px solid var(--border-soft)} .settings-row:last-child{border-bottom:0}
+  .settings-row .sr-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .settings-row .rn{font-weight:600;font-size:13.5px}
+  .settings-row .sr-toggles{display:flex;flex-direction:column;gap:12px;padding-left:2px}
+  .sr-toggle{display:flex;align-items:flex-start;gap:12px;cursor:pointer}
+  .sr-toggle .toggle{flex:0 0 auto;margin-top:1px}
+  .sr-toggle strong{font-size:13px;font-weight:600}
   .view{display:none} .view.active{display:block}
   .banner{background:var(--warn-wash);color:var(--warn);border-radius:10px;padding:10px 14px;font-size:13px;margin-bottom:16px}
   .muted{color:var(--ink-3)} .loading,.empty{color:var(--ink-3);font-size:13px;padding:16px 0}
@@ -139,6 +155,7 @@ function dashboardHtml(slug: string): string {
     <button class="navitem" data-view="repos"><span class="ico">▤</span>Repositories <span class="count" id="cRepos"></span></button>
     <button class="navitem" data-view="reviews"><span class="ico">◔</span>Review runs</button>
     <button class="navitem" data-view="installs"><span class="ico">◈</span>Installations</button>
+    <button class="navitem" data-view="settings"><span class="ico">⚙</span>Settings</button>
     <div class="spacer"></div>
     <button class="navitem" onclick="location.href='/connect'"><span class="ico">✚</span>Add repositories</button>
     <button class="navitem" onclick="location.href='/auth/logout'"><span class="ico">⇦</span>Sign out</button>
@@ -172,6 +189,7 @@ function dashboardHtml(slug: string): string {
     <!-- REPOS --><div class="view" id="v-repos"><div class="panel"><h3>Repositories</h3><p class="sub">Toggle which repos Orvex reviews.</p><div id="reposList"><div class="loading">Loading…</div></div></div></div>
     <!-- REVIEWS --><div class="view" id="v-reviews"><div class="panel"><h3>Review runs</h3><p class="sub">Every review & fix run, newest first.</p><div class="tbl-wrap"><table class="reviews"><thead><tr><th>Repo</th><th>PR</th><th>Action</th><th>Status</th><th class="num">Dur</th><th>When</th></tr></thead><tbody id="reviewsBody"></tbody></table></div></div></div>
     <!-- INSTALLS --><div class="view" id="v-installs"><div class="panel"><h3>GitHub installations</h3><p class="sub">Orgs where the Orvex App is installed.</p><div class="installs" id="installs"></div></div></div>
+    <!-- SETTINGS --><div class="view" id="v-settings"><div class="panel"><h3>Automatic review triggers</h3><p class="sub">Per repo — control when Orvex reviews run on their own. <code>@orvex review</code> always works regardless of these.</p><div id="settingsList"><div class="loading">Loading…</div></div></div></div>
   </main>
 </div>
 <script>
@@ -179,13 +197,15 @@ const SLUG=${s};
 const api=(p)=>fetch('/api/workspaces/'+encodeURIComponent(SLUG)+p,{credentials:'same-origin'}).then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e)));
 const esc=(x)=>String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const sev=(s)=>({P1:'p1',P2:'p2',P3:'p3'}[s]||'muted');
+const runCls=(s)=>s==='completed'?'ok':s==='failed'?'p1':s==='running'?'info':'muted';
+const runChip=(s)=>'<span class="chip '+runCls(s)+'">'+(s==='running'?'<span class="dot"></span>':'')+esc(s)+'</span>';
 const rel=(iso)=>{if(!iso)return'—';const d=(Date.now()-new Date(iso).getTime())/1000;if(d<60)return'just now';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago';};
 document.getElementById('wsName').textContent=SLUG; document.getElementById('wsSlug').textContent=SLUG;
 document.getElementById('wsAvatar').textContent=SLUG.slice(0,2).toUpperCase();
 document.getElementById('crumb').textContent=SLUG+' / overview';
 document.getElementById('refresh').onclick=loadAll;
 
-const titles={overview:'Overview',pulls:'Pull requests',findings:'Findings',repos:'Repositories',reviews:'Review runs',installs:'Installations'};
+const titles={overview:'Overview',pulls:'Pull requests',findings:'Findings',repos:'Repositories',reviews:'Review runs',installs:'Installations',settings:'Settings'};
 document.querySelectorAll('.navitem[data-view]').forEach(b=>b.onclick=()=>{
   const v=b.dataset.view;
   document.querySelectorAll('.navitem[data-view]').forEach(x=>x.classList.toggle('active',x===b));
@@ -193,7 +213,7 @@ document.querySelectorAll('.navitem[data-view]').forEach(b=>b.onclick=()=>{
   document.getElementById('v-'+v).classList.add('active');
   document.getElementById('viewTitle').textContent=titles[v];
   document.getElementById('crumb').textContent=SLUG+' / '+v;
-  if(v==='repos')loadRepos(); if(v==='reviews')loadReviews();
+  if(v==='repos')loadRepos(); if(v==='reviews')loadReviews(); if(v==='settings')loadSettings();
 });
 
 async function loadAll(){
@@ -211,10 +231,11 @@ function tiles(o){
   const enabled=(o.repos||[]).filter(r=>r.enabled).length;
   const avg=s.avgDurationMs?Math.round(s.avgDurationMs/1000)+'s':'—';
   document.getElementById('cPulls').textContent=pr.open||'';
+  const spend=s.costUsd!=null?'$'+Number(s.costUsd).toFixed(2):'—';
   document.getElementById('tiles').innerHTML=[
     tile('PRs reviewed · 14d',s.runsCompleted??0,(s.findingsNew||0)+' findings surfaced'),
     tile('Fix rate',rate+'%',f.fixed+' of '+total+' fixed',true),
-    tile('Median review',avg,'webhook → posted'),
+    tile('LLM spend · 14d',spend,(s.runsCompleted??0)+' reviews'),
     tile('Open findings',f.open??0,(f.bySeverity?.P1||0)+' P1 · '+(f.bySeverity?.P2||0)+' P2'),
   ].join('');
 }
@@ -232,13 +253,19 @@ async function sources(){
     document.getElementById('srcRows').innerHTML=rows.map(([n,v])=>'<div class="sev-row"><span class="name">'+esc(n)+'</span><div class="track"><div class="fill" style="width:'+Math.round(v/max*100)+'%;background:var(--bar)"></div></div><span class="num">'+v+'</span></div>').join('')||'<div class="empty">No findings yet.</div>';
   }catch{}
 }
-async function loadRecent(){
+async function loadRecent(skipChart){
   try{const {reviews}=await api('/reviews?limit=8');const b=document.getElementById('recentBody');
-    if(!reviews.length){b.innerHTML='<tr><td colspan="6" class="empty">No reviews yet.</td></tr>';drawChart([]);return;}
-    b.innerHTML=reviews.map(r=>'<tr><td class="repo">'+esc(r.repo)+'</td><td class="mono">#'+r.pr+'</td><td><span class="chip '+(r.status==='completed'?'ok':r.status==='failed'?'p1':'muted')+'">'+r.status+'</span></td><td class="num">'+(r.findingsNew||0)+'</td><td class="num">'+(r.findingsFixed||0)+'</td><td class="mono">'+rel(r.createdAt)+'</td></tr>').join('');
-    drawChart(reviews.length?await perDay():[]);
-  }catch{drawChart([]);}
+    if(!reviews.length){b.innerHTML='<tr><td colspan="6" class="empty">No reviews yet.</td></tr>';if(!skipChart)drawChart([]);return;}
+    b.innerHTML=reviews.map(r=>'<tr><td class="repo">'+esc(r.repo)+'</td><td class="mono">#'+r.pr+'</td><td>'+runChip(r.status)+'</td><td class="num">'+(r.findingsNew||0)+'</td><td class="num">'+(r.findingsFixed||0)+'</td><td class="mono">'+rel(r.createdAt)+'</td></tr>').join('');
+    if(!skipChart)drawChart(reviews.length?await perDay():[]);
+  }catch{if(!skipChart)drawChart([]);}
 }
+// Live refresh: while a run is in progress its row shows 'running' — poll the
+// active table so it flips to completed/failed without a manual reload.
+setInterval(()=>{
+  if(document.getElementById('v-overview').classList.contains('active'))loadRecent(true);
+  else if(document.getElementById('v-reviews').classList.contains('active')){reviewsLoaded=false;loadReviews();}
+},5000);
 async function perDay(){
   const {reviews}=await api('/reviews?limit=200');
   const days=[]; for(let i=13;i>=0;i--){const d=new Date(Date.now()-i*86400000);days.push({key:d.toISOString().slice(0,10),label:d.toLocaleDateString(undefined,{month:'short',day:'numeric'}),v:0});}
@@ -279,7 +306,7 @@ async function loadFindings(){
 let reviewsLoaded=false;
 async function loadReviews(){if(reviewsLoaded)return;reviewsLoaded=true;
   try{const {reviews}=await api('/reviews?limit=100');const b=document.getElementById('reviewsBody');
-    b.innerHTML=reviews.length?reviews.map(r=>'<tr><td class="repo">'+esc(r.repo)+'</td><td class="mono">#'+r.pr+'</td><td class="mono">'+esc(r.action)+'</td><td><span class="chip '+(r.status==='completed'?'ok':r.status==='failed'?'p1':'muted')+'">'+r.status+'</span></td><td class="num mono">'+(r.durationMs?Math.round(r.durationMs/1000)+'s':'—')+'</td><td class="mono">'+rel(r.createdAt)+'</td></tr>').join(''):'<tr><td colspan="6" class="empty">No review runs yet.</td></tr>';
+    b.innerHTML=reviews.length?reviews.map(r=>'<tr><td class="repo">'+esc(r.repo)+'</td><td class="mono">#'+r.pr+'</td><td class="mono">'+esc(r.action)+'</td><td>'+runChip(r.status)+'</td><td class="num mono">'+(r.status==='running'?'…':r.durationMs?Math.round(r.durationMs/1000)+'s':'—')+'</td><td class="mono">'+rel(r.createdAt)+'</td></tr>').join(''):'<tr><td colspan="6" class="empty">No review runs yet.</td></tr>';
   }catch(e){document.getElementById('reviewsBody').innerHTML='<tr><td colspan="6" class="empty">'+esc(e.error||'error')+'</td></tr>';}
 }
 let reposLoaded=false;
@@ -291,6 +318,22 @@ async function loadRepos(){if(reposLoaded)return;reposLoaded=true;const list=doc
 }
 async function toggleRepo(t){const next=t.getAttribute('aria-checked')!=='true';t.setAttribute('aria-checked',next);
   try{await fetch('/api/workspaces/'+encodeURIComponent(SLUG)+'/repos/'+t.dataset.id,{method:'PATCH',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({enabled:next})}).then(r=>{if(!r.ok)throw 0;});}catch{t.setAttribute('aria-checked',!next);}
+}
+let settingsLoaded=false;
+async function loadSettings(){if(settingsLoaded)return;settingsLoaded=true;const list=document.getElementById('settingsList');
+  try{const {repos}=await api('/repos');
+    list.innerHTML=repos.length?repos.map(r=>'<div class="settings-row">'+
+      '<div class="sr-head"><span class="rn">'+esc(r.fullName)+'</span>'+(r.enabled?'':'<span class="chip muted">repo disabled</span>')+'</div>'+
+      '<div class="sr-toggles">'+
+        '<label class="sr-toggle"><button class="toggle" role="switch" aria-checked="'+r.reviewOnOpen+'" data-id="'+r.id+'" data-field="reviewOnOpen"></button><span><strong>Run on each PR</strong><br><span class="muted" style="font-size:12px">Auto-review when a pull request is opened (or reopened)</span></span></label>'+
+        '<label class="sr-toggle"><button class="toggle" role="switch" aria-checked="'+r.reviewOnPush+'" data-id="'+r.id+'" data-field="reviewOnPush"></button><span><strong>Run on each commit</strong><br><span class="muted" style="font-size:12px">Auto-review again on every new push to an open PR</span></span></label>'+
+      '</div></div>'
+    ).join(''):'<div class="empty">No repositories. Click “Add repositories”.</div>';
+    list.querySelectorAll('.toggle').forEach(t=>t.onclick=()=>toggleSetting(t));
+  }catch(e){list.innerHTML='<div class="empty">'+esc(e.error||'error')+'</div>';}
+}
+async function toggleSetting(t){const next=t.getAttribute('aria-checked')!=='true';t.setAttribute('aria-checked',next);
+  try{await fetch('/api/workspaces/'+encodeURIComponent(SLUG)+'/repos/'+t.dataset.id,{method:'PATCH',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({[t.dataset.field]:next})}).then(r=>{if(!r.ok)throw 0;});}catch{t.setAttribute('aria-checked',!next);}
 }
 async function loadInstalls(){
   try{const {installations}=await api('/installations');const el=document.getElementById('installs');

@@ -6,6 +6,7 @@ export {
   isRepoAllowed,
   shouldSkipPr,
   fetchPullRequest,
+  isPrStillOpen,
   fetchPrDiff,
   fetchCompareDiff,
   fetchFileContent,
@@ -35,6 +36,7 @@ export {
   type RelatedFile,
   type RepoContext,
 } from './repo-context.js';
+export { retrieveRelevantFiles, type RetrievedFile, type RetrieveOptions } from './repo-index.js';
 export {
   fetchPrHeadInfo,
   fetchBranchSha,

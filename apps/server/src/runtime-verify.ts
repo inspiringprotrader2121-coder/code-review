@@ -1,0 +1,188 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fetchRepoSnapshot, type createInstallationOctokit } from '@orvex-review/github';
+import { runInSandbox } from './sandbox.js';
+
+/**
+ * Tier-2 execution engine (the TREX equivalent): materialize the PR head, run
+ * the repo's OWN verification (install → typecheck/build → tests) inside the
+ * hardened Docker sandbox, and return pass/fail + captured logs as evidence.
+ *
+ * Running the repo's declared scripts — not arbitrary generated code — is the
+ * bounded, defensible first capability: it catches build breaks, type errors,
+ * and newly-failing tests that a static review can't see, and attaches the real
+ * output so a human (or a downstream agent) can confirm rather than trust.
+ *
+ * Gated: only runs when the tenant's plan allows codeExecution AND
+ * ORVEX_CODE_EXECUTION=1. Off by default.
+ */
+
+export interface RuntimeStep {
+  name: string;
+  command: string;
+  ok: boolean;
+  timedOut: boolean;
+  durationMs: number;
+  output: string;
+}
+
+export interface RuntimeVerifyResult {
+  ran: boolean;
+  skippedReason?: string;
+  steps: RuntimeStep[];
+}
+
+const IMAGE = process.env.ORVEX_SANDBOX_IMAGE ?? 'node:22';
+const STEP_TIMEOUT_MS = Number(process.env.ORVEX_SANDBOX_STEP_TIMEOUT_MS ?? 240_000);
+const INSTALL_TIMEOUT_MS = Number(process.env.ORVEX_SANDBOX_INSTALL_TIMEOUT_MS ?? 300_000);
+
+// Package managers are installed HERE (under the /work bind mount) so they
+// survive from the install container into the separate, network-isolated test
+// container (the per-container /tmp tmpfs does not persist across runs).
+const TOOLS_PREFIX = '/work/.orvex-tools';
+const TOOLS_PATH = `export NPM_CONFIG_PREFIX=${TOOLS_PREFIX} && export PATH=${TOOLS_PREFIX}/bin:$PATH`;
+
+function detectPackageManager(files: Map<string, string>): { pm: string; installCmd: string } {
+  // --ignore-scripts is CRITICAL: it stops package lifecycle scripts (pre/post
+  // install, prepare) from running arbitrary code during the networked install
+  // phase. We also do NOT use `corepack enable` — it writes shims to the
+  // read-only root FS (EROFS) and fetches the repo-pinned package-manager
+  // version (another code-fetch vector); install a pinned pnpm/yarn from the npm
+  // registry into the persistent /work prefix instead.
+  if (files.has('pnpm-lock.yaml')) {
+    return {
+      pm: 'pnpm',
+      installCmd: `${TOOLS_PATH} && npm i -g pnpm@9 --ignore-scripts && pnpm install --frozen-lockfile --ignore-scripts`,
+    };
+  }
+  if (files.has('yarn.lock')) {
+    return {
+      pm: 'yarn',
+      installCmd: `${TOOLS_PATH} && npm i -g yarn --ignore-scripts && yarn install --frozen-lockfile --ignore-scripts`,
+    };
+  }
+  return { pm: 'npm', installCmd: 'npm ci --ignore-scripts || npm install --ignore-scripts' };
+}
+
+/** Verification steps declared by the project (typecheck/build + test). */
+function detectSteps(pkgJson: string, pm: string): Array<{ name: string; command: string }> {
+  let scripts: Record<string, string> = {};
+  try {
+    scripts = (JSON.parse(pkgJson).scripts ?? {}) as Record<string, string>;
+  } catch {
+    return [];
+  }
+  // npm ships in the image; pnpm/yarn live under /work/.orvex-tools (see install)
+  const prefix = pm === 'npm' ? '' : `${TOOLS_PATH} && `;
+  const run = (s: string) => `${prefix}${pm} run ${s}`;
+  const steps: Array<{ name: string; command: string }> = [];
+  if (scripts.typecheck) steps.push({ name: 'typecheck', command: run('typecheck') });
+  else if (scripts.build) steps.push({ name: 'build', command: run('build') });
+  if (scripts.test) steps.push({ name: 'test', command: run('test') });
+  return steps;
+}
+
+export async function runtimeVerify(
+  octokit: ReturnType<typeof createInstallationOctokit>,
+  owner: string,
+  repo: string,
+  sha: string,
+): Promise<RuntimeVerifyResult> {
+  // 1) materialize the repo at head into an isolated temp dir
+  let snapshot: Map<string, string>;
+  try {
+    snapshot = await fetchRepoSnapshot(octokit, owner, repo, sha, { maxFileBytes: 1_000_000, maxTotalBytes: 200_000_000 });
+  } catch (err) {
+    return { ran: false, skippedReason: `snapshot failed: ${(err as Error).message}`, steps: [] };
+  }
+  const pkgJson = snapshot.get('package.json');
+  if (!pkgJson) return { ran: false, skippedReason: 'no package.json (non-Node project)', steps: [] };
+
+  const { pm, installCmd } = detectPackageManager(snapshot);
+  const steps = detectSteps(pkgJson, pm);
+  if (steps.length === 0) return { ran: false, skippedReason: 'no typecheck/build/test scripts', steps: [] };
+
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-rv-'));
+  try {
+    for (const [rel, content] of snapshot) {
+      const dest = path.join(workdir, rel);
+      // guard against path traversal from a crafted tar entry
+      if (!dest.startsWith(workdir + path.sep)) continue;
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, content);
+    }
+    fs.chmodSync(workdir, 0o777); // container runs as uid 1000
+
+    // 2) install deps — the ONE phase allowed network access
+    const install = await runInSandbox({
+      workdir,
+      image: IMAGE,
+      command: installCmd,
+      network: 'bridge',
+      timeoutMs: INSTALL_TIMEOUT_MS,
+    });
+    if (install.exitCode !== 0) {
+      return {
+        ran: true,
+        steps: [
+          {
+            name: 'install',
+            command: installCmd,
+            ok: false,
+            timedOut: install.timedOut,
+            durationMs: install.durationMs,
+            output: tail(install.stderr || install.stdout),
+          },
+        ],
+      };
+    }
+
+    // 3) run each verification step network-ISOLATED
+    const results: RuntimeStep[] = [];
+    for (const step of steps) {
+      const r = await runInSandbox({
+        workdir,
+        image: IMAGE,
+        command: step.command,
+        network: 'none',
+        timeoutMs: STEP_TIMEOUT_MS,
+      });
+      results.push({
+        name: step.name,
+        command: step.command,
+        ok: r.exitCode === 0 && !r.timedOut,
+        timedOut: r.timedOut,
+        durationMs: r.durationMs,
+        output: tail(r.stdout + (r.stderr ? `\n${r.stderr}` : '')),
+      });
+    }
+    return { ran: true, steps: results };
+  } finally {
+    fs.rmSync(workdir, { recursive: true, force: true });
+  }
+}
+
+/** Last ~2k chars of output — the failing tail is what matters as evidence. */
+function tail(s: string, n = 2_000): string {
+  const t = s.trimEnd();
+  return t.length > n ? `…\n${t.slice(-n)}` : t;
+}
+
+/** Render a runtime-verification result as a PR comment body (evidence attached). */
+export function formatRuntimeEvidence(result: RuntimeVerifyResult): string | null {
+  if (!result.ran) return null;
+  const lines: string[] = ['### 🧪 Orvex runtime verification'];
+  const failed = result.steps.filter((s) => !s.ok);
+  lines.push(
+    failed.length === 0
+      ? '✅ Ran the change in an isolated sandbox — install, typecheck, and tests all passed.'
+      : `❌ Ran the change in an isolated sandbox — **${failed.length} step(s) failed**.`,
+  );
+  for (const s of result.steps) {
+    const status = s.timedOut ? '⏱️ timed out' : s.ok ? '✅ passed' : '❌ failed';
+    lines.push(`\n**${s.name}** — \`${s.command}\` — ${status} (${Math.round(s.durationMs / 1000)}s)`);
+    if (!s.ok && s.output) lines.push('```\n' + s.output + '\n```');
+  }
+  return lines.join('\n');
+}

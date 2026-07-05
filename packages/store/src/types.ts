@@ -85,7 +85,7 @@ export interface WorkspaceMember {
   createdAt: string;
 }
 
-export type ReviewRunStatus = 'completed' | 'skipped' | 'failed';
+export type ReviewRunStatus = 'running' | 'completed' | 'skipped' | 'failed';
 
 export interface ReviewRun {
   id: string;
@@ -130,6 +130,10 @@ export interface Repo {
   enabled: boolean;
   reviewMode: 'normal' | 'strict';
   autoApply: boolean;
+  /** auto-review when a PR is opened/reopened (dashboard settings toggle) */
+  reviewOnOpen: boolean;
+  /** auto-review on each subsequent push to an open PR (dashboard settings toggle) */
+  reviewOnPush: boolean;
   addedAt: string;
   updatedAt: string;
 }
@@ -197,5 +201,7 @@ export interface WorkspaceStats {
   runsFailed: number;
   findingsNew: number;
   findingsFixed: number;
+  /** total LLM spend (USD) over the window — owner cost visibility */
+  costUsd: number;
   avgDurationMs: number | null;
 }

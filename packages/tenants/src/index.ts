@@ -13,6 +13,14 @@ export {
 } from './service.js';
 export { hashPassword, verifyPassword } from './password.js';
 export {
+  PLANS,
+  planFeatures,
+  defaultPlanId,
+  isPlanId,
+  type PlanId,
+  type PlanFeatures,
+} from './plans.js';
+export {
   authDisabled,
   legacyAuthMode,
   buildAuthorizeUrl,

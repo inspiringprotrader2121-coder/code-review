@@ -1,20 +1,23 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { loadGitHubConfigFromEnv } from '@orvex-review/github';
-import { createAppDatabase } from '@orvex-review/store';
+import { createAppDatabase, type AppDatabase } from '@orvex-review/store';
 import {
   TenantService,
   WorkspaceAccessError,
-  authDisabled,
-  loadOAuthConfigFromEnv,
+  legacyAuthMode,
   verifyInstallState,
   platformSecret,
 } from '@orvex-review/tenants';
 import { loginRedirect, sessionUser } from './session.js';
 import { escapeHtml, onboardingSteps, pageShell } from './pages.js';
 
-/** True while user login (OAuth) is not configured — the pre-auth signup flow stays available. */
+/**
+ * True only while NO login exists at all (no OAuth, no forced email/password
+ * login, no dev bypass) — the pre-auth signup flow stays available. When
+ * ORVEX_REQUIRE_LOGIN=1, /connect requires a session like the dashboard does.
+ */
 function legacyConnectMode(): boolean {
-  return !loadOAuthConfigFromEnv() && !authDisabled();
+  return legacyAuthMode();
 }
 
 const LEGACY_BANNER = `<div class="banner info">You can connect GitHub and start reviewing now — no sign-in required yet.
@@ -134,6 +137,7 @@ export function authRoutes() {
 
   app.get('/auth/github/callback', async (c) => {
     const user = sessionUser(c, db);
+    const ip = clientIp(c);
 
     if (!user && legacyConnectMode()) {
       const legacyInstallationId = Number(c.req.query('installation_id'));
@@ -147,12 +151,15 @@ export function authRoutes() {
         if (!payload) return c.json({ error: 'invalid or expired state' }, 400);
         legacySlug = payload.tenantSlug;
       }
+      const legacyBlock = ipAbuseBlockMessage(db, ip);
+      if (legacyBlock) return c.html(signupPausedPage(legacyBlock), 429);
       try {
         const { tenant, installation } = await tenants.completeInstallCallback(
           legacyInstallationId,
           legacySlug,
           loadGitHubConfigFromEnv(),
         );
+        recordInstallSignal(db, ip, installation.accountLogin, tenant.slug);
         return c.html(
           pageShell(
             'Connected',
@@ -225,6 +232,8 @@ export function authRoutes() {
       tenantSlug = user.login.toLowerCase();
     }
 
+    const block = ipAbuseBlockMessage(db, ip);
+    if (block) return c.html(signupPausedPage(block), 429);
     try {
       // Ensures membership; claims/creates the slug for this user if needed.
       tenants.startConnect(tenantSlug, user.id);
@@ -233,6 +242,7 @@ export function authRoutes() {
         tenantSlug,
         loadGitHubConfigFromEnv(),
       );
+      recordInstallSignal(db, ip, installation.accountLogin, tenant.slug);
 
       return c.html(
         pageShell(
@@ -308,4 +318,63 @@ export function authRoutes() {
 function fullPath(url: string): string {
   const u = new URL(url);
   return `${u.pathname}${u.search}`;
+}
+
+// ——— IP-based anti-abuse (secondary signal to the per-account trial cap) ———
+// IP is a weak signal (shared NAT, VPNs), so the DEFAULT is log-only: record the
+// signal and warn, never block. Set ORVEX_IP_ABUSE_BLOCK=1 to hard-block a new
+// account when an IP has connected more than ORVEX_IP_MAX_ACCOUNTS_PER_DAY
+// distinct accounts in 24h.
+const IP_ACCOUNT_LIMIT = Number(process.env.ORVEX_IP_MAX_ACCOUNTS_PER_DAY ?? 5);
+const IP_ABUSE_BLOCK = process.env.ORVEX_IP_ABUSE_BLOCK === '1';
+const DAY_MS = 24 * 3600_000;
+
+/** Best-effort client IP behind the nginx proxy (first X-Forwarded-For hop). */
+function clientIp(c: Context): string {
+  // Prefer X-Real-IP: nginx sets it to the actual TCP peer and OVERWRITES any
+  // client-supplied value, so it can't be forged. Otherwise use the RIGHT-most
+  // X-Forwarded-For entry — the hop the trusted proxy appended — NOT the
+  // left-most, which the client fully controls (the old code trusted that, so a
+  // trial-farmer could rotate a fake IP per signup and never be counted).
+  const realIp = c.req.header('x-real-ip');
+  if (realIp?.trim()) return realIp.trim();
+  const xff = c.req.header('x-forwarded-for');
+  if (xff) {
+    const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1]!;
+  }
+  return 'unknown';
+}
+
+/** When hard-blocking is enabled, refuse a new account from an IP that has
+ *  onboarded too many distinct accounts. Returns a message, or null to allow. */
+function ipAbuseBlockMessage(db: AppDatabase, ip: string): string | null {
+  if (!IP_ABUSE_BLOCK) return null;
+  if (db.countDistinctAccountsFromIp(ip, DAY_MS) >= IP_ACCOUNT_LIMIT) {
+    return 'Too many workspaces have been created from your network recently. If this is a mistake, email support@useorvex.com.';
+  }
+  return null;
+}
+
+/** Log the install signal and warn if this IP looks like a trial farm. Fully
+ *  best-effort — anti-abuse bookkeeping must never break onboarding. */
+function recordInstallSignal(db: AppDatabase, ip: string, accountLogin: string, tenantSlug: string): void {
+  try {
+    db.recordAbuseSignal({ ip, accountLogin, tenantSlug, kind: 'install' });
+    const n = db.countDistinctAccountsFromIp(ip, DAY_MS);
+    if (n > IP_ACCOUNT_LIMIT) {
+      console.warn(`[abuse] IP ${ip} onboarded ${n} distinct GitHub accounts in 24h (latest: ${accountLogin} / ${tenantSlug})`);
+    }
+  } catch (err) {
+    console.warn('[abuse] failed to record install signal:', err);
+  }
+}
+
+function signupPausedPage(message: string): string {
+  return pageShell(
+    'Signup paused',
+    `<h1>Couldn't create workspace</h1>
+     <div class="banner error">${escapeHtml(message)}</div>
+     <a class="btn" href="/connect">Back</a>`,
+  );
 }

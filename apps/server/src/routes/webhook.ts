@@ -9,25 +9,27 @@ import {
   loadGitHubConfigFromEnv,
   replyToIssueComment,
   replyToReviewComment,
+  updateReviewCommentBody,
   userCanWrite,
   verifyWebhookSignature,
   type GitHubAppConfig,
 } from '@orvex-review/github';
 import {
   applyCheckboxChecked,
+  applyingLine,
   commandTrigger,
   formatAutoApplyReply,
   formatFixSkippedReply,
   formatHelpComment,
   parseApplyMarker,
   parseOrvexCommand,
+  replaceApplyLine,
 } from '@orvex-review/review';
-import { TenantService } from '@orvex-review/tenants';
+import { TenantService, isPlanId } from '@orvex-review/tenants';
 import { createAppDatabase, type GitHubInstallation } from '@orvex-review/store';
 import { enqueueManualReview } from '../queue-runner.js';
 
 const REVIEW_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
-const WRITE_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 interface WebhookInstallation {
   id: number;
@@ -60,6 +62,7 @@ interface PullRequestWebhook {
     default_branch?: string;
     owner: { login: string };
   };
+  sender?: { login?: string };
 }
 
 interface RepositoryLite {
@@ -188,10 +191,6 @@ export function webhookRoutes(queue: ReviewQueue) {
     const command = parseOrvexCommand(data.comment.body);
     if (!command) return 'no_command';
 
-    if (!WRITE_ASSOCIATIONS.has(data.comment.author_association ?? '')) {
-      return 'insufficient_permissions';
-    }
-
     const owner = data.repository.owner.login;
     const repo = data.repository.name;
     const pr = data.issue.number;
@@ -199,6 +198,15 @@ export function webhookRoutes(queue: ReviewQueue) {
     if (!installation) return 'no_installation';
 
     const octokit = createInstallationOctokit(githubConfig, installation.installationId);
+
+    // These commands can commit code to the PR branch, so gate on the commenter's
+    // ACTUAL write access — NOT author_association, which counts read-only org
+    // members (MEMBER) and read/triage collaborators (COLLABORATOR) as "write".
+    // (Same live-permission check the apply-fix checkbox path uses.)
+    if (!(await userCanWrite(octokit, owner, repo, data.sender.login))) {
+      return 'insufficient_permissions';
+    }
+
     const ref = { owner, repo, number: pr };
     await addCommentReaction(octokit, owner, repo, data.comment.id, 'eyes', false);
 
@@ -295,6 +303,20 @@ export function webhookRoutes(queue: ReviewQueue) {
         isReviewComment: true,
         requestedBy: data.sender.login,
       });
+
+      // Immediate feedback: flip the checkbox to "⏳ Applying fix…" right now, so
+      // the user sees the click registered instead of waiting with no signal.
+      try {
+        await updateReviewCommentBody(
+          gateOctokit,
+          owner,
+          repo,
+          data.comment.id,
+          replaceApplyLine(data.comment.body, applyingLine(fingerprint, data.sender.login)),
+        );
+      } catch {
+        /* cosmetic — the fix is already enqueued */
+      }
       return 'checkbox_fix_enqueued';
     }
 
@@ -303,14 +325,18 @@ export function webhookRoutes(queue: ReviewQueue) {
 
     const command = parseOrvexCommand(data.comment.body);
     if (!command) return 'no_command';
-    if (!WRITE_ASSOCIATIONS.has(data.comment.author_association ?? '')) {
-      return 'insufficient_permissions';
-    }
 
     const installation = await resolveActiveInstallation(data, owner);
     if (!installation) return 'no_installation';
 
     const octokit = createInstallationOctokit(githubConfig, installation.installationId);
+
+    // Gate on the commenter's ACTUAL write access (see handleIssueComment) —
+    // author_association is not repo write permission.
+    if (!(await userCanWrite(octokit, owner, repo, data.sender.login))) {
+      return 'insufficient_permissions';
+    }
+
     await addCommentReaction(octokit, owner, repo, data.comment.id, 'eyes', true);
 
     // the thread root is Orvex's finding comment
@@ -483,6 +509,10 @@ export function webhookRoutes(queue: ReviewQueue) {
 
     if (event === 'pull_request_review_comment') {
       const outcome = await handleReviewComment(githubConfig, payload as unknown as CommentWebhook);
+      // Log so checkbox/fix activity is observable (e.g. action=edited
+      // outcome=checkbox_fix_enqueued when someone ticks the apply box).
+      const action = (payload as { action?: string }).action;
+      console.log(`[webhook] review_comment action=${action} outcome=${outcome}`);
       return c.json({ ok: true, outcome });
     }
 
@@ -559,10 +589,28 @@ export function webhookRoutes(queue: ReviewQueue) {
       return c.json({ ok: true, recorded: prState, reviewed: false });
     }
 
+    // Auto-apply loop guard: when Orvex's own auto-applied fix pushes a commit,
+    // GitHub fires a `synchronize` whose sender is our bot. Re-reviewing that
+    // would let review→fix→review bounce and burn the monthly budget on one PR.
+    // A real author's push has a human/other sender and is reviewed normally.
+    if (action === 'synchronize' && prPayload.sender?.login === githubConfig.botLogin) {
+      console.log(`[webhook] ${fullName} synchronize from bot (own fix commit) — not re-reviewing`);
+      return c.json({ ok: true, recorded: prState, reviewed: false, reason: 'own_commit' });
+    }
+
     // respect the per-repo enable toggle from the dashboard
     if (!db.isRepoEnabled(installationId, fullName)) {
       console.log(`[webhook] ${fullName} disabled for review — recorded PR only`);
       return c.json({ ok: true, recorded: prState, reviewed: false, reason: 'repo_disabled' });
+    }
+
+    // respect the finer-grained "on open" vs "on push" toggles (dashboard
+    // Settings section) — a repo can be enabled overall but opt out of one
+    // trigger, e.g. review on open but not on every follow-up push.
+    if (!db.isRepoActionEnabled(installationId, fullName, action)) {
+      const which = action === 'synchronize' ? 'review_on_push' : 'review_on_open';
+      console.log(`[webhook] ${fullName} ${action} skipped — ${which} is off`);
+      return c.json({ ok: true, recorded: prState, reviewed: false, reason: which });
     }
 
     const job: ReviewJobPayload = {
@@ -587,11 +635,11 @@ export function webhookRoutes(queue: ReviewQueue) {
 
   app.post('/review', async (c) => {
     const secret = process.env.REVIEW_API_SECRET;
-    if (secret) {
-      const auth = c.req.header('authorization');
-      if (auth !== `Bearer ${secret}`) {
-        return c.json({ error: 'unauthorized' }, 401);
-      }
+    // Fail CLOSED: an unset secret used to leave this endpoint open to anyone,
+    // who could trigger reviews and bind installations to a chosen workspace.
+    if (!secret) return c.json({ error: 'endpoint disabled: REVIEW_API_SECRET not set' }, 503);
+    if (c.req.header('authorization') !== `Bearer ${secret}`) {
+      return c.json({ error: 'unauthorized' }, 401);
     }
 
     const body = await c.req.json<{
@@ -626,6 +674,26 @@ export function webhookRoutes(queue: ReviewQueue) {
     });
 
     return c.json({ ok: true, job });
+  });
+
+  // Admin: set a workspace's subscription plan. This is the billing/admin hook
+  // that moves a tenant off the default 'review' plan onto 'verify' etc. — until
+  // a real billing surface exists it lets plans be set without hand-editing the
+  // DB. Guarded by ORVEX_ADMIN_SECRET (falls back to REVIEW_API_SECRET).
+  app.post('/admin/tenants/:slug/plan', async (c) => {
+    const adminSecret = process.env.ORVEX_ADMIN_SECRET ?? process.env.REVIEW_API_SECRET;
+    if (!adminSecret) return c.json({ error: 'admin endpoint disabled: no admin secret set' }, 503);
+    if (c.req.header('authorization') !== `Bearer ${adminSecret}`) {
+      return c.json({ error: 'unauthorized' }, 401);
+    }
+    const { plan } = await c.req.json<{ plan?: string }>().catch(() => ({ plan: undefined }));
+    if (!plan || !isPlanId(plan)) {
+      return c.json({ error: 'plan must be one of: free, review, verify, enterprise' }, 400);
+    }
+    const tenant = db.getTenantBySlug(c.req.param('slug'));
+    if (!tenant) return c.json({ error: 'workspace not found' }, 404);
+    db.setTenantPlan(tenant.id, plan);
+    return c.json({ ok: true, slug: tenant.slug, plan });
   });
 
   return app;

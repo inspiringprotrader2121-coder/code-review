@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { llmChat } from './llm-client.js';
+import { llmChat, extractJsonLoose } from './llm-client.js';
 import { redactSecrets } from './redact.js';
 import type { CodeFix } from './apply.js';
 
@@ -50,8 +50,8 @@ export async function generateFixWithLlm(
       (input.suggestion ? `\nReviewer suggestion: ${input.suggestion}` : '');
 
   const related = (input.relatedFiles ?? [])
-    .slice(0, 4)
-    .map((r) => `### ${r.path} (imported by the file — context only, do NOT edit)\n\`\`\`\n${redactSecrets(r.content.slice(0, 12_000))}\n\`\`\``)
+    .slice(0, 12)
+    .map((r) => `### ${r.path} (repo context only, do NOT edit)\n\`\`\`\n${redactSecrets(r.content.slice(0, 24_000))}\n\`\`\``)
     .join('\n');
 
   const user = [
@@ -88,9 +88,7 @@ export async function generateFixWithLlm(
 
   let parsed: z.infer<typeof LlmFixSchema>;
   try {
-    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const raw = fenced ? fenced[1].trim() : text.trim();
-    parsed = LlmFixSchema.parse(JSON.parse(raw));
+    parsed = LlmFixSchema.parse(extractJsonLoose(text));
   } catch {
     return null;
   }

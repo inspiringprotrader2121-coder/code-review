@@ -1,6 +1,7 @@
 import { gunzipSync } from 'node:zlib';
 import type { Octokit } from '@octokit/rest';
 import { fetchFileContent } from './content.js';
+import { retrieveRelevantFiles } from './repo-index.js';
 
 export interface RelatedFile {
   path: string;
@@ -16,6 +17,8 @@ export interface RepoContext {
   dependents: RelatedFile[];
   /** full contents of the changed files themselves (diff hunks lack surrounding logic) */
   changedContents: RelatedFile[];
+  /** every remaining code file in the repo snapshot — true full-repo context */
+  others: RelatedFile[];
 }
 
 const IMPORT_RE =
@@ -160,6 +163,8 @@ export interface BuildContextOptions {
   maxFileBytes?: number;
   /** max changed files whose imports are chased (default 10) */
   maxSourceFiles?: number;
+  /** max remaining repo code files included in full (default 0 = off) */
+  maxOthers?: number;
 }
 
 /**
@@ -183,6 +188,7 @@ export async function buildRepoContext(
   const maxDependents = opts.maxDependents ?? 8;
   const maxFileBytes = opts.maxFileBytes ?? 16_000;
   const maxSourceFiles = opts.maxSourceFiles ?? 10;
+  const maxOthers = opts.maxOthers ?? 0;
   const clip = (content: string) =>
     content.length > maxFileBytes ? `${content.slice(0, maxFileBytes)}\n… (truncated)` : content;
 
@@ -246,5 +252,21 @@ export async function buildRepoContext(
     }
   }
 
-  return { treePaths, related, dependents, changedContents };
+  // the rest of the repo, RETRIEVED by relevance (not arbitrary order): the
+  // top-K files across the whole repo whose identifiers overlap the change, so a
+  // 5-line diff can surface breakage in a file it doesn't directly import. This
+  // is the repo index — it lets the reviewer reason over the relevant slice of a
+  // large repo without dumping (or paying to reason over) all of it.
+  const others: RelatedFile[] = [];
+  if (snapshot && maxOthers > 0) {
+    const exclude = new Set<string>([...changed, ...seen]);
+    const retrieved = retrieveRelevantFiles(snapshot, changedFiles, {
+      k: maxOthers,
+      maxFileBytes,
+      exclude,
+    });
+    for (const r of retrieved) others.push({ path: r.path, content: r.content });
+  }
+
+  return { treePaths, related, dependents, changedContents, others };
 }

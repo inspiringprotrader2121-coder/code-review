@@ -6,6 +6,8 @@ export {
   runLlmReview,
   llmFindingsToReviewFindings,
   formatReviewComment,
+  isTransientLlmError,
+  REVIEW_INCOMPLETE_SUMMARY,
   type LlmReviewOptions,
 } from './llm.js';
 export {
@@ -35,6 +37,11 @@ export {
   applyMarker,
   parseApplyMarker,
   applyCheckboxChecked,
+  applyCheckboxLine,
+  applyingLine,
+  appliedLine,
+  failedApplyLine,
+  replaceApplyLine,
   type ReviewCommentMeta,
   type InlineFindingRender,
   type FixSummaryInput,
@@ -57,3 +64,4 @@ export {
   type FixCandidate,
 } from './verifier.js';
 export { dropSelfNegatingFindings } from './noise.js';
+export { isRateLimitOrQuotaError } from './llm-client.js';

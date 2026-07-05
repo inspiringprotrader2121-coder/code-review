@@ -1,0 +1,49 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { extractJsonLoose } from './llm-client.js';
+
+test('extracts a plain JSON object', () => {
+  assert.deepEqual(extractJsonLoose('{"findings":[],"summary":"ok"}'), {
+    findings: [],
+    summary: 'ok',
+  });
+});
+
+test('prefers an explicit ```json fence over an earlier ```bash block', () => {
+  // This is the exact shape that crashed review #15: the model answered with a
+  // bash/nginx code block BEFORE the JSON. Naive `/```(?:json)?/` extraction
+  // grabbed "bash\nNGINX…" and threw "Unexpected token 'b'… is not valid JSON".
+  const reply = [
+    'Here is the config I referenced:',
+    '```bash',
+    'NGINX -s reload',
+    'location / { proxy_pass http://app; }',
+    '```',
+    'And the review:',
+    '```json',
+    '{"findings":[{"file":"nginx.conf","message":"missing header"}],"summary":"one issue"}',
+    '```',
+  ].join('\n');
+  const out = extractJsonLoose(reply) as { findings: unknown[]; summary: string };
+  assert.equal(out.summary, 'one issue');
+  assert.equal(out.findings.length, 1);
+});
+
+test('falls back to the outermost object when there is no json fence', () => {
+  const reply = 'Sure — here you go:\n{"findings":[],"summary":"done"}\nHope that helps!';
+  assert.deepEqual(extractJsonLoose(reply), { findings: [], summary: 'done' });
+});
+
+test('ignores a leading non-JSON fenced block and finds the bare object', () => {
+  const reply = '```bash\nNGINX -t\n```\n{"findings":[],"summary":"clean"}';
+  assert.deepEqual(extractJsonLoose(reply), { findings: [], summary: 'clean' });
+});
+
+test('strips <think> reasoning before parsing', () => {
+  const reply = '<think>let me consider the diff</think>{"findings":[],"summary":"s"}';
+  assert.deepEqual(extractJsonLoose(reply), { findings: [], summary: 's' });
+});
+
+test('throws (does not return garbage) when nothing parses', () => {
+  assert.throws(() => extractJsonLoose('```bash\nNGINX -s reload\n```'), /no parseable JSON/);
+});

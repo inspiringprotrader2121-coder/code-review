@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { llmChat } from './llm-client.js';
+import { llmChat, extractJsonLoose } from './llm-client.js';
 import { redactSecrets } from './redact.js';
 import type { ReviewFinding } from './finding.js';
 
@@ -27,8 +27,35 @@ export interface VerifiedFindings {
   dropped: Array<{ finding: ReviewFinding; reason: string }>;
 }
 
-const MAX_VERIFY_FILE_CHARS = 40_000;
-const MAX_VERIFY_TOTAL_CHARS = 160_000;
+// Sized for GLM-5.2's 1M-token window — the verifier must see the FULL file to
+// correctly confirm/refute a finding (truncation made it reject real findings it
+// "couldn't see the source" for).
+const MAX_VERIFY_FILE_CHARS = Number(process.env.ORVEX_VERIFY_FILE_CHARS ?? 250_000);
+const MAX_VERIFY_TOTAL_CHARS = Number(process.env.ORVEX_VERIFY_TOTAL_CHARS ?? 600_000);
+
+/**
+ * Verification gates real outcomes (posting findings, committing fixes), so a
+ * transient provider error must not decide them. Retry with backoff before any
+ * fail-open/fail-closed policy kicks in.
+ */
+async function llmChatWithRetry(
+  system: string,
+  user: string,
+  opts: Parameters<typeof llmChat>[2],
+  attempts = 3,
+): Promise<string> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await llmChat(system, user, opts);
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[verifier] call failed (attempt ${i + 1}/${attempts}):`, (err as Error).message);
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2_000 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
 
 /**
  * Adversarial second pass: a skeptical reviewer tries to REFUTE each candidate
@@ -92,13 +119,12 @@ export async function verifyFindings(
 
   let parsed: z.infer<typeof VerdictSchema>;
   try {
-    const text = await llmChat(
+    const text = await llmChatWithRetry(
       'You are a skeptical principal engineer verifying code-review findings before they are posted. You respond with strict JSON only.',
       user,
       { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, json: true },
     );
-    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    parsed = VerdictSchema.parse(JSON.parse(fenced ? fenced[1].trim() : text.trim()));
+    parsed = VerdictSchema.parse(extractJsonLoose(text));
   } catch {
     return { kept: findings, dropped: [] }; // fail open
   }
@@ -170,13 +196,12 @@ export async function verifyFixes(
   ].join('\n');
 
   try {
-    const text = await llmChat(
+    const text = await llmChatWithRetry(
       'You are a skeptical principal engineer gating auto-generated fixes before they are committed. You respond with strict JSON only.',
       user,
       { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, json: true },
     );
-    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const parsed = VerdictSchema.parse(JSON.parse(fenced ? fenced[1].trim() : text.trim()));
+    const parsed = VerdictSchema.parse(extractJsonLoose(text));
     const approved: number[] = [];
     const rejected: Array<{ index: number; reason: string }> = [];
     candidates.forEach((_, i) => {
@@ -186,11 +211,15 @@ export async function verifyFixes(
     });
     return { approved, rejected };
   } catch {
-    // FAIL CLOSED: this is the only gate before a real commit to the branch.
-    // If we can't verify, don't commit — reject all rather than guess.
+    // FAIL CLOSED after 3 attempts: this is the only gate before a real commit
+    // to the branch — never commit unverified. The reason is surfaced in the PR
+    // reply so dropped fixes are visible, not silent; re-run `@orvex fix`.
     return {
       approved: [],
-      rejected: candidates.map((_, i) => ({ index: i, reason: 'verification unavailable — not committing unverified' })),
+      rejected: candidates.map((_, i) => ({
+        index: i,
+        reason: 'verification unavailable after 3 attempts — fix NOT committed; re-run `@orvex fix` to retry',
+      })),
     };
   }
 }

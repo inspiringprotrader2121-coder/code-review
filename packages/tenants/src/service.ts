@@ -107,6 +107,22 @@ export class TenantService {
   ): Promise<{ tenant: Tenant; installation: GitHubInstallation }> {
     const cfg = config ?? loadGitHubConfigFromEnv();
     const tenant = this.db.getOrCreateTenant(tenantSlug);
+
+    // SECURITY: never rebind an installation that already belongs to a DIFFERENT
+    // tenant with members. installation_id comes from the callback URL and isn't
+    // bound to the signed state, so without this guard any signed-in user could
+    // claim another org's installation (and all its repos/findings) by pointing
+    // the callback at that org's id. First-time installs (no existing row) and
+    // reinstalls to the same tenant, and reclaiming an orphan tenant with no
+    // members, all remain allowed.
+    const existing = this.db.getInstallation(installationId);
+    if (existing && existing.tenantId !== tenant.id && this.db.tenantHasMembers(existing.tenantId)) {
+      throw new WorkspaceAccessError(
+        'this GitHub installation is already linked to another workspace',
+        403,
+      );
+    }
+
     const meta = await fetchInstallationMeta(cfg, installationId);
     const installation = this.db.upsertInstallation({
       installationId,
