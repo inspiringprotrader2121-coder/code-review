@@ -1,4 +1,4 @@
-export type { GitHubAppConfig, PrRef, PullRequestMeta, ChangedFile } from './types.js';
+export type { GitHubAppConfig, PrRef, PullRequestMeta, ChangedFile, DiffCoverage } from './types.js';
 export { loadGitHubConfigFromEnv, createInstallationOctokit, getInstallationIdForRepo } from './config.js';
 export { verifyWebhookSignature } from './webhook.js';
 export {
@@ -8,6 +8,7 @@ export {
   fetchPullRequest,
   isPrStillOpen,
   fetchPrDiff,
+  fetchPrDiffWithCoverage,
   fetchCompareDiff,
   fetchFileContent,
   fetchRepoFile,

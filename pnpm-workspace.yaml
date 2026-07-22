@@ -1,3 +1,10 @@
 packages:
   - "apps/*"
   - "packages/*"
+
+# These are the only dependencies allowed to execute install/build scripts.
+# better-sqlite3 compiles/downloads the SQLite binding; esbuild installs its
+# platform binary. Everything else remains blocked by pnpm's default policy.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true

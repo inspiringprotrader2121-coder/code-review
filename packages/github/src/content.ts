@@ -1,5 +1,13 @@
 import type { Octokit } from '@octokit/rest';
 
+function isNotFoundError(err: unknown): boolean {
+  if (err && typeof err === 'object') {
+    if ('status' in err && err.status === 404) return true;
+    if ('message' in err && typeof err.message === 'string' && /\b404\b/.test(err.message)) return true;
+  }
+  return false;
+}
+
 export async function fetchFileContent(
   octokit: Octokit,
   owner: string,
@@ -18,8 +26,12 @@ export async function fetchFileContent(
       return null;
     }
     return Buffer.from(data.content, data.encoding as BufferEncoding).toString('utf8');
-  } catch {
-    return null;
+  } catch (err) {
+    // A genuine 404 means the file is gone; returning null lets callers treat it
+    // as "fixed by deletion". Any other error (rate-limit, 5xx, network blip)
+    // must propagate so it isn't silently mislabeled as "file missing" / fixed.
+    if (isNotFoundError(err)) return null;
+    throw err;
   }
 }
 

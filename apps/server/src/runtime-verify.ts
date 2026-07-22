@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fetchRepoSnapshot, type createInstallationOctokit } from '@orvex-review/github';
+import { redactSecrets } from '@orvex-review/review';
 import { runInSandbox } from './sandbox.js';
 
 /**
@@ -25,12 +26,18 @@ export interface RuntimeStep {
   timedOut: boolean;
   durationMs: number;
   output: string;
+  /** true when the SAME step also fails at the base commit — pre-existing,
+   *  NOT introduced by this PR (base-vs-head comparison) */
+  preExisting?: boolean;
 }
 
 export interface RuntimeVerifyResult {
   ran: boolean;
   skippedReason?: string;
   steps: RuntimeStep[];
+  /** the same steps run at the BASE commit (only present when head had failures
+   *  and a base comparison was possible) */
+  baseSteps?: RuntimeStep[];
 }
 
 const IMAGE = process.env.ORVEX_SANDBOX_IMAGE ?? 'node:22';
@@ -84,6 +91,41 @@ function detectSteps(pkgJson: string, pm: string): Array<{ name: string; command
 }
 
 export async function runtimeVerify(
+  octokit: ReturnType<typeof createInstallationOctokit>,
+  owner: string,
+  repo: string,
+  sha: string,
+  opts: { baseSha?: string } = {},
+): Promise<RuntimeVerifyResult> {
+  const head = await runStepsAtSha(octokit, owner, repo, sha);
+  // BASE-VS-HEAD: a HEAD-only run blames the PR for failures that already exist
+  // on main. When the head fails and we know the base, run the SAME steps at
+  // base and mark each failure that reproduces there as pre-existing. (Skipped
+  // when head is green — a green head needs no comparison, and base runs cost
+  // real time.)
+  if (!head.ran || head.steps.every((s) => s.ok) || !opts.baseSha || opts.baseSha === sha) {
+    return head;
+  }
+  const base = await runStepsAtSha(octokit, owner, repo, opts.baseSha);
+  if (base.ran) {
+    markPreExistingFailures(head, base);
+  }
+  return head;
+}
+
+/** Apply the base-vs-head classification independently of Docker/GitHub I/O so
+ * the regression logic is directly testable. A step is pre-existing only when
+ * the same named step fails at both revisions. */
+export function markPreExistingFailures(head: RuntimeVerifyResult, base: RuntimeVerifyResult): void {
+  head.baseSteps = base.steps;
+  for (const step of head.steps) {
+    const atBase = base.steps.find((candidate) => candidate.name === step.name);
+    step.preExisting = !step.ok && Boolean(atBase && !atBase.ok);
+  }
+}
+
+/** Materialize the repo at `sha` and run its declared verification steps. */
+async function runStepsAtSha(
   octokit: ReturnType<typeof createInstallationOctokit>,
   owner: string,
   repo: string,
@@ -165,7 +207,9 @@ export async function runtimeVerify(
 
 /** Last ~2k chars of output — the failing tail is what matters as evidence. */
 function tail(s: string, n = 2_000): string {
-  const t = s.trimEnd();
+  // Redact secrets: a repo's build/test script can print env/secrets, and this
+  // tail is posted into a (possibly public) PR comment as evidence.
+  const t = redactSecrets(s.trimEnd());
   return t.length > n ? `…\n${t.slice(-n)}` : t;
 }
 
@@ -174,14 +218,27 @@ export function formatRuntimeEvidence(result: RuntimeVerifyResult): string | nul
   if (!result.ran) return null;
   const lines: string[] = ['### 🧪 Orvex runtime verification'];
   const failed = result.steps.filter((s) => !s.ok);
-  lines.push(
-    failed.length === 0
-      ? '✅ Ran the change in an isolated sandbox — install, typecheck, and tests all passed.'
-      : `❌ Ran the change in an isolated sandbox — **${failed.length} step(s) failed**.`,
-  );
+  const newFailures = failed.filter((s) => !s.preExisting);
+  if (failed.length === 0) {
+    // Name the steps that ACTUALLY ran — "install, typecheck, and tests all
+    // passed" was a lie on repos with only a build script or no tests.
+    lines.push(`✅ Ran the change in an isolated sandbox — ${result.steps.map((s) => s.name).join(' + ')} passed.`);
+  } else if (newFailures.length === 0) {
+    lines.push(
+      `⚠️ Ran the change in an isolated sandbox — ${failed.length} step(s) failed, but the SAME step(s) fail at the base commit: pre-existing, NOT introduced by this PR.`,
+    );
+  } else {
+    lines.push(
+      `❌ Ran the change in an isolated sandbox — **${newFailures.length} step(s) failed** and pass at the base commit — likely introduced by this PR.` +
+        (failed.length > newFailures.length
+          ? ` (${failed.length - newFailures.length} more failure(s) also fail at base — pre-existing.)`
+          : ''),
+    );
+  }
   for (const s of result.steps) {
     const status = s.timedOut ? '⏱️ timed out' : s.ok ? '✅ passed' : '❌ failed';
-    lines.push(`\n**${s.name}** — \`${s.command}\` — ${status} (${Math.round(s.durationMs / 1000)}s)`);
+    const pre = s.preExisting ? ' — also fails at base (pre-existing)' : '';
+    lines.push(`\n**${s.name}** — \`${s.command}\` — ${status}${pre} (${Math.round(s.durationMs / 1000)}s)`);
     if (!s.ok && s.output) lines.push('```\n' + s.output + '\n```');
   }
   return lines.join('\n');

@@ -1,0 +1,1124 @@
+<title>Orvex — Catch bugs before production</title>
+<style>
+  /* ============================================================
+     ORVEX · "SCOREBOARD" landing — self-contained, both themes
+     ============================================================ */
+
+  :root {
+    color-scheme: light dark;
+
+    /* light tokens */
+    --bg: #ffffff;
+    --bg-2: #f7f9fb;
+    --panel: #eef1f4;
+    --panel-2: #e7ebf0;
+    --border: #dde2e8;
+    --border-strong: #c8d0da;
+    --ink: #0b0d12;
+    --ink-2: #3d4552;
+    --ink-3: #6b7482;
+    --ink-inv: #ffffff;
+
+    --win: #0fae7a;
+    --win-bright: #12b981;
+    --win-ink: #067a55;
+    --win-wash: #e7f7f0;
+    --win-line: #b6e6d3;
+
+    --blue: #2563eb;
+    --blue-wash: #eaf0fe;
+
+    --shadow-sm: 0 1px 2px rgba(11,13,18,.06), 0 2px 8px rgba(11,13,18,.05);
+    --shadow-md: 0 8px 30px rgba(11,13,18,.10), 0 2px 8px rgba(11,13,18,.06);
+    --shadow-win: 0 14px 40px rgba(15,174,122,.24);
+
+    --rad: 14px;
+    --rad-lg: 20px;
+    --maxw: 1120px;
+
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Menlo", "Cascadia Code", "Consolas", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #08090c;
+      --bg-2: #0d0f14;
+      --panel: #12151b;
+      --panel-2: #171b23;
+      --border: #232a34;
+      --border-strong: #313a47;
+      --ink: #f2f5f8;
+      --ink-2: #b7c0cd;
+      --ink-3: #7c8797;
+      --ink-inv: #06120d;
+
+      --win: #12b981;
+      --win-bright: #17d492;
+      --win-ink: #37e6a8;
+      --win-wash: #0d2820;
+      --win-line: #1c4a3a;
+
+      --blue: #5b8bff;
+      --blue-wash: #131c33;
+
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.5);
+      --shadow-md: 0 12px 40px rgba(0,0,0,.55);
+      --shadow-win: 0 16px 50px rgba(18,185,129,.30);
+    }
+  }
+
+  /* explicit toggle overrides — must win */
+  :root[data-theme="dark"] {
+    --bg: #08090c;
+    --bg-2: #0d0f14;
+    --panel: #12151b;
+    --panel-2: #171b23;
+    --border: #232a34;
+    --border-strong: #313a47;
+    --ink: #f2f5f8;
+    --ink-2: #b7c0cd;
+    --ink-3: #7c8797;
+    --ink-inv: #06120d;
+
+    --win: #12b981;
+    --win-bright: #17d492;
+    --win-ink: #37e6a8;
+    --win-wash: #0d2820;
+    --win-line: #1c4a3a;
+
+    --blue: #5b8bff;
+    --blue-wash: #131c33;
+
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.5);
+    --shadow-md: 0 12px 40px rgba(0,0,0,.55);
+    --shadow-win: 0 16px 50px rgba(18,185,129,.30);
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --bg-2: #f7f9fb;
+    --panel: #eef1f4;
+    --panel-2: #e7ebf0;
+    --border: #dde2e8;
+    --border-strong: #c8d0da;
+    --ink: #0b0d12;
+    --ink-2: #3d4552;
+    --ink-3: #6b7482;
+    --ink-inv: #ffffff;
+
+    --win: #0fae7a;
+    --win-bright: #12b981;
+    --win-ink: #067a55;
+    --win-wash: #e7f7f0;
+    --win-line: #b6e6d3;
+
+    --blue: #2563eb;
+    --blue-wash: #eaf0fe;
+
+    --shadow-sm: 0 1px 2px rgba(11,13,18,.06), 0 2px 8px rgba(11,13,18,.05);
+    --shadow-md: 0 8px 30px rgba(11,13,18,.10), 0 2px 8px rgba(11,13,18,.06);
+    --shadow-win: 0 14px 40px rgba(15,174,122,.24);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+  a { color: inherit; text-decoration: none; }
+
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+  ::selection { background: var(--win-bright); color: #04140d; }
+
+  :focus-visible {
+    outline: 3px solid var(--win-bright);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* ---------- shared display type ---------- */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--win-ink);
+    font-weight: 600;
+  }
+  h2.section-h {
+    font-size: clamp(30px, 5.2vw, 52px);
+    line-height: 1.02;
+    letter-spacing: -.03em;
+    font-weight: 850;
+    margin: 14px 0 0;
+  }
+  .section-sub {
+    color: var(--ink-2);
+    font-size: clamp(16px, 2vw, 19px);
+    max-width: 52ch;
+    margin: 16px 0 0;
+  }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+    font-family: var(--sans);
+    font-weight: 750;
+    font-size: 15.5px;
+    letter-spacing: -.01em;
+    padding: 13px 22px;
+    border-radius: 11px;
+    border: 1.5px solid transparent;
+    cursor: pointer;
+    transition: transform .12s ease, box-shadow .18s ease, background .18s ease, border-color .18s ease;
+    white-space: nowrap;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-win {
+    background: var(--win-bright);
+    color: #04140d;
+    box-shadow: 0 8px 22px rgba(18,185,129,.30);
+  }
+  .btn-win:hover { background: var(--win); box-shadow: 0 12px 30px rgba(18,185,129,.40); transform: translateY(-1px); }
+  .btn-ghost {
+    background: transparent;
+    color: var(--ink);
+    border-color: var(--border-strong);
+  }
+  .btn-ghost:hover { border-color: var(--ink); background: var(--panel); }
+  .btn-solid {
+    background: var(--ink);
+    color: var(--bg);
+  }
+  .btn-solid:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+  .btn-lg { padding: 16px 28px; font-size: 17px; border-radius: 13px; }
+
+  /* ============================================================
+     NAV
+     ============================================================ */
+  header.nav {
+    position: sticky; top: 0; z-index: 50;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    backdrop-filter: saturate(140%) blur(14px);
+    -webkit-backdrop-filter: saturate(140%) blur(14px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner {
+    max-width: var(--maxw); margin: 0 auto; padding: 0 24px;
+    height: 64px; display: flex; align-items: center; gap: 18px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 850; font-size: 20px; letter-spacing: -.02em; }
+  .brand .mark {
+    width: 30px; height: 30px; border-radius: 8px;
+    display: grid; place-items: center;
+    background: var(--win-bright); color: #04140d;
+    font-weight: 900; font-size: 19px; line-height: 1;
+    box-shadow: 0 4px 12px rgba(18,185,129,.35);
+  }
+  .nav-links { display: flex; gap: 4px; margin-left: 14px; }
+  .nav-links a {
+    font-size: 14.5px; font-weight: 600; color: var(--ink-2);
+    padding: 8px 12px; border-radius: 9px; transition: color .15s, background .15s;
+  }
+  .nav-links a:hover { color: var(--ink); background: var(--panel); }
+  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+  .toggle {
+    width: 38px; height: 38px; border-radius: 10px;
+    border: 1.5px solid var(--border-strong);
+    background: var(--bg); color: var(--ink);
+    display: grid; place-items: center; cursor: pointer;
+    transition: border-color .15s, background .15s, transform .12s;
+  }
+  .toggle:hover { border-color: var(--ink); background: var(--panel); }
+  .toggle:active { transform: scale(.94); }
+  .toggle svg { width: 18px; height: 18px; }
+  .toggle .i-sun { display: none; }
+  :root[data-theme="dark"] .toggle .i-sun,
+  :root:not([data-theme="light"]) .toggle .i-sun { display: block; }
+  :root[data-theme="dark"] .toggle .i-moon,
+  :root:not([data-theme="light"]) .toggle .i-moon { display: none; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .toggle .i-sun { display: none; }
+    :root:not([data-theme="dark"]) .toggle .i-moon { display: block; }
+  }
+
+  @media (max-width: 780px) {
+    .nav-links { display: none; }
+  }
+
+  /* ============================================================
+     HERO / LEADERBOARD
+     ============================================================ */
+  .hero {
+    position: relative;
+    padding: clamp(48px, 8vw, 92px) 0 clamp(40px, 6vw, 64px);
+    overflow: hidden;
+  }
+  .hero::before {
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    background:
+      radial-gradient(60% 55% at 82% -5%, color-mix(in srgb, var(--win-bright) 16%, transparent), transparent 70%),
+      radial-gradient(50% 40% at 8% 8%, color-mix(in srgb, var(--blue) 8%, transparent), transparent 65%);
+    pointer-events: none;
+  }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+    gap: clamp(28px, 4vw, 56px);
+    align-items: center;
+  }
+  @media (max-width: 940px) {
+    .hero-grid { grid-template-columns: 1fr; gap: 34px; }
+  }
+
+  .hero-tag {
+    display: inline-flex; align-items: center; gap: 9px;
+    font-family: var(--mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
+    font-weight: 600; color: var(--win-ink);
+    background: var(--win-wash); border: 1px solid var(--win-line);
+    padding: 6px 12px; border-radius: 999px;
+  }
+  .hero-tag .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--win-bright); box-shadow: 0 0 0 4px color-mix(in srgb, var(--win-bright) 25%, transparent); }
+
+  h1.hero-h {
+    font-size: clamp(44px, 8.2vw, 84px);
+    line-height: .96;
+    letter-spacing: -.045em;
+    font-weight: 880;
+    margin: 20px 0 0;
+  }
+  h1.hero-h .hl {
+    color: var(--win-ink);
+    position: relative; white-space: nowrap;
+  }
+  .hero-lead {
+    margin: 22px 0 0;
+    font-size: clamp(17px, 2.3vw, 20px);
+    color: var(--ink-2);
+    max-width: 44ch;
+  }
+  .hero-cta { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 30px; align-items: center; }
+  .hero-proof {
+    margin-top: 18px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-3);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .hero-proof .chk { color: var(--win-ink); font-weight: 700; }
+
+  /* leaderboard card */
+  .board {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--rad-lg);
+    box-shadow: var(--shadow-md);
+    padding: 22px 22px 20px;
+    position: relative;
+  }
+  .board-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+    padding-bottom: 16px; margin-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .board-title { font-weight: 820; font-size: 16px; letter-spacing: -.02em; }
+  .board-meta { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); letter-spacing: .04em; }
+
+  .row {
+    display: grid;
+    grid-template-columns: 26px 1fr auto;
+    align-items: center;
+    gap: 14px;
+    padding: 15px 8px 15px 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .row:last-child { border-bottom: 0; }
+  .row .rank {
+    font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--ink-3);
+    text-align: center;
+  }
+  .row.win .rank {
+    color: #04140d; background: var(--win-bright); border-radius: 7px;
+    width: 24px; height: 24px; display: grid; place-items: center; margin: 0 auto;
+    box-shadow: 0 3px 10px rgba(18,185,129,.4);
+  }
+  .row .name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .row .name b { font-weight: 750; font-size: 15.5px; letter-spacing: -.01em; }
+  .row.win .name b { font-weight: 850; }
+  .row .crown {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--win-ink); background: var(--win-wash); border: 1px solid var(--win-line);
+    padding: 2px 7px; border-radius: 999px; font-weight: 700;
+  }
+  .row .bar-wrap { grid-column: 2 / 3; }
+  .bar-line { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 14px; grid-column: 2 / 4; }
+  .track {
+    height: 12px; border-radius: 999px;
+    background: var(--panel);
+    overflow: hidden; position: relative;
+  }
+  .fill {
+    height: 100%; border-radius: 999px; width: 0;
+    background: linear-gradient(90deg, var(--border-strong), var(--ink-3));
+    transition: width 1.15s cubic-bezier(.22,.9,.24,1);
+  }
+  .row.win .fill {
+    background: linear-gradient(90deg, var(--win), var(--win-bright));
+    box-shadow: 0 0 20px rgba(18,185,129,.45);
+  }
+  .pct {
+    font-weight: 850; font-size: clamp(22px, 3vw, 30px); letter-spacing: -.03em;
+    min-width: 62px; text-align: right;
+  }
+  .row.win .pct { color: var(--win-ink); }
+
+  .board-foot {
+    margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    font-family: var(--mono); font-size: 11px; color: var(--ink-3); letter-spacing: .03em;
+  }
+  .board-foot .legend { display: flex; gap: 14px; flex-wrap: wrap; }
+  .board-foot .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; }
+
+  /* ============================================================
+     LOGO / TRUST STRIP
+     ============================================================ */
+  .strip {
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-2);
+  }
+  .strip-inner {
+    max-width: var(--maxw); margin: 0 auto; padding: 18px 24px;
+    display: flex; align-items: center; gap: 26px; flex-wrap: wrap;
+    justify-content: center;
+    font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); letter-spacing: .02em;
+  }
+  .strip-inner b { color: var(--ink); font-weight: 700; }
+
+  /* ============================================================
+     SECTION SCAFFOLD
+     ============================================================ */
+  section { padding: clamp(64px, 9vw, 108px) 0; }
+  .sec-head { max-width: 62ch; }
+
+  /* ---------- WHY IT WINS — stat blocks ---------- */
+  .reasons {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px;
+    margin-top: 46px;
+  }
+  @media (max-width: 860px) { .reasons { grid-template-columns: 1fr; } }
+  .reason {
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--rad);
+    padding: 28px 26px; position: relative; overflow: hidden;
+    transition: border-color .2s, transform .2s, box-shadow .2s;
+  }
+  .reason:hover { border-color: var(--border-strong); transform: translateY(-3px); box-shadow: var(--shadow-md); }
+  .reason .big {
+    font-size: clamp(46px, 6vw, 66px); line-height: 1; font-weight: 880; letter-spacing: -.045em;
+    color: var(--win-ink);
+  }
+  .reason .big small { font-size: .42em; font-weight: 750; color: var(--ink-3); letter-spacing: -.01em; }
+  .reason h3 { margin: 14px 0 8px; font-size: 20px; font-weight: 800; letter-spacing: -.02em; }
+  .reason p { margin: 0; color: var(--ink-2); font-size: 15.5px; }
+  .reason .tick {
+    position: absolute; top: 22px; right: 22px;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  /* ---------- BENCHMARK DEEP DIVE ---------- */
+  .bench { background: var(--bg-2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .bench-grid {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(30px, 5vw, 64px);
+    align-items: center; margin-top: 44px;
+  }
+  @media (max-width: 900px) { .bench-grid { grid-template-columns: 1fr; gap: 34px; } }
+  .bench-defs { display: grid; gap: 16px; }
+  .def {
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--rad);
+    padding: 20px 22px;
+  }
+  .def h4 { margin: 0 0 6px; font-size: 15.5px; font-weight: 800; letter-spacing: -.01em; display: flex; align-items: center; gap: 9px; }
+  .def h4 .n { font-family: var(--mono); font-size: 12px; color: var(--win-ink); border: 1px solid var(--win-line); background: var(--win-wash); border-radius: 6px; padding: 1px 7px; }
+  .def p { margin: 0; color: var(--ink-2); font-size: 15px; }
+
+  .unique {
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--rad-lg);
+    padding: 26px; box-shadow: var(--shadow-sm);
+  }
+  .unique .cap {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-3); margin-bottom: 18px;
+  }
+  .unique-num {
+    font-size: clamp(58px, 9vw, 96px); line-height: .9; font-weight: 880; letter-spacing: -.05em;
+    color: var(--win-ink);
+  }
+  .unique-num small { font-size: .3em; color: var(--ink-2); font-weight: 700; letter-spacing: 0; display: block; margin-top: 8px; }
+  .catch-list { list-style: none; padding: 0; margin: 22px 0 0; display: grid; gap: 11px; }
+  .catch-list li {
+    display: flex; gap: 12px; align-items: flex-start; font-size: 14.5px; color: var(--ink-2);
+    padding-top: 11px; border-top: 1px dashed var(--border);
+  }
+  .catch-list li:first-child { border-top: 0; padding-top: 0; }
+  .catch-list .miss {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--win-ink); background: var(--win-wash); border: 1px solid var(--win-line);
+    border-radius: 6px; padding: 3px 7px; font-weight: 700; white-space: nowrap; margin-top: 1px;
+  }
+
+  /* ---------- NO NOISE / PR MOCK ---------- */
+  .noise-grid {
+    display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: clamp(30px, 5vw, 60px);
+    align-items: center; margin-top: 44px;
+  }
+  @media (max-width: 900px) { .noise-grid { grid-template-columns: 1fr; gap: 30px; } }
+  .noise-facts { list-style: none; padding: 0; margin: 26px 0 0; display: grid; gap: 14px; }
+  .noise-facts li { display: flex; gap: 13px; align-items: flex-start; font-size: 16px; color: var(--ink-2); }
+  .noise-facts .ic {
+    flex: none; width: 24px; height: 24px; border-radius: 7px; margin-top: 1px;
+    display: grid; place-items: center; background: var(--win-wash); color: var(--win-ink);
+    border: 1px solid var(--win-line); font-weight: 900; font-size: 13px;
+  }
+  .noise-facts b { color: var(--ink); font-weight: 750; }
+
+  .pr {
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--rad-lg);
+    box-shadow: var(--shadow-md); overflow: hidden;
+  }
+  .pr-top {
+    display: flex; align-items: center; gap: 10px; padding: 14px 18px;
+    border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  .pr-top .rev { display: flex; align-items: center; gap: 8px; font-weight: 750; font-size: 14px; }
+  .pr-top .rev .mark {
+    width: 22px; height: 22px; border-radius: 6px; background: var(--win-bright); color: #04140d;
+    display: grid; place-items: center; font-weight: 900; font-size: 14px;
+  }
+  .pr-top .count {
+    margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
+  }
+  .pr-body { padding: 8px 0; }
+  .comment {
+    padding: 15px 20px; border-bottom: 1px solid var(--border);
+    display: grid; grid-template-columns: auto 1fr; gap: 12px;
+  }
+  .comment:last-child { border-bottom: 0; }
+  .comment .ava {
+    width: 26px; height: 26px; border-radius: 7px; flex: none;
+    display: grid; place-items: center; font-weight: 900; font-size: 13px;
+    background: var(--ink); color: var(--bg);
+  }
+  .comment .ava.o { background: var(--win-bright); color: #04140d; }
+  .comment .who { font-size: 13px; color: var(--ink-3); margin-bottom: 3px; }
+  .comment .who b { color: var(--ink); font-weight: 700; }
+  .comment .who .sev {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    border-radius: 5px; padding: 1px 6px; margin-left: 6px; font-weight: 700;
+    border: 1px solid var(--border-strong); color: var(--ink-2);
+  }
+  .comment .who .sev.high { color: #c0392b; border-color: color-mix(in srgb, #c0392b 40%, var(--border)); background: color-mix(in srgb,#c0392b 8%, transparent); }
+  .comment .txt { font-size: 14.5px; color: var(--ink); }
+  .comment .txt code {
+    font-family: var(--mono); font-size: 12.5px; background: var(--panel-2);
+    padding: 1.5px 6px; border-radius: 6px; border: 1px solid var(--border);
+  }
+  .fixed-badge {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
+    font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .04em;
+    color: var(--win-ink); background: var(--win-wash); border: 1px solid var(--win-line);
+    padding: 3px 9px; border-radius: 999px;
+  }
+
+  /* ---------- PRICING ---------- */
+  .price-grid {
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-top: 46px;
+    align-items: stretch;
+  }
+  @media (max-width: 1080px) { .price-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .price-grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--rad);
+    padding: 24px 20px; display: flex; flex-direction: column;
+    transition: border-color .2s, transform .2s, box-shadow .2s;
+  }
+  .card:hover { border-color: var(--border-strong); transform: translateY(-4px); box-shadow: var(--shadow-md); }
+  .card .plan { font-weight: 800; font-size: 16px; letter-spacing: -.01em; }
+  .card .track-tag {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--ink-3); margin-top: 3px; min-height: 14px;
+  }
+  .card .price {
+    font-size: clamp(34px, 4vw, 44px); font-weight: 880; letter-spacing: -.04em; line-height: 1;
+    margin: 16px 0 2px;
+  }
+  .card .price .per { font-size: 15px; font-weight: 650; color: var(--ink-3); letter-spacing: -.01em; }
+  .card .price.custom { font-size: clamp(28px,3.4vw,34px); }
+  .card .feats { list-style: none; padding: 0; margin: 18px 0 22px; display: grid; gap: 9px; }
+  .card .feats li { font-size: 13.5px; color: var(--ink-2); display: flex; gap: 9px; align-items: flex-start; line-height: 1.4; }
+  .card .feats li::before {
+    content: "+"; color: var(--win-ink); font-weight: 900; font-family: var(--mono); flex: none; margin-top: -1px;
+  }
+  .card .feats li.dim { color: var(--ink-3); }
+  .card .feats li.dim::before { content: "±"; color: var(--ink-3); }
+  .card .btn { margin-top: auto; width: 100%; }
+
+  .card.feat {
+    border-color: var(--win-bright);
+    box-shadow: var(--shadow-win);
+    position: relative;
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--win-bright) 7%, var(--bg)), var(--bg) 42%);
+  }
+  .card.feat:hover { transform: translateY(-6px); }
+  .card.feat .ribbon {
+    position: absolute; top: -1px; right: 16px;
+    transform: translateY(-50%);
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: #04140d; background: var(--win-bright);
+    padding: 4px 11px; border-radius: 999px;
+    box-shadow: 0 6px 16px rgba(18,185,129,.4);
+  }
+  .card.feat .price { color: var(--win-ink); }
+  .price-foot {
+    margin-top: 26px; text-align: center; font-family: var(--mono); font-size: 12.5px; color: var(--ink-3);
+    letter-spacing: .02em;
+  }
+  .price-foot b { color: var(--win-ink); }
+
+  /* ---------- FINAL CTA ---------- */
+  .cta-band { position: relative; overflow: hidden; }
+  .cta-inner {
+    max-width: var(--maxw); margin: 0 auto; padding: 0 24px;
+  }
+  .cta-box {
+    background: var(--ink);
+    color: var(--bg);
+    border-radius: var(--rad-lg);
+    padding: clamp(44px, 7vw, 76px) clamp(28px, 5vw, 64px);
+    position: relative; overflow: hidden;
+    text-align: center;
+  }
+  .cta-box::before {
+    content: ""; position: absolute; inset: 0; z-index: 0;
+    background: radial-gradient(60% 120% at 78% -10%, rgba(18,185,129,.42), transparent 60%),
+                radial-gradient(50% 100% at 12% 120%, rgba(18,185,129,.20), transparent 55%);
+  }
+  .cta-box > * { position: relative; z-index: 1; }
+  .cta-box .eyebrow { color: var(--win-bright); }
+  .cta-box h2 {
+    font-size: clamp(34px, 6vw, 62px); line-height: 1; letter-spacing: -.04em; font-weight: 880;
+    margin: 14px 0 0;
+    color: var(--bg);
+  }
+  .cta-box p { color: color-mix(in srgb, var(--bg) 72%, transparent); margin: 18px auto 0; max-width: 46ch; font-size: 18px; }
+  .cta-box .hero-cta { justify-content: center; }
+  .cta-box .btn-ghost { color: var(--bg); border-color: color-mix(in srgb, var(--bg) 35%, transparent); }
+  .cta-box .btn-ghost:hover { border-color: var(--bg); background: color-mix(in srgb, var(--bg) 10%, transparent); }
+  .cta-box .foot-note { margin-top: 18px; font-family: var(--mono); font-size: 12px; color: color-mix(in srgb, var(--bg) 60%, transparent); }
+
+  /* ---------- FOOTER ---------- */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 54px 0 40px;
+    background: var(--bg-2);
+  }
+  .foot-grid {
+    display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 30px;
+  }
+  @media (max-width: 760px) { .foot-grid { grid-template-columns: 1fr 1fr; gap: 26px; } }
+  .foot-grid h5 {
+    margin: 0 0 14px; font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600;
+  }
+  .foot-grid a { display: block; color: var(--ink-2); font-size: 14.5px; padding: 5px 0; transition: color .15s; }
+  .foot-grid a:hover { color: var(--win-ink); }
+  .foot-blurb { color: var(--ink-2); font-size: 14.5px; max-width: 34ch; margin: 14px 0 0; }
+  .foot-bottom {
+    max-width: var(--maxw); margin: 40px auto 0; padding: 22px 24px 0;
+    border-top: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    .fill { transition: none !important; }
+  }
+</style>
+
+<!-- ================= NAV ================= -->
+<header class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#top" aria-label="Orvex home">
+      <span class="mark" aria-hidden="true">±</span>
+      <span>Orvex</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#scoreboard">Scoreboard</a>
+      <a href="#why">Why it wins</a>
+      <a href="#benchmark">Benchmark</a>
+      <a href="#pricing">Pricing</a>
+    </nav>
+    <div class="nav-right">
+      <button class="toggle" id="themeToggle" type="button" aria-label="Toggle color theme">
+        <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+        <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <a class="btn btn-win" href="#pricing">Start free</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <!-- ================= HERO / LEADERBOARD ================= -->
+  <section class="hero" id="scoreboard">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <span class="hero-tag"><span class="dot" aria-hidden="true"></span> Head-to-head · 80 real PRs</span>
+        <h1 class="hero-h">Catch bugs<br>before <span class="hl">production.</span></h1>
+        <p class="hero-lead">Orvex reviews every pull request with a multi-model AI ensemble — and caught more real bugs than any single competitor.</p>
+        <div class="hero-cta">
+          <a class="btn btn-win btn-lg" href="#pricing">Start free — 10 reviews, no card</a>
+          <a class="btn btn-ghost btn-lg" href="#benchmark">See the benchmark</a>
+        </div>
+        <div class="hero-proof"><span class="chk">✓</span> Verified head-to-head on 80 real PRs — defect-cluster catch rate.</div>
+      </div>
+
+      <!-- leaderboard -->
+      <div class="board" id="board" role="img" aria-label="Catch-rate leaderboard: Orvex 43%, Codex 29%, CodeRabbit 28%, Qodo 22%.">
+        <div class="board-head">
+          <span class="board-title">Defect-cluster catch rate</span>
+          <span class="board-meta num">n = 80 PRs</span>
+        </div>
+
+        <div class="row win" data-target="43">
+          <span class="rank" aria-hidden="true">1</span>
+          <span class="name"><b>Orvex</b> <span class="crown">Winner</span></span>
+          <div class="bar-line">
+            <span class="track"><span class="fill" data-w="86"></span></span>
+            <span class="pct num" data-count>0%</span>
+          </div>
+        </div>
+
+        <div class="row" data-target="29">
+          <span class="rank num" aria-hidden="true">2</span>
+          <span class="name"><b>Codex</b></span>
+          <div class="bar-line">
+            <span class="track"><span class="fill" data-w="58"></span></span>
+            <span class="pct num" data-count>0%</span>
+          </div>
+        </div>
+
+        <div class="row" data-target="28">
+          <span class="rank num" aria-hidden="true">3</span>
+          <span class="name"><b>CodeRabbit</b></span>
+          <div class="bar-line">
+            <span class="track"><span class="fill" data-w="56"></span></span>
+            <span class="pct num" data-count>0%</span>
+          </div>
+        </div>
+
+        <div class="row" data-target="22">
+          <span class="rank num" aria-hidden="true">4</span>
+          <span class="name"><b>Qodo</b></span>
+          <div class="bar-line">
+            <span class="track"><span class="fill" data-w="44"></span></span>
+            <span class="pct num" data-count>0%</span>
+          </div>
+        </div>
+
+        <div class="board-foot">
+          <span class="legend">
+            <span><i class="swatch" style="background:var(--win-bright)"></i> Orvex</span>
+            <span><i class="swatch" style="background:var(--ink-3)"></i> Competitors</span>
+          </span>
+          <span>% of defect clusters caught</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= TRUST STRIP ================= -->
+  <div class="strip">
+    <div class="strip-inner">
+      <span><b>GitHub App</b> — scoped install</span>
+      <span aria-hidden="true">·</span>
+      <span><b>3</b> independent AI models</span>
+      <span aria-hidden="true">·</span>
+      <span><b>Runs</b> your code, not just the diff</span>
+      <span aria-hidden="true">·</span>
+      <span><b>~8</b> comments max — signal, not noise</span>
+      <span aria-hidden="true">·</span>
+      <span><b>10</b> free reviews, no card</span>
+    </div>
+  </div>
+
+  <!-- ================= WHY IT WINS ================= -->
+  <section id="why">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Why it wins</span>
+        <h2 class="section-h">Three reasons the score isn't close.</h2>
+        <p class="section-sub">Different models catch different bugs. Orvex runs more of them, actually executes your code, and never wastes your attention twice.</p>
+      </div>
+
+      <div class="reasons">
+        <div class="reason">
+          <span class="tick">Ensemble</span>
+          <div class="big num">3<small> models</small></div>
+          <h3>An AI ensemble, not a single opinion</h3>
+          <p>Deterministic rules run first — cheap, exact, before a single token is spent. Then up to three independent models review the same PR. The merged result is the differentiator.</p>
+        </div>
+        <div class="reason">
+          <span class="tick">Runtime moat</span>
+          <div class="big num">1×<small> run</small></div>
+          <h3>It runs your code, not just reads the diff</h3>
+          <p>Orvex executes changes in a sandbox to surface bugs a static read of the diff can't see. Runtime proof is the moat — real behavior, not guesswork.</p>
+        </div>
+        <div class="reason">
+          <span class="tick">No repeats</span>
+          <div class="big num">0<small> nits</small></div>
+          <h3>Never repeats a finding</h3>
+          <p>Push three times, get zero repeated nits. Orvex replies “Fixed” when you actually fix it — and keeps to roughly eight comments per PR. Signal, not noise.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= BENCHMARK DEEP DIVE ================= -->
+  <section class="bench" id="benchmark">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">The receipts</span>
+        <h2 class="section-h">What “catch rate” actually means.</h2>
+        <p class="section-sub">We ran Orvex head-to-head against other review bots on 80 real pull requests. The story is coverage: more models, more passes, more real bugs surfaced.</p>
+      </div>
+
+      <div class="bench-grid">
+        <div class="bench-defs">
+          <div class="def">
+            <h4><span class="n num">01</span> Defect-cluster catch rate</h4>
+            <p>Every PR has a known set of real defects. Catch rate is the share of those defect clusters a reviewer flagged. Orvex hit <b>43%</b> — ahead of Codex (29%), CodeRabbit (28%) and Qodo (22%).</p>
+          </div>
+          <div class="def">
+            <h4><span class="n num">02</span> Head-to-head, same PRs</h4>
+            <p>Same 80 pull requests, same defects, every bot judged against the same ground truth. No cherry-picking — a straight, comparable run.</p>
+          </div>
+          <div class="def">
+            <h4><span class="n num">03</span> Coverage, honestly framed</h4>
+            <p>This is a coverage win, not a precision claim. More models and more passes surface more real bugs — including ones the others missed entirely.</p>
+          </div>
+        </div>
+
+        <div class="unique">
+          <div class="cap">Unique catches — bugs only Orvex flagged</div>
+          <div class="unique-num num">+14<small>pts of catch rate clear of the nearest competitor</small></div>
+          <ul class="catch-list">
+            <li><span class="miss">Others missed</span> A race condition that only appeared once the changed code path actually ran in the sandbox.</li>
+            <li><span class="miss">Others missed</span> An off-by-one that a diff-only read looked past — caught by a second model on the ensemble pass.</li>
+            <li><span class="miss">Others missed</span> An unhandled error branch surfaced by executing the code instead of reasoning about it.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= NO NOISE ================= -->
+  <section id="noise">
+    <div class="wrap">
+      <div class="noise-grid">
+        <div>
+          <span class="eyebrow">No noise</span>
+          <h2 class="section-h">Roughly eight comments. All of them matter.</h2>
+          <ul class="noise-facts">
+            <li><span class="ic" aria-hidden="true">±</span><span><b>~8 comments max</b> per PR — Orvex ranks and trims so you read findings, not filler.</span></li>
+            <li><span class="ic" aria-hidden="true">↺</span><span><b>Never repeats a finding.</b> Push again and again — zero repeated nits.</span></li>
+            <li><span class="ic" aria-hidden="true">✓</span><span><b>Replies “Fixed”</b> when you actually resolve it, so the thread stays honest.</span></li>
+            <li><span class="ic" aria-hidden="true">@</span><span><b>@orvex deep</b> triggers an on-demand deeper pass when a PR is critical.</span></li>
+          </ul>
+        </div>
+
+        <div class="pr" role="img" aria-label="Example PR review: three ranked comments from Orvex, one already marked Fixed.">
+          <div class="pr-top">
+            <span class="rev"><span class="mark" aria-hidden="true">±</span> Orvex reviewed this pull request</span>
+            <span class="count num">3 comments</span>
+          </div>
+          <div class="pr-body">
+            <div class="comment">
+              <span class="ava o" aria-hidden="true">±</span>
+              <div>
+                <div class="who"><b>Orvex</b> on <code>auth/session.ts</code> <span class="sev high">High</span></div>
+                <div class="txt">Session token compared with <code>==</code> — timing-unsafe. Use a constant-time compare before this reaches prod.</div>
+                <span class="fixed-badge">✓ Fixed in a1c9f20</span>
+              </div>
+            </div>
+            <div class="comment">
+              <span class="ava o" aria-hidden="true">±</span>
+              <div>
+                <div class="who"><b>Orvex</b> on <code>api/orders.ts</code> <span class="sev">Medium</span></div>
+                <div class="txt">Ran your code: <code>total</code> overflows when <code>qty</code> is empty. Reproduced in the sandbox — guard the empty case.</div>
+              </div>
+            </div>
+            <div class="comment">
+              <span class="ava o" aria-hidden="true">±</span>
+              <div>
+                <div class="who"><b>Orvex</b> on <code>utils/retry.ts</code> <span class="sev">Low</span></div>
+                <div class="txt">Retry loop can exceed the cap by one under a race — the second model flagged it. Tighten the bound.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PRICING ================= -->
+  <section id="pricing">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Pricing</span>
+        <h2 class="section-h">Priced per workspace. Not per seat.</h2>
+        <p class="section-sub">Every account starts with 10 free reviews — no card required. Scale up when the score speaks for itself.</p>
+      </div>
+
+      <div class="price-grid">
+        <!-- Starter -->
+        <div class="card">
+          <div class="plan">Starter</div>
+          <div class="track-tag">Get going</div>
+          <div class="price num">$29<span class="per">/mo</span></div>
+          <ul class="feats">
+            <li><span class="num">100</span> reviews / mo</li>
+            <li>Then <span class="num">$0.50</span> / review</li>
+            <li><span class="num">2</span> AI models</li>
+            <li>Deterministic rules first</li>
+          </ul>
+          <a class="btn btn-ghost" href="#top">Start free</a>
+        </div>
+
+        <!-- Pro Unlimited -->
+        <div class="card">
+          <div class="plan">Pro Unlimited</div>
+          <div class="track-tag">No caps</div>
+          <div class="price num">$69<span class="per">/mo</span></div>
+          <ul class="feats">
+            <li><b>Unlimited</b> reviews</li>
+            <li><span class="num">2</span> AI models</li>
+            <li>No per-review overage</li>
+            <li>Never repeats a finding</li>
+          </ul>
+          <a class="btn btn-ghost" href="#top">Start free</a>
+        </div>
+
+        <!-- Verify Lite -->
+        <div class="card">
+          <div class="plan">Verify Lite</div>
+          <div class="track-tag">Premium track · budget</div>
+          <div class="price num">$49<span class="per">/mo</span></div>
+          <ul class="feats">
+            <li><span class="num">50</span> reviews / mo</li>
+            <li>Then <span class="num">$0.75</span> / review</li>
+            <li><b><span class="num">3</span> AI models</b></li>
+            <li class="dim">Runs your code — Verify only</li>
+          </ul>
+          <a class="btn btn-ghost" href="#top">Start free</a>
+        </div>
+
+        <!-- Verify (featured) -->
+        <div class="card feat">
+          <span class="ribbon">Best catch rate</span>
+          <div class="plan">Verify</div>
+          <div class="track-tag">The full moat</div>
+          <div class="price num">$99<span class="per">/mo</span></div>
+          <ul class="feats">
+            <li><span class="num">120</span> reviews / mo</li>
+            <li>Then <span class="num">$0.75</span> / review</li>
+            <li><b><span class="num">3</span> AI models</b></li>
+            <li><b>Runs your code</b> in a sandbox</li>
+            <li><code>@orvex deep</code> on demand</li>
+          </ul>
+          <a class="btn btn-win" href="#top">Start free</a>
+        </div>
+
+        <!-- Enterprise -->
+        <div class="card">
+          <div class="plan">Enterprise</div>
+          <div class="track-tag">Scale &amp; control</div>
+          <div class="price num custom">Custom</div>
+          <ul class="feats">
+            <li>SSO / SAML</li>
+            <li>Bring-your-own-LLM key</li>
+            <li>SLA &amp; support</li>
+            <li>Everything in Verify</li>
+          </ul>
+          <a class="btn btn-solid" href="#top">Talk to us</a>
+        </div>
+      </div>
+
+      <p class="price-foot"><b>10 free reviews</b> on every account — no card required · priced per workspace, not per seat.</p>
+    </div>
+  </section>
+
+  <!-- ================= FINAL CTA ================= -->
+  <section class="cta-band">
+    <div class="cta-inner">
+      <div class="cta-box">
+        <span class="eyebrow">Put it on the board</span>
+        <h2>Catch bugs before production.</h2>
+        <p>Install the GitHub App, open a PR, and watch the review land. Ten reviews free — see your own score before you pay a cent.</p>
+        <div class="hero-cta">
+          <a class="btn btn-win btn-lg" href="#pricing">Start free — 10 reviews, no card</a>
+          <a class="btn btn-ghost btn-lg" href="#benchmark">Read the benchmark</a>
+        </div>
+        <div class="foot-note">Scoped GitHub App · pull_requests read/write, contents read · no passwords pasted.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= FOOTER ================= -->
+  <footer>
+    <div class="wrap">
+      <div class="foot-grid">
+        <div>
+          <a class="brand" href="#top" aria-label="Orvex home">
+            <span class="mark" aria-hidden="true">±</span>
+            <span>Orvex</span>
+          </a>
+          <p class="foot-blurb">Automated pull-request review that runs your code and catches bugs before they reach production.</p>
+        </div>
+        <div>
+          <h5>Product</h5>
+          <a href="#scoreboard">Scoreboard</a>
+          <a href="#why">Why it wins</a>
+          <a href="#benchmark">Benchmark</a>
+          <a href="#noise">No noise</a>
+        </div>
+        <div>
+          <h5>Plans</h5>
+          <a href="#pricing">Starter</a>
+          <a href="#pricing">Pro Unlimited</a>
+          <a href="#pricing">Verify</a>
+          <a href="#pricing">Enterprise</a>
+        </div>
+        <div>
+          <h5>Setup</h5>
+          <a href="#top">Install the GitHub App</a>
+          <a href="#top">Config: .orvex-review.yml</a>
+          <a href="#top">@orvex deep</a>
+          <a href="#top">Docs</a>
+        </div>
+      </div>
+    </div>
+    <div class="foot-bottom">
+      <span>± Orvex Review — catch bugs before production.</span>
+      <span class="num">© 2026 Orvex · priced per workspace</span>
+    </div>
+  </footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var root = document.documentElement;
+  var toggle = document.getElementById("themeToggle");
+
+  /* ---- theme toggle: stamp data-theme, persist best-effort ---- */
+  function currentIsDark() {
+    var attr = root.getAttribute("data-theme");
+    if (attr === "dark") return true;
+    if (attr === "light") return false;
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+  try {
+    var saved = localStorage.getItem("orvex-theme");
+    if (saved === "dark" || saved === "light") root.setAttribute("data-theme", saved);
+  } catch (e) {}
+
+  if (toggle) {
+    toggle.addEventListener("click", function () {
+      var next = currentIsDark() ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("orvex-theme", next); } catch (e) {}
+    });
+  }
+
+  /* ---- leaderboard animation ---- */
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var board = document.getElementById("board");
+  if (!board) return;
+
+  var rows = Array.prototype.slice.call(board.querySelectorAll(".row"));
+
+  function setFinal() {
+    rows.forEach(function (row) {
+      var fill = row.querySelector(".fill");
+      var pct = row.querySelector("[data-count]");
+      if (fill) fill.style.width = fill.getAttribute("data-w") + "%";
+      if (pct) pct.textContent = row.getAttribute("data-target") + "%";
+    });
+  }
+
+  function animate() {
+    // grow bars (staggered via transition-delay)
+    rows.forEach(function (row, i) {
+      var fill = row.querySelector(".fill");
+      if (fill) {
+        fill.style.transitionDelay = (i * 90) + "ms";
+        requestAnimationFrame(function () {
+          fill.style.width = fill.getAttribute("data-w") + "%";
+        });
+      }
+    });
+
+    // count up numbers
+    var duration = 1300;
+    var start = null;
+    function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+    function frame(ts) {
+      if (start === null) start = ts;
+      var t = Math.min((ts - start) / duration, 1);
+      var e = easeOut(t);
+      rows.forEach(function (row) {
+        var pct = row.querySelector("[data-count]");
+        var target = parseInt(row.getAttribute("data-target"), 10);
+        if (pct) pct.textContent = Math.round(e * target) + "%";
+      });
+      if (t < 1) requestAnimationFrame(frame);
+      else setFinal();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  if (reduce) { setFinal(); return; }
+
+  // play once the board is on screen
+  var played = false;
+  function play() { if (played) return; played = true; animate(); }
+
+  if ("IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) { play(); io.disconnect(); }
+      });
+    }, { threshold: 0.35 });
+    io.observe(board);
+  } else {
+    play();
+  }
+})();
+</script>

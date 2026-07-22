@@ -5,10 +5,7 @@
  */
 import {
   buildRepoContext,
-  createInstallationOctokit,
   fetchPrDiff,
-  getInstallationIdForRepo,
-  loadGitHubConfigFromEnv,
 } from '@orvex-review/github';
 import {
   dropSelfNegatingFindings,
@@ -18,6 +15,7 @@ import {
   type ReviewFinding,
 } from '@orvex-review/review';
 import { CASES, type EvalCase } from './cases.js';
+import { createBenchmarkOctokit } from './bench/github-auth.js';
 
 interface CaseResult {
   name: string;
@@ -44,9 +42,7 @@ function llmEnv() {
 }
 
 async function reviewPr(c: EvalCase): Promise<ReviewFinding[]> {
-  const cfg = loadGitHubConfigFromEnv();
-  const installationId = await getInstallationIdForRepo(cfg, c.owner, c.repo);
-  const octokit = createInstallationOctokit(cfg, installationId);
+  const octokit = await createBenchmarkOctokit(c.owner, c.repo);
   const ref = { owner: c.owner, repo: c.repo, number: c.pr };
   const { data: pr } = await octokit.rest.pulls.get({ owner: c.owner, repo: c.repo, pull_number: c.pr });
   const sha = pr.head.sha;
@@ -58,10 +54,13 @@ async function reviewPr(c: EvalCase): Promise<ReviewFinding[]> {
   const llm = llmEnv();
   let context;
   try {
+    // Match PRODUCTION context limits so the eval isn't starved relative to what
+    // the live pipeline actually gives the model (was 6/4/10KB — far below prod).
     context = await buildRepoContext(octokit, c.owner, c.repo, sha, reviewable.map((f) => f.filename), {
-      maxRelated: 6,
-      maxDependents: 4,
-      maxFileBytes: 10_000,
+      maxSourceFiles: Number(process.env.ORVEX_CTX_SOURCE ?? 200),
+      maxRelated: Number(process.env.ORVEX_CTX_RELATED ?? 18),
+      maxDependents: Number(process.env.ORVEX_CTX_DEPENDENTS ?? 12),
+      maxFileBytes: Number(process.env.ORVEX_CTX_FILE_BYTES ?? 250_000),
     });
   } catch {
     /* diff-only fallback */
@@ -84,6 +83,8 @@ async function reviewPr(c: EvalCase): Promise<ReviewFinding[]> {
   return findings;
 }
 
+const SEV_RANK: Record<string, number> = { P1: 3, P2: 2, P3: 1, info: 0 };
+
 function scoreCase(c: EvalCase, findings: ReviewFinding[]): CaseResult {
   const blob = findings.map((f) => `${f.severity} ${f.file} ${f.message}`).join('\n');
   const missing: string[] = [];
@@ -91,6 +92,15 @@ function scoreCase(c: EvalCase, findings: ReviewFinding[]): CaseResult {
   for (const re of c.shouldFlag ?? []) {
     if (re.test(blob)) recallHits++;
     else missing.push(re.source);
+  }
+  // Severity-aware recall: the pattern must match a finding AT the required
+  // severity or higher — a P2 bug reported as info is NOT a catch.
+  for (const req of c.shouldFlagSevere ?? []) {
+    const hit = findings.some(
+      (f) => req.pattern.test(`${f.file} ${f.message}`) && (SEV_RANK[f.severity] ?? 0) >= SEV_RANK[req.minSeverity],
+    );
+    if (hit) recallHits++;
+    else missing.push(`${req.pattern.source} @≥${req.minSeverity}`);
   }
   const falsePos: string[] = [];
   for (const re of c.shouldNotFlag ?? []) {
@@ -100,7 +110,7 @@ function scoreCase(c: EvalCase, findings: ReviewFinding[]): CaseResult {
     name: c.name,
     findings,
     recallHits,
-    recallTotal: (c.shouldFlag ?? []).length,
+    recallTotal: (c.shouldFlag ?? []).length + (c.shouldFlagSevere ?? []).length,
     falsePositives: falsePos.length,
     missing,
     falsePos,
@@ -112,18 +122,29 @@ async function main() {
   const cases = only ? CASES.filter((c) => c.name.includes(only)) : CASES;
   const results: CaseResult[] = [];
 
+  const groups = new Map<string, EvalCase[]>();
   for (const c of cases) {
-    process.stdout.write(`▶ ${c.name} (${c.owner}/${c.repo}#${c.pr}) … `);
+    const key = `${c.owner}/${c.repo}#${c.pr}`;
+    const group = groups.get(key) ?? [];
+    group.push(c);
+    groups.set(key, group);
+  }
+
+  for (const [key, group] of groups) {
+    process.stdout.write(`▶ ${key} (${group.length} case${group.length === 1 ? '' : 's'}) … `);
     try {
-      const findings = await reviewPr(c);
-      const r = scoreCase(c, findings);
-      results.push(r);
-      const parts: string[] = [];
-      if (r.recallTotal) parts.push(`recall ${r.recallHits}/${r.recallTotal}`);
-      if (c.shouldNotFlag?.length) parts.push(`${r.falsePositives === 0 ? 'no' : r.falsePositives} false-pos`);
-      console.log(`${r.falsePositives === 0 && r.recallHits === r.recallTotal ? '✅' : '⚠️'} ${parts.join(', ')} (${findings.length} findings)`);
-      for (const m of r.missing) console.log(`    ✗ missed: /${m}/`);
-      for (const fp of r.falsePos) console.log(`    ✗ false positive: /${fp}/`);
+      const findings = await reviewPr(group[0]);
+      console.log(`${findings.length} findings`);
+      for (const c of group) {
+        const r = scoreCase(c, findings);
+        results.push(r);
+        const parts: string[] = [];
+        if (r.recallTotal) parts.push(`recall ${r.recallHits}/${r.recallTotal}`);
+        if (c.shouldNotFlag?.length) parts.push(`${r.falsePositives === 0 ? 'no' : r.falsePositives} false-pos`);
+        console.log(`    ${r.falsePositives === 0 && r.recallHits === r.recallTotal ? '✅' : '⚠️'} ${c.name}: ${parts.join(', ')}`);
+        for (const m of r.missing) console.log(`       ✗ missed: /${m}/`);
+        for (const fp of r.falsePos) console.log(`       ✗ false positive: /${fp}/`);
+      }
     } catch (err) {
       console.log(`ERROR ${(err as Error).message}`);
     }

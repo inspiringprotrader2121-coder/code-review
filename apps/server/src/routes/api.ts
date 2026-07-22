@@ -7,6 +7,8 @@ import {
   legacyAuthMode,
 } from '@orvex-review/tenants';
 import { sessionUser } from './session.js';
+import { checkRateLimit } from './rate-limit.js';
+import { llmCostVisibleForTenant, reviewRunsForTenant, workspaceStatsForTenant } from './cost-visibility.js';
 
 
 export function apiRoutes() {
@@ -21,7 +23,7 @@ export function apiRoutes() {
 
     // Legacy mode (no OAuth configured): allow read access by slug so the
     // dashboard works before login is set up. Locks down once OAuth is on.
-    if (legacyAuthMode()) {
+    if (legacyAuthMode(db.hasPasswordUsers())) {
       const tenant = db.getTenantBySlug(slug);
       if (!tenant) return c.json({ error: 'workspace not found' }, 404);
       return { tenant };
@@ -44,14 +46,22 @@ export function apiRoutes() {
     const ws = workspace(c);
     if (ws instanceof Response) return ws;
     const days = clamp(Number(c.req.query('days') ?? 14), 1, 365);
-    return c.json({ workspace: ws.tenant.slug, ...db.getWorkspaceStats(ws.tenant.id, days) });
+    const canViewLlmCost = llmCostVisibleForTenant(ws.tenant.slug);
+    return c.json({
+      workspace: ws.tenant.slug,
+      ...workspaceStatsForTenant(db.getWorkspaceStats(ws.tenant.id, days), canViewLlmCost),
+    });
   });
 
   app.get('/api/workspaces/:slug/reviews', (c) => {
     const ws = workspace(c);
     if (ws instanceof Response) return ws;
     const limit = clamp(Number(c.req.query('limit') ?? 50), 1, 200);
-    return c.json({ workspace: ws.tenant.slug, reviews: db.listReviewRuns(ws.tenant.id, limit) });
+    const canViewLlmCost = llmCostVisibleForTenant(ws.tenant.slug);
+    return c.json({
+      workspace: ws.tenant.slug,
+      reviews: reviewRunsForTenant(db.listReviewRuns(ws.tenant.id, limit), canViewLlmCost),
+    });
   });
 
   app.get('/api/workspaces/:slug/installations', (c) => {
@@ -83,6 +93,14 @@ export function apiRoutes() {
   app.post('/api/workspaces/:slug/repos/sync', async (c) => {
     const ws = workspace(c);
     if (ws instanceof Response) return ws;
+    // This is the one expensive endpoint here — it fans out a live GitHub API call
+    // per installation. Throttle per tenant so it can't be hammered to exhaust the
+    // App's REST rate limit / spike DB writes.
+    const limit = checkRateLimit(`repos-sync:${ws.tenant.id}`, { windowMs: 60_000, max: 3 });
+    if (!limit.allowed) {
+      c.header('Retry-After', String(limit.retryAfterSeconds));
+      return c.json({ error: 'rate limited — try again shortly' }, 429);
+    }
     const cfg = loadGitHubConfigFromEnv();
     const settings = db.getWorkspaceSettings(ws.tenant.id);
     let synced = 0;
@@ -219,13 +237,14 @@ export function apiRoutes() {
     const ws = workspace(c);
     if (ws instanceof Response) return ws;
     const t = ws.tenant.id;
+    const canViewLlmCost = llmCostVisibleForTenant(ws.tenant.slug);
     return c.json({
       workspace: ws.tenant.slug,
-      stats: db.getWorkspaceStats(t, 14),
+      stats: workspaceStatsForTenant(db.getWorkspaceStats(t, 14), canViewLlmCost),
       pullRequests: db.getPullRequestCounts(t),
       findings: db.getFindingCounts(t),
       repos: db.listRepos(t).map((r) => ({ fullName: r.fullName, enabled: r.enabled })),
-      recentReviews: db.listReviewRuns(t, 8),
+      recentReviews: reviewRunsForTenant(db.listReviewRuns(t, 8), canViewLlmCost),
     });
   });
 

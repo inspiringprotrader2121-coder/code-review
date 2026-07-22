@@ -10,6 +10,7 @@ export {
   REVIEW_INCOMPLETE_SUMMARY,
   type LlmReviewOptions,
 } from './llm.js';
+export { runCodexCliReview, closeCodexSession, isCodexRepoAllowed, type CodexCliReviewOptions, type CodexCliReviewResult } from './codex-cli.js';
 export {
   type ReviewFinding,
   fingerprintFinding,
@@ -51,9 +52,11 @@ export { applyFixToContent, type CodeFix, type ApplyResult } from './apply.js';
 export {
   generateFixWithLlm,
   generateExplanationWithLlm,
+  FixGenerationError,
   type GenerateFixInput,
   type GenerateFixOptions,
   type ExplainInput,
+  type FixGenerationFailureKind,
 } from './llm-fix.js';
 export { runAgent, type AgentFile, type AgentOptions, type AgentResponse } from './agent.js';
 export {
@@ -64,4 +67,5 @@ export {
   type FixCandidate,
 } from './verifier.js';
 export { dropSelfNegatingFindings } from './noise.js';
-export { isRateLimitOrQuotaError } from './llm-client.js';
+export { checkImportBindings, enumerateExports, extractNamedImports } from './import-check.js';
+export { isRateLimitOrQuotaError, llmChat, type LlmClientOptions } from './llm-client.js';

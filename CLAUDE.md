@@ -10,6 +10,19 @@
 - Keep server state aligned with the local checkout via `rsync`.
 
 ## Server Sync Rule
+- Do not run raw `rsync` for deploys. Use `scripts/deploy-safe.sh --dry-run`
+  first, inspect the file list, then `scripts/deploy-safe.sh --restart`.
+  The first rollout of the drain-aware worker may use
+  `DEPLOY_BOOTSTRAP_DRAIN=1`; subsequent deploys must omit that escape hatch.
+- NEVER sync `node_modules`, `dist`, `.data`, `.env`, or `*.pem` to the server.
+  A full-repo sync on 2026-07-08 copied macOS-native binaries
+  (better-sqlite3) onto the Linux server and crashed it on restart
+  (`invalid ELF header`). The same bad sync also overwrote the runtime SQLite
+  DB and removed email/password users.
+- The live server DB must live outside the repo at
+  `/home/orvex/orvex-data/velatrix-review.db`. Server `.env` must use that
+  absolute `STORE_PATH` and stay immutable (`chattr +i`). This makes accidental
+  repo syncs unable to overwrite live account data.
 - Server changes must originate from this local repository.
 - Only files that absolutely must be edited on the live server should be edited/deployed there — keep server changes to the minimum necessary.
 - Use `rsync` from the local checkout to the server so the deployed files match the local source.

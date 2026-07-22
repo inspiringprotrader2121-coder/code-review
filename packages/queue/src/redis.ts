@@ -13,6 +13,76 @@ const DONE_PREFIX = 'orvex-review:done:';
 const INFLIGHT_PREFIX = 'orvex-review:inflight:';
 const PENDING_PREFIX = 'orvex-review:pending:';
 
+// Atomic coalesce: a review replaces the LAST review already in the pending list
+// (scanning from the tail); anything else appends. cjson decode is wrapped in
+// pcall so a malformed entry never aborts the script. Shared by the enqueue and
+// dequeue-claim scripts below — it does NOT return, so callers control the
+// script's own return value. Expects: pending list key in KEYS[2], raw job in
+// ARGV[1], kind in ARGV[2].
+const COALESCE_SNIPPET = `
+local coalesced = 0
+if ARGV[2] == 'review' then
+  local list = redis.call('LRANGE', KEYS[2], 0, -1)
+  for i = #list, 1, -1 do
+    local k = 'review'
+    local ok, d = pcall(cjson.decode, list[i])
+    if ok and d and d.kind then k = d.kind end
+    if k == 'review' then
+      redis.call('LSET', KEYS[2], i - 1, ARGV[1])
+      coalesced = 1
+      break
+    end
+  end
+end
+if coalesced == 0 then
+  redis.call('RPUSH', KEYS[2], ARGV[1])
+end`;
+
+// ATOMIC enqueue decision (closes the enqueue→coalesce TOCTOU): check the PR's
+// inflight lock and either coalesce into pending or push to the main queue as
+// ONE Redis step. With a non-atomic check-then-act, a job could land in pending
+// AFTER the worker's final drain ran — stranded forever (nothing drains pending
+// once the PR goes idle). Serialized against the drain, every interleaving is
+// safe: lock held → pending (the drain pops it); lock gone → main queue.
+// KEYS[1]=inflight key, KEYS[2]=pending list, KEYS[3]=main queue.
+// ARGV[1]=raw job json, ARGV[2]=kind.
+const ENQUEUE_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  ${COALESCE_SNIPPET}
+  return 'coalesced'
+end
+redis.call('RPUSH', KEYS[3], ARGV[1])
+return 'enqueued'`;
+
+// ATOMIC dequeue claim: claim the PR's inflight lock, or — if a run for this PR
+// is already in flight — coalesce into pending, as ONE step (same TOCTOU as
+// enqueue: a non-atomic claim-then-stash could strand the job behind a drain
+// that already ran).
+// KEYS[1]=inflight key, KEYS[2]=pending list. ARGV[1]=raw job, ARGV[2]=kind,
+// ARGV[3]=lock TTL seconds.
+const CLAIM_LUA = `
+local ok = redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[3], 'NX')
+if ok then return 'claimed' end
+${COALESCE_SNIPPET}
+return 'pending'`;
+
+// Compare-and-delete: DEL the key only if it still holds our exact value.
+const CASDEL_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0`;
+
+// Crash-loop guard for startup recovery: a job that kills the worker (OOM, native
+// crash) would otherwise be requeued by recoverOrphans on EVERY restart and crash
+// it again forever. Count how many times each job has been resumed after a
+// restart; past the cap, drop it with a loud log instead of requeueing.
+const RESUMED_PREFIX = 'orvex-review:resumed:';
+const MAX_RESUME_AFTER_RESTART = Math.max(
+  0,
+  Number(process.env.ORVEX_MAX_RESUME_AFTER_RESTART ?? 2) || 2,
+);
+
 export class RedisReviewQueue implements ReviewQueue {
   private redis: Redis;
 
@@ -38,23 +108,19 @@ export class RedisReviewQueue implements ReviewQueue {
       return { accepted: false, jobId: idKey, reason: 'duplicate' };
     }
 
-    const inflight = await this.redis.exists(`${INFLIGHT_PREFIX}${pk}`);
-    if (inflight) {
-      // pending is a LIST; coalesce only a trailing review-after-review so a
-      // fix/ask/resolve command is never overwritten by a later review.
-      const kind = job.kind ?? 'review';
-      const lastRaw = await this.redis.lindex(`${PENDING_PREFIX}${pk}`, -1);
-      const lastKind = lastRaw ? (JSON.parse(lastRaw).kind ?? 'review') : null;
-      if (kind === 'review' && lastKind === 'review') {
-        await this.redis.lset(`${PENDING_PREFIX}${pk}`, -1, JSON.stringify(job));
-      } else {
-        await this.redis.rpush(`${PENDING_PREFIX}${pk}`, JSON.stringify(job));
-      }
-      return { accepted: true, jobId: idKey, reason: 'coalesced' };
-    }
-
-    await this.redis.rpush(QUEUE_KEY, JSON.stringify(job));
-    return { accepted: true, jobId: idKey, reason: 'enqueued' };
+    const raw = JSON.stringify(job);
+    const kind = job.kind ?? 'review';
+    // ONE atomic step: inflight → coalesce to pending, else → main queue.
+    const result = await this.redis.eval(
+      ENQUEUE_LUA,
+      3,
+      `${INFLIGHT_PREFIX}${pk}`,
+      `${PENDING_PREFIX}${pk}`,
+      QUEUE_KEY,
+      raw,
+      kind,
+    );
+    return { accepted: true, jobId: idKey, reason: result === 'coalesced' ? 'coalesced' : 'enqueued' };
   }
 
   async dequeue(): Promise<ReviewJobPayload | null> {
@@ -72,45 +138,41 @@ export class RedisReviewQueue implements ReviewQueue {
 
       // Claim the PR atomically. If a review for this PR is ALREADY running, do
       // NOT start a second one concurrently — stash this as the pending "latest"
-      // so it runs once, after the current one finishes. `SET NX` returns null
-      // when the lock already exists.
-      const claimed = await this.redis.set(`${INFLIGHT_PREFIX}${pk}`, job.headSha, 'EX', 3600, 'NX');
-      if (claimed === null) {
-        await this.coalesceToPending(pk, raw);
-        continue;
-      }
+      // so it runs once, after the current one finishes. Claim-or-stash runs as
+      // ONE Lua step (SET NX + coalesce): a non-atomic claim-then-stash could
+      // land in pending after the in-flight run's final drain, stranding the job.
+      // Store the PAYLOAD as the lock value (not just headSha) so a hard crash
+      // can recover the in-flight job, and so completion can compare-and-delete
+      // only ITS OWN lock. 2h TTL comfortably outlives even a deep review (each
+      // call is wall-clock-capped upstream).
+      const claimed = await this.redis.eval(
+        CLAIM_LUA,
+        2,
+        `${INFLIGHT_PREFIX}${pk}`,
+        `${PENDING_PREFIX}${pk}`,
+        raw,
+        job.kind ?? 'review',
+        7200,
+      );
+      if (claimed === 'pending') continue;
       return job;
     }
     return null;
   }
 
-  /** Stash a job in a PR's pending list, keeping only the LATEST review (older
-   *  same-PR reviews are superseded); command jobs are appended, never dropped. */
-  private async coalesceToPending(pk: string, raw: string): Promise<void> {
-    const kind = (JSON.parse(raw) as ReviewJobPayload).kind ?? 'review';
-    const lastRaw = await this.redis.lindex(`${PENDING_PREFIX}${pk}`, -1);
-    const lastKind = lastRaw ? ((JSON.parse(lastRaw) as ReviewJobPayload).kind ?? 'review') : null;
-    if (kind === 'review' && lastKind === 'review') {
-      await this.redis.lset(`${PENDING_PREFIX}${pk}`, -1, raw);
-    } else {
-      await this.redis.rpush(`${PENDING_PREFIX}${pk}`, raw);
-    }
-  }
-
   async markCompleted(job: ReviewJobPayload): Promise<void> {
     const idKey = jobIdempotencyKey(job);
-    await Promise.all([
-      this.redis.set(`${DONE_PREFIX}${idKey}`, '1', 'EX', 604800),
-      this.redis.del(`${INFLIGHT_PREFIX}${prKey(job)}`),
-    ]);
+    await this.redis.set(`${DONE_PREFIX}${idKey}`, '1', 'EX', 604800);
+    // Compare-and-delete: only release the lock if it is STILL ours. If this
+    // review outran its TTL and another run re-claimed the PR, an unconditional
+    // DEL would delete the new run's lock and let a third run start concurrently.
+    await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, JSON.stringify(job));
   }
 
   async markFailed(job: ReviewJobPayload, _error: string): Promise<void> {
     const idKey = jobIdempotencyKey(job);
-    await Promise.all([
-      this.redis.del(`${SEEN_PREFIX}${idKey}`),
-      this.redis.del(`${INFLIGHT_PREFIX}${prKey(job)}`),
-    ]);
+    await this.redis.del(`${SEEN_PREFIX}${idKey}`);
+    await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, JSON.stringify(job));
   }
 
   async releaseLockAndDrain(prKeyStr: string): Promise<ReviewJobPayload | null> {
@@ -131,10 +193,43 @@ export class RedisReviewQueue implements ReviewQueue {
    * at startup before the worker loop starts.
    */
   async recoverOrphans(): Promise<number> {
+    // After a restart NOTHING is genuinely in-flight, so a leftover inflight lock
+    // is a review that was cut off mid-run (hard crash / SIGKILL). The lock value
+    // is the full job payload — REQUEUE it (clearing its dedup marker) before
+    // deleting the lock, so a crashed review is never lost, then the PR unblocks.
     const inflight = await this.redis.keys(`${INFLIGHT_PREFIX}*`);
-    if (inflight.length > 0) await this.redis.del(...inflight);
+    let recovered = 0;
+    for (const key of inflight) {
+      const raw = await this.redis.get(key);
+      if (raw) {
+        try {
+          const job = JSON.parse(raw) as ReviewJobPayload;
+          // don't requeue a job that already finished (its DONE marker survived)
+          if (!(await this.redis.exists(`${DONE_PREFIX}${jobIdempotencyKey(job)}`))) {
+            // CRASH-LOOP GUARD: a job that KILLS the worker (OOM, native crash)
+            // comes back here on every restart and would crash it again forever.
+            // Count resumes; past the cap, drop the job loudly instead.
+            const idKey = jobIdempotencyKey(job);
+            const resumes = await this.redis.incr(`${RESUMED_PREFIX}${idKey}`);
+            await this.redis.expire(`${RESUMED_PREFIX}${idKey}`, 86400);
+            if (resumes > MAX_RESUME_AFTER_RESTART) {
+              console.error(
+                `[queue] DROPPING job ${idKey} — resumed ${resumes}x after restarts (cap ${MAX_RESUME_AFTER_RESTART}); it appears to crash the worker. Investigate manually.`,
+              );
+            } else {
+              await this.redis.del(`${SEEN_PREFIX}${idKey}`);
+              await this.redis.rpush(QUEUE_KEY, raw);
+              recovered++;
+            }
+          }
+        } catch {
+          /* malformed lock value — just drop the lock */
+        }
+      }
+      await this.redis.del(key);
+    }
 
-    let requeued = 0;
+    let requeued = recovered;
     const pendingKeys = await this.redis.keys(`${PENDING_PREFIX}*`);
     for (const key of pendingKeys) {
       for (;;) {
@@ -151,7 +246,7 @@ export class RedisReviewQueue implements ReviewQueue {
         requeued++;
       }
     }
-    return inflight.length + requeued;
+    return requeued; // recovered in-flight + drained pending
   }
 
   async ping(): Promise<boolean> {

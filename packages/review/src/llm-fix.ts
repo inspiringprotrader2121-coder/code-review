@@ -30,6 +30,17 @@ export interface GenerateFixOptions {
 
 const MAX_FILE_CHARS = 60_000;
 
+export type FixGenerationFailureKind = 'transient' | 'unparseable' | 'no_fix';
+
+export class FixGenerationError extends Error {
+  constructor(
+    message: string,
+    public readonly kind: FixGenerationFailureKind,
+  ) {
+    super(message);
+  }
+}
+
 /**
  * Ask the LLM for a search/replace fix for one finding. The returned
  * originalCode must exist verbatim in the file — the caller re-validates via
@@ -82,18 +93,20 @@ export async function generateFixWithLlm(
       user,
       { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, json: true },
     );
-  } catch {
-    return null;
+  } catch (err) {
+    throw new FixGenerationError((err as Error).message, 'transient');
   }
 
   let parsed: z.infer<typeof LlmFixSchema>;
   try {
     parsed = LlmFixSchema.parse(extractJsonLoose(text));
-  } catch {
-    return null;
+  } catch (err) {
+    throw new FixGenerationError((err as Error).message, 'unparseable');
   }
 
-  if (!parsed.originalCode || parsed.originalCode === parsed.fixedCode) return null;
+  if (!parsed.originalCode || parsed.originalCode === parsed.fixedCode) {
+    throw new FixGenerationError('no safe fix could be generated', 'no_fix');
+  }
 
   return {
     originalCode: parsed.originalCode,

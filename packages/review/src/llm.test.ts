@@ -45,10 +45,11 @@ test('normalizeLlmResponse drops findings missing message or file', () => {
   assert.equal(parsed.findings[0].file, 'ok.ts');
 });
 
-test('normalizeLlmResponse defaults unknown severity to P3 and clamps confidence', () => {
+test('normalizeLlmResponse defaults unknown severity to info (fail toward nitpick) and clamps confidence', () => {
   const raw = { findings: [{ file: 'a.ts', message: 'm', severity: 'weird', confidence: 5 }] };
   const parsed = LlmReviewResponseSchema.parse(normalizeLlmResponse(raw));
-  assert.equal(parsed.findings[0].severity, 'P3');
+  // Unknown/unrecognized severity → info, NOT P3 (P3 now means MEDIUM = a real bug).
+  assert.equal(parsed.findings[0].severity, 'info');
   assert.equal(parsed.findings[0].confidence, 1);
   assert.equal(parsed.findings[0].category, 'general');
 });

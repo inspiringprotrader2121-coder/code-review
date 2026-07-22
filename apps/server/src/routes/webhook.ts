@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import type { ReviewQueue } from '@orvex-review/queue';
 import type { FixRequest, ReviewJobPayload } from '@orvex-review/queue';
 import {
@@ -17,6 +18,7 @@ import {
 import {
   applyCheckboxChecked,
   applyingLine,
+  closeCodexSession,
   commandTrigger,
   formatAutoApplyReply,
   formatFixSkippedReply,
@@ -25,9 +27,10 @@ import {
   parseOrvexCommand,
   replaceApplyLine,
 } from '@orvex-review/review';
-import { TenantService, isPlanId } from '@orvex-review/tenants';
+import { TenantService, isPlanId, planFeatures } from '@orvex-review/tenants';
 import { createAppDatabase, type GitHubInstallation } from '@orvex-review/store';
 import { enqueueManualReview } from '../queue-runner.js';
+import { authorizedAdmin } from './admin-auth.js';
 
 const REVIEW_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
 
@@ -108,6 +111,30 @@ export function webhookRoutes(queue: ReviewQueue) {
   const tenants = new TenantService();
   const db = createAppDatabase();
 
+  // Load the GitHub App config ONCE (lazily, on the first webhook) — it reads
+  // and parses the App private key, and doing it PER REQUEST meant every
+  // webhook delivery re-read the PEM from disk. Lazy (not at construction) so
+  // tests can build the routes without GitHub env set.
+  let githubConfig: GitHubAppConfig | null = null;
+  const getGithubConfig = (): GitHubAppConfig => (githubConfig ??= loadGitHubConfigFromEnv());
+
+  // Dedup GitHub REDELIVERIES (X-GitHub-Delivery): GitHub re-sends a delivery
+  // on timeout/5xx, and re-processing a fix_all command or apply-checkbox edit
+  // double-enqueues jobs and double-posts reply comments. Bounded FIFO set.
+  const seenDeliveries = new Set<string>();
+  const markDelivery = (id: string | undefined): boolean => {
+    if (!id) return true; // no header (non-Github caller) — process normally
+    if (seenDeliveries.has(id)) return false;
+    seenDeliveries.add(id);
+    if (seenDeliveries.size > 10_000) {
+      for (const old of seenDeliveries) {
+        seenDeliveries.delete(old);
+        if (seenDeliveries.size <= 8_000) break;
+      }
+    }
+    return true;
+  };
+
   /** Upsert the repos an installation can access into the dashboard repo list. */
   function syncReposFromPayload(installationId: number, repos: RepositoryLite[]): void {
     if (repos.length === 0) return;
@@ -158,10 +185,12 @@ export function webhookRoutes(queue: ReviewQueue) {
     pr: number,
     kind: 'review' | 'fix' | 'explain' | 'ask' | 'resolve',
     fix?: FixRequest,
+    extra?: Partial<ReviewJobPayload>,
   ): Promise<void> {
     const octokit = createInstallationOctokit(githubConfig, installation.installationId);
     const prMeta = await fetchPullRequest(octokit, { owner, repo, number: pr });
     const job: ReviewJobPayload = {
+      ...extra,
       kind,
       installationId: installation.installationId,
       tenantId: installation.tenantId,
@@ -184,8 +213,47 @@ export function webhookRoutes(queue: ReviewQueue) {
     githubConfig: GitHubAppConfig,
     data: CommentWebhook,
   ): Promise<string> {
-    if (data.action !== 'created') return 'ignored_action';
     if (!data.issue?.pull_request) return 'not_a_pr';
+
+    // Apply-fix checkbox ticked on one of our PR-LEVEL finding comments (the
+    // ones posted for findings that couldn't be anchored to a diff line —
+    // summary-only findings previously had NO apply button). Mirrors the
+    // inline review-comment checkbox path below.
+    if (data.action === 'edited' && data.comment.user.login === githubConfig.botLogin) {
+      if (data.sender.login === githubConfig.botLogin) return 'own_edit';
+      if (!applyCheckboxChecked(data.changes?.body?.from, data.comment.body)) return 'not_a_check';
+      const fingerprint = parseApplyMarker(data.comment.body);
+      if (!fingerprint) return 'no_marker';
+
+      const pr = data.issue.number;
+      const owner = data.repository.owner.login;
+      const repo = data.repository.name;
+      const installation = await resolveActiveInstallation(data, owner);
+      if (!installation) return 'no_installation';
+
+      // commits to the branch → gate on the toggler's real write access
+      const gateOctokit = createInstallationOctokit(githubConfig, installation.installationId);
+      if (!(await userCanWrite(gateOctokit, owner, repo, data.sender.login))) {
+        return 'insufficient_permissions';
+      }
+
+      await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+        scope: 'one',
+        fingerprint,
+        replyToCommentId: data.comment.id,
+        isReviewComment: false,
+        requestedBy: data.sender.login,
+      });
+      // immediate feedback (new comments DO live-update in open browsers)
+      await replyToIssueComment(
+        gateOctokit,
+        { owner, repo, number: pr },
+        `🔄 **Applying this fix…** — requested by @${data.sender.login}. Orvex will follow up here with the result.`,
+      ).catch(() => {});
+      return 'fix_enqueued_from_checkbox';
+    }
+
+    if (data.action !== 'created') return 'ignored_action';
     if (data.comment.user.login === githubConfig.botLogin) return 'own_comment';
 
     const command = parseOrvexCommand(data.comment.body);
@@ -217,6 +285,26 @@ export function webhookRoutes(queue: ReviewQueue) {
       case 'review':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review');
         return 'review_enqueued';
+      case 'deep': {
+        // PAID-ONLY: ~2x a normal review's cost — the free trial's whole point
+        // is bounded spend, so it's excluded (plans.deepReviews).
+        const features = planFeatures(db.getTenantPlan(installation.tenantId));
+        if (!features.deepReviews) {
+          await replyToIssueComment(
+            octokit,
+            { owner, repo, number: pr },
+            '🔎 **Deep review** runs extra analysis passes and is available on paid plans. Upgrade at https://useorvex.com/#pricing — or use `@orvex review` for a standard re-review.',
+          ).catch(() => {});
+          return 'deep_not_in_plan';
+        }
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review', undefined, { deep: true });
+        await replyToIssueComment(
+          octokit,
+          { owner, repo, number: pr },
+          '🔎 **Deep review started** — running extra diverse analysis passes on top of the standard review. This takes noticeably longer than a normal review (often 10+ minutes), so no need to worry if it is not back in a couple of minutes. New findings will be added to this PR; nothing already found is repeated. A deep review counts as 2 reviews toward your monthly quota.',
+        ).catch(() => {});
+        return 'deep_enqueued';
+      }
       case 'fix':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
           ...baseFix,
@@ -304,8 +392,25 @@ export function webhookRoutes(queue: ReviewQueue) {
         requestedBy: data.sender.login,
       });
 
-      // Immediate feedback: flip the checkbox to "⏳ Applying fix…" right now, so
-      // the user sees the click registered instead of waiting with no signal.
+      // Immediate feedback that survives no-refresh: post a NEW reply comment
+      // (GitHub live-updates new thread comments to open browsers, unlike an edit
+      // to the bot's own comment which it does NOT push). The fix job then posts a
+      // follow-up reply with the result + reason. This is why CodeRabbit feels
+      // instant — status via new comments, not button edits.
+      try {
+        await replyToReviewComment(
+          gateOctokit,
+          owner,
+          repo,
+          pr,
+          data.comment.id,
+          `🔄 **Applying this fix…** Orvex is committing it to this branch — I'll post the result here in a moment.`,
+        );
+      } catch {
+        /* best-effort progress signal — the fix is already enqueued */
+      }
+      // Also flip the checkbox to "⏳ Applying fix…" as a secondary signal (shows
+      // on refresh, and the fix job resets it to a retry checkbox if it fails).
       try {
         await updateReviewCommentBody(
           gateOctokit,
@@ -347,6 +452,26 @@ export function webhookRoutes(queue: ReviewQueue) {
       case 'review':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review');
         return 'review_enqueued';
+      case 'deep': {
+        // PAID-ONLY: ~2x a normal review's cost — the free trial's whole point
+        // is bounded spend, so it's excluded (plans.deepReviews).
+        const features = planFeatures(db.getTenantPlan(installation.tenantId));
+        if (!features.deepReviews) {
+          await replyToIssueComment(
+            octokit,
+            { owner, repo, number: pr },
+            '🔎 **Deep review** runs extra analysis passes and is available on paid plans. Upgrade at https://useorvex.com/#pricing — or use `@orvex review` for a standard re-review.',
+          ).catch(() => {});
+          return 'deep_not_in_plan';
+        }
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review', undefined, { deep: true });
+        await replyToIssueComment(
+          octokit,
+          { owner, repo, number: pr },
+          '🔎 **Deep review started** — running extra diverse analysis passes on top of the standard review. This takes noticeably longer than a normal review (often 10+ minutes), so no need to worry if it is not back in a couple of minutes. New findings will be added to this PR; nothing already found is repeated. A deep review counts as 2 reviews toward your monthly quota.',
+        ).catch(() => {});
+        return 'deep_enqueued';
+      }
       case 'fix':
       case 'fix_this':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
@@ -443,8 +568,14 @@ export function webhookRoutes(queue: ReviewQueue) {
     }
   }
 
-  app.post('/webhooks/github', async (c) => {
-    const githubConfig = loadGitHubConfigFromEnv();
+  app.post(
+    '/webhooks/github',
+    // Cap the body BEFORE it's buffered — an unauthenticated attacker must not be
+    // able to exhaust memory with a multi-GB POST before signature verification.
+    // 25MB matches GitHub's own max webhook payload.
+    bodyLimit({ maxSize: 25 * 1024 * 1024, onError: (c) => c.json({ error: 'payload too large' }, 413) }),
+    async (c) => {
+    const githubConfig = getGithubConfig();
     const rawBody = await c.req.text();
     const signature = c.req.header('x-hub-signature-256');
     const event = c.req.header('x-github-event');
@@ -453,7 +584,16 @@ export function webhookRoutes(queue: ReviewQueue) {
       return c.json({ error: 'invalid signature' }, 401);
     }
 
-    const payload = JSON.parse(rawBody) as Record<string, unknown>;
+    // AFTER signature verification, so a forged request can't poison the set.
+    // A claimed id is released if parsing/processing throws: GitHub must be able
+    // to redeliver a transiently failed event instead of receiving a false dedup.
+    const deliveryId = c.req.header('x-github-delivery');
+    if (!markDelivery(deliveryId)) {
+      return c.json({ ok: true, deduped: true });
+    }
+
+    try {
+      const payload = JSON.parse(rawBody) as Record<string, unknown>;
 
     if (event === 'installation') {
       const data = payload as unknown as InstallationWebhook;
@@ -585,6 +725,17 @@ export function webhookRoutes(queue: ReviewQueue) {
       mergedAt: prPayload.pull_request.merged_at ?? undefined,
     });
 
+    // Close any persisted Codex CLI session when the PR is done. The session
+    // files are passive (no CPU), but deleting them keeps ~/.codex tidy.
+    if (prState === 'closed' || prState === 'merged') {
+      const prior = db.getState({ installationId, owner, repo, pr });
+      if (prior?.codexThreadId) {
+        console.log(`[webhook] closing Codex session ${prior.codexThreadId} for ${owner}/${repo}#${pr}`);
+        closeCodexSession(prior.codexThreadId).catch(() => {});
+        db.saveState({ ...prior, codexThreadId: undefined });
+      }
+    }
+
     if (!REVIEW_ACTIONS.has(action)) {
       return c.json({ ok: true, recorded: prState, reviewed: false });
     }
@@ -630,7 +781,11 @@ export function webhookRoutes(queue: ReviewQueue) {
         `${owner}/${repo}#${pr} ${action} @ ${headSha.slice(0, 7)} → ${result.reason ?? 'queued'}`,
     );
 
-    return c.json({ ok: true, jobId: result.jobId, reason: result.reason });
+      return c.json({ ok: true, jobId: result.jobId, reason: result.reason });
+    } catch (err) {
+      if (deliveryId) seenDeliveries.delete(deliveryId);
+      throw err;
+    }
   });
 
   app.post('/review', async (c) => {
@@ -681,11 +836,7 @@ export function webhookRoutes(queue: ReviewQueue) {
   // a real billing surface exists it lets plans be set without hand-editing the
   // DB. Guarded by ORVEX_ADMIN_SECRET (falls back to REVIEW_API_SECRET).
   app.post('/admin/tenants/:slug/plan', async (c) => {
-    const adminSecret = process.env.ORVEX_ADMIN_SECRET ?? process.env.REVIEW_API_SECRET;
-    if (!adminSecret) return c.json({ error: 'admin endpoint disabled: no admin secret set' }, 503);
-    if (c.req.header('authorization') !== `Bearer ${adminSecret}`) {
-      return c.json({ error: 'unauthorized' }, 401);
-    }
+    if (!authorizedAdmin(c, db)) return c.json({ error: 'unauthorized' }, 401);
     const { plan } = await c.req.json<{ plan?: string }>().catch(() => ({ plan: undefined }));
     if (!plan || !isPlanId(plan)) {
       return c.json({ error: 'plan must be one of: free, review, verify, enterprise' }, 400);

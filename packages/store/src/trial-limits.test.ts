@@ -55,6 +55,20 @@ test('trial is anchored to the GitHub account, not the workspace — a second wo
   assert.equal(d.countAccountReviews('alice'), 2, 'both workspaces count against the same account');
 });
 
+test('countGlobalFreeTierReviewsSince counts only free-tier reviews across all accounts', () => {
+  const d = db();
+  // free-tier reviews from several accounts (a farm)
+  d.recordReviewRun({ tenantId: 't1', installationId: 1, owner: 'farm1', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: true });
+  d.recordReviewRun({ tenantId: 't2', installationId: 2, owner: 'farm2', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'running', durationMs: 100, freeTier: true });
+  d.recordReviewRun({ tenantId: 't3', installationId: 3, owner: 'farm3', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: true });
+  // a PAID review must NOT count toward the free-tier cap
+  d.recordReviewRun({ tenantId: 'p1', installationId: 9, owner: 'paying', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: false });
+  // a free-tier FIX / skipped run must NOT count
+  d.recordReviewRun({ tenantId: 't4', installationId: 4, owner: 'farm4', repo: 'r', pr: 1, headSha: 's', action: 'fix:ready', status: 'completed', durationMs: 100, freeTier: true });
+  d.recordReviewRun({ tenantId: 't5', installationId: 5, owner: 'farm5', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'skipped', durationMs: 0, freeTier: true });
+  assert.equal(d.countGlobalFreeTierReviewsSince(24 * 3600_000), 3, 'counts running+completed free-tier reviews only');
+});
+
 test('countDistinctAccountsFromIp counts unique accounts and ignores unknown IPs', () => {
   const d = db();
   d.recordAbuseSignal({ ip: '1.2.3.4', accountLogin: 'acc1', kind: 'install' });
@@ -64,6 +78,25 @@ test('countDistinctAccountsFromIp counts unique accounts and ignores unknown IPs
   assert.equal(d.countDistinctAccountsFromIp('1.2.3.4', 24 * 3600_000), 2);
   assert.equal(d.countDistinctAccountsFromIp('9.9.9.9', 24 * 3600_000), 1);
   assert.equal(d.countDistinctAccountsFromIp('unknown', 24 * 3600_000), 0);
+});
+
+test('getUserByNormalizedEmail finds an account by its alias-collapsed identity (anti-farm)', () => {
+  const d = db();
+  // signup stores the normalized (alias-collapsed) identity
+  const u = d.createPasswordUser({ email: 'John.Doe+work@gmail.com', passwordHash: 'scrypt$x$y', normalizedEmail: 'johndoe@gmail.com' });
+  assert.ok(u);
+  // a second signup with a DIFFERENT-looking alias of the same inbox is detected
+  assert.ok(d.getUserByNormalizedEmail('johndoe@gmail.com'), 'alias of the same inbox is recognized');
+  // an unrelated inbox is not
+  assert.equal(d.getUserByNormalizedEmail('someoneelse@gmail.com'), null);
+});
+
+test('setUserNormalizedEmailIfMissing backfills only when absent (never overwrites)', () => {
+  const d = db();
+  const u = d.createPasswordUser({ email: 'a@b.com', passwordHash: 'scrypt$x$y' })!; // normalizedEmail defaults to email
+  d.setUserNormalizedEmailIfMissing(u.id, 'different@x.com'); // should NOT overwrite existing
+  assert.ok(d.getUserByNormalizedEmail('a@b.com'), 'existing normalized_email is preserved');
+  assert.equal(d.getUserByNormalizedEmail('different@x.com'), null, 'did not overwrite');
 });
 
 test('new tenants start on the free trial, not a paid tier', () => {

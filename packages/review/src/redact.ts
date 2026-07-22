@@ -28,13 +28,42 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
       /(password|passwd|secret|api[_-]?key|apikey|access[_-]?key|client[_-]?secret|auth[_-]?token|token)\s*[:=]\s*['"][^'"\n]{8,}['"]/gi,
     replacement: '$1=[REDACTED]',
   },
-  // key=value (UNQUOTED) — the common .env / CI leak the quoted rule missed.
-  // Requires an assignment and an 8+ char non-whitespace value, so ordinary
-  // prose ("token: the next step") won't trip it.
+  // key=value (UNQUOTED) — the common .env / CI leak. NO leading \b on purpose:
+  // real secrets use prefixed SCREAMING_SNAKE keys (JWT_SECRET, DB_PASSWORD,
+  // AWS_SECRET_ACCESS_KEY) where `_` is a word char, so a leading \b never
+  // matched them and shipped the value to the model. Matching the keyword as a
+  // substring of the key is correct — over-redaction is safe, under-redaction is
+  // the bug. The assignment + 6+ char value guard keeps ordinary prose out.
   {
     pattern:
-      /\b(password|passwd|secret|api[_-]?key|apikey|access[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token)\b(\s*[:=]\s*)([^\s'"#;,]{8,})/gi,
+      /(password|passwd|secret|api[_-]?key|apikey|access[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|token)(\s*[:=]\s*)([^\s'"#;,]{6,})/gi,
     replacement: '$1$2[REDACTED]',
+  },
+  // SCREAMING_SNAKE env secret where the keyword is NOT the last token before `=`
+  // — e.g. SECRET_KEY=, SECRET_KEY_BASE=, PRIVATE_KEY=, ENCRYPTION_KEY=,
+  // SIGNING_KEY=, MASTER_KEY=, GPG_PASSPHRASE=. The rule above only fires when the
+  // keyword ends the key (DB_PASSWORD works, SECRET_KEY doesn't), so these leaked.
+  {
+    pattern:
+      /\b([A-Z][A-Z0-9_]*(?:SECRET|KEY|TOKEN|PASS(?:WORD|PHRASE)?|CREDENTIALS?|PRIVATE|SIGNING|ENCRYPTION)[A-Z0-9_]*)(\s*[:=]\s*)([^\s'"#;,]{6,})/g,
+    replacement: '$1$2[REDACTED]',
+  },
+  // Authorization: Bearer <token> (and JSON "authorization": "Bearer …").
+  {
+    pattern: /\b([Bb]earer\s+)[A-Za-z0-9._~+/-]{16,}=*/g,
+    replacement: '$1[REDACTED]',
+  },
+  // Connection-string / URL credentials: scheme://[user]:PASSWORD@host — redact
+  // the password. Username is OPTIONAL ([^\s:@/]*) so redis AUTH's userless form
+  // `redis://:pass@host` (and many managed URLs) is caught, not just `user:pass@`.
+  {
+    pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:@/]*:)([^\s@/]{3,})@/gi,
+    replacement: '$1[REDACTED]@',
+  },
+  // Slack incoming-webhook URLs (the path IS the secret).
+  {
+    pattern: /(hooks\.slack\.com\/services\/)[A-Za-z0-9/]+/g,
+    replacement: '$1[REDACTED]',
   },
 ];
 

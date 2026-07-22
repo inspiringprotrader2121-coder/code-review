@@ -91,7 +91,12 @@ export async function fetchRepoTree(
 
 // ——— Full-repo snapshot (in-memory only; never written to disk) ———
 
-const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte)$/;
+// Include shell + SQL: a changed backup.sh / migration.sql was previously EXCLUDED
+// from the relationship snapshot, so it got no companion context (its callers,
+// sibling scripts, cron/compose refs) — a real recall gap on script/migration
+// bugs. They're still reviewed when changed (they have a patch); this lets them
+// pull related files too.
+const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte|sh|bash|sql)$/;
 
 /**
  * Download the repo tarball at `sha` and extract it IN MEMORY into a
@@ -196,7 +201,16 @@ export async function buildRepoContext(
 
   let snapshot: Map<string, string> | null = null;
   try {
-    snapshot = await fetchRepoSnapshot(octokit, owner, repo, sha);
+    // The snapshot keeps files up to AT LEAST its own 120KB default, even when
+    // the caller's per-file review limit is smaller. Passing the review limit
+    // through verbatim regressed the small-budget callers (nightly 24KB, autofix
+    // 32KB): the snapshot silently dropped every file over ~24KB, so exactly the
+    // big files a reviewer needs context FROM vanished from related/dependents/
+    // others. The per-file `clip` above still bounds what reaches the prompt —
+    // this only controls what the snapshot is allowed to KEEP.
+    snapshot = await fetchRepoSnapshot(octokit, owner, repo, sha, {
+      maxFileBytes: Math.max(maxFileBytes, 120_000),
+    });
   } catch {
     snapshot = null; // fall back to API-per-file below
   }
@@ -204,8 +218,20 @@ export async function buildRepoContext(
   const treePaths = snapshot ? [...snapshot.keys()] : await fetchRepoTree(octokit, owner, repo, sha);
   const tree = new Set(treePaths);
 
-  const readFile = async (path: string): Promise<string | null> =>
-    snapshot ? (snapshot.get(path) ?? null) : fetchFileContent(octokit, owner, repo, path, sha);
+  // When a CHANGED file is missing from an otherwise-successful snapshot (omitted
+  // for the total cap, a binary false-positive, or size), fall back to the GitHub
+  // API so the file under review always gets its full content. Gated to changed
+  // files (known to exist from the diff) so we never waste a call on a possibly
+  // mis-resolved context path. Note: when a snapshot exists, `tree` is only the
+  // snapshot's keys, so we can't gate on tree membership for the large files this
+  // is meant to rescue — `changed` is the correct, complete signal.
+  const readFile = async (path: string): Promise<string | null> => {
+    if (!snapshot) return fetchFileContent(octokit, owner, repo, path, sha);
+    const fromSnap = snapshot.get(path);
+    if (fromSnap !== undefined) return fromSnap;
+    if (changed.has(path)) return fetchFileContent(octokit, owner, repo, path, sha);
+    return null; // best-effort context file absent from snapshot — skip
+  };
 
   // full contents of the changed files themselves
   const changedContents: RelatedFile[] = [];
@@ -232,6 +258,40 @@ export async function buildRepoContext(
   for (const path of relatedPaths) {
     const content = await readFile(path);
     if (content) related.push({ path, content: clip(content) });
+  }
+
+  // Migration-aware context: a changed migration imports nothing and nothing
+  // imports it, so the import graph gives the reviewer NOTHING to check it
+  // against — yet its entire correctness is consistency with the ORM schema
+  // and with what other migrations assume exists. (PR102: four fresh-install-
+  // breaking column omissions in a rewritten baseline were invisible for
+  // exactly this reason — the passes never saw schema.prisma or migrations
+  // 013/028.) When a migration or .sql file changes, pull in the schema
+  // definition files and the sibling migrations so shape mismatches are
+  // checkable, not guessable.
+  const MIGRATION_PATH_RE = /(^|\/)migrations?\//i;
+  const changedMigrations = changedFiles.filter((p) => MIGRATION_PATH_RE.test(p) || p.endsWith('.sql'));
+  if (changedMigrations.length > 0) {
+    const SCHEMA_BASENAME_RE = /^(schema\.(prisma|sql|rb)|structure\.sql|[\w.-]*-?schema\.sql)$/i;
+    const schemaPaths = treePaths
+      .filter((p) => SCHEMA_BASENAME_RE.test(p.split('/').pop() ?? ''))
+      .slice(0, 4);
+    const migrationDirs = new Set<string>();
+    for (const p of changedMigrations) {
+      const m = p.match(MIGRATION_PATH_RE);
+      if (m && m.index !== undefined) migrationDirs.add(p.slice(0, m.index + m[0].length));
+    }
+    const siblingMigrations = treePaths
+      .filter((p) => !changed.has(p) && [...migrationDirs].some((d) => p.startsWith(d)))
+      .sort() // migration names are ordered (000_, 013_, …)
+      .slice(-24); // the most recent encode what the current shape must satisfy
+    for (const path of [...schemaPaths, ...siblingMigrations]) {
+      if (changed.has(path) || seen.has(path)) continue;
+      const content = await readFile(path);
+      if (!content) continue;
+      seen.add(path);
+      related.push({ path, content: clip(content) });
+    }
   }
 
   // reverse deps: repo-wide scan for files importing the changed ones

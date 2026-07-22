@@ -34,6 +34,14 @@ export interface ReviewJobPayload {
   action: 'opened' | 'synchronize' | 'reopened' | 'manual' | 'command';
   fix?: FixRequest;
   enqueuedAt: string;
+  /** `@orvex deep`: run extra diverse lens passes and union the results (paid plans) */
+  deep?: boolean;
+  /** set when this job was re-queued after a restart interrupted it — a job may
+   *  be resumed at most ONCE, so a crash/restart loop can't re-run it forever */
+  resumedAfterRestart?: boolean;
+  /** transient-failure retry counter — bounds how many times a job is re-queued
+   *  after a rate-limit/network blip so a persistent failure can't loop forever */
+  attempts?: number;
 }
 
 export interface EnqueueResult {

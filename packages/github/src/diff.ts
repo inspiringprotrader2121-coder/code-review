@@ -1,5 +1,5 @@
 import type { Octokit } from '@octokit/rest';
-import type { ChangedFile, PrRef } from './types.js';
+import type { ChangedFile, DiffCoverage, PrRef } from './types.js';
 import { filterChangedFiles } from './diff-filter.js';
 
 export async function fetchCompareDiff(
@@ -9,15 +9,43 @@ export async function fetchCompareDiff(
   baseSha: string,
   headSha: string,
   opts: { maxFileBytes: number; maxFiles: number; ignoreGlobs?: string[] },
-): Promise<ChangedFile[]> {
-  const { data } = await octokit.rest.repos.compareCommits({
+): Promise<{ files: ChangedFile[]; coverage: DiffCoverage }> {
+  // PAGINATE via the iterator — octokit.paginate does NOT aggregate
+  // `res.data.files` for compareCommits (it only concatenates array responses),
+  // so a single call silently dropped every file past the first page on a large
+  // PR. GitHub caps the compare endpoint at 3000 files; log when we hit it.
+  const GITHUB_COMPARE_FILE_CAP = 3000;
+  const rawFiles: Array<{
+    filename: string;
+    status: string;
+    patch?: string;
+    previous_filename?: string;
+  }> = [];
+  let hitCap = false;
+  for await (const res of octokit.paginate.iterator(octokit.rest.repos.compareCommits, {
     owner,
     repo,
     base: baseSha,
     head: headSha,
-  });
+    per_page: 100,
+  })) {
+    const pageFiles = (res.data as { files?: typeof rawFiles }).files ?? [];
+    for (const f of pageFiles) {
+      if (rawFiles.length >= GITHUB_COMPARE_FILE_CAP) {
+        hitCap = true;
+        break;
+      }
+      rawFiles.push(f);
+    }
+    if (hitCap) break;
+  }
+  if (hitCap) {
+    console.warn(
+      `[diff] compare ${baseSha.slice(0, 7)}...${headSha.slice(0, 7)} hit GitHub's ${GITHUB_COMPARE_FILE_CAP}-file cap — diff is TRUNCATED`,
+    );
+  }
 
-  const files = (data.files ?? []).map((file) => ({
+  const files = rawFiles.map((file) => ({
     filename: file.filename,
     status: file.status as ChangedFile['status'],
     patch: file.patch,
@@ -28,7 +56,9 @@ export async function fetchCompareDiff(
   return filterChangedFiles(files, opts);
 }
 
-export async function fetchPrDiff(
+/** Full diff + explicit coverage (what actually reached the reviewer). Prefer
+ *  this in the pipeline so the review can flag an incomplete pass. */
+export async function fetchPrDiffWithCoverage(
   octokit: Octokit,
   ref: PrRef,
   opts: {
@@ -38,19 +68,15 @@ export async function fetchPrDiff(
     sinceSha?: string;
     headSha?: string;
   },
-): Promise<ChangedFile[]> {
+): Promise<{ files: ChangedFile[]; coverage: DiffCoverage }> {
   if (opts.sinceSha && opts.headSha && opts.sinceSha !== opts.headSha) {
-    return fetchCompareDiff(
-      octokit,
-      ref.owner,
-      ref.repo,
-      opts.sinceSha,
-      opts.headSha,
-      opts,
-    );
+    return fetchCompareDiff(octokit, ref.owner, ref.repo, opts.sinceSha, opts.headSha, opts);
   }
 
-  const { data: files } = await octokit.rest.pulls.listFiles({
+  // PAGINATE — a single per_page:100 call silently dropped every file past the
+  // first 100 on a large PR (they never reached the model or even the maxFiles
+  // cap). Fetch all changed files (GitHub caps listFiles at 3000).
+  const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
     owner: ref.owner,
     repo: ref.repo,
     pull_number: ref.number,
@@ -66,4 +92,19 @@ export async function fetchPrDiff(
   }));
 
   return filterChangedFiles(mapped, opts);
+}
+
+/** Back-compat: returns just the files. Callers that don't need coverage. */
+export async function fetchPrDiff(
+  octokit: Octokit,
+  ref: PrRef,
+  opts: {
+    maxFileBytes: number;
+    maxFiles: number;
+    ignoreGlobs?: string[];
+    sinceSha?: string;
+    headSha?: string;
+  },
+): Promise<ChangedFile[]> {
+  return (await fetchPrDiffWithCoverage(octokit, ref, opts)).files;
 }

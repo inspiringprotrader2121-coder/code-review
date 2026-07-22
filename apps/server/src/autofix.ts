@@ -19,6 +19,7 @@ import {
   applyFixToContent,
   commandTrigger,
   failedApplyLine,
+  FixGenerationError,
   formatFixAppliedReply,
   formatFixSkippedReply,
   formatFixSummaryComment,
@@ -27,9 +28,11 @@ import {
   parseApplyMarker,
   replaceApplyLine,
   runAgent,
+  verifyFindings,
   verifyFixes,
   type AgentFile,
   type CodeFix,
+  type ReviewFinding,
 } from '@orvex-review/review';
 import type { StoredFinding } from '@orvex-review/store';
 import { planFeatures } from '@orvex-review/tenants';
@@ -86,6 +89,14 @@ const SKIP_REASONS: Record<string, string> = {
   no_fix: 'no safe fix could be generated',
   file_missing: 'the file no longer exists on the branch head',
 };
+
+function isTransientGitHubError(err: unknown): boolean {
+  if (err && typeof err === 'object' && 'status' in err) {
+    const status = (err as { status: unknown }).status;
+    return status === 429 || (typeof status === 'number' && status >= 500);
+  }
+  return false;
+}
 
 export async function processFixJob(
   job: ReviewJobPayload,
@@ -171,7 +182,16 @@ export async function processFixJob(
   }
 
   try {
-    const targets = selectTargets(openFindings, fix);
+    // Cap the number of findings a single fix run acts on. `fix all` returns
+    // EVERY open finding; each non-ready one triggers an LLM fix-generation call
+    // plus verification, so an uncapped run on a many-finding PR is a large,
+    // repeatable provider bill. Excess findings are handled on the next run.
+    const MAX_FIX_TARGETS = Number(process.env.ORVEX_MAX_FIX_TARGETS ?? 25);
+    const allTargets = selectTargets(openFindings, fix);
+    const targets = allTargets.slice(0, MAX_FIX_TARGETS);
+    if (allTargets.length > targets.length) {
+      console.log(`[autofix] capping fix run to ${targets.length}/${allTargets.length} findings (ORVEX_MAX_FIX_TARGETS)`);
+    }
     if (targets.length === 0) {
       // still inside the lock's try — `skip` reverts the button; the finally
       // below releases the lock.
@@ -235,7 +255,20 @@ export async function processFixJob(
     const pristine = new Map<string, string>();
     const candidates: Candidate[] = [];
     for (const [file, fileTargets] of byFile) {
-      const content = await fetchFileContent(octokit, owner, repo, file, expectedHead);
+      let content: string | null;
+      try {
+        content = await fetchFileContent(octokit, owner, repo, file, expectedHead);
+      } catch (err) {
+        // P2-3: transient GitHub read errors must not be mislabeled "file missing".
+        const transient = isTransientGitHubError(err);
+        const reason = transient
+          ? 'transient GitHub API error — try again'
+          : `could not read file (${err instanceof Error ? err.message : String(err)})`;
+        for (const t of fileTargets) {
+          skipped.push({ file, message: t.finding.message, reason });
+        }
+        continue;
+      }
       if (content === null) {
         for (const t of fileTargets) {
           skipped.push({ file, message: t.finding.message, reason: SKIP_REASONS.file_missing });
@@ -243,8 +276,74 @@ export async function processFixJob(
         continue;
       }
       pristine.set(file, content);
-      for (const t of fileTargets) {
-        const codeFix = await resolveCodeFix(t.finding, content, fix, config, relatedByFile.get(file));
+
+      // VERIFY THE FINDING IS REAL before generating any fix. The finding passed
+      // review-time verification, but a false positive that slipped through (or
+      // was tier-rescued) must NOT cause the fixer to rewrite correct code — a
+      // bad comment turning into a bad commit is the worst outcome. Re-check each
+      // target against the CURRENT file with the strict verifier; drop any that
+      // no longer hold. Bias is safe: a skipped real fix is a re-run away, but a
+      // fix applied to a non-bug is a silent regression. ORVEX_VERIFY=0 disables.
+      let confirmed = fileTargets;
+      if (process.env.ORVEX_VERIFY !== '0' && fileTargets.length > 0) {
+        try {
+          const asFindings: ReviewFinding[] = fileTargets.map((t) => ({
+            file: t.finding.file,
+            line: t.finding.line,
+            severity: t.finding.severity as ReviewFinding['severity'],
+            category: t.finding.category,
+            message: t.finding.message,
+            suggestion: t.finding.suggestion,
+            originalCode: t.finding.originalCode,
+            fixedCode: t.finding.fixedCode,
+            confidence: t.finding.confidence,
+            ruleId: t.finding.ruleId,
+          }));
+          const { dropped } = await verifyFindings(asFindings, [{ path: file, content }], {
+            apiKey: config.standardModel.apiKey,
+            model: config.standardModel.model,
+            baseUrl: config.standardModel.baseUrl,
+            strict: true,
+          });
+          if (dropped.length > 0) {
+            const rejected = new Set(dropped.map((d) => `${d.finding.line ?? '?'}|${d.finding.message}`));
+            confirmed = fileTargets.filter((t) => {
+              const bad = rejected.has(`${t.finding.line ?? '?'}|${t.finding.message}`);
+              if (bad) {
+                skipped.push({
+                  file,
+                  message: t.finding.message,
+                  reason: 'finding not confirmed on re-check — not fixed (likely a false positive)',
+                });
+              }
+              return !bad;
+            });
+            console.log(`[autofix] pre-fix finding verification dropped ${dropped.length}/${fileTargets.length} in ${file}`);
+          }
+        } catch (err) {
+          // Verifier unavailable → proceed (the fix-side verifyFixes still gates).
+          console.warn(`[autofix] pre-fix finding verification skipped for ${file}:`, (err as Error).message);
+        }
+      }
+
+      for (const t of confirmed) {
+        let codeFix: CodeFix | null;
+        try {
+          codeFix = await resolveCodeFix(t.finding, content, fix, config, relatedByFile.get(file));
+        } catch (err) {
+          // P2-5: distinguish transient model failures from "no safe fix".
+          if (err instanceof FixGenerationError) {
+            const reason =
+              err.kind === 'transient'
+                ? 'LLM temporarily unavailable — try again'
+                : err.kind === 'unparseable'
+                  ? 'fix response was unparseable — try again'
+                  : SKIP_REASONS.no_fix;
+            skipped.push({ file, message: t.finding.message, reason });
+            continue;
+          }
+          throw err;
+        }
         if (!codeFix) {
           skipped.push({ file, message: t.finding.message, reason: SKIP_REASONS.no_fix });
           continue;
@@ -280,7 +379,7 @@ export async function processFixJob(
           fixedCode: c.codeFix.fixedCode,
         })),
         [...pristine.entries()].map(([path, content]) => ({ path, content })),
-        { apiKey: config.llmApiKey, model: config.llmModel, baseUrl: config.llmBaseUrl },
+        { apiKey: config.standardModel.apiKey, model: config.standardModel.model, baseUrl: config.standardModel.baseUrl },
       );
       for (const r of rejected) {
         const c = candidates[r.index];
@@ -301,7 +400,15 @@ export async function processFixJob(
     const pendingFindings: StoredFinding[] = [];
     const working = new Map<string, string>(pristine);
     const touchedFiles = new Set<string>();
-    for (const c of approvedCandidates) {
+    // Apply within each file in DESCENDING line order, so an earlier edit never
+    // shifts the line numbers a later same-file fix anchors on — otherwise a fix
+    // whose `originalCode` occurs more than once could land on the wrong (stale)
+    // occurrence, at a spot verifyFixes never approved. Cross-file order is
+    // irrelevant; ties/unknown lines keep their relative order.
+    const orderedCandidates = [...approvedCandidates].sort(
+      (a, b) => (b.codeFix.line ?? 0) - (a.codeFix.line ?? 0),
+    );
+    for (const c of orderedCandidates) {
       const content = working.get(c.file);
       if (content === undefined) continue;
       const result = applyFixToContent(content, c.codeFix);
@@ -389,6 +496,18 @@ export async function processFixJob(
       ? `\n\n> ⚠️ **Orvex can't commit yet.** The GitHub App has \`Contents: Read & write\`, but this installation is still on the old permissions. An org/account owner must **accept the updated permissions** at **Settings → Applications → Orvex Review → Review request** (or https://github.com/settings/installations). Once accepted, ticking the box or \`${commandTrigger()} fix\` will commit automatically.`
       : '';
 
+    // P1-2: revert the optimistic "⏳ Applying…" button BEFORE the summary reply.
+    // If the reply itself throws, the catch below would still try to revert, but
+    // doing it here means the normal path never leaves the button stuck either.
+    if (fix.isReviewComment && fix.replyToCommentId && applied.length === 0) {
+      const why = headMoved
+        ? 'the branch moved'
+        : permissionDenied
+          ? 'commit permission needed'
+          : (skipped[0]?.reason ?? 'could not apply');
+      await setApplyButtonState(octokit, owner, repo, fix.replyToCommentId, (fp) => failedApplyLine(fp, why));
+    }
+
     // Per-thread single fixes already replied inline; command-level runs get a summary.
     const singleInlineReply =
       fix.scope === 'one' && applied.length === 1 && skipped.length === 0 && !permissionDenied;
@@ -399,17 +518,6 @@ export async function processFixJob(
       } else {
         await replyToIssueComment(octokit, ref, summary);
       }
-    }
-
-    // If a ticked apply-checkbox produced no fix, revert its "⏳ Applying…" line
-    // back to a retry checkbox so it isn't stuck showing "Applying" forever.
-    if (fix.isReviewComment && fix.replyToCommentId && applied.length === 0) {
-      const why = headMoved
-        ? 'the branch moved'
-        : permissionDenied
-          ? 'commit permission needed'
-          : (skipped[0]?.reason ?? 'could not apply');
-      await setApplyButtonState(octokit, owner, repo, fix.replyToCommentId, (fp) => failedApplyLine(fp, why));
     }
 
     if (fix.replyToCommentId) {
@@ -442,6 +550,18 @@ export async function processFixJob(
     );
 
     return { applied: applied.length, skipped: skipped.length, headMoved };
+  } catch (err) {
+    // P1-2: any unexpected throw must revert the optimistic "⏳ Applying…" button
+    // back to a retry checkbox BEFORE we let the job fail; otherwise the button
+    // is stuck forever. `skip()` handles its own revert, but non-skip throws
+    // (GitHub API blips, commit failures, etc.) need this catch.
+    if (fix.isReviewComment && fix.replyToCommentId) {
+      const why = err instanceof Error ? err.message : 'unexpected error';
+      await setApplyButtonState(octokit, owner, repo, fix.replyToCommentId, (fp) =>
+        failedApplyLine(fp, why),
+      );
+    }
+    throw err;
   } finally {
     config.store.releaseFixLock(prKeyObj, holder);
   }
@@ -503,7 +623,7 @@ export async function processExplainJob(
       suggestion: finding.suggestion,
       severity: finding.severity,
     },
-    { apiKey: config.llmApiKey, model: config.llmModel, baseUrl: config.llmBaseUrl },
+    { apiKey: config.standardModel.apiKey, model: config.standardModel.model, baseUrl: config.standardModel.baseUrl },
   );
 
   await reply(explanation ?? formatFixSkippedReply('could not generate an explanation, try again.'));
@@ -559,9 +679,9 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
   }
 
   const result = await runAgent(instruction, agentFiles, {
-    apiKey: config.llmApiKey,
-    model: config.llmModel,
-    baseUrl: config.llmBaseUrl,
+    apiKey: config.standardModel.apiKey,
+    model: config.standardModel.model,
+    baseUrl: config.standardModel.baseUrl,
   });
   if (!result) return void (await reply(formatFixSkippedReply('could not process that request, try rephrasing.')));
 
@@ -589,11 +709,14 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
   }
   try {
     const expectedHead = await fetchBranchSha(octokit, owner, repo, head.ref);
-    const byPath = new Map<string, string>(agentFiles.map((f) => [f.path, f.content]));
     const changes: Array<{ path: string; content: string }> = [];
     const applied: Array<{ file: string; message: string; sha: string }> = [];
     const skipped: Array<{ file: string; message: string; reason: string }> = [];
 
+    // Read each file FRESH at expectedHead (never the agent's lagging snapshot —
+    // that would revert a commit that landed during the multi-minute agent run).
+    const freshContent = new Map<string, string>();
+    const editList: Array<{ path: string; originalCode: string; fixedCode: string }> = [];
     const editsByFile = new Map<string, typeof result.changes>();
     for (const ch of result.changes) {
       const list = editsByFile.get(ch.file) ?? [];
@@ -601,22 +724,51 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
       editsByFile.set(ch.file, list);
     }
     for (const [path, edits] of editsByFile) {
-      let content = byPath.get(path) ?? (await fetchFileContent(octokit, owner, repo, path, expectedHead));
+      const content = await fetchFileContent(octokit, owner, repo, path, expectedHead);
       if (content == null) {
         skipped.push({ file: path, message: 'requested change', reason: 'file not found' });
         continue;
       }
-      let touched = false;
-      for (const ch of edits) {
-        const res = applyFixToContent(content, { originalCode: ch.originalCode, fixedCode: ch.fixedCode });
-        if (res.ok) {
-          content = res.content;
-          touched = true;
-        } else {
-          skipped.push({ file: path, message: 'requested change', reason: SKIP_REASONS[res.reason] });
-        }
+      freshContent.set(path, content);
+      for (const ch of edits) editList.push({ path, originalCode: ch.originalCode, fixedCode: ch.fixedCode });
+    }
+
+    // Adversarial verify BEFORE committing — the ask path is the most powerful
+    // arbitrary-edit surface and previously committed unverified. Drop any edit
+    // the verifier can't confirm is a safe, correct application of the request.
+    let approvedEdits = editList;
+    if (editList.length > 0 && process.env.ORVEX_VERIFY !== '0') {
+      try {
+        const { rejected } = await verifyFixes(
+          editList.map((e) => ({
+            file: e.path,
+            findingMessage: `Requested change: ${instruction.slice(0, 200)}`,
+            originalCode: e.originalCode,
+            fixedCode: e.fixedCode,
+          })),
+          [...freshContent.entries()].map(([path, content]) => ({ path, content })),
+          { apiKey: config.standardModel.apiKey, model: config.standardModel.model, baseUrl: config.standardModel.baseUrl },
+        );
+        const rej = new Set(rejected.map((r) => r.index));
+        for (const r of rejected) skipped.push({ file: editList[r.index]!.path, message: 'requested change', reason: 'change not verified as safe' });
+        approvedEdits = editList.filter((_, i) => !rej.has(i));
+      } catch {
+        /* verifier unavailable → proceed; the CAS commit still guards head moves */
       }
-      if (touched) changes.push({ path, content });
+    }
+
+    // Apply approved edits per file (descending line order not needed — the ask
+    // path re-anchors on exact originalCode substrings against fresh content).
+    const changed = new Map<string, string>(freshContent);
+    for (const e of approvedEdits) {
+      const content = changed.get(e.path);
+      if (content == null) continue;
+      const res = applyFixToContent(content, { originalCode: e.originalCode, fixedCode: e.fixedCode });
+      if (res.ok) changed.set(e.path, res.content);
+      else skipped.push({ file: e.path, message: 'requested change', reason: SKIP_REASONS[res.reason] });
+    }
+    for (const [path, content] of changed) {
+      if (content !== freshContent.get(path)) changes.push({ path, content });
     }
 
     if (changes.length === 0) {
@@ -749,7 +901,7 @@ async function resolveCodeFix(
       instruction: fix.instruction,
       relatedFiles,
     },
-    { apiKey: config.llmApiKey, model: config.llmModel, baseUrl: config.llmBaseUrl },
+    { apiKey: config.standardModel.apiKey, model: config.standardModel.model, baseUrl: config.standardModel.baseUrl },
   );
   return generated;
 }

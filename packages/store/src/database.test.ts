@@ -102,3 +102,40 @@ test('review runs: recorded and aggregated into workspace stats', () => {
   assert.equal(db.getWorkspaceStats(other.id, 14).runsTotal, 0);
   assert.equal(db.listReviewRuns(other.id).length, 0);
 });
+
+test('review runs: setReviewRunHeadSha re-points a run at the effective SHA', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('acme');
+  const runId = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 7,
+    headSha: 'stale-sha-from-webhook',
+    action: 'synchronize',
+  });
+  // The PR head moved between enqueue and execution — record on the real SHA.
+  db.setReviewRunHeadSha(runId, 'effective-sha');
+  db.completeReviewRun(runId, { status: 'completed', durationMs: 10 });
+
+  // Cooldown keys on head_sha: the EFFECTIVE sha must hit, the stale one must not.
+  assert.notEqual(db.secondsSinceLastCompletedReview(1, 'acme', 'api', 7, 'effective-sha'), null);
+  assert.equal(db.secondsSinceLastCompletedReview(1, 'acme', 'api', 7, 'stale-sha-from-webhook'), null);
+});
+
+test('repos: upsert refreshes tenant_id when an installation is re-linked', () => {
+  const db = freshDb();
+  const t1 = db.createTenant('one');
+  const t2 = db.createTenant('two');
+  const base = { installationId: 7, githubRepoId: 99, owner: 'acme', name: 'api', fullName: 'acme/api' };
+
+  db.upsertRepo({ ...base, tenantId: t1.id });
+  assert.equal(db.getRepoByGitHubId(7, 99)?.tenantId, t1.id);
+
+  // installation re-linked to a different tenant → the repo must follow
+  db.upsertRepo({ ...base, tenantId: t2.id });
+  assert.equal(db.getRepoByGitHubId(7, 99)?.tenantId, t2.id);
+  assert.equal(db.listRepos(t1.id).length, 0);
+  assert.equal(db.listRepos(t2.id).length, 1);
+});

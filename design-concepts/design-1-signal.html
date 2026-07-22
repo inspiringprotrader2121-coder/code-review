@@ -1,0 +1,798 @@
+<title>Orvex — Signal</title>
+<style>
+  /* ============================================================
+     ORVEX — "SIGNAL" — developer-native terminal landing page
+     Self-contained. System fonts only. Dark-first, both themes.
+     ============================================================ */
+
+  :root {
+    /* type */
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Cascadia Code", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+    /* dark tokens (default) */
+    --ground: #0a0c10;
+    --ground-2: #0c0f14;
+    --raised: #111419;
+    --raised-2: #141922;
+    --border: #1a1f27;
+    --border-2: #232a34;
+    --ink: #e8ecf2;
+    --ink-2: #9aa4b2;
+    --ink-muted: #5b6472;
+    --accent: #3ddc97;
+    --accent-ink: #06180f;         /* text on the green button */
+    --accent-soft: rgba(61,220,151,.12);
+    --accent-line: rgba(61,220,151,.34);
+    --danger: #ff5c5c;
+    --danger-soft: rgba(255,92,92,.12);
+    --danger-line: rgba(255,92,92,.34);
+    --shadow: 0 24px 60px -28px rgba(0,0,0,.75);
+    --grid: rgba(255,255,255,.022);
+    color-scheme: dark;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ground: #fbfcfe;
+      --ground-2: #f4f7fb;
+      --raised: #ffffff;
+      --raised-2: #f6f8fc;
+      --border: #e4e9f1;
+      --border-2: #d5dce7;
+      --ink: #0a0c10;
+      --ink-2: #4b5563;
+      --ink-muted: #8a93a1;
+      --accent: #0e9d63;
+      --accent-ink: #ffffff;
+      --accent-soft: rgba(14,157,99,.10);
+      --accent-line: rgba(14,157,99,.30);
+      --danger: #d6382f;
+      --danger-soft: rgba(214,56,47,.09);
+      --danger-line: rgba(214,56,47,.28);
+      --shadow: 0 24px 55px -30px rgba(20,40,70,.28);
+      --grid: rgba(10,12,16,.028);
+      color-scheme: light;
+    }
+  }
+
+  /* explicit toggle wins over system pref */
+  :root[data-theme="dark"] {
+    --ground: #0a0c10; --ground-2: #0c0f14; --raised: #111419; --raised-2: #141922;
+    --border: #1a1f27; --border-2: #232a34;
+    --ink: #e8ecf2; --ink-2: #9aa4b2; --ink-muted: #5b6472;
+    --accent: #3ddc97; --accent-ink: #06180f;
+    --accent-soft: rgba(61,220,151,.12); --accent-line: rgba(61,220,151,.34);
+    --danger: #ff5c5c; --danger-soft: rgba(255,92,92,.12); --danger-line: rgba(255,92,92,.34);
+    --shadow: 0 24px 60px -28px rgba(0,0,0,.75);
+    --grid: rgba(255,255,255,.022);
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --ground: #fbfcfe; --ground-2: #f4f7fb; --raised: #ffffff; --raised-2: #f6f8fc;
+    --border: #e4e9f1; --border-2: #d5dce7;
+    --ink: #0a0c10; --ink-2: #4b5563; --ink-muted: #8a93a1;
+    --accent: #0e9d63; --accent-ink: #ffffff;
+    --accent-soft: rgba(14,157,99,.10); --accent-line: rgba(14,157,99,.30);
+    --danger: #d6382f; --danger-soft: rgba(214,56,47,.09); --danger-line: rgba(214,56,47,.28);
+    --shadow: 0 24px 55px -30px rgba(20,40,70,.28);
+    --grid: rgba(10,12,16,.028);
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+    /* faint scanline / grid texture */
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 100% 3px, 64px 100%;
+  }
+
+  .num { font-variant-numeric: tabular-nums; }
+  .mono { font-family: var(--mono); }
+
+  ::selection { background: var(--accent-soft); color: var(--ink); }
+
+  a { color: inherit; text-decoration: none; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  .wrap { width: 100%; max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin: 0 0 18px;
+  }
+  .eyebrow .dot { color: var(--accent); }
+
+  /* ---------- NAV ---------- */
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: color-mix(in srgb, var(--ground) 82%, transparent);
+    backdrop-filter: blur(14px) saturate(1.2);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-in {
+    max-width: 1120px; margin: 0 auto; padding: 13px 24px;
+    display: flex; align-items: center; gap: 22px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-weight: 600; font-size: 16px; letter-spacing: -.01em; }
+  .mark {
+    width: 30px; height: 30px; display: grid; place-items: center;
+    border: 1px solid var(--accent-line); border-radius: 8px;
+    background: var(--accent-soft); color: var(--accent);
+    font-size: 17px; font-weight: 700; line-height: 1;
+  }
+  .nav-links { display: flex; gap: 4px; margin-left: 12px; }
+  .nav-links a {
+    font-size: 13.5px; color: var(--ink-2); padding: 7px 12px; border-radius: 7px;
+    transition: color .15s, background .15s;
+  }
+  .nav-links a:hover { color: var(--ink); background: var(--raised); }
+  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+  .icon-btn {
+    width: 36px; height: 36px; display: grid; place-items: center;
+    background: var(--raised); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--ink-2); cursor: pointer; font-size: 15px; line-height: 1;
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .icon-btn:hover { color: var(--ink); border-color: var(--border-2); }
+  .theme-icon-dark { display: none; }
+  :root[data-theme="dark"] .theme-icon-dark, :root:not([data-theme]) .theme-icon-dark { display: inline; }
+  :root[data-theme="dark"] .theme-icon-light, :root:not([data-theme]) .theme-icon-light { display: none; }
+  :root[data-theme="light"] .theme-icon-light { display: inline; }
+  :root[data-theme="light"] .theme-icon-dark { display: none; }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme]) .theme-icon-dark { display: none; }
+    :root:not([data-theme]) .theme-icon-light { display: inline; }
+  }
+
+  .btn {
+    font-family: var(--mono); font-size: 13.5px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 9px 16px; border-radius: 8px; cursor: pointer;
+    border: 1px solid transparent; white-space: nowrap;
+    transition: transform .12s ease, box-shadow .15s, background .15s, border-color .15s;
+  }
+  .btn-primary {
+    background: var(--accent); color: var(--accent-ink);
+    box-shadow: 0 0 0 1px var(--accent-line), 0 8px 24px -10px var(--accent);
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 0 0 1px var(--accent-line), 0 14px 30px -12px var(--accent); }
+  .btn-ghost { background: transparent; border-color: var(--border-2); color: var(--ink); }
+  .btn-ghost:hover { background: var(--raised); border-color: var(--ink-muted); }
+  .btn-lg { padding: 13px 22px; font-size: 15px; }
+
+  /* ---------- HERO ---------- */
+  header.hero { padding: 74px 0 84px; position: relative; }
+  .hero-grid {
+    display: grid; grid-template-columns: 1.02fr 1.14fr; gap: 56px; align-items: center;
+  }
+  @media (max-width: 940px) { .hero-grid { grid-template-columns: 1fr; gap: 40px; } }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12px; color: var(--ink-2);
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--raised); margin-bottom: 26px;
+  }
+  .badge .live {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 0 0 var(--accent-line);
+    animation: pulse 2.4s ease-out infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 var(--accent-line); }
+    70% { box-shadow: 0 0 0 7px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+
+  h1.slogan {
+    font-family: var(--mono);
+    font-size: clamp(38px, 6.2vw, 62px);
+    line-height: 1.02;
+    letter-spacing: -.03em;
+    font-weight: 680;
+    margin: 0 0 24px;
+  }
+  h1.slogan .cursor {
+    display: inline-block; width: .58em; height: .92em; margin-left: .06em;
+    transform: translateY(.08em);
+    background: var(--accent);
+    animation: blink 1.05s steps(1) infinite;
+  }
+  @keyframes blink { 0%,50% { opacity: 1; } 50.01%,100% { opacity: 0; } }
+
+  .lede { font-size: 18px; color: var(--ink-2); max-width: 46ch; margin: 0 0 32px; }
+  .lede b { color: var(--ink); font-weight: 600; }
+
+  .cta-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 16px; }
+  .subnote { font-family: var(--mono); font-size: 12.5px; color: var(--ink-muted); }
+  .subnote .ok { color: var(--accent); }
+
+  .trust {
+    margin-top: 34px; padding-top: 24px; border-top: 1px solid var(--border);
+    display: flex; flex-wrap: wrap; gap: 26px;
+  }
+  .trust-item { display: flex; flex-direction: column; gap: 2px; }
+  .trust-item .n { font-family: var(--mono); font-size: 21px; font-weight: 680; color: var(--ink); letter-spacing: -.02em; }
+  .trust-item .n .u { color: var(--accent); }
+  .trust-item .l { font-size: 12px; color: var(--ink-muted); }
+
+  /* ---------- REVIEW LOG (hero terminal) ---------- */
+  .term {
+    background: linear-gradient(180deg, var(--raised) 0%, var(--ground-2) 130%);
+    border: 1px solid var(--border-2);
+    border-radius: 14px; overflow: hidden;
+    box-shadow: var(--shadow);
+    font-family: var(--mono);
+  }
+  .term-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 11px 14px; border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--raised-2) 70%, transparent);
+  }
+  .dots { display: flex; gap: 6px; }
+  .dots i { width: 11px; height: 11px; border-radius: 50%; background: var(--border-2); display: block; }
+  .term-title { font-size: 12px; color: var(--ink-2); margin-left: 6px; }
+  .term-title .pr { color: var(--accent); }
+  .term-status { margin-left: auto; font-size: 11px; color: var(--ink-muted); display: flex; align-items: center; gap: 6px; }
+  .term-status .s-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-muted); }
+  .term-status.done .s-dot { background: var(--accent); }
+  .term-status.done { color: var(--accent); }
+
+  .log { padding: 16px 18px 20px; font-size: 13px; line-height: 1.85; min-height: 372px; }
+  .line { display: flex; gap: 10px; align-items: flex-start; }
+  .line .gutter { color: var(--ink-muted); user-select: none; white-space: nowrap; flex: none; }
+  .line .body { color: var(--ink-2); }
+  .line .body .k { color: var(--ink); }
+  .ok { color: var(--accent); }
+  .bad { color: var(--danger); }
+  .tag {
+    font-size: 10.5px; padding: 1px 7px; border-radius: 5px; letter-spacing: .04em;
+    border: 1px solid var(--border-2); color: var(--ink-2); vertical-align: middle;
+  }
+  .tag.p1 { color: var(--danger); border-color: var(--danger-line); background: var(--danger-soft); }
+  .tag.model { color: var(--ink-2); }
+
+  .caught-card {
+    margin-top: 12px; padding: 11px 13px; border-radius: 9px;
+    border: 1px solid var(--accent-line); background: var(--accent-soft);
+    display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink);
+  }
+  .caught-card .big { color: var(--accent); font-weight: 700; }
+
+  /* stream animation: lines revealed one-by-one */
+  .stream .line, .stream .caught-card { opacity: 0; transform: translateY(6px); }
+  .stream.play .line { animation: reveal .38s ease forwards; }
+  .stream.play .caught-card { animation: reveal .5s ease forwards; }
+  .stream.play .line:nth-child(1) { animation-delay: .15s; }
+  .stream.play .line:nth-child(2) { animation-delay: .55s; }
+  .stream.play .line:nth-child(3) { animation-delay: .95s; }
+  .stream.play .line:nth-child(4) { animation-delay: 1.35s; }
+  .stream.play .line:nth-child(5) { animation-delay: 1.75s; }
+  .stream.play .line:nth-child(6) { animation-delay: 2.15s; }
+  .stream.play .line:nth-child(7) { animation-delay: 2.65s; }
+  .stream.play .caught-card { animation-delay: 3.15s; }
+  @keyframes reveal { to { opacity: 1; transform: translateY(0); } }
+
+  /* live-typing caret on the currently streaming region */
+  .caret {
+    display: inline-block; width: 7px; height: 14px; background: var(--accent);
+    transform: translateY(2px); margin-left: 2px;
+    animation: blink 1s steps(1) infinite;
+  }
+  .stream.done .caret { display: none; }
+
+  /* ---------- SECTION SHELL ---------- */
+  section { padding: 82px 0; border-top: 1px solid var(--border); }
+  .sec-head { max-width: 640px; margin-bottom: 44px; }
+  .sec-head h2 {
+    font-family: var(--mono); font-size: clamp(26px, 3.4vw, 34px); letter-spacing: -.025em;
+    line-height: 1.1; margin: 0 0 14px; font-weight: 660;
+  }
+  .sec-head p { font-size: 17px; color: var(--ink-2); margin: 0; max-width: 54ch; }
+
+  /* ---------- HOW IT WORKS pipeline ---------- */
+  .pipe { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 860px) { .pipe { grid-template-columns: 1fr; } }
+  .step {
+    position: relative; background: var(--raised); border: 1px solid var(--border);
+    border-radius: 13px; padding: 24px 22px; overflow: hidden;
+    transition: border-color .18s, transform .18s;
+  }
+  .step:hover { border-color: var(--border-2); transform: translateY(-2px); }
+  .step::before {
+    content: ""; position: absolute; left: 0; top: 0; height: 100%; width: 2px;
+    background: linear-gradient(var(--accent), transparent);
+  }
+  .step .idx { font-family: var(--mono); font-size: 12px; color: var(--accent); letter-spacing: .1em; }
+  .step h3 { font-family: var(--mono); font-size: 17px; margin: 12px 0 8px; letter-spacing: -.01em; font-weight: 620; }
+  .step p { font-size: 14.5px; color: var(--ink-2); margin: 0 0 16px; }
+  .step .chip {
+    display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono);
+    font-size: 11.5px; color: var(--ink-2); padding: 5px 10px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--ground-2);
+  }
+  .step .chip .ok { font-weight: 700; }
+  .flow-arrow { text-align: center; color: var(--ink-muted); font-family: var(--mono); }
+
+  /* ---------- PROOF bars ---------- */
+  .proof-wrap {
+    background: var(--raised); border: 1px solid var(--border); border-radius: 16px;
+    padding: 34px 32px; box-shadow: var(--shadow);
+  }
+  @media (max-width: 620px) { .proof-wrap { padding: 24px 18px; } }
+  .proof-hero { display: flex; align-items: center; gap: 22px; padding-bottom: 28px; margin-bottom: 28px; border-bottom: 1px solid var(--border); }
+  @media (max-width: 620px) { .proof-hero { gap: 16px; } }
+  .proof-num { font-family: var(--mono); font-weight: 700; font-size: clamp(56px, 12vw, 96px); line-height: .9; color: var(--accent); letter-spacing: -.02em; }
+  .proof-num-label { font-size: 15px; color: var(--ink); line-height: 1.4; }
+  .proof-num-label .dim { color: var(--ink-muted); font-size: 13.5px; }
+  .proof-foot .dim { color: var(--ink-muted); }
+  .proof-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 28px; }
+  .proof-top .big { font-family: var(--mono); font-size: 15px; color: var(--ink); }
+  .proof-top .sub { font-family: var(--mono); font-size: 12px; color: var(--ink-muted); margin-left: auto; }
+  .bars { display: grid; gap: 16px; }
+  .bar-row { display: grid; grid-template-columns: 130px 1fr 60px; align-items: center; gap: 16px; }
+  @media (max-width: 620px) { .bar-row { grid-template-columns: 92px 1fr 48px; gap: 10px; } }
+  .bar-name { font-family: var(--mono); font-size: 13.5px; color: var(--ink-2); }
+  .bar-row.lead .bar-name { color: var(--ink); font-weight: 600; }
+  .bar-track { height: 30px; background: var(--ground-2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; position: relative; }
+  .bar-fill { height: 100%; width: 0; border-radius: 7px 0 0 7px; transition: width 1.1s cubic-bezier(.22,.9,.28,1); }
+  .bar-fill.muted { background: var(--border-2); }
+  .bar-fill.lead {
+    background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 78%, black), var(--accent));
+    box-shadow: inset 0 0 0 1px var(--accent-line);
+  }
+  .bar-val { font-family: var(--mono); font-size: 15px; text-align: right; color: var(--ink-2); }
+  .bar-row.lead .bar-val { color: var(--accent); font-weight: 700; }
+  .proof-foot { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 14px; color: var(--ink-2); }
+  .proof-foot b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- NEVER REPEATS thread ---------- */
+  .thread-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: center; }
+  @media (max-width: 860px) { .thread-grid { grid-template-columns: 1fr; gap: 28px; } }
+  .thread { background: var(--raised); border: 1px solid var(--border); border-radius: 13px; overflow: hidden; box-shadow: var(--shadow); font-family: var(--mono); font-size: 13px; }
+  .push { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+  .push:last-child { border-bottom: 0; }
+  .push .sha { color: var(--ink-muted); }
+  .push .msg { color: var(--ink-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .push .verdict { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+  .verdict.zero { color: var(--accent); border: 1px solid var(--accent-line); background: var(--accent-soft); }
+  .verdict.fix { color: var(--ink-2); border: 1px solid var(--border-2); }
+  .verdict.first { color: var(--danger); border: 1px solid var(--danger-line); background: var(--danger-soft); }
+  .thread-note ul { list-style: none; padding: 0; margin: 20px 0 0; }
+  .thread-note li { display: flex; gap: 12px; font-size: 15px; color: var(--ink-2); margin-bottom: 14px; }
+  .thread-note li .tick { color: var(--accent); font-family: var(--mono); flex: none; }
+  .thread-note li b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- PRICING ---------- */
+  .price-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+  @media (max-width: 1080px) { .price-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .price-grid { grid-template-columns: 1fr; } }
+  .plan {
+    display: flex; flex-direction: column;
+    background: var(--raised); border: 1px solid var(--border); border-radius: 13px;
+    padding: 22px 20px; transition: border-color .18s, transform .18s;
+  }
+  .plan:hover { border-color: var(--border-2); transform: translateY(-3px); }
+  .plan.feat { border-color: var(--accent-line); background: linear-gradient(180deg, var(--accent-soft), var(--raised) 42%); position: relative; }
+  .plan.feat::after {
+    content: "FEATURED"; position: absolute; top: -9px; left: 20px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: .14em; color: var(--accent-ink);
+    background: var(--accent); padding: 3px 9px; border-radius: 5px;
+  }
+  .plan .pname { font-family: var(--mono); font-size: 14px; font-weight: 620; letter-spacing: -.01em; }
+  .plan .price { font-family: var(--mono); margin: 12px 0 2px; display: flex; align-items: baseline; gap: 3px; }
+  .plan .price .amt { font-size: 30px; font-weight: 700; letter-spacing: -.03em; }
+  .plan .price .per { font-size: 12.5px; color: var(--ink-muted); }
+  .plan.feat .price .amt { color: var(--accent); }
+  .plan .reviews { font-family: var(--mono); font-size: 12px; color: var(--ink-2); margin-bottom: 16px; }
+  .plan ul { list-style: none; padding: 0; margin: 0 0 20px; flex: 1; }
+  .plan li { font-size: 13px; color: var(--ink-2); display: flex; gap: 9px; margin-bottom: 9px; line-height: 1.45; }
+  .plan li .tick { color: var(--accent); flex: none; font-family: var(--mono); }
+  .plan .pbtn {
+    font-family: var(--mono); font-size: 13px; font-weight: 600; text-align: center;
+    padding: 10px; border-radius: 8px; border: 1px solid var(--border-2); color: var(--ink);
+    transition: background .15s, border-color .15s;
+  }
+  .plan .pbtn:hover { background: var(--ground-2); border-color: var(--ink-muted); }
+  .plan.feat .pbtn { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  .plan.feat .pbtn:hover { transform: translateY(-1px); box-shadow: 0 10px 22px -12px var(--accent); }
+  .price-note { text-align: center; font-family: var(--mono); font-size: 12.5px; color: var(--ink-muted); margin-top: 22px; }
+
+  /* ---------- FINAL CTA ---------- */
+  .cta-band { border-top: 1px solid var(--border); }
+  .cta-inner {
+    background: linear-gradient(180deg, var(--raised), var(--ground-2));
+    border: 1px solid var(--border-2); border-radius: 18px;
+    padding: 54px 40px; text-align: center; position: relative; overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  .cta-inner::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(600px 200px at 50% 0%, var(--accent-soft), transparent 70%);
+    pointer-events: none;
+  }
+  .cta-inner h2 { font-family: var(--mono); font-size: clamp(26px, 4vw, 40px); letter-spacing: -.03em; margin: 0 0 14px; font-weight: 680; position: relative; }
+  .cta-inner p { color: var(--ink-2); font-size: 17px; margin: 0 0 28px; position: relative; }
+  .cta-inner .cta-row { justify-content: center; position: relative; }
+
+  /* ---------- FOOTER ---------- */
+  footer { border-top: 1px solid var(--border); padding: 34px 0 44px; }
+  .foot-in { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+  .foot-in .brand { font-size: 14px; }
+  .foot-links { display: flex; flex-wrap: wrap; gap: 20px; margin-left: auto; }
+  .foot-links a { font-family: var(--mono); font-size: 12.5px; color: var(--ink-muted); transition: color .15s; }
+  .foot-links a:hover { color: var(--ink); }
+  .foot-copy { width: 100%; font-family: var(--mono); font-size: 11.5px; color: var(--ink-muted); margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
+
+  /* ---------- reduced motion: rest state, no motion ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    h1.slogan .cursor { opacity: 1; }
+    .stream .line, .stream .caught-card { opacity: 1 !important; transform: none !important; }
+    .caret { display: none !important; }
+    .bar-fill { transition: none !important; }
+  }
+</style>
+
+<!-- ============================== NAV ============================== -->
+<nav>
+  <div class="nav-in">
+    <a class="brand" href="#top" aria-label="Orvex home">
+      <span class="mark" aria-hidden="true">±</span>
+      <span>Orvex</span>
+    </a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#proof">Proof</a>
+      <a href="#memory">Memory</a>
+      <a href="#pricing">Pricing</a>
+    </div>
+    <div class="nav-right">
+      <button class="icon-btn" id="themeToggle" type="button" aria-label="Toggle color theme" title="Toggle theme">
+        <span class="theme-icon-dark" aria-hidden="true">☾</span>
+        <span class="theme-icon-light" aria-hidden="true">☀</span>
+      </button>
+      <a class="btn btn-primary" href="#start">Start free</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============================== HERO ============================== -->
+<header class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="badge"><span class="live" aria-hidden="true"></span> GitHub App · reviews every PR</span>
+      <h1 class="slogan">Catch bugs before production.<span class="cursor" aria-hidden="true"></span></h1>
+      <p class="lede">
+        Orvex reviews every pull request the moment it opens. <b>Deterministic rules run
+        first</b>, then a <b>multi-model AI ensemble</b> weighs in, and it
+        <b>runs your code</b> — not just the diff. It flags the bug an instant before merge.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary btn-lg" href="#start">Start free — 10 reviews, no card</a>
+        <a class="btn btn-ghost btn-lg" href="#how">See how it works</a>
+      </div>
+      <div class="subnote"><span class="ok">✓</span> No passwords pasted · scoped GitHub App · priced per workspace, not per seat</div>
+
+      <div class="trust">
+        <div class="trust-item"><span class="n num">131</span><span class="l">bugs caught that other bots missed</span></div>
+        <div class="trust-item"><span class="n num">3</span><span class="l">independent models per PR</span></div>
+        <div class="trust-item"><span class="n num">~8</span><span class="l">comments max — signal, not noise</span></div>
+      </div>
+    </div>
+
+    <!-- REVIEW LOG -->
+    <div class="term" role="img" aria-label="Animated review log: a pull request arrives, deterministic rules pass, three models review, a P1 null-dereference bug is flagged, and it is caught before merge.">
+      <div class="term-bar">
+        <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="term-title">orvex review · <span class="pr">PR #842</span> retry-queue</span>
+        <span class="term-status" id="termStatus"><span class="s-dot"></span>reviewing</span>
+      </div>
+      <div class="log stream" id="stream">
+        <div class="line"><span class="gutter">➜</span><span class="body"><span class="k">PR #842</span> opened — <span class="k">retry-queue: backoff + jitter</span> · +214 −38</span></div>
+        <div class="line"><span class="gutter num">01</span><span class="body">deterministic rules <span class="ok">✓ pass</span> <span class="tag">0 tokens spent</span></span></div>
+        <div class="line"><span class="gutter num">02</span><span class="body"><span class="tag model">model·A</span> reviewing… lockfile, types, edges</span></div>
+        <div class="line"><span class="gutter num">03</span><span class="body"><span class="tag model">model·B</span> reviewing… concurrency, retries</span></div>
+        <div class="line"><span class="gutter num">04</span><span class="body"><span class="tag model">model·C</span> <span class="k">runs the code</span> in sandbox…</span></div>
+        <div class="line"><span class="gutter">!</span><span class="body"><span class="tag p1">P1</span> <span class="bad">null deref reaches prod on retry path</span> <span class="k">queue.js:118</span></span></div>
+        <div class="line"><span class="gutter">✎</span><span class="body">merged &amp; deduped → <span class="k">1 blocking</span>, 2 notes<span class="caret" aria-hidden="true"></span></span></div>
+        <div class="caught-card"><span class="big">✓ caught before merge</span><span>— the null deref never shipped.</span></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ============================== HOW IT WORKS ============================== -->
+<section id="how">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="eyebrow"><span class="dot">//</span> THE PIPELINE</p>
+      <h2>Three passes. One verdict.</h2>
+      <p>Every PR runs the same route — cheapest checks first, most expensive last, nothing wasted. Different layers catch different bugs.</p>
+    </div>
+    <div class="pipe">
+      <div class="step">
+        <span class="idx">01 · FIRST</span>
+        <h3>Deterministic rules</h3>
+        <p>Cheap, exact checks run before any LLM token is spent. Config-as-code — your repo sets the rules in <span class="mono">.orvex-review.yml</span>.</p>
+        <span class="chip"><span class="ok">✓</span> 0 tokens · instant</span>
+      </div>
+      <div class="step">
+        <span class="idx">02 · THEN</span>
+        <h3>3-model ensemble</h3>
+        <p>Up to three independent models review one PR. Different models catch different bugs — the merged, deduped result is the differentiator.</p>
+        <span class="chip">A · B · C → merged</span>
+      </div>
+      <div class="step">
+        <span class="idx">03 · PROOF</span>
+        <h3>Runs your code</h3>
+        <p>Orvex executes the change in a sandbox instead of only reading the diff — the runtime-proof moat. Add <span class="mono">@orvex deep</span> for critical PRs.</p>
+        <span class="chip"><span class="ok">▶</span> sandbox execution</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== PROOF ============================== -->
+<section id="proof">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="eyebrow"><span class="dot">//</span> HEAD-TO-HEAD · 80 REAL PRs</p>
+      <h2>Flagged 131 issues the other reviewers didn't.</h2>
+      <p>Run side-by-side with Codex, CodeRabbit and Qodo on real pull requests. Different models catch different bugs — the ensemble surfaces what a single pass walks right past.</p>
+    </div>
+    <div class="proof-wrap">
+      <div class="proof-hero">
+        <span class="proof-num num">131</span>
+        <span class="proof-num-label">issues only Orvex caught<br><span class="dim">— missed by every other bot tested</span></span>
+      </div>
+      <div class="proof-top">
+        <span class="big">…and the widest coverage overall</span>
+        <span class="sub num">defect-cluster coverage, 80 PRs</span>
+      </div>
+      <div class="bars" id="bars">
+        <div class="bar-row lead">
+          <span class="bar-name">Orvex</span>
+          <span class="bar-track"><span class="bar-fill lead" data-w="43"></span></span>
+          <span class="bar-val num">43%</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-name">Codex</span>
+          <span class="bar-track"><span class="bar-fill muted" data-w="29"></span></span>
+          <span class="bar-val num">29%</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-name">CodeRabbit</span>
+          <span class="bar-track"><span class="bar-fill muted" data-w="28"></span></span>
+          <span class="bar-val num">28%</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-name">Qodo</span>
+          <span class="bar-track"><span class="bar-fill muted" data-w="22"></span></span>
+          <span class="bar-val num">22%</span>
+        </div>
+      </div>
+      <p class="proof-foot"><b>No single model catches everything</b> — that's the whole point of the ensemble. <span class="dim">Coverage = share of all issues flagged by any reviewer across 80 real PRs; “only Orvex” = clusters no other bot flagged.</span></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== NEVER REPEATS ============================== -->
+<section id="memory">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="eyebrow"><span class="dot">//</span> IT REMEMBERS</p>
+      <h2>Never repeats itself.</h2>
+      <p>Push three times, get zero repeated nits. Orvex tracks what it already said and replies “Fixed” when you actually fix it. Roughly eight comments, max — signal, not noise.</p>
+    </div>
+    <div class="thread-grid">
+      <div class="thread" aria-label="A pull request thread across three pushes, showing the null deref flagged once, resolved, then zero repeated comments.">
+        <div class="push">
+          <span class="sha num">a1f9c02</span>
+          <span class="msg">retry-queue: backoff + jitter</span>
+          <span class="verdict first">P1 · null deref</span>
+        </div>
+        <div class="push">
+          <span class="sha num">7d2e5b8</span>
+          <span class="msg">guard null on retry path</span>
+          <span class="verdict fix">✓ Fixed — verified</span>
+        </div>
+        <div class="push">
+          <span class="sha num">b93aa10</span>
+          <span class="msg">tidy tests + rename</span>
+          <span class="verdict zero">0 repeated nits</span>
+        </div>
+      </div>
+      <div class="thread-note">
+        <ul>
+          <li><span class="tick">✓</span><span>Says it <b>once</b>. No re-litigating a line you already handled.</span></li>
+          <li><span class="tick">✓</span><span>Confirms <b>“Fixed”</b> when the change actually resolves it.</span></li>
+          <li><span class="tick">✓</span><span>Caps the noise at <b>~8 comments</b> — a review you'll actually read.</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== PRICING ============================== -->
+<section id="pricing">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="eyebrow"><span class="dot">//</span> PRICING</p>
+      <h2>Priced per workspace, not per seat.</h2>
+      <p>Every account starts with 10 free reviews — no card required. Scale from a first repo to bring-your-own-LLM enterprise.</p>
+    </div>
+    <div class="price-grid">
+
+      <div class="plan">
+        <span class="pname">Starter</span>
+        <div class="price"><span class="per">$</span><span class="amt num">29</span><span class="per">/mo</span></div>
+        <div class="reviews num">100 reviews · then $0.50/review</div>
+        <ul>
+          <li><span class="tick">✓</span>2 AI models per PR</li>
+          <li><span class="tick">✓</span>Deterministic rules pass</li>
+          <li><span class="tick">✓</span>Config-as-code (.orvex-review.yml)</li>
+        </ul>
+        <a class="pbtn" href="#start">Start free</a>
+      </div>
+
+      <div class="plan">
+        <span class="pname">Pro Unlimited</span>
+        <div class="price"><span class="per">$</span><span class="amt num">69</span><span class="per">/mo</span></div>
+        <div class="reviews num">unlimited reviews</div>
+        <ul>
+          <li><span class="tick">✓</span>2 AI models per PR</li>
+          <li><span class="tick">✓</span>No per-review overage</li>
+          <li><span class="tick">✓</span>Never-repeats memory</li>
+        </ul>
+        <a class="pbtn" href="#start">Choose Pro</a>
+      </div>
+
+      <div class="plan">
+        <span class="pname">Verify Lite</span>
+        <div class="price"><span class="per">$</span><span class="amt num">49</span><span class="per">/mo</span></div>
+        <div class="reviews num">50 reviews · then $0.75/review</div>
+        <ul>
+          <li><span class="tick">✓</span><b style="color:var(--ink)">3 AI models</b> per PR</li>
+          <li><span class="tick">✓</span>Premium track, budget entry</li>
+          <li><span class="tick">✓</span>@orvex deep on demand</li>
+        </ul>
+        <a class="pbtn" href="#start">Choose Lite</a>
+      </div>
+
+      <div class="plan feat">
+        <span class="pname">Verify</span>
+        <div class="price"><span class="per">$</span><span class="amt num">99</span><span class="per">/mo</span></div>
+        <div class="reviews num">120 reviews · then $0.75/review</div>
+        <ul>
+          <li><span class="tick">✓</span>3 AI models per PR</li>
+          <li><span class="tick">✓</span><b style="color:var(--ink)">Runs your code</b> in sandbox</li>
+          <li><span class="tick">✓</span>The full runtime-proof moat</li>
+        </ul>
+        <a class="pbtn" href="#start">Choose Verify</a>
+      </div>
+
+      <div class="plan">
+        <span class="pname">Enterprise</span>
+        <div class="price"><span class="amt num">Custom</span></div>
+        <div class="reviews num">volume + governance</div>
+        <ul>
+          <li><span class="tick">✓</span>SSO / SAML</li>
+          <li><span class="tick">✓</span>Bring-your-own-LLM key</li>
+          <li><span class="tick">✓</span>SLA &amp; support</li>
+        </ul>
+        <a class="pbtn" href="#start">Talk to us</a>
+      </div>
+
+    </div>
+    <p class="price-note">Every plan starts with 10 free reviews — no card required.</p>
+  </div>
+</section>
+
+<!-- ============================== FINAL CTA ============================== -->
+<section class="cta-band" id="start">
+  <div class="wrap">
+    <div class="cta-inner">
+      <h2>Ship it. Orvex already read it.</h2>
+      <p>Install the GitHub App and your next pull request gets reviewed — before it merges.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary btn-lg" href="#start">Start free — 10 reviews, no card</a>
+        <a class="btn btn-ghost btn-lg" href="#pricing">Compare plans</a>
+      </div>
+      <div class="subnote" style="margin-top:18px"><span class="ok">✓</span> Installs scoped: pull_requests read/write, contents read · no passwords pasted</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== FOOTER ============================== -->
+<footer>
+  <div class="wrap foot-in">
+    <a class="brand" href="#top"><span class="mark" aria-hidden="true">±</span><span>Orvex</span></a>
+    <div class="foot-links">
+      <a href="#how">How it works</a>
+      <a href="#proof">Proof</a>
+      <a href="#memory">Memory</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#start">Start free</a>
+    </div>
+    <div class="foot-copy">Orvex Review — catch bugs before production. Deterministic rules first, three models per PR, runs your code. Benchmarked 43% catch rate on 80 real PRs.</div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.documentElement;
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---------- Theme toggle ---------- */
+  var toggle = document.getElementById("themeToggle");
+  function currentTheme() {
+    var set = root.getAttribute("data-theme");
+    if (set) return set;
+    return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+  }
+  toggle.addEventListener("click", function () {
+    var next = currentTheme() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+  });
+
+  /* ---------- Hero review log: one-time orchestrated stream ---------- */
+  var stream = document.getElementById("stream");
+  var status = document.getElementById("termStatus");
+  function finishStream() {
+    stream.classList.add("done");
+    if (status) { status.classList.add("done"); status.lastChild.nodeValue = "caught"; }
+  }
+  if (reduce) {
+    finishStream();
+  } else {
+    // start playback shortly after load
+    window.setTimeout(function () { stream.classList.add("play"); }, 260);
+    // settle into rest state after the sequence completes (~3.7s + buffer)
+    window.setTimeout(finishStream, 4100);
+  }
+
+  /* ---------- Proof bars: fill when scrolled into view ---------- */
+  var bars = document.getElementById("bars");
+  function fillBars() {
+    var fills = bars.querySelectorAll(".bar-fill");
+    for (var i = 0; i < fills.length; i++) {
+      fills[i].style.width = fills[i].getAttribute("data-w") + "%";
+    }
+  }
+  if (reduce || !("IntersectionObserver" in window)) {
+    fillBars();
+  } else {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { fillBars(); io.disconnect(); }
+      });
+    }, { threshold: 0.35 });
+    io.observe(bars);
+  }
+})();
+</script>

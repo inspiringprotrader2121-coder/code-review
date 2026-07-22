@@ -1,0 +1,12 @@
+P .env
+P .env.*
+P .data/
+P node_modules/
+P dist/
+P build/
+P *.pem
+P *.key
+P *.db
+P *.db-*
+P *.sqlite
+P *.sqlite3

@@ -21,13 +21,16 @@ export function isRepoAllowed(
 
 export function shouldSkipPr(
   pr: PullRequestMeta,
-  opts: { botLogin: string; skipDependabot?: boolean },
+  opts: { botLogin: string; skipDependabot?: boolean; allowDraft?: boolean },
 ): string | null {
   // Checked first: a closed/merged PR should never spend a deep review — this
   // was a real incident (backlog jobs queued while a PR was open finally
   // running long after it was closed/merged, burning tokens for nothing).
+  // NOTE: closed/merged is NEVER overridable — reviewing it is always pointless.
   if (pr.state !== 'open') return 'PR is closed';
-  if (pr.draft) return 'draft PR';
+  // Draft PRs are skipped for AUTO reviews (work-in-progress), but an explicit
+  // `@orvex review` / manual trigger overrides this — the author asked for it.
+  if (pr.draft && !opts.allowDraft) return 'draft PR';
   if (opts.skipDependabot !== false && pr.authorLogin === 'dependabot[bot]') {
     return 'dependabot PR';
   }
@@ -98,7 +101,7 @@ export async function addIssueCommentReaction(
   });
 }
 
-export { fetchPrDiff, fetchCompareDiff } from './diff.js';
+export { fetchPrDiff, fetchPrDiffWithCoverage, fetchCompareDiff } from './diff.js';
 export { fetchFileContent, fetchRepoFile } from './content.js';
 export { fetchPrLabels, hasIgnoreLabel } from './labels.js';
 export {

@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "eval": "tsx src/run.ts",
+    "bench": "tsx src/bench/bench.ts",
+    "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@octokit/rest": "^21.1.1",
     "@orvex-review/github": "workspace:*",
     "@orvex-review/review": "workspace:*",
     "@orvex-review/rules": "workspace:*"

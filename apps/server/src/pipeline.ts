@@ -3,7 +3,7 @@ import {
   createInstallationOctokit,
   createCheckRun,
   fetchFileContent,
-  fetchPrDiff,
+  fetchPrDiffWithCoverage,
   fetchPrLabels,
   fetchPullRequest,
   fetchRepoFile,
@@ -13,6 +13,7 @@ import {
   loadGitHubConfigFromEnv,
   postPullRequestReview,
   replyToReviewComment,
+  replyToIssueComment,
   shouldSkipPr,
   type GitHubAppConfig,
   type InlineReviewComment,
@@ -26,6 +27,8 @@ import {
   type ReviewConfig,
 } from '@orvex-review/rules';
 import {
+  applyCheckboxLine,
+  checkImportBindings,
   commandTrigger,
   dedupeByFileLine,
   filterAndCapFindings,
@@ -40,9 +43,12 @@ import {
   reconcileFixedOnHead,
   dropSelfNegatingFindings,
   runLlmReview,
+  runCodexCliReview,
+  isCodexRepoAllowed,
   toStoredFinding,
   verifyFindings,
   type ReviewFinding,
+  type ReviewPromptContext,
 } from '@orvex-review/review';
 import {
   createAppDatabase,
@@ -51,13 +57,48 @@ import {
   type StoredFinding,
 } from '@orvex-review/store';
 import { planFeatures } from '@orvex-review/tenants';
+import { reportStripeReviewOverage } from './routes/billing.js';
 import { runtimeVerify, formatRuntimeEvidence } from './runtime-verify.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+/**
+ * Download + extract the repo at `ref` into a temp dir so the Codex CLI can
+ * AGENTICALLY sweep the whole codebase (read-only), not just the diff. Fail-safe:
+ * returns null on any error and the review falls back to diff+context only.
+ */
+async function checkoutRepoForCodex(
+  octokit: ReturnType<typeof createInstallationOctokit>,
+  owner: string,
+  repo: string,
+  ref: string,
+): Promise<string | null> {
+  try {
+    const res = await octokit.rest.repos.downloadTarballArchive({ owner, repo, ref });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-repo-'));
+    const tarPath = path.join(dir, 'repo.tar.gz');
+    fs.writeFileSync(tarPath, Buffer.from(res.data as ArrayBuffer));
+    // GitHub tarballs nest everything under a top-level `owner-repo-sha/` dir.
+    execFileSync('tar', ['-xzf', tarPath, '-C', dir, '--strip-components=1'], { stdio: 'ignore' });
+    fs.rmSync(tarPath, { force: true });
+    return dir;
+  } catch (err) {
+    console.warn('[worker] codex repo checkout failed (diff-only fallback):', (err as Error).message);
+    return null;
+  }
+}
 
 export interface LlmTarget {
   apiKey: string;
-  /** set for OpenAI-compatible providers (MiniMax, z.ai/GLM); unset means Anthropic */
+  /** Provider base URL. */
   baseUrl?: string;
   model: string;
+  /** Provider wire protocol. */
+  api?: 'chat' | 'responses' | 'anthropic';
+  /** reasoning effort for /v1/responses models ('low'|'medium'|'high'|'xhigh') */
+  reasoningEffort?: string;
 }
 
 export interface WorkerConfig {
@@ -65,31 +106,85 @@ export interface WorkerConfig {
   llmApiKey: string;
   /** set for OpenAI-compatible providers (MiniMax); unset means Anthropic */
   llmBaseUrl?: string;
+  llmApi?: 'chat' | 'responses' | 'anthropic';
   llmModel: string;
   /** the cheaper 'standard' model (MiniMax) for Review/Free tiers; falls back to
    *  the premium model when ORVEX_STANDARD_* is not configured. */
   standardModel: LlmTarget;
+  /** optional OpenAI model (e.g. gpt-5.3-codex via /v1/responses) for tiers with
+   *  modelTier 'openai'; null when ORVEX_OPENAI_API_KEY is not set. */
+  openaiModel: LlmTarget | null;
+  /** optional Codex CLI target (OAuth/login) used when ORVEX_CODEX_CLI=1; null
+   *  when the CLI path is disabled. */
+  codexCliModel: LlmTarget | null;
+  /** optional DeepSeek model (reasoning-heavy, cheap) — a standalone pass
+   *  target for 'multi-model' tiers, and the automatic fallback when codex
+   *  CLI's OAuth is down. null when ORVEX_DEEPSEEK_API_KEY is not set. */
+  deepseekModel: LlmTarget | null;
   maxFileBytes: number;
   maxFiles: number;
   enableCheckRuns: boolean;
   store: AppDatabase;
 }
 
-type ModelTier = 'premium' | 'standard' | 'hybrid';
-export type PassTier = 'premium' | 'standard';
+type ModelTier = 'premium' | 'standard' | 'hybrid' | 'openai' | 'codex-hybrid' | 'multi-model' | 'dual-model';
+export type PassTier = 'premium' | 'standard' | 'openai' | 'deepseek';
 
 function premiumTarget(config: WorkerConfig): LlmTarget {
-  return { apiKey: config.llmApiKey, baseUrl: config.llmBaseUrl, model: config.llmModel };
+  return { apiKey: config.llmApiKey, baseUrl: config.llmBaseUrl, model: config.llmModel, api: config.llmApi };
 }
 
-/** The model + cost-tier for a given review PASS. 'hybrid' tiers run pass 1
- *  (general) on the standard model (MiniMax) and pass 2+ (deep-dive) on the
- *  flagship (GLM-5.2) — two different models for broader bug coverage. */
+/** The model + cost-tier for a given review PASS.
+ *  - 'codex-hybrid' → pass 1 (general) on CODEX (sharp), pass 2+ (deep-dive) on
+ *    MiniMax (thorough breadth, and it reasons hard where codex's deep-dive skips).
+ *  - 'multi-model'  → THREE DIFFERENT MODELS, one per pass, for max blind-spot
+ *    diversity with zero OAuth dependency: pass 1 MiniMax, pass 2 DeepSeek
+ *    (reasoning-heavy, cheap), pass 3 the OpenAI API model (e.g. Luna). Pure
+ *    pay-as-you-go — no subscription/account-pool fragility, scales with
+ *    customer volume like any other API cost.
+ *  - 'openai'   → the OpenAI reasoning model (gpt-5.x/Luna) on every pass.
+ *  - 'hybrid'   → pass 1 (general) on MiniMax, pass 2+ (deep-dive) on GLM-5.2.
+ *  - 'standard' → MiniMax on every pass.  'premium' → GLM on every pass. */
 export function modelForPass(
   config: WorkerConfig,
   plan: { modelTier?: ModelTier },
   passIndex: number,
 ): { target: LlmTarget; tier: PassTier } {
+  if (plan.modelTier === 'codex-hybrid') {
+    // general → codex (CLI if enabled, else paid API); deep-dive + further passes → MiniMax
+    if (passIndex === 0 && config.codexCliModel) return { target: config.codexCliModel, tier: 'openai' };
+    if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
+    return { target: config.standardModel, tier: 'standard' };
+  }
+  if (plan.modelTier === 'multi-model') {
+    // pass 1 (general) → the frontier OpenAI model (Luna) — sharpest first look,
+    // same "strongest model owns the broadest pass" pattern codex-hybrid used.
+    // Prefer the CODEX CLI (API-key auth, not OAuth) when configured: same
+    // model, but with real repo-exploration tool calls (rg/cat/git diff)
+    // instead of a single-shot call — the repo-sweep capability, without any
+    // OAuth session fragility since API keys don't expire/rotate/get revoked.
+    if (passIndex === 0 && config.codexCliModel) return { target: config.codexCliModel, tier: 'openai' };
+    if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
+    // pass 2 (deep-dive) → DeepSeek's heavy reasoning, built for hunting the
+    // subtle defects a first read misses.
+    if (passIndex === 1 && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+    // pass 3 (perf/completeness) + any missing-key fallback → MiniMax.
+    return { target: config.standardModel, tier: 'standard' };
+  }
+  if (plan.modelTier === 'dual-model') {
+    // TWO-MODEL ensemble for the base paid tiers: MiniMax handles breadth
+    // (general + perf/completeness lenses), DeepSeek's heavy reasoning takes
+    // the deep-dive lens (pass 2) — exactly the "hunt subtle defects a first
+    // read misses" job a strong reasoner is built for. Falls back to MiniMax
+    // if DeepSeek isn't configured, so nothing breaks with the key unset.
+    if (passIndex === 1 && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+    return { target: config.standardModel, tier: 'standard' };
+  }
+  if (plan.modelTier === 'openai') {
+    if (config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
+    // P3-4: missing OpenAI key must fall back to standard, not premium.
+    return { target: config.standardModel, tier: 'standard' };
+  }
   if (plan.modelTier === 'hybrid') {
     return passIndex === 0
       ? { target: config.standardModel, tier: 'standard' }
@@ -99,10 +194,19 @@ export function modelForPass(
   return { target: premiumTarget(config), tier: 'premium' };
 }
 
-/** The model for non-pass LLM work (the verification pass). Hybrid uses the
- *  flagship for verification. */
+/** The model for the single verification pass. Verification is a FILTER, not the
+ *  reviewer, so it always runs on the cheaper standard model (MiniMax) — even when
+ *  the review passes use an expensive model (e.g. codex). */
 export function modelForPlan(config: WorkerConfig, plan: { modelTier?: ModelTier }): LlmTarget {
-  if (plan.modelTier === 'standard') return config.standardModel;
+  if (
+    plan.modelTier === 'standard' ||
+    plan.modelTier === 'openai' ||
+    plan.modelTier === 'codex-hybrid' ||
+    plan.modelTier === 'multi-model' ||
+    plan.modelTier === 'dual-model'
+  ) {
+    return config.standardModel;
+  }
   return premiumTarget(config);
 }
 
@@ -111,7 +215,7 @@ let sharedStore: AppDatabase | null = null;
 export function loadWorkerConfig(): WorkerConfig {
   const github = loadGitHubConfigFromEnv();
 
-  // MiniMax (OpenAI-compatible) takes precedence when configured; Anthropic otherwise.
+  // MiniMax takes precedence when configured; Anthropic otherwise.
   const minimaxKey = process.env.MINIMAX_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   if (!minimaxKey && !anthropicKey) {
@@ -123,7 +227,18 @@ export function loadWorkerConfig(): WorkerConfig {
   }
 
   const premiumApiKey = (minimaxKey ?? anthropicKey)!;
-  const premiumBaseUrl = minimaxKey ? (process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1') : undefined;
+  const premiumApi = minimaxKey
+    ? process.env.MINIMAX_API === 'anthropic'
+      ? 'anthropic'
+      : process.env.MINIMAX_API === 'chat'
+        ? 'chat'
+        : process.env.MINIMAX_BASE_URL?.includes('/anthropic')
+          ? 'anthropic'
+          : 'chat'
+    : undefined;
+  const premiumBaseUrl = minimaxKey
+    ? (process.env.MINIMAX_BASE_URL ?? (premiumApi === 'anthropic' ? 'https://api.minimax.io/anthropic' : 'https://api.minimax.io/v1'))
+    : undefined;
   const premiumModel = minimaxKey
     ? (process.env.MINIMAX_MODEL ?? 'MiniMax-M3')
     : (process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514');
@@ -131,20 +246,77 @@ export function loadWorkerConfig(): WorkerConfig {
   // The cheaper 'standard' model (Review/Free). Configured via ORVEX_STANDARD_*;
   // if unset, falls back to the premium model so nothing breaks.
   const stdKey = process.env.ORVEX_STANDARD_API_KEY;
+  const stdModelName = process.env.ORVEX_STANDARD_MODEL ?? 'MiniMax-M3';
+  const stdApi = process.env.ORVEX_STANDARD_API === 'anthropic'
+    ? 'anthropic'
+    : process.env.ORVEX_STANDARD_API === 'responses'
+      ? 'responses'
+      : process.env.ORVEX_STANDARD_API === 'chat'
+        ? 'chat'
+        : process.env.ORVEX_STANDARD_BASE_URL?.includes('/anthropic')
+          ? 'anthropic'
+          : 'chat';
   const standardModel: LlmTarget = stdKey
     ? {
         apiKey: stdKey,
-        baseUrl: process.env.ORVEX_STANDARD_BASE_URL,
-        model: process.env.ORVEX_STANDARD_MODEL ?? 'MiniMax-M3',
+        baseUrl: process.env.ORVEX_STANDARD_BASE_URL ??
+          (stdApi === 'anthropic' ? 'https://api.minimax.io/anthropic' : 'https://api.minimax.io/v1'),
+        model: stdModelName,
+        api: stdApi,
       }
-    : { apiKey: premiumApiKey, baseUrl: premiumBaseUrl, model: premiumModel };
+    : { apiKey: premiumApiKey, baseUrl: premiumBaseUrl, model: premiumModel, api: premiumApi };
+
+  // Optional OpenAI reasoning model via /v1/responses. Verify's first pass uses
+  // this direct API target when configured; it can be enabled or changed without
+  // a code deployment.
+  const openaiKey = process.env.ORVEX_OPENAI_API_KEY;
+  const openaiModel: LlmTarget | null = openaiKey
+    ? {
+        apiKey: openaiKey,
+        baseUrl: process.env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+        model: process.env.ORVEX_OPENAI_MODEL ?? 'gpt-5.6-luna',
+        // 'responses' for OpenAI's native gpt-5.x endpoint; 'chat' for
+        // OpenAI-compatible gateways (OpenRouter etc. — verified live: streams
+        // and accepts reasoning_effort on /chat/completions).
+        api: process.env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
+        reasoningEffort: process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'xhigh',
+      }
+    : null;
+
+  // Optional local Codex CLI (OAuth/login) used for codex-hybrid pass 1 instead
+  // of the paid OpenAI API.
+  const codexCliModel: LlmTarget | null =
+    process.env.ORVEX_CODEX_CLI === '1'
+      ? {
+          apiKey: '',
+          model: process.env.ORVEX_CODEX_CLI_MODEL ?? 'gpt-5.5',
+          reasoningEffort: process.env.ORVEX_CODEX_CLI_REASONING_EFFORT ?? 'xhigh',
+        }
+      : null;
+
+  // Optional DeepSeek model — reasoning-heavy, cheap, no OAuth. Standalone pass
+  // target for 'multi-model' tiers, and codex-hybrid's automatic pass-1
+  // fallback when the CLI's OAuth session is down.
+  const deepseekKey = process.env.ORVEX_DEEPSEEK_API_KEY;
+  const deepseekModel: LlmTarget | null = deepseekKey
+    ? {
+        apiKey: deepseekKey,
+        baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: process.env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
+        reasoningEffort: process.env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+      }
+    : null;
 
   return {
     github,
     llmApiKey: premiumApiKey,
     llmBaseUrl: premiumBaseUrl,
     llmModel: premiumModel,
+    llmApi: premiumApi,
     standardModel,
+    openaiModel,
+    codexCliModel,
+    deepseekModel,
     maxFileBytes: Number(process.env.MAX_FILE_BYTES ?? 300_000),
     maxFiles: Number(process.env.MAX_FILES ?? 150),
     enableCheckRuns: process.env.CHECK_RUNS_ENABLED === '1',
@@ -161,6 +333,8 @@ export interface ProcessResult {
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  /** severity/file/line of what this run NEWLY posted — deep-vs-normal scorecard */
+  newFindings?: Array<{ severity: string; file: string; line?: number }>;
 }
 
 // LLM cost model (USD per 1M tokens), PER MODEL TIER — a Review (MiniMax) review
@@ -170,24 +344,44 @@ const PREMIUM_COST_IN = Number(process.env.ORVEX_COST_INPUT_PER_M ?? 1.4);
 const PREMIUM_COST_OUT = Number(process.env.ORVEX_COST_OUTPUT_PER_M ?? 4.4);
 const STANDARD_COST_IN = Number(process.env.ORVEX_STANDARD_COST_INPUT_PER_M ?? 0.3);
 const STANDARD_COST_OUT = Number(process.env.ORVEX_STANDARD_COST_OUTPUT_PER_M ?? 1.2);
-function computeCostUsd(inputTokens: number, outputTokens: number, tier: 'premium' | 'standard'): number {
-  const [inRate, outRate] = tier === 'standard' ? [STANDARD_COST_IN, STANDARD_COST_OUT] : [PREMIUM_COST_IN, PREMIUM_COST_OUT];
+// OpenAI reasoning models bill reasoning tokens as output. Default is Luna's
+// confirmed launch pricing ($1 / $6 per 1M in/out) — override via env if the
+// configured ORVEX_OPENAI_MODEL is priced differently.
+const OPENAI_COST_IN = Number(process.env.ORVEX_OPENAI_COST_INPUT_PER_M ?? 1);
+const OPENAI_COST_OUT = Number(process.env.ORVEX_OPENAI_COST_OUTPUT_PER_M ?? 6);
+// DeepSeek (reasoning-heavy, cheap) — placeholder rate, override once billed usage confirms it.
+const DEEPSEEK_COST_IN = Number(process.env.ORVEX_DEEPSEEK_COST_INPUT_PER_M ?? 0.55);
+const DEEPSEEK_COST_OUT = Number(process.env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M ?? 2.19);
+function computeCostUsd(inputTokens: number, outputTokens: number, tier: PassTier): number {
+  const [inRate, outRate] =
+    tier === 'standard'
+      ? [STANDARD_COST_IN, STANDARD_COST_OUT]
+      : tier === 'openai'
+        ? [OPENAI_COST_IN, OPENAI_COST_OUT]
+        : tier === 'deepseek'
+          ? [DEEPSEEK_COST_IN, DEEPSEEK_COST_OUT]
+          : [PREMIUM_COST_IN, PREMIUM_COST_OUT];
   return (inputTokens / 1e6) * inRate + (outputTokens / 1e6) * outRate;
 }
 
-/** Total tokens + cost from per-tier usage (a hybrid review mixes two models,
- *  each with its own $/token). */
-function totalUsage(usage: { standard: { in: number; out: number }; premium: { in: number; out: number } }): {
-  inputTokens: number;
-  outputTokens: number;
-  costUsd: number;
-} {
+type TierUsage = {
+  standard: { in: number; out: number };
+  premium: { in: number; out: number };
+  openai: { in: number; out: number };
+  deepseek: { in: number; out: number };
+};
+
+/** Total tokens + cost from per-tier usage (a review can mix models, each with
+ *  its own $/token). */
+function totalUsage(usage: TierUsage): { inputTokens: number; outputTokens: number; costUsd: number } {
   return {
-    inputTokens: usage.standard.in + usage.premium.in,
-    outputTokens: usage.standard.out + usage.premium.out,
+    inputTokens: usage.standard.in + usage.premium.in + usage.openai.in + usage.deepseek.in,
+    outputTokens: usage.standard.out + usage.premium.out + usage.openai.out + usage.deepseek.out,
     costUsd:
       computeCostUsd(usage.standard.in, usage.standard.out, 'standard') +
-      computeCostUsd(usage.premium.in, usage.premium.out, 'premium'),
+      computeCostUsd(usage.premium.in, usage.premium.out, 'premium') +
+      computeCostUsd(usage.openai.in, usage.openai.out, 'openai') +
+      computeCostUsd(usage.deepseek.in, usage.deepseek.out, 'deepseek'),
   };
 }
 
@@ -222,11 +416,27 @@ const MS_PER_30_DAYS = 30 * 24 * 3_600_000;
  * Checked cheapest/most-specific first: hourly burst, then monthly cost
  * exposure, then the free-trial lifetime cap.
  */
+const GLOBAL_FREE_TIER_DAILY_CAP = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
+
 export function accountLimitReason(
   store: WorkerConfig['store'],
   owner: string,
   plan: ReturnType<typeof planFeatures>,
-): 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | null {
+): 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'free_tier_capped' | null {
+  // GLOBAL free-tier circuit-breaker: a hard ceiling on total free reviews per
+  // rolling 24h across ALL accounts. This is the abuse BACKSTOP — it bounds the
+  // dollar damage of trial-farming no matter how a farmer evades the per-account
+  // (10/owner) and per-IP (5 accounts/IP/day) gates. Trips well above any real
+  // free-tier day; when it fires, ops gets a loud log and can raise it.
+  if (plan.trialReviewLimit !== null) {
+    const globalToday = store.countGlobalFreeTierReviewsSince(3_600_000 * 24);
+    if (globalToday >= GLOBAL_FREE_TIER_DAILY_CAP) {
+      console.error(
+        `[abuse] FREE-TIER DAILY CAP HIT: ${globalToday} free reviews in 24h (cap ${GLOBAL_FREE_TIER_DAILY_CAP}). Pausing free reviews — likely trial-farming. Raise ORVEX_FREE_TIER_DAILY_CAP if this is genuine growth.`,
+      );
+      return 'free_tier_capped';
+    }
+  }
   if (
     plan.reviewsPerHour !== null &&
     store.countAccountReviews(owner, { sinceMs: 3_600_000 }) >= plan.reviewsPerHour
@@ -235,6 +445,7 @@ export function accountLimitReason(
   }
   if (
     plan.reviewsPerMonth !== null &&
+    plan.overageCentsPerReview === null &&
     store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS }) >= plan.reviewsPerMonth
   ) {
     return 'monthly_limit';
@@ -243,6 +454,22 @@ export function accountLimitReason(
     return 'trial_exhausted';
   }
   return null;
+}
+
+/**
+ * TIER-RESCUE GATE (reason-based): the verification pass runs on a cheaper
+ * model, so its veto of a strong-reasoner finding is only trusted when it
+ * FACTUALLY REFUTES the finding against the code. Hedged / low-information
+ * rejections — "cannot verify", "not enough context", "validated elsewhere" —
+ * are exactly the failure mode the protected-tier rescue exists for, and those
+ * get rescued. A concrete refutation (states what the code actually does, and
+ * why the claim is wrong) stands even against a protected tier.
+ */
+export function isHedgedRejection(reason: string): boolean {
+  const r = reason.toLowerCase();
+  return /cannot (?:independently )?(?:verify|confirm|re-derive|reproduce|determine)|can'?t (?:verify|confirm)|insufficient|not enough (?:context|evidence|information)|lack(?:s|ing)? (?:of )?(?:context|evidence|information)|no evidence|unclear|uncertain|unable to|unverifiable|not enough information|could not (?:verify|confirm|find)|(?:validated|handled|checked|guarded|mitigated) elsewhere|assum|presum|likely (?:intentional|fine|safe)|probably|seems? (?:fine|correct|okay|ok|safe|intentional)|appears? (?:fine|correct|safe|intentional)/i.test(
+    r,
+  );
 }
 
 /** Post the upgrade nudge for a blocked free-tier review (best-effort). */
@@ -325,21 +552,24 @@ export async function processReviewJob(
   // await in between. Because better-sqlite3 is synchronous, two concurrent
   // reviews on different PRs can't both read a stale count and slip past the cap.
   const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
-  if (plan.trialReviewLimit !== null || plan.reviewsPerHour !== null) {
+  const isFreeTier = plan.trialReviewLimit !== null;
+  if (isFreeTier || plan.reviewsPerHour !== null) {
     const reason = accountLimitReason(config.store, job.owner, plan);
     if (reason) {
       config.store.recordReviewRun({ ...runBase, status: 'skipped', skipReason: reason, durationMs: 0 });
-      await postLimitNudge(config, job, plan, reason);
+      // The global cap is an anti-abuse pause, not a per-user limit — don't nudge
+      // the (possibly innocent) author to upgrade; just skip quietly.
+      if (reason !== 'free_tier_capped') await postLimitNudge(config, job, plan, reason);
       return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: reason };
     }
   }
 
   // Insert a 'running' row up front so the dashboard shows the run the instant
   // it's triggered, then finalize the same row when it finishes.
-  const runId = config.store.startReviewRun(runBase);
+  const runId = config.store.startReviewRun({ ...runBase, deep: Boolean(job.deep), freeTier: isFreeTier });
 
   try {
-    const result = await executeReview(job, config);
+    const result = await executeReview(job, config, runId);
     config.store.completeReviewRun(runId, {
       status: result.skipReason ? 'skipped' : 'completed',
       skipReason: result.skipReason,
@@ -350,7 +580,17 @@ export async function processReviewJob(
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       costUsd: result.costUsd,
+      newFindings: result.newFindings,
     });
+    // Metered-overage plans (have an included quota + per-review overage price).
+    // 'review-plus' (unlimited) and 'enterprise'/'free' are excluded — no overage.
+    if (!result.skipReason && (plan.id === 'review' || plan.id === 'verify-lite' || plan.id === 'verify')) {
+      try {
+        await reportStripeReviewOverage({ store: config.store, tenantId: job.tenantId, plan: plan.id, runId, deep: Boolean(job.deep) });
+      } catch (err) {
+        console.error(`[billing] failed to report Stripe overage for run ${runId}:`, err);
+      }
+    }
     return result;
   } catch (err) {
     config.store.completeReviewRun(runId, {
@@ -365,6 +605,8 @@ export async function processReviewJob(
 async function executeReview(
   job: ReviewJobPayload,
   config: WorkerConfig,
+  /** the 'running' row created by processReviewJob — re-pointed at the real head SHA below */
+  runId?: string,
 ): Promise<ProcessResult> {
   const { installationId, tenantId, owner, repo, pr: number, action } = job;
   const ref = { owner, repo, number };
@@ -381,11 +623,12 @@ async function executeReview(
   // The tenant's plan drives review DEPTH and which features run — this is the
   // enforced separation between tiers (Free/Review/Verify), not just wording.
   const plan = planFeatures(config.store.getTenantPlan(tenantId));
-  // Review/Free run on the cheaper 'standard' model; Verify/Enterprise on the
-  // flagship. Same pipeline — the review call and the verification pass both use
-  // the plan's model.
+  // The review passes use modelForPass (may be codex on the Verify test); the
+  // single verification pass uses `llm` = modelForPlan (always MiniMax — a cheap
+  // filter, not the reviewer).
   const llm = modelForPlan(config, plan);
-  console.log(`[worker] plan=${plan.id} model=${llm.model}`);
+  const reviewModel = modelForPass(config, plan, 0).target.model;
+  console.log(`[worker] plan=${plan.id} review=${reviewModel} verify=${llm.model}`);
 
   console.log(
     `[worker] tenant=${tenantId.slice(0, 8)} inst=${installationId} account=${installation.accountLogin} plan=${plan.id}`,
@@ -397,36 +640,71 @@ async function executeReview(
 
   const pr = await fetchPullRequest(octokit, ref);
   const effectiveSha = pr.headSha;
+  // The run row was created from the webhook payload's headSha, which can be
+  // STALE (a newer commit landed between event and execution). Record the run
+  // on the SHA actually being reviewed — cooldown, dedup, and the scorecard
+  // all key on head_sha.
+  if (runId && effectiveSha !== job.headSha) {
+    console.log(`[worker] head moved ${job.headSha.slice(0, 7)} → ${effectiveSha.slice(0, 7)} since enqueue; recording run on effective SHA`);
+    config.store.setReviewRunHeadSha(runId, effectiveSha);
+  }
 
   const labels = await fetchPrLabels(octokit, ref);
-  const repoConfigYaml =
-    (await fetchRepoFile(octokit, owner, repo, '.orvex-review.yml', effectiveSha)) ??
-    // deprecated pre-rename config filename; remove after customers migrate
-    (await fetchRepoFile(octokit, owner, repo, '.velatrix-review.yml', effectiveSha));
-  const reviewConfig = parseReviewConfigYaml(repoConfigYaml);
+  // This config file is optional — a transient GitHub 5xx/network blip on the
+  // lookup must fall back to defaults, not abort the whole review (it did:
+  // PR93 died in 8s on a raw 502 here, before any LLM call ran).
+  let repoConfigYaml: string | null = null;
+  try {
+    repoConfigYaml =
+      (await fetchRepoFile(octokit, owner, repo, '.orvex-review.yml', effectiveSha)) ??
+      // deprecated pre-rename config filename; remove after customers migrate
+      (await fetchRepoFile(octokit, owner, repo, '.velatrix-review.yml', effectiveSha));
+  } catch (err) {
+    console.error(`[worker] repo config fetch failed, using defaults: ${(err as Error).message}`);
+  }
+  const reviewConfig = effectiveReviewConfig(
+    repoConfigYaml,
+    config.store.getWorkspaceSettings(tenantId),
+    config.store.getRepoByFullName(installationId, `${owner}/${repo}`)?.reviewMode,
+  );
 
   if (hasIgnoreLabel(labels, reviewConfig.ignore_labels)) {
     console.log(`[worker] skip PR #${number}: label ${reviewConfig.ignore_labels.join('/')}`);
     return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: 'ignore_label' };
   }
 
-  const skipReason = shouldSkipPr(pr, { botLogin: config.github.botLogin });
+  // A manual review (`@orvex review` → action 'command', or the API → 'manual')
+  // is an explicit request, so it reviews even a draft PR. Auto triggers
+  // (opened/synchronize/reopened) still skip drafts.
+  const isManualTrigger = action === 'command' || action === 'manual';
+  const skipReason = shouldSkipPr(pr, {
+    botLogin: config.github.botLogin,
+    allowDraft: isManualTrigger,
+  });
   if (skipReason) {
     console.log(`[worker] skip PR #${number}: ${skipReason}`);
     return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason };
   }
 
   const priorState = config.store.getState({ installationId, owner, repo, pr: number });
+  // Codex CLI session id for this PR — re-used across re-reviews so the model
+  // keeps the same conversation context; undefined starts a fresh session.
+  let codexThreadId = priorState?.codexThreadId;
   const sinceSha =
     action === 'synchronize' && priorState?.lastSha ? priorState.lastSha : undefined;
 
-  const files = await fetchPrDiff(octokit, ref, {
+  const { files, coverage } = await fetchPrDiffWithCoverage(octokit, ref, {
     maxFileBytes: config.maxFileBytes,
     maxFiles: config.maxFiles,
     ignoreGlobs: reviewConfig.ignore,
     sinceSha,
     headSha: effectiveSha,
   });
+  if (!coverage.complete) {
+    console.warn(
+      `[worker] PARTIAL coverage ${owner}/${repo}#${number}: ${coverage.reviewed}/${coverage.candidates} files reviewed, ${coverage.skippedByCap} over cap, ${coverage.truncatedFiles} truncated, ${coverage.omittedPatch} patch-omitted`,
+    );
+  }
 
   console.log(
     `[worker] PR #${number} @ ${effectiveSha.slice(0, 7)} action=${action} files=${files.length}` +
@@ -439,11 +717,11 @@ async function executeReview(
   };
 
   const priorOpen = (priorState?.findings ?? []).filter((f) => f.status === 'open');
-  const { stillOpen: verifiedOpen, newlyFixed: verifiedFixed } = await reconcileFixedOnHead(
-    priorOpen,
-    effectiveSha,
-    fileReader,
-  );
+  const {
+    stillOpen: verifiedOpen,
+    newlyFixed: verifiedFixed,
+    readErrorFps,
+  } = await reconcileFixedOnHead(priorOpen, effectiveSha, fileReader);
 
   for (const fixed of verifiedFixed) {
     if (fixed.githubCommentId) {
@@ -483,13 +761,20 @@ async function executeReview(
   let llmFindings: ReviewFinding[] = [];
   // Token usage per model tier — a hybrid review runs two different models, so
   // cost is tracked separately (each has its own $/token) and summed.
-  const usage = { standard: { in: 0, out: 0 }, premium: { in: 0, out: 0 } };
+  const usage: TierUsage = {
+    standard: { in: 0, out: 0 },
+    premium: { in: 0, out: 0 },
+    openai: { in: 0, out: 0 },
+    deepseek: { in: 0, out: 0 },
+  };
   const onUsageFor = (tier: PassTier) => (u: { inputTokens: number; outputTokens: number }) => {
     usage[tier].in += u.inputTokens;
     usage[tier].out += u.outputTokens;
   };
   // full-file contents used by both the review call and the verification pass
   let reviewContextFiles: Array<{ path: string; content: string }> = [];
+  // repo tree paths, hoisted so the (later) deepVerify pass can locate manifests
+  let repoTreePaths: string[] = [];
 
   // author intent — critical for not flagging deliberate changes as bugs
   const prIntent = [pr.title, pr.body].filter(Boolean).join('\n\n').slice(0, 4000);
@@ -539,6 +824,7 @@ async function executeReview(
           ...reviewContext.dependents,
           ...reviewContext.others,
         ];
+        repoTreePaths = reviewContext.treePaths ?? [];
       } catch (err) {
         console.warn('[worker] deep context unavailable, reviewing diff-only:', err);
       }
@@ -548,12 +834,14 @@ async function executeReview(
     // how long one model call decides to think. Higher tiers get more passes and
     // (Verify only) an exhaustive whole-repo sweep. Findings accumulate and
     // dedupe by fingerprint; a hard call-count cap prevents runaway.
-    const baseCtx = { ...(reviewContext ?? {}), prTitle: pr.title, prBody: pr.body };
+    const baseCtx: ReviewPromptContext = { ...(reviewContext ?? {}), prTitle: pr.title, prBody: pr.body };
     const runReview = (ctx: typeof baseCtx, target: LlmTarget, tier: PassTier) =>
       runLlmReview(filesForLlm, {
         apiKey: target.apiKey,
         baseUrl: target.baseUrl,
         model: target.model,
+        api: target.api,
+        reasoningEffort: target.reasoningEffort,
         context: ctx,
         onUsage: onUsageFor(tier),
       });
@@ -576,34 +864,106 @@ async function executeReview(
     const passOthers = (reviewContext?.others ?? []).slice(0, plan.retrievalTopK);
     const passCtx = { ...baseCtx, others: passOthers };
 
-    // Verify's 2nd+ passes are a DEEP-DIVE with a different lens — the first pass
-    // reviews generally, later passes hunt SPECIFICALLY for the subtle high-impact
-    // bugs a first read misses. Different focus (not a redundant re-run) is what
-    // makes multiple passes catch meaningfully more (e.g. the data-integrity /
-    // migration bugs a general pass skims over).
+    // Each pass beyond the first uses a DIFFERENT lens — not a redundant re-run.
+    // Pass 1 reviews generally; pass 2 deep-dives the subtle high-impact bugs; the
+    // (Verify-only) pass 3 hunts an entirely SEPARATE class the bug-focused passes
+    // skip — performance, completeness/what's-missing, and API/contract breakage.
+    // Distinct focus is what makes extra passes catch meaningfully more.
     const DEEP_DIVE_FOCUS =
       'This is a SECOND, DEEPER review pass — a general pass already ran. Re-read the changed code with fresh skepticism and hunt SPECIFICALLY for the subtle, high-impact defects a first read misses:\n' +
       '- DATA INTEGRITY & MIGRATIONS: type mismatches (e.g. copying VARCHAR/UUID ids into a BIGINT column), count-based logic that can DROP or DUPLICATE rows, partial-failure / retry paths that re-run destructively, missing idempotency or version/marker guards, dropping backups before reconciling.\n' +
       '- SECURITY: auth/authz gaps, injection, IDOR, secrets, fail-OPEN defaults, signing/verification mistakes.\n' +
       '- CONCURRENCY: races, TOCTOU, non-atomic read-modify-write, lost updates.\n' +
+      '- STATE-TRANSITION MATRIX: for each changed branch compare absent vs false/zero, create vs update/no-op/not-found, first event vs retry/cumulative event, and new vs restored/legacy records. Check that counters, quotas, markers, and response fields describe what actually happened.\n' +
+      '- TRUST PRECEDENCE: signed/authenticated/session claims must outrank body, query, header, and User-Agent hints; request data may fill an absent claim but never override a present trusted one.\n' +
+      '- LIFECYCLE OWNERSHIP: for every new lock, lease, refcount, pool, or shared tunnel, enumerate all acquire/open and release/close/destroy paths, including eviction, teardown, timeout, and overlapping-creation failure.\n' +
+      '- KEYING & SCOPING: cache keys, lock names, dedup keys, or map keys that omit part of the identity (tenant/user/resource) — two different entities colliding on one key is data-leak/data-corruption territory.\n' +
+      '- ENCODING BYPASS: a validator/denylist/allowlist that checks one FORM of the input but not its equivalents (hex, URL-encoded, IPv6-mapped, unicode, case) — the alternate encoding walks straight past the new check.\n' +
+      '- STATED-CONTRACT VIOLATIONS: the code/comment/docstring CLAIMS a behavior (fail-open, idempotent, atomic, retries) — verify the implementation actually delivers it on every path; a claimed contract the code breaks is a bug even if each line looks fine.\n' +
       '- EDGE CASES: null/empty/boundary/malformed input, off-by-one, error paths, tests whose assertions no longer match the code they test.\n' +
-      'Report anything real the first pass would plausibly have overlooked. Do not repeat obvious findings; go deeper.';
-    const deepDiveCtx = { ...passCtx, extraFocus: DEEP_DIVE_FOCUS };
+      '- ENVIRONMENT: every NEW/moved file must load in its package’s module system — CJS globals (__dirname/require) in an ESM ("type": "module") package = ReferenceError at collection = P1; check the nearest package.json.\n' +
+      'Report anything real the first pass would plausibly have overlooked. Do not repeat obvious findings; go deeper.\n' +
+      'Before finalizing, take ONE more look at the 2-3 most complex changed areas — the subtlest bug is usually there.';
+    const THIRD_ANGLE_FOCUS =
+      'This is a THIRD review pass with a DIFFERENT LENS than the first two (which already covered correctness, security, data-integrity, and concurrency). Do NOT repeat those — hunt for the class of problem a bug-focused read SKIPS:\n' +
+      '- PERFORMANCE: N+1 queries (especially a null/missing prefetch silently falling back to per-item queries), work inside a loop that belongs outside it, O(n^2)+ on data that grows, unbounded result sets / memory, blocking I/O on a hot path or at startup, missing pagination or an index, redundant re-computation or repeated network/DB calls.\n' +
+      "- COMPLETENESS / WHAT'S MISSING: inputs never validated, error paths unhandled or swallowed, a changed function whose CALLERS or TESTS were not updated to match, a new branch with no test, missing null/empty handling, a multi-step operation with no rollback/idempotency.\n" +
+      '- API / CONTRACT COMPATIBILITY: a changed signature, return shape, HTTP status, error type, DB schema, or serialized format that breaks existing callers/clients or stored data.\n' +
+      '- FALLBACK / LEGACY PARITY: normal and fallback branches must use the same real enum values, error classes, and output shape. Legacy protected/encrypted data that looks corrupted must fail closed, not pass through as plaintext.\n' +
+      '- DESIGN (only when it will cause real bugs or heavy future cost): a bandaid special-case that should be a deeper fix, duplicated logic that will drift out of sync, an abstraction that invites misuse.\n' +
+      'Every finding must name a concrete failure or measurable cost. Skip anything the correctness/security passes would already catch.\n' +
+      'Before finalizing, take ONE more look at the 2-3 most complex changed areas through this lens — the subtlest miss is usually there.';
+    // Per-pass lens; pass index beyond the list reuses the last (deepest) angle.
+    const PASS_ANGLES: Array<{ tag: string; focus?: string }> = [
+      { tag: 'general' },
+      { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS },
+      { tag: 'perf/completeness/api', focus: THIRD_ANGLE_FOCUS },
+    ];
 
     type ReviewCall = {
       label: string;
-      kind: 'pass' | 'sweep';
+      kind: 'pass' | 'sweep' | 'codex-cli';
       ctx: typeof baseCtx;
       target: LlmTarget;
       tier: PassTier;
     };
+    // When ORVEX_CODEX_CLI=1, route the OpenAI-tier pass through the local
+    // `codex` CLI (API-key auth — see codexCliModel in loadWorkerConfig)
+    // instead of a plain single-shot /v1/responses call, for real repo
+    // exploration (rg/cat/git diff tool calls). SCOPED to the tiers actually
+    // designed to use it — an allowlist, not "any pass that happens to be
+    // tier 'openai'", so a future tier can't get silently CLI-routed by accident.
+    const useCodexCli =
+      process.env.ORVEX_CODEX_CLI === '1' &&
+      (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model');
+    // Check out the repo (read-only) so codex can sweep the whole codebase, not
+    // just the diff. Only when codex-cli is the pass-1 model for this plan AND
+    // the repo is on the first-party allowlist (ORVEX_CODEX_CLI_REPOS) — codex
+    // runs unsandboxed, so sweeping arbitrary third-party repos is an RCE surface.
+    const codexRepoDir =
+      useCodexCli && modelForPass(config, plan, 0).tier === 'openai' && isCodexRepoAllowed(`${owner}/${repo}`)
+        ? await checkoutRepoForCodex(octokit, owner, repo, effectiveSha)
+        : null;
+    if (codexRepoDir) console.log(`[worker] codex repo sweep: checked out ${owner}/${repo}@${effectiveSha.slice(0, 7)}`);
+    // `@orvex deep` (paid plans): two EXTRA lenses beyond the standard three,
+    // unioned into the same review — deliberately different angles, not reruns.
+    const DEEP_EXTRA_ANGLES: Array<{ tag: string; focus: string; modelIdx: number }> = job.deep
+      ? [
+          {
+            tag: 'deep:removed-behavior',
+            modelIdx: 1, // the heavy reasoner (DeepSeek on dual/multi tiers)
+            focus:
+              'EXTRA DEEP-REVIEW PASS — REMOVED-BEHAVIOR & CALLER AUDIT. For every line this diff DELETES or replaces: name the invariant/behavior it enforced, then verify where the new code re-establishes it — a dropped guard, narrowed validation, or deleted error path that is NOT re-established is a finding. Then trace every changed function to its CALLERS: does any call site break on a new precondition, changed return shape, new exception, or ordering change? Report only concrete breakages with file:line.',
+          },
+          {
+            tag: 'deep:second-opinion',
+            modelIdx: 0,
+            focus:
+              'EXTRA DEEP-REVIEW PASS — ADVERSARIAL SECOND OPINION. Assume earlier review passes MISSED at least one real defect. Do not repeat the obvious; hunt specifically where reviews go blind: async boundaries and unawaited promises, error/cleanup paths, resource lifecycle (open/close/retry), identity scoping (tenant/user leaking across a boundary), and off-by-one/boundary conditions in new loops or slices. Report only findings with a concrete failure scenario.',
+          },
+        ]
+      : [];
+    const totalPasses = passes + DEEP_EXTRA_ANGLES.length;
+    if (job.deep) console.log(`[worker] deep review requested: +${DEEP_EXTRA_ANGLES.length} extra passes`);
+
     const reviewCalls: ReviewCall[] = [];
     for (let p = 0; p < passes; p++) {
       const { target, tier } = modelForPass(config, plan, p);
+      const angle = PASS_ANGLES[Math.min(p, PASS_ANGLES.length - 1)];
       reviewCalls.push({
-        label: `pass ${p + 1}/${passes}${p >= 1 ? ' (deep-dive)' : ''} [${target.model}]`,
-        kind: 'pass',
-        ctx: p >= 1 ? deepDiveCtx : passCtx,
+        label: `pass ${p + 1}/${totalPasses} (${angle.tag}) [${target.model}]`,
+        kind: useCodexCli && tier === 'openai' ? 'codex-cli' : 'pass',
+        ctx: angle.focus ? { ...passCtx, extraFocus: angle.focus } : passCtx,
+        target,
+        tier,
+      });
+    }
+    for (const [i, extra] of DEEP_EXTRA_ANGLES.entries()) {
+      const { target, tier } = modelForPass(config, plan, extra.modelIdx);
+      reviewCalls.push({
+        label: `pass ${passes + i + 1}/${totalPasses} (${extra.tag}) [${target.model}]`,
+        kind: 'pass', // deep extras always use the plain API path, never codex CLI
+        ctx: { ...passCtx, extraFocus: extra.focus },
         target,
         tier,
       });
@@ -614,6 +974,8 @@ async function executeReview(
     // files become a handful of calls instead of ~100.
     const sweepSource = plan.repoSweep ? (reviewContext?.others ?? []).slice(plan.retrievalTopK) : [];
     if (sweepSource.length > 0) {
+      // P3-7: sweep cost tier must derive from the plan, not be hard-coded premium.
+      const sweepModel = modelForPass(config, plan, 0);
       const budget = Number(process.env.ORVEX_MAX_OTHER_CHARS ?? 45_000) - 2_000;
       // Read a meaningful chunk of each swept file (deeper than a skim) so the
       // Verify sweep is thorough, not just broad. ~4 files/batch at this size.
@@ -625,10 +987,10 @@ async function executeReview(
         const files = batch;
         reviewCalls.push({
           label: `sweep (${files.length}f)`,
-          kind: 'sweep',
+          kind: useCodexCli && sweepModel.tier === 'openai' ? 'codex-cli' : 'sweep',
           ctx: { ...baseCtx, related: [], dependents: [], others: files },
-          target: premiumTarget(config),
-          tier: 'premium',
+          target: sweepModel.target,
+          tier: sweepModel.tier,
         });
         batch = [];
         used = 0;
@@ -666,43 +1028,117 @@ async function executeReview(
         .catch(() => {});
     }, abortPollMs);
 
-    let outcomes: Array<{
+    type Outcome = {
       ok: boolean;
       transient: boolean;
       degraded: boolean;
       summary: string | undefined;
       findings: ReviewFinding[];
       kind: 'pass' | 'sweep';
-    }>;
+    };
+
+    const runSingleCall = async (call: (typeof toRun)[number]): Promise<Outcome> => {
+      if (prClosedMidRun) {
+        return { ok: false, transient: false, degraded: false, summary: undefined, findings: [], kind: 'pass' };
+      }
+      try {
+        if (call.kind === 'codex-cli') {
+          try {
+            const { response, threadId } = await runCodexCliReview(filesForLlm, {
+              threadId: codexThreadId,
+              model: call.target.model,
+              reasoningEffort: call.target.reasoningEffort,
+              context: call.ctx,
+              cwd: codexRepoDir ?? undefined,
+              repoId: `${owner}/${repo}`,
+            });
+            codexThreadId = threadId;
+            const got = llmFindingsToReviewFindings(response.findings);
+            for (const f of got) f.sourceTier = call.tier; // codex findings → protected in verification
+            const degraded = got.length === 0 && response.summary === REVIEW_INCOMPLETE_SUMMARY;
+            console.log(`[worker] ${call.label}: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
+            return { ok: !degraded, transient: false, degraded, summary: response.summary, findings: got, kind: 'pass' };
+          } catch (err) {
+            const msg = (err as Error).message;
+            // FALLBACK CHAIN on a codex CLI failure (mechanical — spawn/sandbox
+            // error, bad key, etc. With API-key auth there's no more "OAuth
+            // revoked" case). Try same-model plain API first (still the
+            // intended frontier pass, just without repo exploration); only
+            // drop to DeepSeek if that's unavailable/also fails.
+            if (config.openaiModel) {
+              try {
+                console.error(
+                  `[worker] ${call.label} codex CLI failed — retrying as plain API call (${config.openaiModel.model}): ${msg.slice(0, 140)}`,
+                );
+                const llm = await runReview(call.ctx, config.openaiModel, 'openai');
+                const got = llmFindingsToReviewFindings(llm.findings);
+                for (const f of got) f.sourceTier = 'openai';
+                const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
+                console.log(`[worker] ${call.label} [api-fallback]: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
+                return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got, kind: 'pass' };
+              } catch (apiErr) {
+                console.error(`[worker] ${call.label} plain API fallback also failed: ${(apiErr as Error).message.slice(0, 140)}`);
+              }
+            }
+            // CHEAP BACKUP REVIEWER: last resort — DeepSeek (heavy reasoner,
+            // cheap, no OAuth) instead of losing the frontier pass entirely.
+            // Dormant unless ORVEX_DEEPSEEK_API_KEY is set. Findings take the
+            // normal (unprotected) verifier gate.
+            if (!config.deepseekModel) throw err;
+            console.error(`[worker] ${call.label} falling back to DeepSeek (${config.deepseekModel.model})`);
+            const llm = await runReview(call.ctx, config.deepseekModel, 'deepseek');
+            const got = llmFindingsToReviewFindings(llm.findings);
+            for (const f of got) f.sourceTier = 'deepseek';
+            const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
+            console.log(`[worker] ${call.label} [deepseek-fallback]: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
+            return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got, kind: 'pass' };
+          }
+        }
+
+        const llm = await runReview(call.ctx, call.target, call.tier);
+        const got = llmFindingsToReviewFindings(llm.findings);
+        for (const f of got) f.sourceTier = call.tier;
+        // A call that returned the "unparseable" sentinel with no findings
+        // didn't really succeed — it degraded. Mark it NOT-ok so an all-degraded
+        // review fails/retries instead of posting a contradictory clean pass.
+        const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
+        console.log(`[worker] ${call.label}: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
+        return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got, kind: call.kind };
+      } catch (err) {
+        const msg = (err as Error).message;
+        console.warn(`[worker] ${call.label} failed:`, msg);
+        return {
+          ok: false,
+          transient: isTransientLlmError(msg),
+          degraded: false,
+          summary: undefined,
+          findings: [],
+          kind: call.kind === 'codex-cli' ? 'pass' : call.kind,
+        };
+      }
+    };
+
+    let outcomes: Outcome[];
     try {
-      outcomes = await mapLimit(toRun, concurrency, async (call) => {
-        if (prClosedMidRun) {
-          return { ok: false, transient: false, degraded: false, summary: undefined, findings: [], kind: call.kind };
-        }
-        try {
-          const llm = await runReview(call.ctx, call.target, call.tier);
-          const got = llmFindingsToReviewFindings(llm.findings);
-          // A call that returned the "unparseable" sentinel with no findings
-          // didn't really succeed — it degraded. Mark it NOT-ok so an all-degraded
-          // review fails/retries instead of posting a contradictory clean pass.
-          const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
-          console.log(`[worker] ${call.label}: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
-          return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got, kind: call.kind };
-        } catch (err) {
-          const msg = (err as Error).message;
-          console.warn(`[worker] ${call.label} failed:`, msg);
-          return {
-            ok: false,
-            transient: isTransientLlmError(msg),
-            degraded: false,
-            summary: undefined as string | undefined,
-            findings: [] as ReviewFinding[],
-            kind: call.kind,
-          };
-        }
-      });
+      // Codex CLI calls share a session per PR and must run sequentially (resuming
+      // the same thread from the previous call). API calls can still run in parallel.
+      const cliCalls = toRun.filter((c) => c.kind === 'codex-cli');
+      const apiCalls = toRun.filter((c) => c.kind !== 'codex-cli');
+      const cliOutcomes: Outcome[] = [];
+      for (const call of cliCalls) {
+        cliOutcomes.push(await runSingleCall(call));
+      }
+      const apiOutcomes = await mapLimit(apiCalls, concurrency, runSingleCall);
+      outcomes = [...cliOutcomes, ...apiOutcomes];
     } finally {
       clearInterval(abortPoll);
+      if (codexRepoDir) {
+        try {
+          fs.rmSync(codexRepoDir, { recursive: true, force: true });
+        } catch {
+          /* best-effort temp cleanup */
+        }
+      }
     }
 
     if (prClosedMidRun) {
@@ -721,10 +1157,32 @@ async function executeReview(
     const okCount = outcomes.filter((o) => o.ok).length;
     const transientCount = outcomes.filter((o) => o.transient).length;
     const degradedCount = outcomes.filter((o) => o.degraded).length;
-    if (okCount === 0 && transientCount + degradedCount > 0) {
-      const why = transientCount > 0 ? 'rate-limit/transport errors (likely token-plan quota)' : 'unparseable model responses';
+    // If NO pass succeeded, NEVER post — regardless of how it failed. A systematic
+    // error thrown before runLlmReview's own try (bad prompt build, an unmatched
+    // provider error) surfaces as ok:false/transient:false/degraded:false on every
+    // call; the old guard skipped those and posted a false "0 findings — clean"
+    // review on a PR that was never actually reviewed. A real clean review has
+    // ok:true calls, so it is still correctly distinguished.
+    if (outcomes.length > 0 && okCount === 0) {
+      const why =
+        transientCount > 0
+          ? 'rate-limit/transport errors (likely token-plan quota)'
+          : degradedCount > 0
+            ? 'unparseable model responses'
+            : 'model calls errored before completing';
       throw new Error(
         `review aborted: all ${outcomes.length} model calls failed — ${why}. Will retry on the next push or \`@orvex review\`.`,
+      );
+    }
+
+    // The named review passes are the product contract. Posting Luna/DeepSeek
+    // findings while MiniMax timed out made a Verify badge look complete when
+    // one of its promised reviewers never finished. Sweeps may degrade, but a
+    // failed core pass aborts the run and posts nothing.
+    const failedRequiredPasses = outcomes.filter((o) => o.kind === 'pass' && !o.ok);
+    if (failedRequiredPasses.length > 0) {
+      throw new Error(
+        `review aborted: ${failedRequiredPasses.length}/${passes} required model pass(es) failed; no partial review was posted`,
       );
     }
 
@@ -755,7 +1213,21 @@ async function executeReview(
     // incremental push `files` is just the newly-pushed diff, so a prior finding
     // in an un-touched file is carried forward, not falsely marked "fixed".
     reviewedFiles: new Set(files.map((f) => f.filename)),
+    // P1-3: use the previous review's head SHA as the flip-flop guard, because
+    // reconcileFixedOnHead no longer overwrites lastSeenSha for LLM/semgrep findings.
+    priorReviewSha: priorState?.lastSha,
+    // P2-4: findings whose files hit a transient read error must not be marked fixed.
+    protectedFingerprints: new Set(readErrorFps),
   });
+
+  // A model reported these but below min_confidence — the drop must be VISIBLE
+  // (a real DeepSeek finding vanished here with zero trace on PR91).
+  if (merged.lowConfidence.length > 0) {
+    console.log(
+      `[worker] confidence filter dropped ${merged.lowConfidence.length} (min ${reviewConfig.min_confidence}): ` +
+        merged.lowConfidence.map((f) => `${f.severity} ${f.file}:${f.line ?? '?'} conf=${f.confidence}`).join(' | '),
+    );
+  }
 
   // drop findings the team suppressed with `@orvex ignore`
   const suppressed = config.store.getSuppressedFingerprints(installationId, owner, repo);
@@ -787,29 +1259,123 @@ async function executeReview(
       haveContent.add(file.filename);
     }
   }
+  // For the premium deepVerify pass, pull in dependency MANIFESTS (package.json,
+  // etc.) so the strict verifier can reject premise-on-wrong-version false
+  // positives (e.g. "you removed a required Prisma field" when package.json shows
+  // a major version that no longer needs it). Only fetch ones that exist in the
+  // tree, so no 404 spam, and only on tiers that run the strict pass.
+  if (plan.deepVerify) {
+    const MANIFESTS = new Set([
+      'package.json', 'pnpm-workspace.yaml', 'requirements.txt', 'pyproject.toml',
+      'go.mod', 'composer.json', 'Gemfile', 'Cargo.toml', 'pom.xml', 'build.gradle',
+    ]);
+    const changedManifests = filesForLlm
+      .map((f) => f.filename)
+      .filter((p) => MANIFESTS.has(p.split('/').pop() ?? ''));
+    const treeManifests = repoTreePaths
+      // P2-6: include monorepo manifests at depth 3 (e.g. apps/server/package.json).
+      .filter((p) => MANIFESTS.has(p.split('/').pop() ?? '') && p.split('/').length <= 3)
+      .slice(0, 6);
+    const manifestPaths = Array.from(new Set([...changedManifests, ...treeManifests]));
+    for (const mp of manifestPaths) {
+      if (haveContent.has(mp)) continue;
+      try {
+        const content = await fetchFileContent(octokit, owner, repo, mp, effectiveSha);
+        if (content) {
+          verifyFiles.push({ path: mp, content: content.slice(0, 20_000) });
+          haveContent.add(mp);
+        }
+      } catch {
+        /* manifest absent or unreadable — the strict pass still runs without it */
+      }
+    }
+  }
   if (merged.toPost.length > 0 && process.env.ORVEX_VERIFY !== '0' && verifyFiles.length > 0) {
+    // ONE verification pass at the end of the review (NOT a second full review) —
+    // strict/premise-checking on deepVerify tiers (rejects false positives incl.
+    // wrong-library-version claims, using the manifests fetched above), recall-
+    // biased otherwise. Always the standard model (MiniMax), even when the review
+    // ran on codex — verification is a cheap filter, not the reviewer.
+    const mode = plan.deepVerify ? 'strict' : 'recall';
     const verified = await verifyFindings(merged.toPost, verifyFiles, {
       apiKey: llm.apiKey,
       model: llm.model,
       baseUrl: llm.baseUrl,
+      api: llm.api,
+      reasoningEffort: llm.reasoningEffort,
       prIntent,
+      strict: plan.deepVerify,
+      // P2-2: count verification tokens in the review's cost total.
+      onUsage: onUsageFor('standard'),
     });
     if (verified.dropped.length > 0) {
       console.log(
-        `[worker] verification dropped ${verified.dropped.length}/${merged.toPost.length}: ` +
+        `[worker] verification (${mode}) dropped ${verified.dropped.length}/${merged.toPost.length}: ` +
           verified.dropped.map((d) => `${d.finding.file} (${d.reason.slice(0, 60)})`).join(' | '),
       );
     }
-    merged.toPost = verified.kept;
+    // Root-cause dedup (piggybacked on the same verifier call): the same bug
+    // found by two passes at DIFFERENT lines sails through fingerprint dedup —
+    // on PR93 that double-posted two separate bugs. Merged copies fold their
+    // severity into the kept finding; the root cause still posts once.
+    if (verified.duplicates.length > 0) {
+      console.log(
+        `[worker] verification merged ${verified.duplicates.length} duplicate finding(s): ` +
+          verified.duplicates
+            .map((d) => `${d.finding.file}:${d.finding.line ?? '?'} → dup of :${d.of.line ?? '?'}`)
+            .join(', '),
+      );
+    }
+    // PROTECT stronger-reasoner findings: the verifier runs on the CHEAPER model
+    // (MiniMax), and we watched it veto a real codex P2 with the "validated
+    // elsewhere" excuse the rules explicitly forbid. The weaker model must not
+    // overrule a stronger reviewer — that principle applies to BOTH heavy
+    // reasoners: 'openai' (codex/Luna, Verify pass 1) and 'deepseek' (v4-pro at
+    // max effort, the deep-dive pass on every dual-model plan; without this its
+    // findings were vetoable by the same MiniMax that missed them). MiniMax's
+    // own findings still get the full strict gate, so precision on the noisy
+    // majority is unchanged.
+    // 'deterministic' = mechanical rule findings (import/export mismatch): they
+    // carry their own in-message evidence and must never be vetoable by an LLM.
+    //
+    // REASON-BASED, not blanket-restore: a veto backed by a FACTUAL refutation
+    // (the verifier quotes the code and shows the claim is wrong) stands even
+    // against a protected tier — otherwise real hallucinations from the strong
+    // model could never be filtered. Only HEDGED / low-information rejections
+    // ("cannot verify", "validated elsewhere", "unclear") get rescued.
+    const PROTECTED_TIERS = new Set(['openai', 'deepseek', 'deterministic']);
+    const rescued = verified.dropped.filter(
+      (d) => d.finding.sourceTier && PROTECTED_TIERS.has(d.finding.sourceTier) && isHedgedRejection(d.reason),
+    );
+    const refuted = verified.dropped.filter(
+      (d) => d.finding.sourceTier && PROTECTED_TIERS.has(d.finding.sourceTier) && !isHedgedRejection(d.reason),
+    );
+    if (rescued.length > 0) {
+      console.log(
+        `[worker] verification: rescued ${rescued.length} strong-reasoner finding(s) dropped on hedged grounds: ` +
+          rescued.map((d) => `${d.finding.sourceTier} ${d.finding.file}:${d.finding.line}`).join(', '),
+      );
+    }
+    if (refuted.length > 0) {
+      console.log(
+        `[worker] verification: ${refuted.length} strong-reasoner finding(s) FACTUALLY refuted (drop stands): ` +
+          refuted.map((d) => `${d.finding.sourceTier} ${d.finding.file}:${d.finding.line} (${d.reason.slice(0, 60)})`).join(', '),
+      );
+    }
+    merged.toPost = [...verified.kept, ...rescued.map((d) => d.finding)];
   }
 
   // snap finding lines to lines actually added in the diff — GitHub rejects
   // inline comments on unchanged lines; far-off guesses become summary-only
   const addedLinesByFile = buildAddedLineIndex(files);
   merged.toPost = merged.toPost.map((f) => normalizeFindingLine(f, addedLinesByFile));
+  // Re-dedup AFTER anchoring: two passes (codex general + MiniMax deep-dive) can
+  // report the same defect and only collide on line once snapped to the nearest
+  // added line — this collapses those into the highest-severity single comment.
+  merged.toPost = dedupeByFileLine(merged.toPost);
 
   const allFixed = dedupeByFingerprint([...verifiedFixed, ...merged.newlyFixed]);
-  let { inline, summaryOnly } = filterAndCapFindings(merged.toPost, reviewConfig);
+  let { inline, summaryOnly, nitpicks } = filterAndCapFindings(merged.toPost, reviewConfig);
 
   // cumulative cap: repeated re-reviews must never bury a PR in comments.
   // Once ORVEX_MAX_INLINE_PER_PR (default 100) inline comments exist across the
@@ -853,14 +1419,26 @@ async function executeReview(
       stats,
       summary,
       filesReviewed: filesForLlm.map((f) => f.filename),
-    });
+      isDeep: job.deep,
+      coverage: coverage.complete
+        ? undefined
+        : { reviewed: coverage.reviewed, candidates: coverage.candidates, skippedByCap: coverage.skippedByCap, truncatedFiles: coverage.truncatedFiles, omittedPatch: coverage.omittedPatch },
+      stillOpen: merged.stillOpen.map((f) => ({
+        severity: f.severity,
+        file: f.file,
+        line: f.line,
+        message: f.message,
+      })),
+      trigger: commandTrigger(),
+      canAutofix: plan.autofix,
+    }, nitpicks);
 
     const inlineComments: InlineReviewComment[] = inline
       .filter((f) => f.line)
       .map((f) => ({
         path: f.file,
         line: f.line!,
-        body: formatInlineBody(f, plan.autofix),
+        body: formatInlineBody(f, plan.autofix, reviewContextFiles),
       }));
 
     // Advisory by default: post as COMMENT (never blocks the PR). Set
@@ -874,6 +1452,30 @@ async function executeReview(
     for (const c of review.commentIds) {
       commentIdMap.set(`${c.path}:${c.line}`, c.id);
     }
+
+    // Findings that could NOT be anchored to a diff line (file not in this
+    // diff / no line) land in the summary table — which had NO apply button
+    // (real complaint: 3 findings, 1 button). Give each one its own PR-level
+    // comment with a working apply checkbox (the issue-comment checkbox path
+    // in webhook.ts handles the tick). Capped to avoid comment spam.
+    if (plan.autofix && summaryOnly.length > 0) {
+      const cap = Number(process.env.ORVEX_MAX_UNANCHORED_COMMENTS ?? 3);
+      for (const f of summaryOnly.slice(0, cap)) {
+        const fp = fingerprintFinding(f);
+        const parts = [
+          `**${f.severity}** · \`${f.file}${f.line ? `:${f.line}` : ''}\` · \`${f.ruleId}\``,
+          '',
+          f.message,
+        ];
+        if (f.fixedCode) parts.push('', '```suggestion-preview', f.fixedCode, '```');
+        parts.push('', applyCheckboxLine(fp, f.fixedCode !== undefined));
+        try {
+          await replyToIssueComment(octokit, ref, parts.join('\n'));
+        } catch (err) {
+          console.warn('[worker] unanchored-finding comment failed:', (err as Error).message);
+        }
+      }
+    }
   }
 
   const newStored: StoredFinding[] = merged.toPost.map((f) => {
@@ -886,12 +1488,25 @@ async function executeReview(
   });
 
   const fixedFps = new Set(allFixed.map((f) => f.fingerprint));
+  const incomingFpSet = new Set(merged.toPost.map((f) => fingerprintFinding(f)));
 
   const updatedPrior = (priorState?.findings ?? []).map((f) => {
     const fixed = allFixed.find((x) => x.fingerprint === f.fingerprint);
     if (fixed) return fixed;
     const still = merged.stillOpen.find((x) => x.fingerprint === f.fingerprint);
     if (still) return still;
+    // P3-6: a previously-fixed finding that reappears must be reopened, not
+    // re-posted as a duplicate comment and not left as "fixed" in the store.
+    if (f.status === 'fixed' && incomingFpSet.has(f.fingerprint)) {
+      const reborn = merged.toPost.find((x) => fingerprintFinding(x) === f.fingerprint);
+      if (reborn) {
+        return {
+          ...toStoredFinding(reborn, effectiveSha),
+          status: 'open' as const,
+          firstSeenSha: f.firstSeenSha,
+        };
+      }
+    }
     if (fixedFps.has(f.fingerprint)) {
       return { ...f, status: 'fixed' as const, fixedAtSha: effectiveSha };
     }
@@ -913,6 +1528,7 @@ async function executeReview(
     lastSha: effectiveSha,
     findings: finalFindings,
     lastReviewAt: new Date().toISOString(),
+    codexThreadId,
   };
   config.store.saveState(state);
 
@@ -944,7 +1560,7 @@ async function executeReview(
   if (plan.codeExecution && process.env.ORVEX_CODE_EXECUTION === '1') {
     try {
       console.log(`[worker] tier-2 runtime verify (plan=${plan.id}) PR #${number}…`);
-      const rv = await runtimeVerify(octokit, owner, repo, effectiveSha);
+      const rv = await runtimeVerify(octokit, owner, repo, effectiveSha, { baseSha: pr.baseSha });
       const evidence = formatRuntimeEvidence(rv);
       if (evidence) {
         await octokit.rest.issues.createComment({ owner, repo, issue_number: number, body: evidence });
@@ -975,6 +1591,29 @@ async function executeReview(
     inputTokens,
     outputTokens,
     costUsd,
+    newFindings: merged.toPost.map((f) => ({ severity: f.severity, file: f.file, line: f.line })),
+  };
+}
+
+/**
+ * Dashboard defaults apply when a repository has no config-as-code file.
+ * Previously maxComments/minConfidence/reviewMode were stored and shown by the
+ * product but silently ignored by the worker, which also made the public
+ * "8 comments by default" promise untrue. A checked-in repo config remains the
+ * source of truth when present.
+ */
+export function effectiveReviewConfig(
+  repoConfigYaml: string | null,
+  workspace: { defaultReviewMode: 'normal' | 'strict'; minConfidence: number; maxComments: number },
+  repoReviewMode?: 'normal' | 'strict',
+): ReviewConfig {
+  const parsed = parseReviewConfigYaml(repoConfigYaml);
+  if (repoConfigYaml?.trim()) return parsed;
+  return {
+    ...parsed,
+    mode: repoReviewMode ?? workspace.defaultReviewMode,
+    min_confidence: workspace.minConfidence,
+    max_comments: workspace.maxComments,
   };
 }
 
@@ -1017,10 +1656,59 @@ async function runDeterministicRules(
     );
   }
 
+  // Deterministic import/export check: `const { x } = require('./m')` where
+  // ./m never exports x is a guaranteed TypeError on first call. PR93's
+  // getFileFromR2 bug (whole PITR feature dead) slipped past all 5 LLM passes —
+  // a mechanical class gets a mechanical check. Best-effort: any fetch error
+  // just skips the check; it must never fail a review.
+  try {
+    const jsChanged = files.filter(
+      (f) =>
+        f.status !== 'removed' &&
+        /\.(js|mjs|cjs|ts|tsx|jsx)$/.test(f.filename) &&
+        !shouldIgnorePath(f.filename, config),
+    );
+    if (jsChanged.length > 0) {
+      const cache = new Map<string, string | null>();
+      const fetchCached = async (path: string): Promise<string | null> => {
+        if (cache.has(path)) return cache.get(path) ?? null;
+        let content: string | null = null;
+        try {
+          content = await fetchFileContent(octokit, owner, repo, path, headSha);
+        } catch {
+          content = null;
+        }
+        cache.set(path, content);
+        return content;
+      };
+      const changedSources: Array<{ path: string; content: string }> = [];
+      for (const f of jsChanged.slice(0, 60)) {
+        const content = await fetchCached(f.filename);
+        if (content) changedSources.push({ path: f.filename, content });
+      }
+      const importFindings = await checkImportBindings(changedSources, fetchCached);
+      if (importFindings.length > 0) {
+        console.log(
+          `[worker] import check: ${importFindings.length} unresolved named import(s): ` +
+            importFindings.map((f) => `${f.file}:${f.line}`).join(', '),
+        );
+      }
+      findings.push(...importFindings);
+    }
+  } catch (err) {
+    console.warn('[worker] import check skipped:', (err as Error).message);
+  }
+
   return findings;
 }
 
-function formatInlineBody(f: ReviewFinding, canAutofix: boolean): string {
+function formatInlineBody(
+  f: ReviewFinding,
+  canAutofix: boolean,
+  contextFiles: Array<{ path: string; content: string }>,
+): string {
+  const content = contextFiles.find((x) => x.path === f.file)?.content;
+  const anchoredLine = f.line && content ? content.split('\n')[f.line - 1] : undefined;
   return formatInlineFinding({
     finding: {
       severity: f.severity,
@@ -1030,9 +1718,14 @@ function formatInlineBody(f: ReviewFinding, canAutofix: boolean): string {
       originalCode: f.originalCode,
       fixedCode: f.fixedCode,
       fingerprint: fingerprintFinding(f),
+      file: f.file,
+      line: f.line,
     },
     trigger: commandTrigger(),
     canAutofix,
+    anchoredLine,
+    lineRelocated: f.lineRelocated,
+    anchorContext: f.anchorContext,
   });
 }
 
@@ -1044,87 +1737,117 @@ function dedupeByFingerprint(findings: StoredFinding[]): StoredFinding[] {
   return [...byFp.values()];
 }
 
-type AddedLineMap = Map<string, Set<number>>;
+type LineIndexEntry = { added: Set<number>; context: Set<number> };
+type AddedLineMap = Map<string, LineIndexEntry>;
 
 function buildAddedLineIndex(files: Array<{ filename: string; patch?: string }>): AddedLineMap {
   const map: AddedLineMap = new Map();
   for (const file of files) {
     if (!file.patch) continue;
-    const lines = parseAddedLinesFromPatch(file.patch);
-    if (lines.size > 0) {
-      map.set(file.filename, lines);
+    const idx = parseAddedLinesFromPatch(file.patch);
+    if (idx.added.size > 0 || idx.context.size > 0) {
+      map.set(file.filename, idx);
     }
   }
   return map;
 }
 
-function parseAddedLinesFromPatch(patch: string): Set<number> {
-  // Every RIGHT-side line present in the new file — ADDED lines AND the CONTEXT
-  // lines around them — is a valid inline-comment anchor on GitHub. Capturing
-  // context too is what makes findings on DELETION-ONLY hunks (+0/-N files)
-  // anchorable: the removed code is gone, but the surrounding lines remain, so a
-  // finding about the removal still gets an inline comment + apply-fix checkbox
-  // instead of falling silently into the summary table.
-  const commentable = new Set<number>();
+function parseAddedLinesFromPatch(patch: string): LineIndexEntry {
+  // P2-8 / P3-1 / P3-2: PREFER added lines for anchoring. Only fall back to
+  // context lines for DELETION-ONLY hunks (+0/-N), where the removed code is
+  // gone but the surrounding lines remain. Skip phantom lines from trailing
+  // newlines and `\ No newline at end of file`.
+  const added = new Set<number>();
+  const context = new Set<number>();
   let newLine = 0;
+  let hunkAdded = new Set<number>();
+  let hunkContext: number[] = [];
 
-  for (const rawLine of patch.split('\n')) {
+  const flushHunk = () => {
+    if (hunkAdded.size === 0) {
+      for (const ln of hunkContext) context.add(ln);
+    }
+    hunkAdded = new Set();
+    hunkContext = [];
+  };
+
+  const lines = patch.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+
+    // P3-1: ignore `\ No newline at end of file` and empty trailing entry.
+    if (line.startsWith('\\')) continue;
+    if (line === '' && i === lines.length - 1) continue;
+
     const match = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
     if (match) {
+      flushHunk();
       newLine = Number(match[1]);
       continue;
     }
     if (line.startsWith('+') && !line.startsWith('+++')) {
-      if (newLine > 0) commentable.add(newLine);
+      if (newLine > 0) {
+        added.add(newLine);
+        hunkAdded.add(newLine);
+      }
       newLine += 1;
       continue;
     }
     if (line.startsWith('-')) {
       continue; // deleted line — no new-side number to anchor to
     }
-    // context line: present in the new file, so a valid anchor.
     if (newLine > 0) {
-      commentable.add(newLine);
+      hunkContext.push(newLine);
       newLine += 1;
     }
   }
+  flushHunk();
 
-  return commentable;
+  return { added, context };
 }
 
-function normalizeFindingLine(finding: ReviewFinding, addedLinesByFile: AddedLineMap): ReviewFinding {
-  const candidateLines = addedLinesByFile.get(finding.file);
-  // file not part of the diff's added lines (pure deletion / unchanged) → summary-only
-  if (!candidateLines || candidateLines.size === 0) {
+function normalizeFindingLine(finding: ReviewFinding, index: AddedLineMap): ReviewFinding {
+  const fileIndex = index.get(finding.file);
+  // file not part of the diff (pure deletion / unchanged) → summary-only
+  if (!fileIndex || (fileIndex.added.size === 0 && fileIndex.context.size === 0)) {
     return { ...finding, line: undefined };
   }
-  // exact hit
-  if (finding.line && candidateLines.has(finding.line)) {
-    return finding;
+
+  const { added, context } = fileIndex;
+
+  // P2-8: exact hit on an added line is the safest anchor.
+  if (finding.line && added.has(finding.line)) {
+    return { ...finding, lineRelocated: false, anchorContext: false };
   }
-  // Anchor to the nearest changed line in the same file so the finding still
-  // gets an inline comment (and its fix checkbox). GitHub only accepts inline
-  // comments on changed lines; a slightly-off anchor is far better than hiding
-  // the finding — and its fix button — in a summary table. Only a finding whose
-  // file has no changed lines at all stays summary-only (handled above).
-  const anchor = nearestAddedLine(candidateLines, finding.line);
-  return { ...finding, line: anchor };
+
+  // Otherwise snap to the nearest added line.
+  if (added.size > 0) {
+    const anchor = nearestLine(added, finding.line);
+    return { ...finding, line: anchor, lineRelocated: true, anchorContext: false };
+  }
+
+  // No added lines in this file's hunks → deletion-only. Use context lines.
+  if (finding.line && context.has(finding.line)) {
+    return { ...finding, lineRelocated: false, anchorContext: true };
+  }
+  const anchor = nearestLine(context, finding.line);
+  return { ...finding, line: anchor, lineRelocated: true, anchorContext: true };
 }
 
-/** Nearest changed line to `requested`, or the first changed line if no hint. */
-function nearestAddedLine(addedLines: Set<number>, requested?: number): number {
+/** Nearest line in `set` to `requested`, or the first line if no hint. */
+function nearestLine(set: Set<number>, requested?: number): number {
   let bestLine = Number.POSITIVE_INFINITY;
   let bestDistance = Number.POSITIVE_INFINITY;
-  for (const addedLine of addedLines) {
+  for (const ln of set) {
     if (requested === undefined) {
-      if (addedLine < bestLine) bestLine = addedLine;
+      if (ln < bestLine) bestLine = ln;
       continue;
     }
-    const distance = Math.abs(addedLine - requested);
+    const distance = Math.abs(ln - requested);
     if (distance < bestDistance) {
       bestDistance = distance;
-      bestLine = addedLine;
+      bestLine = ln;
       if (distance === 0) break;
     }
   }

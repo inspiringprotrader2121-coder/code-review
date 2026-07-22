@@ -1,5 +1,6 @@
 export type OrvexCommand =
   | { kind: 'review' }
+  | { kind: 'deep' } // extra diverse passes unioned into the same review (paid plans)
   | { kind: 'fix' } // apply Orvex's ready suggestions
   | { kind: 'fix_all' } // also generate fixes for findings without one
   | { kind: 'fix_this' } // thread reply on one finding
@@ -19,13 +20,23 @@ export function commandTrigger(): string {
  * Returns null when the comment doesn't address the bot.
  */
 export function parseOrvexCommand(body: string, trigger = commandTrigger()): OrvexCommand | null {
-  const lower = body.toLowerCase();
+  // Strip fenced code blocks and markdown blockquote lines BEFORE searching — a
+  // quoted prior comment (GitHub "Quote reply" produces `> @orvex fix all`) or a
+  // fenced mention must NOT re-trigger a command (esp. destructive `fix all`).
+  const scanBody = body
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/^\s*>.*$/gm, ' ');
+  const lower = scanBody.toLowerCase();
   const idx = lower.indexOf(trigger.toLowerCase());
   if (idx === -1) return null;
-  // must be at start of the body or preceded by whitespace (not e.g. an email)
-  if (idx > 0 && !/\s/.test(body[idx - 1])) return null;
+  // must be at start or preceded by whitespace (not e.g. an email), AND the char
+  // AFTER the trigger must be a boundary — reject `@orvexander` (trigger as a
+  // prefix of a longer handle) which otherwise fired with garbled instruction text.
+  if (idx > 0 && !/\s/.test(scanBody[idx - 1])) return null;
+  const after = scanBody[idx + trigger.length];
+  if (after !== undefined && /\w/.test(after)) return null;
 
-  const rest = body
+  const rest = scanBody
     .slice(idx + trigger.length)
     .split('\n')[0]
     .trim();
@@ -39,6 +50,9 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
   if (normalized === '' || normalized === 'help') return { kind: 'help' };
   if (normalized === 'review' || normalized === 're-review' || normalized === 'rereview') {
     return { kind: 'review' };
+  }
+  if (normalized === 'deep' || normalized === 'deep review' || normalized === 'review deep') {
+    return { kind: 'deep' };
   }
   if (normalized === 'fix all' || normalized === 'fix-all' || normalized === 'fixall') {
     return { kind: 'fix_all' };
@@ -67,5 +81,16 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
     return { kind: 'auto_apply', enabled: false };
   }
 
+  // Only dispatch a free-form agent (LLM cost + a commit surface) when the text
+  // is a REAL instruction — it must contain a recognized imperative verb. A bare
+  // question ("@orvex thoughts?") or casual chatter ("@orvex looks great here")
+  // must NOT enqueue a paid job; the old ≥3-words / trailing-? heuristics let
+  // exactly those through. A genuine "why/how/explain … ?" still qualifies via the
+  // verb list.
+  const looksActionable =
+    /\b(fix|change|add|remove|rename|refactor|update|make|replace|move|delete|rewrite|implement|explain|why|how|convert|handle|validate|escape|sanitize|review|check|investigate|resolve|correct|improve|use|prefer|extract|wrap|inline|simplify|consolidate|split|merge|guard|ensure|avoid|switch)\b/i.test(
+      rest,
+    );
+  if (!rest.trim() || !looksActionable) return { kind: 'help' };
   return { kind: 'prompt', instruction: rest };
 }

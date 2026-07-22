@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import type { ReviewQueue, ReviewJobPayload } from '@orvex-review/queue';
 import { prKey } from '@orvex-review/queue';
 import {
@@ -8,6 +9,22 @@ import {
 import { TenantService } from '@orvex-review/tenants';
 import { isTransientLlmError } from '@orvex-review/review';
 import { processReviewJob, loadWorkerConfig } from './worker.js';
+
+// Live count of in-flight jobs, exposed on /ready so deploys can WAIT FOR IDLE
+// before restarting. Restarting mid-review both discards the review (now
+// mitigated by resume-once) and — worse — can kill a codex process mid
+// token-refresh, invalidating the OAuth session account-wide (the recurring
+// "codex logged out" incidents).
+let activeGauge: () => number = () => 0;
+function registerActiveGauge(fn: () => number): void {
+  activeGauge = fn;
+}
+export function getActiveJobCount(): number {
+  return activeGauge();
+}
+export function isDeployDraining(): boolean {
+  return existsSync(process.env.ORVEX_DEPLOY_DRAIN_PATH ?? '/home/orvex/orvex-data/deploy-drain');
+}
 import { processAskJob, processExplainJob, processFixJob, processResolveJob } from './autofix.js';
 import { processScanJob } from './nightly.js';
 import { INITIAL_BACKOFF_STATE, nextBackoffState, isPaused, type BackoffState } from './backoff.js';
@@ -37,6 +54,10 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   // Jobs currently being processed — so a graceful shutdown (deploy/restart) can
   // re-queue them instead of killing them mid-flight and losing the work.
   const inFlight = new Set<ReviewJobPayload>();
+  // Include reserved dequeue slots as active. This closes the tiny handoff
+  // window where a deploy could observe zero in-flight jobs while a dequeue
+  // promise had already started but had not yet entered `inFlight`.
+  registerActiveGauge(() => active);
   let backoff: BackoffState = INITIAL_BACKOFF_STATE;
 
   const processOne = async (job: ReviewJobPayload) => {
@@ -85,6 +106,26 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[worker] failed ${pk}:`, message);
       await queue.markFailed(job, message);
+      // Re-queue a TRANSIENT failure (bounded) so a rate-limit/network blip on a
+      // `synchronize` doesn't leave that PR silently unreviewed — the webhook
+      // already returned 200, so GitHub won't redeliver. Non-transient failures
+      // (real bugs) are NOT retried; the circuit breaker still pauses the pump.
+      const attempts = (job.attempts ?? 0) + 1;
+      // Clamped: a garbage env (NaN) must not silently disable retries, and an
+      // absurd value must not retry a poison job forever. 0..10, default 2.
+      const MAX_JOB_RETRIES = (() => {
+        const n = Number(process.env.ORVEX_MAX_JOB_RETRIES ?? 2);
+        return Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 0), 10) : 2;
+      })();
+      // A user-triggered @orvex review is never silently rerun in full after a
+      // provider timeout: that multiplies spend and can keep a PR busy for tens
+      // of minutes. Automatic webhook jobs retain bounded transient retries.
+      if (job.action !== 'command' && isTransientLlmError(message) && attempts <= MAX_JOB_RETRIES) {
+        console.warn(`[worker] transient failure on ${pk} — re-queuing (attempt ${attempts}/${MAX_JOB_RETRIES})`);
+        await queue.enqueue({ ...job, attempts }).catch((e) =>
+          console.error(`[worker] could not re-queue ${pk}:`, (e as Error).message),
+        );
+      }
       const wasPaused = isPaused(backoff, Date.now());
       backoff = nextBackoffState(
         backoff,
@@ -110,9 +151,12 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   // when it settles, so at most MAX_CONCURRENT run at once and the queue keeps
   // draining as slots free up.
   const pump = async () => {
-    if (!running) return;
-    if (isPaused(backoff, Date.now())) return; // circuit breaker tripped — don't hammer a down/exhausted provider
+    // Re-checked PER ITERATION below too: a deploy-drain flag or a tripped
+    // circuit breaker appearing MID-LOOP must stop further dequeues in this
+    // same tick, not just the next one.
     while (active < MAX_CONCURRENT) {
+      if (!running || isDeployDraining()) return;
+      if (isPaused(backoff, Date.now())) return; // circuit breaker tripped — don't hammer a down/exhausted provider
       // Reserve the slot BEFORE the async dequeue so two overlapping pump ticks
       // can't both pass the guard and exceed MAX_CONCURRENT; release it if the
       // dequeue turns up empty.
@@ -143,31 +187,62 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     pump().catch((err) => console.error('[worker] pump error', err));
   }, POLL_MS);
 
-  // Graceful shutdown. Release the lock + dedup keys for every interrupted job,
-  // but ONLY re-queue cheap, user-initiated command jobs (fix/ask/explain/
-  // resolve/scan). REVIEW jobs are deliberately NOT re-run: re-executing an
-  // interrupted deep review from scratch re-incurs its full (expensive) cost —
-  // the exact thing that wasted money on a restart. The next push reviews the
-  // latest code anyway, and startup's failStaleRunningRuns marks the interrupted
-  // attempt 'skipped'.
+  // Graceful shutdown. Release the lock + dedup keys for every interrupted job
+  // and RE-QUEUE it so it resumes after the restart — a deploy must never eat a
+  // review (real incident: PR #78's near-complete review was discarded by a
+  // deploy restart, leaving the PR silently unreviewed). Cost protection stays:
+  // each job may be resumed at most ONCE (resumedAfterRestart flag), so a
+  // crash/restart LOOP can't re-run the same expensive review forever.
   return async () => {
     running = false;
     clearInterval(interval);
-    if (inFlight.size === 0) return;
+    if (active === 0) return;
+    // DRAIN before force-requeue: give in-flight jobs a window to FINISH
+    // naturally. Killing a codex process mid token-refresh corrupts its OAuth
+    // session, so exiting while codex is running is the last resort, not the
+    // default. pm2's kill timeout must exceed this (set on the server).
+    const drainMs = Number(process.env.ORVEX_SHUTDOWN_DRAIN_MS ?? 240_000);
+    const deadline = Date.now() + drainMs;
+    if (active > 0) {
+      console.log(`[worker] shutdown: draining ${active} active slot(s) (up to ${Math.round(drainMs / 1000)}s)…`);
+      while (active > 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    if (active === 0) {
+      console.log('[worker] shutdown: drained cleanly — no jobs interrupted');
+      return;
+    }
+    // Do not return while a slot is still awaiting dequeue. A queue can claim a
+    // job between the deadline and process exit; wait until each active slot is
+    // represented in `inFlight`, then requeue that complete snapshot below.
+    if (active > inFlight.size) {
+      console.error('[worker] shutdown: waiting for pending dequeue slot(s) to resolve before exit');
+      while (active > inFlight.size) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    if (inFlight.size === 0) {
+      return;
+    }
     let requeued = 0;
+    let dropped = 0;
     for (const job of inFlight) {
       try {
         await queue.markFailed(job, 'interrupted by restart');
-        if ((job.kind ?? 'review') !== 'review') {
-          await queue.enqueue(job);
+        if (!job.resumedAfterRestart) {
+          await queue.enqueue({ ...job, resumedAfterRestart: true, enqueuedAt: new Date().toISOString() });
           requeued += 1;
+        } else {
+          dropped += 1; // already resumed once — don't loop
         }
       } catch (err) {
         console.error('[worker] shutdown handling failed for a job', err);
       }
     }
     console.log(
-      `[worker] shutdown: ${inFlight.size} interrupted — ${requeued} command job(s) re-queued; reviews left for the next push (not re-run)`,
+      `[worker] shutdown: ${inFlight.size} interrupted — ${requeued} re-queued to resume after restart` +
+        (dropped > 0 ? `, ${dropped} dropped (already resumed once)` : ''),
     );
   };
 }

@@ -6,17 +6,17 @@
     "dev": "pnpm --filter @orvex-review/server dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test",
+    "test": "pnpm -r test && bash scripts/deploy-safe.test.sh",
     "review": "tsx apps/cli/src/review.ts",
-    "start": "pnpm --filter @orvex-review/server start",
+    "start": "corepack pnpm@11.7.0 --pm-on-fail=ignore --filter @orvex-review/server start",
     "eval": "pnpm --filter @orvex-review/eval eval"
   },
   "devDependencies": {
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   },
-  "packageManager": "pnpm@9.15.9",
+  "packageManager": "pnpm@11.7.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   }
 }

@@ -3,41 +3,78 @@ import type { ReviewFinding } from './finding.js';
 
 const SEVERITY_RANK: Record<string, number> = { P1: 0, P2: 1, P3: 2, info: 3 };
 
+/** What gets FOLDED into the collapsed section instead of shown inline. `info`
+ *  (Low/nitpick) is always folded; P3 (Medium) is a real bug and is surfaced
+ *  inline by default — folded only when a repo opts in via fold_medium. */
+const isFolded = (f: ReviewFinding, foldMedium: boolean): boolean =>
+  f.severity === 'info' || (foldMedium && f.severity === 'P3');
+
 export function filterAndCapFindings(
   findings: ReviewFinding[],
   config: ReviewConfig,
-): { inline: ReviewFinding[]; summaryOnly: ReviewFinding[] } {
+): { inline: ReviewFinding[]; summaryOnly: ReviewFinding[]; nitpicks: ReviewFinding[] } {
   const sorted = [...findings].sort(
     (a, b) => (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9),
   );
 
-  const capped = sorted.slice(0, config.max_comments);
+  // Signal vs folded: Critical/High/Medium (P1/P2/P3) are real bugs and get inline
+  // line-comments; only Low/info is collapsed into the folded "nitpicks" section
+  // by default. A repo can additionally fold Medium via fold_medium. Folded
+  // findings are still surfaced, just collapsed.
+  const foldMedium = (config as { fold_medium?: boolean }).fold_medium ?? false;
+  const actionable = sorted.filter((f) => !isFolded(f, foldMedium));
+  const nitpicks = sorted.filter((f) => isFolded(f, foldMedium));
+
+  // Cap applies to the visible inline (actionable) comments, not the folded nitpicks.
+  const capped = actionable.slice(0, config.max_comments);
   const inline: ReviewFinding[] = [];
   const summaryOnly: ReviewFinding[] = [];
 
+  // inline_min_confidence: a finding that cleared min_confidence (so it WAS
+  // reported) but sits below the INLINE floor goes to the summary table rather
+  // than a line comment — the repo's "tell me, but don't interrupt the diff"
+  // knob. Default 0.5 (see ReviewConfigSchema).
+  const inlineMin = config.inline_min_confidence ?? 0.5;
   for (const f of capped) {
-    // Any finding anchored to a changed line gets an inline comment so it
-    // carries its own apply-fix checkbox. Only findings we couldn't anchor to
-    // the diff (no line) fall back to the summary list.
-    if (typeof f.line === 'number') inline.push(f);
+    // Anchored actionable findings at/above the inline floor get an inline
+    // comment (with apply-fix checkbox); ones we couldn't anchor — or that fall
+    // below the inline floor — fall back to the summary table.
+    if (typeof f.line === 'number' && f.confidence >= inlineMin) inline.push(f);
     else summaryOnly.push(f);
   }
 
-  // Findings past max_comments are surfaced in the summary table rather than
-  // silently discarded — never drop a real finding, even when capping noise.
-  summaryOnly.push(...sorted.slice(config.max_comments));
+  // Actionable findings past max_comments go to the summary table, never dropped.
+  summaryOnly.push(...actionable.slice(config.max_comments));
 
-  return { inline, summaryOnly };
+  return { inline, summaryOnly, nitpicks };
 }
 
+const DEDUP_SEV_RANK: Record<string, number> = { info: 0, P3: 1, P2: 2, P1: 3 };
+
+/**
+ * Collapse findings that share a file:line:rule. Keeps the HIGHEST-severity one
+ * (tie → the more detailed message), preserving first-seen order. Run this BOTH
+ * before anchoring AND after normalizeFindingLine — two findings from different
+ * passes (e.g. codex general + MiniMax deep-dive) can describe the same defect
+ * and only collide on line number AFTER being snapped to the nearest added line,
+ * so a single pre-anchor pass leaves duplicate inline comments.
+ */
 export function dedupeByFileLine(findings: ReviewFinding[]): ReviewFinding[] {
-  const seen = new Set<string>();
-  const out: ReviewFinding[] = [];
+  const best = new Map<string, ReviewFinding>();
+  const order: string[] = [];
   for (const f of findings) {
     const key = `${f.file}:${f.line ?? 0}:${f.ruleId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(f);
+    const existing = best.get(key);
+    if (!existing) {
+      best.set(key, f);
+      order.push(key);
+      continue;
+    }
+    const fRank = DEDUP_SEV_RANK[f.severity] ?? 0;
+    const eRank = DEDUP_SEV_RANK[existing.severity] ?? 0;
+    if (fRank > eRank || (fRank === eRank && f.message.length > existing.message.length)) {
+      best.set(key, f);
+    }
   }
-  return out;
+  return order.map((k) => best.get(k)!);
 }

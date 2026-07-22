@@ -1,71 +1,143 @@
 import type { StoredFinding } from '@orvex-review/store';
 import { auditDocIssuesOpenOnHead } from '@orvex-review/rules';
 import type { ReviewFinding } from './finding.js';
-import { fingerprintFinding } from './finding.js';
+import { fingerprintFinding, findingId } from './finding.js';
 
 export interface FileReader {
   readFile(path: string, ref: string): Promise<string | null>;
 }
 
+export interface VerifyResult {
+  /** true if the finding is still open on HEAD */
+  open: boolean;
+  /** true only if we GENUINELY verified the finding (audit rules). */
+  genuine: boolean;
+  /** true if we could not read the file (transient error) — must not mark fixed */
+  readError?: boolean;
+}
+
 export async function verifyFindingOnHead(
-  finding: Pick<ReviewFinding, 'file' | 'ruleId' | 'message' | 'category'>,
+  finding: Pick<ReviewFinding, 'file' | 'ruleId' | 'message' | 'category' | 'originalCode' | 'fixedCode'> & { severity: string },
   headSha: string,
   reader: FileReader,
-): Promise<boolean> {
-  const content = await reader.readFile(finding.file, headSha);
-  if (!content) return false;
+): Promise<VerifyResult> {
+  let content: string | null;
+  try {
+    content = await reader.readFile(finding.file, headSha);
+  } catch {
+    // Transient read failure (rate-limit, 5xx). Don't treat as "fixed".
+    return { open: true, genuine: false, readError: true };
+  }
+  if (!content) {
+    // File genuinely missing (404) → the code is gone, so the finding is fixed.
+    return { open: false, genuine: true };
+  }
 
   if (finding.ruleId.startsWith('audit.')) {
-    return auditDocIssuesOpenOnHead(content, finding.file);
+    return { open: auditDocIssuesOpenOnHead(content, finding.file), genuine: true };
   }
 
-  // LLM / semgrep: conservative — assume still open unless audit rule cleared
-  if (finding.ruleId.startsWith('llm.')) {
-    return true;
+  // Deterministic fix detection: retire a finding ONLY when we can see the EXACT
+  // recorded fix landed — the flagged `originalCode` is gone AND the recorded
+  // `fixedCode` is now present. HIGH-SEVERITY (P1/P2) findings are NEVER closed
+  // this way: `fixedCode`-present is weak proof (the fix text may already exist in
+  // the file for unrelated reasons, so an incidental rename that removes the
+  // original could false-close it). For a real bug that risk is unacceptable —
+  // defer P1/P2 entirely to mergeFindings' stronger "file reviewed + sha advanced
+  // + model didn't re-surface it" authority. Deterministic close stays only for
+  // P3/info where a stray retirement self-corrects and the cost is low.
+  const highSeverity = finding.severity === 'P1' || finding.severity === 'P2';
+  if (!highSeverity && fixLanded(finding.originalCode, finding.fixedCode, content)) {
+    return { open: false, genuine: true };
   }
 
-  if (finding.ruleId.startsWith('semgrep.')) {
-    return true;
-  }
+  // No proof of a fix: carry it forward WITHOUT stamping lastSeenSha, so
+  // mergeFindings' "model didn't re-surface it" + flip-flop guards decide.
+  return { open: true, genuine: false };
+}
 
-  return true;
+/** Whitespace-normalize so a pure reformat (reindent / rewrap) of otherwise
+ *  identical code doesn't read as either a match or a fix. */
+function normalizeCode(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * True only when the RECORDED fix is demonstrably present: the flagged snippet is
+ * gone AND the recorded `fixedCode` is now in the file. Both must be reliable
+ * anchors (long enough, containing a real identifier) so boilerplate can't
+ * trigger it. Without a recorded fixedCode there is nothing to corroborate, so we
+ * return false and let mergeFindings' model-recall guard decide — that is what
+ * prevents an incidental line edit from false-closing a still-open bug.
+ */
+function fixLanded(originalCode: string | undefined, fixedCode: string | undefined, content: string): boolean {
+  const orig = normalizeCode(originalCode ?? '');
+  const fixed = normalizeCode(fixedCode ?? '');
+  const reliable = (s: string) => s.length >= 12 && /[A-Za-z_][A-Za-z0-9_]{2,}/.test(s);
+  if (!reliable(orig) || !reliable(fixed) || orig === fixed) return false;
+  const norm = normalizeCode(content);
+  return !norm.includes(orig) && norm.includes(fixed);
 }
 
 export interface MergeResult {
   toPost: ReviewFinding[];
   stillOpen: StoredFinding[];
   newlyFixed: StoredFinding[];
+  /** findings a model reported but whose confidence fell below minConfidence —
+   *  returned so the caller can LOG them. A real DeepSeek finding vanished here
+   *  silently (PR91, 2026-07-09: "1 unique finding" → "0 posted", no trace).
+   *  Nothing in the pipeline may drop a finding without a visible log line. */
+  lowConfidence: ReviewFinding[];
   stats: { newCount: number; fixedCount: number; openCount: number };
+}
+
+export interface MergeOptions {
+  minConfidence: number;
+  /**
+   * The set of file paths ACTUALLY reviewed this run. A prior finding is only
+   * eligible to be marked "fixed" (by not being re-detected) if its file was
+   * reviewed. On an incremental `synchronize` push the diff — and therefore the
+   * reviewed set — is only the newly-pushed files, so without this a prior P1
+   * in an un-touched file would be silently marked fixed. When omitted (e.g.
+   * unit tests, a full review), every file is treated as reviewed (legacy
+   * behavior).
+   */
+  reviewedFiles?: Set<string>;
+  /**
+   * The head SHA of the PREVIOUS review. Used to prevent flip-flop: a finding
+   * cannot go from "open" to "fixed" while the code is unchanged (same SHA).
+   * This is a stable signal because reconcileFixedOnHead does not overwrite it.
+   */
+  priorReviewSha?: string;
+  /**
+   * Fingerprints that hit a transient read error during reconcileFixedOnHead.
+   * They are carried forward unchanged and are NEVER marked fixed this run.
+   */
+  protectedFingerprints?: Set<string>;
 }
 
 export function mergeFindings(
   incoming: ReviewFinding[],
   prior: StoredFinding[],
   headSha: string,
-  opts: {
-    minConfidence: number;
-    /**
-     * The set of file paths ACTUALLY reviewed this run. A prior finding is only
-     * eligible to be marked "fixed" (by not being re-detected) if its file was
-     * reviewed. On an incremental `synchronize` push the diff — and therefore the
-     * reviewed set — is only the newly-pushed files, so without this a prior P1
-     * in an un-touched file would be silently marked fixed. When omitted (e.g.
-     * unit tests, a full review), every file is treated as reviewed (legacy
-     * behavior).
-     */
-    reviewedFiles?: Set<string>;
-  },
+  opts: MergeOptions,
 ): MergeResult {
   const incomingFp = new Set<string>();
   const toPost: ReviewFinding[] = [];
+  const lowConfidence: ReviewFinding[] = [];
 
   for (const f of incoming) {
-    if (f.confidence < opts.minConfidence) continue;
     const fp = fingerprintFinding(f);
-    incomingFp.add(fp);
+    incomingFp.add(fp); // register as seen even if confidence is below the post threshold (P3-8)
+
+    if (f.confidence < opts.minConfidence) {
+      lowConfidence.push(f);
+      continue;
+    }
 
     const priorOpen = prior.find((p) => p.fingerprint === fp && p.status === 'open');
     if (priorOpen) continue;
+    if (incomingFp.has(fp) && toPost.some((x) => fingerprintFinding(x) === fp)) continue; // dedup incoming (P2-9)
 
     toPost.push(f);
   }
@@ -75,12 +147,24 @@ export function mergeFindings(
 
   for (const p of prior) {
     if (p.status !== 'open') continue;
+    if (opts.protectedFingerprints?.has(p.fingerprint)) {
+      // Transient read error: we don't know whether it's fixed, so carry it.
+      stillOpen.push({ ...p });
+      continue;
+    }
     if (incomingFp.has(p.fingerprint)) {
       stillOpen.push({ ...p, lastSeenSha: headSha });
     } else if (opts.reviewedFiles && !opts.reviewedFiles.has(p.file)) {
       // This run didn't review the finding's file (an incremental push that
       // didn't touch it), so its absence from `incoming` proves nothing —
       // carry it forward unchanged rather than falsely reporting it fixed.
+      stillOpen.push({ ...p });
+    } else if (opts.priorReviewSha && opts.priorReviewSha === headSha) {
+      // SAME commit as the previous review — the code has NOT changed, so it
+      // cannot have been fixed. The model simply didn't re-surface it this run.
+      // Carry it forward; never flip a real finding to "fixed" just because a
+      // re-run's dice rolled differently. (Using priorReviewSha keeps this gate
+      // safe from reconcileFixedOnHead overwriting lastSeenSha.)
       stillOpen.push({ ...p });
     } else {
       newlyFixed.push({ ...p, status: 'fixed', fixedAtSha: headSha });
@@ -91,6 +175,7 @@ export function mergeFindings(
     toPost,
     stillOpen,
     newlyFixed,
+    lowConfidence,
     stats: {
       newCount: toPost.length,
       fixedCount: newlyFixed.length,
@@ -102,7 +187,7 @@ export function mergeFindings(
 export function toStoredFinding(f: ReviewFinding, headSha: string): StoredFinding {
   const fp = fingerprintFinding(f);
   return {
-    id: `${fp}-${headSha.slice(0, 7)}`,
+    id: findingId(fp, headSha, f.line),
     fingerprint: fp,
     file: f.file,
     line: f.line,
@@ -124,22 +209,32 @@ export async function reconcileFixedOnHead(
   prior: StoredFinding[],
   headSha: string,
   reader: FileReader,
-): Promise<{ stillOpen: StoredFinding[]; newlyFixed: StoredFinding[] }> {
+): Promise<{ stillOpen: StoredFinding[]; newlyFixed: StoredFinding[]; readErrorFps: string[] }> {
   const stillOpen: StoredFinding[] = [];
   const newlyFixed: StoredFinding[] = [];
+  const readErrorFps: string[] = [];
 
   for (const p of prior) {
     if (p.status !== 'open') {
       stillOpen.push(p);
       continue;
     }
-    const open = await verifyFindingOnHead(p, headSha, reader);
-    if (open) {
+    const { open, genuine, readError } = await verifyFindingOnHead(p, headSha, reader);
+    if (readError) {
+      readErrorFps.push(p.fingerprint);
+      // Don't advance lastSeenSha — we couldn't read the file.
+      stillOpen.push({ ...p });
+    } else if (open && genuine) {
+      // Audit rule genuinely verified the finding is still open.
       stillOpen.push({ ...p, lastSeenSha: headSha });
+    } else if (open) {
+      // Carried forward (LLM/semgrep), but don't advance lastSeenSha — the
+      // priorReviewSha flip-flop guard in mergeFindings handles retirement.
+      stillOpen.push({ ...p });
     } else {
       newlyFixed.push({ ...p, status: 'fixed', fixedAtSha: headSha });
     }
   }
 
-  return { stillOpen, newlyFixed };
+  return { stillOpen, newlyFixed, readErrorFps };
 }

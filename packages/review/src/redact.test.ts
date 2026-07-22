@@ -8,6 +8,64 @@ test('redacts unquoted KEY=value (the common .env / CI leak)', () => {
   assert.match(out, /\[REDACTED\]/);
 });
 
+test('P1 regression: PREFIXED SCREAMING_SNAKE env secrets are redacted (the \\b bug)', () => {
+  // The leading \b never matched these because `_` is a word char — they shipped
+  // the value to the LLM. Each must now be redacted.
+  for (const [line, secret] of [
+    ['JWT_SECRET=supersecretvalue123', 'supersecretvalue123'],
+    ['DB_PASSWORD=hunter2hunter2', 'hunter2hunter2'],
+    ['AWS_SECRET_ACCESS_KEY=AKIAexampleKeyMaterialXyz', 'exampleKeyMaterialXyz'],
+    ['SESSION_SECRET=abcd1234efgh5678', 'abcd1234efgh5678'],
+    ['GITHUB_TOKEN=ghtok_abcdef123456', 'ghtok_abcdef123456'],
+  ] as const) {
+    const out = redactSecrets(line);
+    assert.doesNotMatch(out, new RegExp(secret), `leaked: ${line}`);
+    assert.match(out, /\[REDACTED\]/, `not redacted: ${line}`);
+  }
+});
+
+test('redacts connection-string passwords and Slack webhook URLs', () => {
+  const db = redactSecrets('DATABASE_URL=postgres://admin:s3cretP4ss@db.host:5432/app');
+  assert.doesNotMatch(db, /s3cretP4ss/);
+  const slack = redactSecrets('https://hooks.slack.com/services/T00000000/B11111111/aBcDeFgHiJkLmNoP');
+  assert.doesNotMatch(slack, /aBcDeFgHiJkLmNoP/);
+});
+
+test('P1 regression: userless connection strings (redis AUTH) are redacted', () => {
+  for (const [line, secret] of [
+    ['redis://:mypassword123@redis:6379', 'mypassword123'],
+    ['mongodb://:pw12345678@host/db', 'pw12345678'],
+    ['REDIS_URL=redis://:s3cretpass@h:6379', 's3cretpass'],
+  ] as const) {
+    assert.doesNotMatch(redactSecrets(line), new RegExp(secret), `leaked: ${line}`);
+  }
+});
+
+test('P1 regression: SCREAMING_SNAKE secrets where keyword is not the last token', () => {
+  for (const [line, secret] of [
+    ['SECRET_KEY=django-insecure-abcxyz', 'django-insecure-abcxyz'],
+    ['SECRET_KEY_BASE=railsbase64secret', 'railsbase64secret'],
+    ['PRIVATE_KEY=MIIEabc123base64val', 'MIIEabc123base64val'],
+    ['ENCRYPTION_KEY=aeskeymaterial12', 'aeskeymaterial12'],
+    ['SIGNING_KEY=sigval123456', 'sigval123456'],
+    ['MASTER_KEY=masterval1234', 'masterval1234'],
+    ['GPG_PASSPHRASE=phrase1234', 'phrase1234'],
+  ] as const) {
+    assert.doesNotMatch(redactSecrets(line), new RegExp(secret), `leaked: ${line}`);
+  }
+});
+
+test('redacts Authorization: Bearer tokens', () => {
+  const out = redactSecrets('Authorization: Bearer abcdef1234567890xyztoken');
+  assert.doesNotMatch(out, /abcdef1234567890xyztoken/);
+});
+
+test('does not over-redact ordinary prose containing key/secret/token words', () => {
+  for (const p of ['this is the key insight', 'the secret to success', 'a token of appreciation']) {
+    assert.equal(redactSecrets(p), p, `over-redacted: ${p}`);
+  }
+});
+
 test('redacts Anthropic sk-ant- keys (old regex stopped at the hyphen)', () => {
   const out = redactSecrets('const k = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345";');
   assert.doesNotMatch(out, /abcdefghijklmnopqrstuvwxyz/);

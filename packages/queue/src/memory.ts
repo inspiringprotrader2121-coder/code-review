@@ -6,6 +6,41 @@ import {
   type ReviewQueue,
 } from './types.js';
 
+/** Add a job to a PR's pending list. A review SUPERSEDES the last queued review
+ *  (not merely the last element) — otherwise `[review(sha1), fix]` + review(sha2)
+ *  leaves BOTH reviews, and the stale sha1 review later runs against old code.
+ *  Commands are always kept distinct. */
+function pushCoalesced(list: ReviewJobPayload[], job: ReviewJobPayload): void {
+  if ((job.kind ?? 'review') === 'review') {
+    const idx = list.map((j) => j.kind ?? 'review').lastIndexOf('review');
+    if (idx >= 0) {
+      list[idx] = job; // keep only the latest review SHA
+      return;
+    }
+  }
+  list.push(job);
+}
+
+// The Redis backend TTLs its dedup keys; the in-memory sets have no expiry, so a
+// long-lived worker leaks them. Cap and evict oldest (Set preserves insertion
+// order) — matches Redis's bounded footprint. Dropping an ancient dedup key at
+// worst allows a very old SHA to be re-reviewed, which is harmless.
+// NaN-guard: a garbage ORVEX_QUEUE_MAX_DEDUP (e.g. "abc") makes `size <= NaN`
+// false forever and trimSet would evict EVERY entry on each write, silently
+// disabling dedup — fall back to the default on any non-positive/non-finite value.
+const MAX_DEDUP_ENTRIES = (() => {
+  const n = Number(process.env.ORVEX_QUEUE_MAX_DEDUP ?? 20_000);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 20_000;
+})();
+function trimSet(set: Set<string>): void {
+  if (set.size <= MAX_DEDUP_ENTRIES) return;
+  let drop = set.size - MAX_DEDUP_ENTRIES;
+  for (const k of set) {
+    set.delete(k);
+    if (--drop <= 0) break;
+  }
+}
+
 interface MemoryState {
   seen: Set<string>;
   completed: Set<string>;
@@ -35,17 +70,11 @@ export class MemoryReviewQueue implements ReviewQueue {
     }
 
     this.state.seen.add(idKey);
+    trimSet(this.state.seen);
 
     if (this.state.inFlight.has(pk)) {
       const list = this.state.pending.get(pk) ?? [];
-      const kind = job.kind ?? 'review';
-      const last = list[list.length - 1];
-      // collapse only a review-after-review; keep every command distinct
-      if (kind === 'review' && last && (last.kind ?? 'review') === 'review') {
-        list[list.length - 1] = job;
-      } else {
-        list.push(job);
-      }
+      pushCoalesced(list, job);
       this.state.pending.set(pk, list);
       return { accepted: true, jobId: idKey, reason: 'coalesced' };
     }
@@ -67,13 +96,7 @@ export class MemoryReviewQueue implements ReviewQueue {
 
       if (this.state.inFlight.has(pk)) {
         const list = this.state.pending.get(pk) ?? [];
-        const kind = job.kind ?? 'review';
-        const last = list[list.length - 1];
-        if (kind === 'review' && last && (last.kind ?? 'review') === 'review') {
-          list[list.length - 1] = job; // keep only the latest review
-        } else {
-          list.push(job);
-        }
+        pushCoalesced(list, job);
         this.state.pending.set(pk, list);
         continue;
       }
@@ -87,6 +110,7 @@ export class MemoryReviewQueue implements ReviewQueue {
   async markCompleted(job: ReviewJobPayload): Promise<void> {
     const idKey = jobIdempotencyKey(job);
     this.state.completed.add(idKey);
+    trimSet(this.state.completed);
     this.state.inFlight.delete(prKey(job));
   }
 

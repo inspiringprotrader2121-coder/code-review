@@ -13,6 +13,13 @@ export interface ReviewFinding {
   fixedCode?: string;
   confidence: number;
   ruleId: string;
+  /** internal: the line was snapped to the nearest changed line because the original line wasn't in the diff */
+  lineRelocated?: boolean;
+  /** internal: the anchor is on a context line in a deletion-only hunk */
+  anchorContext?: boolean;
+  /** internal: model tier that produced this finding ('openai' = codex, 'standard' =
+   *  MiniMax, 'premium' = GLM). Codex findings are PROTECTED in verification. */
+  sourceTier?: string;
 }
 
 export function normalizeMessage(message: string): string {
@@ -43,6 +50,6 @@ export function fingerprintFinding(
   return `v${FINGERPRINT_VERSION}-${hash}`;
 }
 
-export function findingId(fingerprint: string, headSha: string): string {
-  return `${fingerprint}-${headSha.slice(0, 7)}`;
+export function findingId(fingerprint: string, headSha: string, line?: number): string {
+  return `${fingerprint}-${line ?? 0}-${headSha.slice(0, 7)}`;
 }

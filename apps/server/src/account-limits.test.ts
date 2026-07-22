@@ -32,14 +32,13 @@ function completeSpreadOverDays(d: AppDatabase, owner: string, n: number): void 
   }
 }
 
-test('monthly ceiling trips once an account reaches reviewsPerMonth for a paid tier (isolated from the hourly check via backdated rows)', () => {
+test('Review monthly quota is included usage, not a hard stop', () => {
   const d = db();
   const plan = planFeatures('review');
   assert.ok(plan.reviewsPerMonth !== null);
-  completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth! - 1);
-  assert.equal(accountLimitReason(d, 'acme', plan), null, 'one under the cap: not yet limited');
-  completeSpreadOverDays(d, 'acme', 1);
-  assert.equal(accountLimitReason(d, 'acme', plan), 'monthly_limit', 'at the cap: limited');
+  assert.equal(plan.overageCentsPerReview, 50);
+  completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth! + 10);
+  assert.equal(accountLimitReason(d, 'acme', plan), null, 'over quota is billed as overage');
 });
 
 test('the hourly ceiling is checked FIRST — when a burst crosses BOTH thresholds at once, it reports rate_limited, not monthly_limit', () => {
@@ -63,10 +62,40 @@ test('enterprise (custom contract) is never limited by these code defaults', () 
   assert.equal(accountLimitReason(d, 'acme', plan), null);
 });
 
-test('different accounts never affect each other\'s monthly count', () => {
+test('Verify monthly quota is included usage, not a hard stop', () => {
   const d = db();
   const plan = planFeatures('verify');
-  completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth!);
-  assert.equal(accountLimitReason(d, 'acme', plan), 'monthly_limit');
+  assert.equal(plan.overageCentsPerReview, 75);
+  completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth! + 10);
+  assert.equal(accountLimitReason(d, 'acme', plan), null, 'over quota is billed as overage');
   assert.equal(accountLimitReason(d, 'other-co', plan), null, 'a fresh account is unaffected');
+});
+
+test('GLOBAL free-tier daily cap trips for a trial account once total free reviews cross the ceiling (abuse backstop)', () => {
+  const d = db();
+  const free = planFeatures('free');
+  // Simulate a farm: many distinct free-tier accounts, each a fresh trial (so
+  // per-account and per-IP checks never fire), together exceeding the global cap.
+  const cap = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
+  for (let i = 0; i < cap; i++) {
+    d.recordReviewRun({
+      tenantId: `farm${i}`, installationId: i, owner: `farm-acct-${i}`, repo: 'r', pr: 1,
+      headSha: `s${i}`, action: 'opened', status: 'completed', durationMs: 100, freeTier: true,
+    });
+  }
+  // a brand-new farmed account (0 of its own reviews) is now blocked by the GLOBAL cap
+  assert.equal(accountLimitReason(d, 'farm-acct-new', free), 'free_tier_capped');
+});
+
+test('the global free-tier cap does NOT block PAID accounts (only trial plans are gated)', () => {
+  const d = db();
+  const cap = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
+  for (let i = 0; i < cap; i++) {
+    d.recordReviewRun({
+      tenantId: `farm${i}`, installationId: i, owner: `farm-acct-${i}`, repo: 'r', pr: 1,
+      headSha: `s${i}`, action: 'opened', status: 'completed', durationMs: 100, freeTier: true,
+    });
+  }
+  // a paying tenant is unaffected by the free-tier abuse pause
+  assert.equal(accountLimitReason(d, 'paying-co', planFeatures('verify')), null);
 });

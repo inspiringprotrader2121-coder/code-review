@@ -13,12 +13,17 @@
  * this is the v1 that makes cross-file review real today.
  */
 
-const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte)$/;
+// Shell + SQL included so a changed script/migration can find its textual callers
+// (a file referencing "backup.sh", or a query site hitting a migrated table).
+const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte|sh|bash|sql)$/;
 const IDENT_RE = /[A-Za-z_][A-Za-z0-9_]{2,}/g;
 
 // Language keywords + ubiquitous names carry no relevance signal — they appear
 // everywhere, so they'd just add noise (and idf already down-weights them, but
-// dropping them keeps the token sets small and fast).
+// dropping them keeps the token sets small and fast). Shell + SQL keywords are
+// included because .sh/.sql files ARE indexed (a changed script/migration should
+// find its textual callers) — without these, every migration "matches" every
+// other migration on SELECT/UPDATE.
 const STOPWORDS = new Set([
   'const', 'let', 'var', 'function', 'return', 'import', 'export', 'from', 'this',
   'true', 'false', 'null', 'undefined', 'async', 'await', 'class', 'extends', 'super',
@@ -29,6 +34,14 @@ const STOPWORDS = new Set([
   'try', 'with', 'and', 'not', 'the', 'that', 'this', 'value', 'data', 'result', 'item',
   'index', 'name', 'args', 'props', 'params', 'options', 'opts', 'config', 'error', 'err',
   'self', 'cls', 'def', 'func', 'end', 'nil', 'none', 'true', 'false',
+  // SQL
+  'select', 'insert', 'update', 'create', 'alter', 'drop', 'table', 'column', 'values',
+  'where', 'join', 'left', 'right', 'inner', 'outer', 'group', 'order', 'limit', 'offset',
+  'having', 'union', 'primary', 'foreign', 'references', 'constraint', 'begin', 'commit',
+  'rollback', 'transaction', 'integer', 'text', 'varchar', 'timestamp', 'into', 'set',
+  // shell
+  'echo', 'then', 'elif', 'done', 'esac', 'local', 'shift', 'exit', 'eval', 'exec',
+  'source', 'printf', 'grep', 'curl', 'sudo', 'mkdir', 'chmod', 'chown',
 ]);
 
 /** Split camelCase / snake_case / kebab into lowercase subtokens. */
@@ -101,11 +114,22 @@ export function retrieveRelevantFiles(
   if (docs.length === 0) return [];
   const n = docs.length;
 
-  // query = every identifier that appears in the changed files
+  // query = every identifier that appears in the changed files. When a changed
+  // file is MISSING from the snapshot (dropped for size/cap), fall back to its
+  // PATH tokens — `src/billing/invoice.ts` still contributes billing/invoice,
+  // so retrieval over a PR of huge files degrades instead of returning nothing.
   const query = new Set<string>();
   for (const cf of changedFiles) {
     const content = snapshot.get(cf);
-    if (content) for (const t of tokenize(content.slice(0, maxScanBytes))) query.add(t);
+    if (content) {
+      for (const t of tokenize(content.slice(0, maxScanBytes))) query.add(t);
+    } else {
+      for (const segment of cf.split('/')) {
+        for (const sub of subtokens(segment.replace(/\.[^.]+$/, ''))) {
+          if (sub.length >= 3 && !STOPWORDS.has(sub)) query.add(sub);
+        }
+      }
+    }
   }
   if (query.size === 0) return [];
 
@@ -116,7 +140,10 @@ export function retrieveRelevantFiles(
       for (const t of query) {
         if (d.tokens.has(t)) score += Math.log(1 + n / (df.get(t) ?? 1));
       }
-      return { path: d.path, score };
+      // LENGTH-NORMALIZE: a raw idf sum scales with document size — a giant file
+      // matches more query terms by chance alone and crowded out small, highly
+      // relevant files. sqrt dampens the size advantage without flattening it.
+      return { path: d.path, score: score / Math.sqrt(d.tokens.size || 1) };
     })
     .filter((d) => d.score > 0)
     .sort((a, b) => b.score - a.score)

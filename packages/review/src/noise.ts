@@ -49,6 +49,21 @@ function lower(s: string): string {
  * These are the "impact is nil, flagging as P3 to call out" comments — the
  * dominant source of review noise. Returns the survivors and the dropped ones.
  */
+// Our secret-redactor replaces leaked tokens with markers that all end in
+// `REDACTED]` ([REDACTED], sk-[REDACTED], [STRIPE_KEY_REDACTED], …). A finding
+// that quotes one of these was reasoned FROM censored input — the model can't
+// have seen the real value, so any claim about it is a hallucination (PR112 #7:
+// a P2 "broken test — token is [REDACTED]" filed on Orvex's OWN redaction). Drop
+// at ALL severities, since it's not a severity-triage problem.
+const REDACTION_MARKER = /REDACTED\]/;
+function citesRedactedInput(f: ReviewFinding): boolean {
+  return (
+    REDACTION_MARKER.test(f.message) ||
+    REDACTION_MARKER.test(f.originalCode ?? '') ||
+    REDACTION_MARKER.test(f.fixedCode ?? '')
+  );
+}
+
 export function dropSelfNegatingFindings(findings: ReviewFinding[]): {
   kept: ReviewFinding[];
   dropped: ReviewFinding[];
@@ -56,6 +71,11 @@ export function dropSelfNegatingFindings(findings: ReviewFinding[]): {
   const kept: ReviewFinding[] = [];
   const dropped: ReviewFinding[] = [];
   for (const f of findings) {
+    // Reasoned from redacted input → hallucination. Drop regardless of severity.
+    if (citesRedactedInput(f)) {
+      dropped.push(f);
+      continue;
+    }
     // A P1/P2 that hedges is likely mis-severitied, not noise — keep it and let
     // verification/severity re-triage handle it. Only low-severity self-negating
     // findings are dropped as count-padding.

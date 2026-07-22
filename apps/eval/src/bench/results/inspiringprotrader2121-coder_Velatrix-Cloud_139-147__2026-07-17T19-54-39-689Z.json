@@ -1,0 +1,175 @@
+{
+  "batch": "inspiringprotrader2121-coder_Velatrix-Cloud_139-147",
+  "range": "139-147",
+  "prLo": 139,
+  "prHi": 147,
+  "prNums": [
+    139,
+    140,
+    141,
+    142,
+    143,
+    144,
+    145,
+    146,
+    147
+  ],
+  "runAt": "2026-07-17T19:54:39.689Z",
+  "orvexReviewedAt": {
+    "139": "2026-07-16T15:05:31Z",
+    "140": "2026-07-16T15:27:19Z",
+    "141": "2026-07-16T15:37:50Z",
+    "142": "2026-07-16T15:48:24Z",
+    "143": "2026-07-16T16:47:13Z",
+    "144": "2026-07-16T16:58:51Z",
+    "145": "2026-07-16T17:14:21Z",
+    "146": "2026-07-16T17:36:19Z",
+    "147": "2026-07-16T17:42:20Z"
+  },
+  "pairwise": [
+    {
+      "competitor": "codex",
+      "prs": [
+        139,
+        140,
+        141,
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "all": {
+        "total": 39,
+        "both": 4,
+        "compOnly": 12,
+        "orvexOnly": 23
+      },
+      "actionable": {
+        "total": 25,
+        "both": 4,
+        "compOnly": 12,
+        "orvexOnly": 9
+      },
+      "total": 39,
+      "both": 4,
+      "compOnly": 12,
+      "orvexOnly": 23
+    },
+    {
+      "competitor": "greptile",
+      "prs": [
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "all": {
+        "total": 41,
+        "both": 7,
+        "compOnly": 12,
+        "orvexOnly": 22
+      },
+      "actionable": {
+        "total": 26,
+        "both": 7,
+        "compOnly": 12,
+        "orvexOnly": 7
+      },
+      "total": 41,
+      "both": 7,
+      "compOnly": 12,
+      "orvexOnly": 22
+    },
+    {
+      "competitor": "coderabbit",
+      "prs": [
+        140,
+        143,
+        144,
+        145
+      ],
+      "all": {
+        "total": 25,
+        "both": 0,
+        "compOnly": 14,
+        "orvexOnly": 11
+      },
+      "actionable": {
+        "total": 11,
+        "both": 0,
+        "compOnly": 4,
+        "orvexOnly": 7
+      },
+      "total": 25,
+      "both": 0,
+      "compOnly": 14,
+      "orvexOnly": 11
+    },
+    {
+      "competitor": "qodo",
+      "prs": [
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "all": {
+        "total": 48,
+        "both": 3,
+        "compOnly": 19,
+        "orvexOnly": 26
+      },
+      "actionable": {
+        "total": 25,
+        "both": 3,
+        "compOnly": 11,
+        "orvexOnly": 11
+      },
+      "total": 48,
+      "both": 3,
+      "compOnly": 19,
+      "orvexOnly": 26
+    },
+    {
+      "competitor": "gitar",
+      "prs": [
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147
+      ],
+      "all": {
+        "total": 38,
+        "both": 1,
+        "compOnly": 9,
+        "orvexOnly": 28
+      },
+      "actionable": {
+        "total": 17,
+        "both": 1,
+        "compOnly": 3,
+        "orvexOnly": 13
+      },
+      "total": 38,
+      "both": 1,
+      "compOnly": 9,
+      "orvexOnly": 28
+    }
+  ]
+}

@@ -13,7 +13,8 @@
   "dependencies": {
     "@octokit/rest": "^21.1.1",
     "@orvex-review/github": "workspace:*",
-    "@orvex-review/store": "workspace:*"
+    "@orvex-review/store": "workspace:*",
+    "otplib": "^13.4.1"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

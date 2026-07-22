@@ -11,7 +11,19 @@ import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } 
  * A model returning unparseable text is a different case (degrade to empty).
  */
 export function isTransientLlmError(message: string): boolean {
-  return /\b429\b|rate.?limit|quota|token plan|request failed|fetch failed|stalled|timed?\s?out|econn|socket hang/i.test(
+  // Client errors are permanent unless the status explicitly means retry later.
+  // Check the complete 4xx range before the broad `request failed` matcher so an
+  // unsupported media type (415), validation error (422), etc. cannot be requeued
+  // as a transport failure. 408/425/429 are the retryable HTTP exceptions.
+  const status =
+    /\b(?:http(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*(4\d\d)\b/i.exec(message)?.[1] ??
+    /\brequest failed\s*\(\s*(4\d\d)\b/i.exec(message)?.[1];
+  // Gateways commonly use 402 when the requested output allowance exceeds the
+  // current credit balance. That is a quota condition: fail over/retry it rather
+  // than misreporting the missing pass as a clean, empty review.
+  if (status === '402' && /credit|quota|payment required|insufficient/i.test(message)) return true;
+  if (status && !['408', '425', '429'].includes(status)) return false;
+  return /\b(408|425|429|5\d\d)\b|rate.?limit|quota|token plan|request failed|fetch failed|stalled|timed?\s?out|econn|socket hang/i.test(
     message,
   );
 }
@@ -30,6 +42,10 @@ export interface LlmReviewOptions {
   model: string;
   /** OpenAI-compatible endpoint (e.g. MiniMax); omit to use Anthropic */
   baseUrl?: string;
+  /** 'responses' for OpenAI gpt-5.x/codex reasoning models */
+  api?: 'chat' | 'responses' | 'anthropic';
+  /** reasoning effort for /v1/responses models */
+  reasoningEffort?: string;
   maxTokens?: number;
   /** cross-file context: repo tree + imported files */
   context?: ReviewPromptContext;
@@ -80,6 +96,8 @@ export async function runLlmReview(
       apiKey: opts.apiKey,
       model: opts.model,
       baseUrl: opts.baseUrl,
+      api: opts.api,
+      reasoningEffort: opts.reasoningEffort,
       // no cap — pass through (undefined → client's high ceiling) so the review
       // has room for full reasoning + detailed findings with fix code
       maxTokens: opts.maxTokens,
@@ -104,9 +122,23 @@ export async function runLlmReview(
   try {
     parsed = parseReview(await call(reviewThinking));
   } catch (err) {
-    console.warn('[llm] review call/parse failed, retrying without reasoning:', (err as Error).message);
+    const firstMessage = (err as Error).message;
+    // A hard timeout already consumed the complete per-call budget. Starting a
+    // second long request hid provider failures for another 5-8 minutes and
+    // doubled spend. Surface it immediately so the required-pass gate can stop
+    // the review without posting partial results.
+    if (/wall-clock cap|timed?\s*out|stalled/i.test(firstMessage)) throw err;
+    // Retry transport disconnects with reasoning still enabled. Only parsing,
+    // truncation, and empty-answer failures drop reasoning on the retry.
+    const retryThinking = /terminated|fetch failed|econn|socket hang|network/i.test(firstMessage)
+      ? reviewThinking
+      : false;
+    console.warn(
+      `[llm] review call/parse failed, retrying with reasoning ${retryThinking ? 'on' : 'off'}:`,
+      firstMessage,
+    );
     try {
-      parsed = parseReview(await call(false));
+      parsed = parseReview(await call(retryThinking));
     } catch (err2) {
       const msg = (err2 as Error).message;
       // A rate-limit / transport failure is NOT a clean review — propagate it so
@@ -122,24 +154,40 @@ export async function runLlmReview(
   // Generous backstop against a runaway model, not a quality gate — the rules
   // prompt and the noise/verification passes control real finding volume.
   const maxFindings = Number(process.env.ORVEX_MAX_FINDINGS ?? 25);
+  // Sort by severity BEFORE the cap so a runaway response keeps the most-severe
+  // findings (the old prefix-slice could drop a P1 while keeping info), and LOG
+  // any drop so a capped finding is never silently lost.
+  const rank = (s: string): number => (s === 'P1' ? 0 : s === 'P2' ? 1 : s === 'P3' ? 2 : 3);
+  const sorted = [...parsed.findings].sort((a, b) => rank(a.severity) - rank(b.severity));
+  if (sorted.length > maxFindings) {
+    console.warn(`[llm] capping ${sorted.length} findings to ${maxFindings}; ${sorted.length - maxFindings} lowest-severity dropped`);
+  }
   return {
     ...parsed,
-    findings: parsed.findings.slice(0, maxFindings).map((f) => ({
+    findings: sorted.slice(0, maxFindings).map((f) => ({
       ...f,
       ruleId: f.ruleId ?? `llm.${f.category}`,
     })),
   };
 }
 
+// Taxonomy (Codex 2026-07-16): P1=Critical, P2=High, P3=MEDIUM, info=Low/nitpick.
+// "medium" must NOT collapse into the same bucket as "low/minor" — a medium bug
+// is a real finding the product exists to surface, not a nitpick. low/minor/
+// trivial map to `info`; medium/moderate map to P3.
 const SEVERITY_MAP: Record<string, 'P1' | 'P2' | 'P3' | 'info'> = {
   p1: 'P1', critical: 'P1', blocker: 'P1', severe: 'P1', error: 'P1',
   p2: 'P2', high: 'P2', major: 'P2', warning: 'P2', warn: 'P2',
-  p3: 'P3', medium: 'P3', moderate: 'P3', low: 'P3', minor: 'P3',
-  info: 'info', informational: 'info', note: 'info', nit: 'info', suggestion: 'info',
+  p3: 'P3', medium: 'P3', moderate: 'P3', mid: 'P3',
+  info: 'info', informational: 'info', note: 'info', nit: 'info', nitpick: 'info',
+  suggestion: 'info', low: 'info', minor: 'info', trivial: 'info', small: 'info',
 };
 
 function coerceSeverity(v: unknown): 'P1' | 'P2' | 'P3' | 'info' {
-  return SEVERITY_MAP[String(v ?? '').toLowerCase().trim()] ?? 'P3';
+  // Unknown/empty severity → `info`, NOT P3. P3 now means MEDIUM (a real bug), so
+  // an unrecognized word ("style", "cosmetic", "") is more likely noise than a
+  // medium bug — fail toward nitpick, not toward asserting a real finding.
+  return SEVERITY_MAP[String(v ?? '').toLowerCase().trim()] ?? 'info';
 }
 
 /** Reduce a category to a short kebab slug (≤3 words); default 'general'. */

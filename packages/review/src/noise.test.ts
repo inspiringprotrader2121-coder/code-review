@@ -16,6 +16,27 @@ function f(partial: Partial<ReviewFinding>): ReviewFinding {
   };
 }
 
+test('THE PR112 #7 FIX: drops findings that quote a redaction marker (reasoned from censored input) — even at P2', () => {
+  const findings = [
+    f({ severity: 'P2', message: "The test token is `[REDACTED]`, so the mock is broken and the test can't pass." }),
+    f({ severity: 'P1', message: 'API key sk-[REDACTED] appears hardcoded on line 12.' }),
+    f({ severity: 'P2', message: 'Correct field but wrong value', originalCode: "token: '[STRIPE_KEY_REDACTED]'" }),
+    f({ severity: 'P2', message: 'Real bug: null deref on the retry path.' }),
+  ];
+  const { kept, dropped } = dropSelfNegatingFindings(findings);
+  assert.equal(dropped.length, 3, 'all three redaction-derived findings dropped regardless of severity');
+  assert.equal(kept.length, 1);
+  assert.match(kept[0].message, /null deref/);
+});
+
+test('does NOT drop a legitimate finding that merely uses the word redact in prose', () => {
+  const { kept, dropped } = dropSelfNegatingFindings([
+    f({ severity: 'P2', message: 'This logs the token in plaintext — it should be redacted before logging.' }),
+  ]);
+  assert.equal(dropped.length, 0, '"redacted" in normal prose is not a marker');
+  assert.equal(kept.length, 1);
+});
+
 test('drops findings that admit their own impact is nil', () => {
   const findings = [
     f({ message: 'Historical rows would still match — realistically the source never contains these chars, so impact is nil; flagging as P3 to call out the gap.' }),

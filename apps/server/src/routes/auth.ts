@@ -15,9 +15,12 @@ import { escapeHtml, onboardingSteps, pageShell } from './pages.js';
  * True only while NO login exists at all (no OAuth, no forced email/password
  * login, no dev bypass) — the pre-auth signup flow stays available. When
  * ORVEX_REQUIRE_LOGIN=1, /connect requires a session like the dashboard does.
+ * MUST receive db.hasPasswordUsers(): once ANY email/password account exists,
+ * login is in use and /connect must require a session — otherwise an
+ * unauthenticated visitor could keep binding workspaces post-auth-migration.
  */
-function legacyConnectMode(): boolean {
-  return legacyAuthMode();
+function legacyConnectMode(hasPasswordUsers: boolean): boolean {
+  return legacyAuthMode(hasPasswordUsers);
 }
 
 const LEGACY_BANNER = `<div class="banner info">You can connect GitHub and start reviewing now — no sign-in required yet.
@@ -34,7 +37,7 @@ export function authRoutes() {
 
   app.get('/connect', (c) => {
     const user = sessionUser(c, db);
-    if (!user && legacyConnectMode()) {
+    if (!user && legacyConnectMode(db.hasPasswordUsers())) {
       const error = c.req.query('error');
       const errorBanner = error ? `<div class="banner error">${escapeHtml(error)}</div>` : '';
       return c.html(
@@ -118,7 +121,7 @@ export function authRoutes() {
       return c.redirect('/connect');
     }
 
-    if (!user && legacyConnectMode()) {
+    if (!user && legacyConnectMode(db.hasPasswordUsers())) {
       const { installUrl } = tenants.startConnectLegacy(tenantSlug, name);
       return c.redirect(installUrl);
     }
@@ -139,7 +142,7 @@ export function authRoutes() {
     const user = sessionUser(c, db);
     const ip = clientIp(c);
 
-    if (!user && legacyConnectMode()) {
+    if (!user && legacyConnectMode(db.hasPasswordUsers())) {
       const legacyInstallationId = Number(c.req.query('installation_id'));
       if (!legacyInstallationId || Number.isNaN(legacyInstallationId)) {
         return c.json({ error: 'missing installation_id' }, 400);

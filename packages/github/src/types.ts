@@ -34,3 +34,23 @@ export interface ChangedFile {
   previousFilename?: string;
   truncated: boolean;
 }
+
+/** Whether the whole PR actually reached the reviewer. Surfaced in the review so
+ *  Orvex never claims "review complete / looks good to merge" when part of the PR
+ *  was silently dropped (over the file cap, or a patch truncated). */
+export interface DiffCoverage {
+  /** candidate changed files (excluding intentionally-skipped lockfiles/binaries) */
+  candidates: number;
+  /** files that actually made it into the review set WITH reviewable content */
+  reviewed: number;
+  /** dropped because the maxFiles cap was hit — NOT reviewed */
+  skippedByCap: number;
+  /** patches cut at maxFileBytes — only partially reviewed */
+  truncatedFiles: number;
+  /** deletions (content not reviewable, expected — informational only) */
+  deletedFiles: number;
+  /** GitHub omitted the patch (oversized file) — changed but NOT reviewed */
+  omittedPatch: number;
+  /** true iff nothing was dropped by the cap, no patch was truncated, and no patch was omitted */
+  complete: boolean;
+}

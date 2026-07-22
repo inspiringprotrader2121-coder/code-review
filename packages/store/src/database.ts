@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   FindingRecord,
   FindingStatus,
@@ -14,10 +14,14 @@ import type {
   Repo,
   ReviewRun,
   ReviewRunStatus,
+  ScorecardRun,
   Session,
   StoredFinding,
   Tenant,
+  TenantBilling,
   User,
+  UserSecurity,
+  MfaChallenge,
   WorkspaceMember,
   WorkspaceRole,
   WorkspaceSettings,
@@ -29,6 +33,11 @@ CREATE TABLE IF NOT EXISTS tenants (
   id TEXT PRIMARY KEY,
   slug TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
+  stripe_subscription_status TEXT,
+  stripe_current_period_start TEXT,
+  stripe_current_period_end TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -55,6 +64,7 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
   findings_json TEXT NOT NULL,
   last_review_at TEXT NOT NULL,
   last_summary_comment_id INTEGER,
+  codex_thread_id TEXT,
   PRIMARY KEY (installation_id, owner, repo, pr)
 );
 
@@ -64,7 +74,36 @@ CREATE TABLE IF NOT EXISTS users (
   login TEXT NOT NULL,
   name TEXT,
   avatar_url TEXT,
+  email TEXT,
+  google_id TEXT UNIQUE,
+  password_hash TEXT,
+  is_superadmin INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_security (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  totp_enabled INTEGER NOT NULL DEFAULT 0,
+  totp_secret_encrypted TEXT,
+  last_totp_epoch INTEGER,
+  recovery_code_hashes_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mfa_challenges (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  next TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expiry ON mfa_challenges(expires_at);
+
+CREATE TABLE IF NOT EXISTS auth_rate_limits (
+  rate_key TEXT PRIMARY KEY,
+  attempt_count INTEGER NOT NULL,
+  reset_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -250,9 +289,21 @@ export class AppDatabase {
     this.db.exec(SCHEMA_V2);
     this.migrateLegacyPrReviews();
     this.migrateUserAuthColumns();
+    this.migrateUserSecurityColumns();
     this.migrateTenantPlan();
+    this.migrateTenantBillingColumns();
     this.migrateRepoAutomationToggles();
     this.migrateReviewRunCostColumns();
+    this.migrateCodexThreadIdColumn();
+  }
+
+  /** Add Codex CLI session id column to pr_reviews on existing DBs. */
+  private migrateCodexThreadIdColumn(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(pr_reviews)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('codex_thread_id')) {
+      this.db.exec(`ALTER TABLE pr_reviews ADD COLUMN codex_thread_id TEXT`);
+    }
   }
 
   /** Add token/cost columns to review_runs on existing DBs (fresh DBs get them
@@ -269,6 +320,23 @@ export class AppDatabase {
     if (!names.has('cost_usd')) {
       this.db.exec(`ALTER TABLE review_runs ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0`);
     }
+    // Deep-vs-normal scorecard columns: which runs were `@orvex deep`, and what
+    // each run NEWLY posted (severity/file/line JSON). Because the A/B protocol
+    // runs normal-then-deep on the same commit, a deep run's new findings are
+    // exactly its marginal value over normal — these two columns make that
+    // measurable instead of anecdotal.
+    if (!names.has('deep')) {
+      this.db.exec(`ALTER TABLE review_runs ADD COLUMN deep INTEGER NOT NULL DEFAULT 0`);
+    }
+    // free_tier: was this run started under a trial/free plan? Powers the global
+    // free-tier daily spend circuit-breaker — a bound on total free-review cost
+    // that holds regardless of how a trial-farmer evades per-account/IP checks.
+    if (!names.has('free_tier')) {
+      this.db.exec(`ALTER TABLE review_runs ADD COLUMN free_tier INTEGER NOT NULL DEFAULT 0`);
+    }
+    if (!names.has('new_findings_json')) {
+      this.db.exec(`ALTER TABLE review_runs ADD COLUMN new_findings_json TEXT`);
+    }
   }
 
   /** Add the subscription plan column to an existing tenants table.
@@ -278,6 +346,21 @@ export class AppDatabase {
     const cols = this.db.prepare(`PRAGMA table_info(tenants)`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === 'plan')) {
       this.db.exec(`ALTER TABLE tenants ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'`);
+    }
+  }
+
+  /** Stripe customer/subscription state used for Checkout and metered overage. */
+  private migrateTenantBillingColumns(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(tenants)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    for (const col of [
+      'stripe_customer_id',
+      'stripe_subscription_id',
+      'stripe_subscription_status',
+      'stripe_current_period_start',
+      'stripe_current_period_end',
+    ]) {
+      if (!names.has(col)) this.db.exec(`ALTER TABLE tenants ADD COLUMN ${col} TEXT`);
     }
   }
 
@@ -301,12 +384,69 @@ export class AppDatabase {
     const row = this.db
       .prepare(`SELECT plan FROM tenants WHERE id = ?`)
       .get(tenantId) as { plan?: string } | undefined;
-    return row?.plan ?? null;
+    const plan = row?.plan ?? null;
+    if (!plan || plan === 'free') return plan;
+    // Enforce subscription status: a paid plan whose Stripe subscription is in a
+    // dunning/failed state must NOT keep paid access (Luna/verify COGS) through
+    // Stripe's weeks-long retry window. Only an EXPLICIT bad status downgrades —
+    // a missing status (fresh checkout before the first subscription.updated
+    // webhook) keeps the paid plan so we never downgrade a customer who just paid.
+    const status = this.getTenantBilling(tenantId)?.stripeSubscriptionStatus;
+    if (status && DOWNGRADED_SUB_STATUSES.has(status)) return 'free';
+    return plan;
   }
 
   /** Set a tenant's plan (billing/admin). Returns false if the tenant is unknown. */
   setTenantPlan(tenantId: string, plan: string): boolean {
     const res = this.db.prepare(`UPDATE tenants SET plan = ? WHERE id = ?`).run(plan, tenantId);
+    return res.changes > 0;
+  }
+
+  getTenantBilling(tenantId: string): TenantBilling | null {
+    const row = this.db
+      .prepare(
+        `SELECT stripe_customer_id, stripe_subscription_id, stripe_subscription_status,
+                stripe_current_period_start, stripe_current_period_end
+         FROM tenants WHERE id = ?`,
+      )
+      .get(tenantId) as
+      | {
+          stripe_customer_id: string | null;
+          stripe_subscription_id: string | null;
+          stripe_subscription_status: string | null;
+          stripe_current_period_start: string | null;
+          stripe_current_period_end: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      stripeCustomerId: row.stripe_customer_id ?? undefined,
+      stripeSubscriptionId: row.stripe_subscription_id ?? undefined,
+      stripeSubscriptionStatus: row.stripe_subscription_status ?? undefined,
+      stripeCurrentPeriodStart: row.stripe_current_period_start ?? undefined,
+      stripeCurrentPeriodEnd: row.stripe_current_period_end ?? undefined,
+    };
+  }
+
+  setTenantBilling(tenantId: string, patch: TenantBilling): boolean {
+    const existing = this.getTenantBilling(tenantId);
+    if (!existing) return false;
+    const next = { ...existing, ...patch };
+    const res = this.db
+      .prepare(
+        `UPDATE tenants
+         SET stripe_customer_id = ?, stripe_subscription_id = ?, stripe_subscription_status = ?,
+             stripe_current_period_start = ?, stripe_current_period_end = ?
+         WHERE id = ?`,
+      )
+      .run(
+        next.stripeCustomerId ?? null,
+        next.stripeSubscriptionId ?? null,
+        next.stripeSubscriptionStatus ?? null,
+        next.stripeCurrentPeriodStart ?? null,
+        next.stripeCurrentPeriodEnd ?? null,
+        tenantId,
+      );
     return res.changes > 0;
   }
 
@@ -335,6 +475,38 @@ export class AppDatabase {
     const row = this.db
       .prepare(`SELECT COUNT(*) AS n FROM review_runs WHERE ${where}`)
       .get(...params) as { n: number };
+    return row.n;
+  }
+
+  countTenantCompletedReviewsSince(tenantId: string, sinceIso: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM review_runs
+         WHERE tenant_id = ? AND status = 'completed'
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'
+           AND created_at >= ?`,
+      )
+      .get(tenantId, sinceIso) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Quota/overage UNITS consumed since `sinceIso` — a deep review (`@orvex
+   * deep`) counts as 2 units, a normal review as 1. Deep measured at ~1.8-2.25x
+   * a normal review's cost, so 2 is the cost-honest weight: 2 included-quota
+   * units per deep review, and 2x the per-review overage price once over quota
+   * (Starter deep = $1.00, Verify deep = $1.50). Same review filter as the plain
+   * count (excludes fix/cmd runs).
+   */
+  completedReviewUnitsSince(tenantId: string, sinceIso: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN deep = 1 THEN 2 ELSE 1 END), 0) AS n FROM review_runs
+         WHERE tenant_id = ? AND status = 'completed'
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'
+           AND created_at >= ?`,
+      )
+      .get(tenantId, sinceIso) as { n: number };
     return row.n;
   }
 
@@ -461,6 +633,8 @@ export class AppDatabase {
       .prepare(`DELETE FROM review_runs WHERE status IN ('skipped', 'failed') AND created_at < ?`)
       .run(runCutoff).changes;
     n += this.db.prepare(`DELETE FROM sessions WHERE expires_at < ?`).run(now).changes;
+    n += this.db.prepare(`DELETE FROM mfa_challenges WHERE expires_at < ?`).run(now).changes;
+    n += this.db.prepare(`DELETE FROM auth_rate_limits WHERE reset_at < ?`).run(now).changes;
     n += this.db.prepare(`DELETE FROM abuse_signals WHERE created_at < ?`).run(abuseCutoff).changes;
     return n;
   }
@@ -470,10 +644,51 @@ export class AppDatabase {
     const cols = this.db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
     const names = new Set(cols.map((c) => c.name));
     if (!names.has('email')) this.db.exec(`ALTER TABLE users ADD COLUMN email TEXT`);
+    if (!names.has('google_id')) this.db.exec(`ALTER TABLE users ADD COLUMN google_id TEXT`);
     if (!names.has('password_hash')) this.db.exec(`ALTER TABLE users ADD COLUMN password_hash TEXT`);
+    if (!names.has('is_superadmin')) {
+      this.db.exec(`ALTER TABLE users ADD COLUMN is_superadmin INTEGER NOT NULL DEFAULT 0`);
+    }
+    // normalized_email: the alias-collapsed identity (gmail dots/+tags folded) so
+    // `john.doe+1@gmail.com` and `johndoe@gmail.com` map to ONE account. Anchors
+    // email-alias anti-farming. Non-unique index (a user could legitimately share
+    // a normalized email across OAuth + password linkage; dedup is enforced in the
+    // signup paths, not by a hard constraint that could break linking).
+    if (!names.has('normalized_email')) {
+      this.db.exec(`ALTER TABLE users ADD COLUMN normalized_email TEXT`);
+    }
+    this.db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_users_normalized_email ON users(normalized_email) WHERE normalized_email IS NOT NULL`,
+    );
+    // DEDUP BEFORE CREATE: if historical rows already share an email (possible
+    // from pre-constraint writes), CREATE UNIQUE INDEX throws and the server
+    // crash-loops at startup. Null out the duplicates first (keeping the OLDEST
+    // row's email, matching the case-insensitive lookup in getUserByEmail) and
+    // log loudly — affected users can re-add their email from the dashboard.
+    const dupes = this.db
+      .prepare(
+        `UPDATE users SET email = NULL
+         WHERE email IS NOT NULL AND rowid NOT IN (
+           SELECT MIN(rowid) FROM users WHERE email IS NOT NULL GROUP BY lower(email)
+         )`,
+      )
+      .run();
+    if (dupes.changes > 0) {
+      console.warn(`[store] nulled ${dupes.changes} duplicate user email(s) so the unique index can be created`);
+    }
     this.db.exec(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL`,
     );
+    this.db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id) WHERE google_id IS NOT NULL`,
+    );
+  }
+
+  private migrateUserSecurityColumns(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(user_security)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'last_totp_epoch')) {
+      this.db.exec(`ALTER TABLE user_security ADD COLUMN last_totp_epoch INTEGER`);
+    }
   }
 
   private migrateLegacyPrReviews(): void {
@@ -661,18 +876,7 @@ export class AppDatabase {
   }
 
   findInstallationForRepo(owner: string, repo: string): GitHubInstallation | null {
-    const slug = `${owner}/${repo}`.toLowerCase();
-    const rows = this.db
-      .prepare(`SELECT installation_id FROM github_installations WHERE suspended_at IS NULL`)
-      .all() as Array<{ installation_id: number }>;
-
-    for (const row of rows) {
-      const inst = this.getInstallation(row.installation_id);
-      if (inst && inst.accountLogin.toLowerCase() === owner.toLowerCase()) {
-        return inst;
-      }
-    }
-
+    void repo; // keyed by account owner — the repo segment is not needed for the lookup
     const bySlug = this.db
       .prepare(
         `SELECT gi.installation_id FROM github_installations gi
@@ -682,10 +886,7 @@ export class AppDatabase {
       )
       .get(owner) as { installation_id: number } | undefined;
 
-    if (bySlug) return this.getInstallation(bySlug.installation_id);
-
-    void slug;
-    return null;
+    return bySlug ? this.getInstallation(bySlug.installation_id) : null;
   }
 
   // ——— PR review state ———
@@ -693,7 +894,7 @@ export class AppDatabase {
   getState(key: PrKey): PrReviewState | null {
     const row = this.db
       .prepare(
-        `SELECT tenant_id, last_sha, findings_json, last_review_at, last_summary_comment_id
+        `SELECT tenant_id, last_sha, findings_json, last_review_at, last_summary_comment_id, codex_thread_id
          FROM pr_reviews
          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr = ?`,
       )
@@ -704,6 +905,7 @@ export class AppDatabase {
           findings_json: string;
           last_review_at: string;
           last_summary_comment_id: number | null;
+          codex_thread_id: string | null;
         }
       | undefined;
 
@@ -719,45 +921,53 @@ export class AppDatabase {
       findings: JSON.parse(row.findings_json),
       lastReviewAt: row.last_review_at,
       lastSummaryCommentId: row.last_summary_comment_id ?? undefined,
+      codexThreadId: row.codex_thread_id ?? undefined,
     };
   }
 
   saveState(state: PrReviewState): void {
-    this.db
-      .prepare(
-        `INSERT INTO pr_reviews
-         (installation_id, owner, repo, pr, tenant_id, last_sha, findings_json, last_review_at, last_summary_comment_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    // ONE transaction: the pr_reviews upsert and the findings projection must
+    // commit or fail TOGETHER — a crash between them leaves the dashboard
+    // projection permanently out of sync with the operational blob.
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO pr_reviews
+         (installation_id, owner, repo, pr, tenant_id, last_sha, findings_json, last_review_at, last_summary_comment_id, codex_thread_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(installation_id, owner, repo, pr) DO UPDATE SET
            tenant_id = excluded.tenant_id,
            last_sha = excluded.last_sha,
            findings_json = excluded.findings_json,
            last_review_at = excluded.last_review_at,
-           last_summary_comment_id = excluded.last_summary_comment_id`,
-      )
-      .run(
-        state.installationId,
-        state.owner,
-        state.repo,
-        state.pr,
-        state.tenantId,
-        state.lastSha,
-        JSON.stringify(state.findings),
-        state.lastReviewAt,
-        state.lastSummaryCommentId ?? null,
-      );
+           last_summary_comment_id = excluded.last_summary_comment_id,
+           codex_thread_id = excluded.codex_thread_id`,
+        )
+        .run(
+          state.installationId,
+          state.owner,
+          state.repo,
+          state.pr,
+          state.tenantId,
+          state.lastSha,
+          JSON.stringify(state.findings),
+          state.lastReviewAt,
+          state.lastSummaryCommentId ?? null,
+          state.codexThreadId ?? null,
+        );
 
-    // keep the dashboard findings projection in sync with the operational blob
-    this.projectFindings(
-      {
-        tenantId: state.tenantId,
-        installationId: state.installationId,
-        owner: state.owner,
-        repo: state.repo,
-        pr: state.pr,
-      },
-      state.findings,
-    );
+      // keep the dashboard findings projection in sync with the operational blob
+      this.projectFindings(
+        {
+          tenantId: state.tenantId,
+          installationId: state.installationId,
+          owner: state.owner,
+          repo: state.repo,
+          pr: state.pr,
+        },
+        state.findings,
+      );
+    })();
   }
 
   // ——— Users & sessions ———
@@ -767,25 +977,122 @@ export class AppDatabase {
     login: string;
     name?: string | null;
     avatarUrl?: string | null;
+    email?: string | null;
+    normalizedEmail?: string;
   }): User {
+    const email = input.email?.trim().toLowerCase();
+    const normEmail = input.normalizedEmail ?? email ?? null;
     const now = new Date().toISOString();
+    const existingGitHub = this.getUserByGitHubId(input.githubId);
+    if (existingGitHub) {
+      const emailOwner = email ? this.getUserByEmail(email) : null;
+      this.db
+        .prepare(
+          `UPDATE users
+           SET login = ?, name = ?, avatar_url = ?, email = CASE WHEN ? IS NULL OR ? IS NOT NULL THEN email ELSE ? END
+           WHERE id = ?`,
+        )
+        .run(
+          input.login,
+          input.name ?? null,
+          input.avatarUrl ?? null,
+          email ?? null,
+          emailOwner && emailOwner.id !== existingGitHub.id ? emailOwner.id : null,
+          email ?? null,
+          existingGitHub.id,
+        );
+      return this.getUserById(existingGitHub.id)!;
+    }
+
+    const existingEmail = email ? this.getUserByEmail(email) : null;
+    if (existingEmail) {
+      if (existingEmail.githubId > 0) {
+        throw new Error('This email is already linked to a different GitHub account');
+      }
+      this.db
+        .prepare(`UPDATE users SET github_id = ?, login = ?, name = ?, avatar_url = ?, email = ? WHERE id = ?`)
+        .run(input.githubId, input.login, input.name ?? null, input.avatarUrl ?? null, email, existingEmail.id);
+      return this.getUserById(existingEmail.id)!;
+    }
+
     this.db
       .prepare(
-        `INSERT INTO users (id, github_id, login, name, avatar_url, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(github_id) DO UPDATE SET
-           login = excluded.login,
-           name = excluded.name,
-           avatar_url = excluded.avatar_url`,
+        `INSERT INTO users (id, github_id, login, name, avatar_url, email, normalized_email, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(randomUUID(), input.githubId, input.login, input.name ?? null, input.avatarUrl ?? null, now);
+      .run(randomUUID(), input.githubId, input.login, input.name ?? null, input.avatarUrl ?? null, email ?? null, normEmail, now);
     return this.getUserByGitHubId(input.githubId)!;
+  }
+
+  /** Set normalized_email when it's currently missing (backfills existing accounts
+   *  on their next login without touching the delicate OAuth-link branches). */
+  setUserNormalizedEmailIfMissing(userId: string, normalizedEmail: string): void {
+    this.db
+      .prepare(`UPDATE users SET normalized_email = ? WHERE id = ? AND normalized_email IS NULL`)
+      .run(normalizedEmail.trim().toLowerCase(), userId);
   }
 
   getUserByGitHubId(githubId: number): User | null {
     const row = this.db
       .prepare(`SELECT * FROM users WHERE github_id = ?`)
       .get(githubId) as UserRow | undefined;
+    return row ? mapUser(row) : null;
+  }
+
+  upsertUserFromGoogle(input: {
+    googleId: string;
+    email: string;
+    name?: string | null;
+    avatarUrl?: string | null;
+    normalizedEmail?: string;
+  }): User {
+    const email = input.email.trim().toLowerCase();
+    const existingGoogle = this.getUserByGoogleId(input.googleId);
+    if (existingGoogle) {
+      this.db
+        .prepare(`UPDATE users SET name = ?, avatar_url = ?, email = ? WHERE id = ?`)
+        .run(input.name ?? null, input.avatarUrl ?? null, email, existingGoogle.id);
+      return this.getUserById(existingGoogle.id)!;
+    }
+
+    const existingEmail = this.getUserByEmail(email);
+    if (existingEmail) {
+      const linkedGoogleId = this.db
+        .prepare(`SELECT google_id FROM users WHERE id = ?`)
+        .get(existingEmail.id) as { google_id: string | null } | undefined;
+      if (linkedGoogleId?.google_id) {
+        throw new Error('This email is already linked to a different Google account');
+      }
+      this.db
+        .prepare(`UPDATE users SET google_id = ?, name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url) WHERE id = ?`)
+        .run(input.googleId, input.name ?? null, input.avatarUrl ?? null, existingEmail.id);
+      return this.getUserById(existingEmail.id)!;
+    }
+
+    const syntheticGithubId = syntheticUserId(`google:${input.googleId}`);
+    this.db
+      .prepare(
+        `INSERT INTO users (id, github_id, login, name, avatar_url, email, normalized_email, google_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        syntheticGithubId,
+        email,
+        input.name ?? null,
+        input.avatarUrl ?? null,
+        email,
+        input.normalizedEmail ?? email,
+        input.googleId,
+        new Date().toISOString(),
+      );
+    return this.getUserByGoogleId(input.googleId)!;
+  }
+
+  getUserByGoogleId(googleId: string): User | null {
+    const row = this.db
+      .prepare(`SELECT * FROM users WHERE google_id = ?`)
+      .get(googleId) as UserRow | undefined;
     return row ? mapUser(row) : null;
   }
 
@@ -813,7 +1120,7 @@ export class AppDatabase {
       return this.getUserById(existing.id)!;
     }
     // password-only users get a synthetic negative github_id (real ids are > 0)
-    const syntheticGithubId = -Math.abs(hashToInt(email));
+    const syntheticGithubId = syntheticUserId(email);
     this.db
       .prepare(
         `INSERT INTO users (id, github_id, login, name, email, password_hash, created_at)
@@ -831,10 +1138,51 @@ export class AppDatabase {
     return this.getUserByEmail(email)!;
   }
 
+  /** Create a password account without ever changing an existing account. */
+  createPasswordUser(input: {
+    email: string;
+    passwordHash: string;
+    name?: string;
+    login?: string;
+    /** alias-collapsed identity (caller computes via tenants.normalizeEmail) */
+    normalizedEmail?: string;
+  }): User | null {
+    const email = input.email.toLowerCase().trim();
+    const now = new Date().toISOString();
+    const syntheticGithubId = syntheticUserId(email);
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO users (id, github_id, login, name, email, normalized_email, password_hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        syntheticGithubId,
+        input.login ?? email,
+        input.name ?? null,
+        email,
+        input.normalizedEmail ?? email,
+        input.passwordHash,
+        now,
+      );
+    return result.changes === 1 ? this.getUserByEmail(email) : null;
+  }
+
   getUserByEmail(email: string): User | null {
     const row = this.db
       .prepare(`SELECT * FROM users WHERE lower(email) = lower(?)`)
       .get(email.trim()) as UserRow | undefined;
+    return row ? mapUser(row) : null;
+  }
+
+  /** Any existing account whose normalized (alias-collapsed) email matches — the
+   *  anchor for email-alias anti-farming. Caller passes a value from
+   *  tenants.normalizeEmail. Returns the first match (accounts are deduped at
+   *  signup, so there should be at most one). */
+  getUserByNormalizedEmail(normalizedEmail: string): User | null {
+    const row = this.db
+      .prepare(`SELECT * FROM users WHERE normalized_email = ? LIMIT 1`)
+      .get(normalizedEmail.trim().toLowerCase()) as UserRow | undefined;
     return row ? mapUser(row) : null;
   }
 
@@ -843,6 +1191,397 @@ export class AppDatabase {
       .prepare(`SELECT password_hash FROM users WHERE id = ?`)
       .get(userId) as { password_hash: string | null } | undefined;
     return row?.password_hash ?? null;
+  }
+
+  setUserSuperAdmin(userId: string, enabled: boolean): boolean {
+    return this.db
+      .prepare(`UPDATE users SET is_superadmin = ? WHERE id = ?`)
+      .run(enabled ? 1 : 0, userId).changes > 0;
+  }
+
+  getUserSecurity(userId: string): UserSecurity {
+    const row = this.db
+      .prepare(
+        `SELECT user_id, totp_enabled, totp_secret_encrypted, last_totp_epoch,
+                recovery_code_hashes_json, updated_at
+         FROM user_security WHERE user_id = ?`,
+      )
+      .get(userId) as
+      | {
+          user_id: string;
+          totp_enabled: number;
+          totp_secret_encrypted: string | null;
+          last_totp_epoch: number | null;
+          recovery_code_hashes_json: string;
+          updated_at: string;
+        }
+      | undefined;
+    if (!row) {
+      return {
+        userId,
+        totpEnabled: false,
+        recoveryCodeHashes: [],
+        updatedAt: new Date(0).toISOString(),
+      };
+    }
+    let recoveryCodeHashes: string[] = [];
+    try {
+      const parsed = JSON.parse(row.recovery_code_hashes_json) as unknown;
+      if (Array.isArray(parsed)) recoveryCodeHashes = parsed.filter((v): v is string => typeof v === 'string');
+    } catch {
+      /* malformed recovery data fails closed: no codes are accepted */
+    }
+    return {
+      userId: row.user_id,
+      totpEnabled: Boolean(row.totp_enabled),
+      totpSecretEncrypted: row.totp_secret_encrypted ?? undefined,
+      lastTotpEpoch: row.last_totp_epoch ?? undefined,
+      recoveryCodeHashes,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  setPendingTotpSecret(userId: string, encryptedSecret: string): boolean {
+    const now = new Date().toISOString();
+    return this.db
+      .prepare(
+        `INSERT INTO user_security
+         (user_id, totp_enabled, totp_secret_encrypted, recovery_code_hashes_json, updated_at)
+         VALUES (?, 0, ?, '[]', ?)
+         ON CONFLICT(user_id) DO UPDATE SET
+           totp_enabled = 0,
+           totp_secret_encrypted = excluded.totp_secret_encrypted,
+           last_totp_epoch = NULL,
+           recovery_code_hashes_json = '[]',
+           updated_at = excluded.updated_at
+         WHERE user_security.totp_enabled = 0`,
+      )
+      .run(userId, encryptedSecret, now).changes > 0;
+  }
+
+  enableTotp(userId: string, recoveryCodeHashes: string[]): boolean {
+    return this.db
+      .prepare(
+         `UPDATE user_security
+         SET totp_enabled = 1, recovery_code_hashes_json = ?, updated_at = ?
+         WHERE user_id = ? AND totp_enabled = 0 AND totp_secret_encrypted IS NOT NULL`,
+      )
+      .run(JSON.stringify(recoveryCodeHashes), new Date().toISOString(), userId).changes > 0;
+  }
+
+  completeTotpEnrollment(input: {
+    userId: string;
+    expectedEncryptedSecret: string;
+    totpEpoch: number;
+    recoveryCodeHashes: string[];
+    sessionTtlMs?: number;
+  }): Session | null {
+    if (!validTotpEpoch(input.totpEpoch)) return null;
+    const tx = this.db.transaction(() => {
+      const updated = this.db
+        .prepare(
+          `UPDATE user_security
+           SET totp_enabled = 1, last_totp_epoch = ?, recovery_code_hashes_json = ?, updated_at = ?
+           WHERE user_id = ? AND totp_enabled = 0 AND totp_secret_encrypted = ?`,
+        )
+        .run(
+          input.totpEpoch,
+          JSON.stringify(input.recoveryCodeHashes),
+          new Date().toISOString(),
+          input.userId,
+          input.expectedEncryptedSecret,
+        );
+      if (updated.changes !== 1) return null;
+      this.clearMfaStateForUser(input.userId);
+      return this.replaceUserSessions(input.userId, input.sessionTtlMs);
+    });
+    return tx();
+  }
+
+  disableTotpAndRotateSession(input: {
+    userId: string;
+    factor: { totpEpoch: number } | { recoveryCodeHash: string };
+    sessionTtlMs?: number;
+  }): Session | null {
+    const tx = this.db.transaction(() => {
+      const security = this.securityFactorRow(input.userId);
+      if (!security || !this.securityFactorIsFresh(security, input.factor)) return null;
+      const deleted = this.db.prepare(`DELETE FROM user_security WHERE user_id = ?`).run(input.userId);
+      if (deleted.changes !== 1) return null;
+      this.clearMfaStateForUser(input.userId);
+      return this.replaceUserSessions(input.userId, input.sessionTtlMs);
+    });
+    return tx();
+  }
+
+  regenerateRecoveryCodesAndRotateSession(input: {
+    userId: string;
+    totpEpoch: number;
+    recoveryCodeHashes: string[];
+    sessionTtlMs?: number;
+  }): Session | null {
+    if (!validTotpEpoch(input.totpEpoch)) return null;
+    const tx = this.db.transaction(() => {
+      const updated = this.db
+        .prepare(
+          `UPDATE user_security
+           SET last_totp_epoch = ?, recovery_code_hashes_json = ?, updated_at = ?
+           WHERE user_id = ? AND totp_enabled = 1
+             AND (last_totp_epoch IS NULL OR last_totp_epoch < ?)`,
+        )
+        .run(
+          input.totpEpoch,
+          JSON.stringify(input.recoveryCodeHashes),
+          new Date().toISOString(),
+          input.userId,
+          input.totpEpoch,
+        );
+      if (updated.changes !== 1) return null;
+      this.clearMfaStateForUser(input.userId);
+      return this.replaceUserSessions(input.userId, input.sessionTtlMs);
+    });
+    return tx();
+  }
+
+  disableTotp(userId: string): void {
+    this.db.prepare(`DELETE FROM user_security WHERE user_id = ?`).run(userId);
+  }
+
+  consumeRecoveryCode(userId: string, codeHash: string): boolean {
+    const security = this.getUserSecurity(userId);
+    const index = security.recoveryCodeHashes.indexOf(codeHash);
+    if (!security.totpEnabled || index < 0) return false;
+    const remaining = security.recoveryCodeHashes.filter((_, i) => i !== index);
+    return this.db
+      .prepare(
+        `UPDATE user_security SET recovery_code_hashes_json = ?, updated_at = ?
+         WHERE user_id = ? AND recovery_code_hashes_json = ?`,
+      )
+      .run(
+        JSON.stringify(remaining),
+        new Date().toISOString(),
+        userId,
+        JSON.stringify(security.recoveryCodeHashes),
+      ).changes > 0;
+  }
+
+  acceptTotpEpoch(userId: string, epoch: number): boolean {
+    if (!Number.isSafeInteger(epoch) || epoch < 0) return false;
+    return this.db
+      .prepare(
+        `UPDATE user_security SET last_totp_epoch = ?, updated_at = ?
+         WHERE user_id = ? AND totp_enabled = 1
+           AND (last_totp_epoch IS NULL OR last_totp_epoch < ?)`,
+      )
+      .run(epoch, new Date().toISOString(), userId, epoch).changes > 0;
+  }
+
+  consumeAuthAttempt(
+    rateKey: string,
+    opts: { windowMs: number; max: number },
+    now = Date.now(),
+  ): { allowed: boolean; retryAfterSeconds: number } {
+    if (!rateKey || !Number.isFinite(opts.windowMs) || opts.windowMs <= 0 || !Number.isInteger(opts.max) || opts.max <= 0) {
+      return { allowed: false, retryAfterSeconds: 1 };
+    }
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .prepare(`SELECT attempt_count, reset_at FROM auth_rate_limits WHERE rate_key = ?`)
+        .get(rateKey) as { attempt_count: number; reset_at: string } | undefined;
+      const resetAt = row ? new Date(row.reset_at).getTime() : 0;
+      if (!row || !Number.isFinite(resetAt) || resetAt <= now) {
+        this.db
+          .prepare(
+            `INSERT INTO auth_rate_limits (rate_key, attempt_count, reset_at) VALUES (?, 1, ?)
+             ON CONFLICT(rate_key) DO UPDATE SET attempt_count = 1, reset_at = excluded.reset_at`,
+          )
+          .run(rateKey, new Date(now + opts.windowMs).toISOString());
+        return { allowed: true, retryAfterSeconds: 0 };
+      }
+      if (row.attempt_count >= opts.max) {
+        return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1000)) };
+      }
+      this.db.prepare(`UPDATE auth_rate_limits SET attempt_count = attempt_count + 1 WHERE rate_key = ?`).run(rateKey);
+      return { allowed: true, retryAfterSeconds: 0 };
+    });
+    return tx();
+  }
+
+  clearAuthAttempts(rateKey: string): void {
+    this.db.prepare(`DELETE FROM auth_rate_limits WHERE rate_key = ?`).run(rateKey);
+  }
+
+  consumeMfaAttempt(
+    userId: string,
+    opts: { windowMs: number; max: number },
+    now = Date.now(),
+  ): { allowed: boolean; retryAfterSeconds: number } {
+    return this.consumeAuthAttempt(`mfa:${userId}`, opts, now);
+  }
+
+  clearMfaAttempts(userId: string): void {
+    this.clearAuthAttempts(`mfa:${userId}`);
+  }
+
+  createMfaChallenge(userId: string, next: string, ttlMs = 5 * 60_000): MfaChallenge {
+    const createdAt = new Date();
+    const challenge: MfaChallenge = {
+      id: randomUUID(),
+      userId,
+      next,
+      expiresAt: new Date(createdAt.getTime() + ttlMs).toISOString(),
+      createdAt: createdAt.toISOString(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO mfa_challenges (id, user_id, next, expires_at, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(challenge.id, challenge.userId, challenge.next, challenge.expiresAt, challenge.createdAt);
+    return challenge;
+  }
+
+  getMfaChallenge(id: string): MfaChallenge | null {
+    const row = this.db
+      .prepare(`SELECT id, user_id, next, expires_at, created_at FROM mfa_challenges WHERE id = ?`)
+      .get(id) as
+      | { id: string; user_id: string; next: string; expires_at: string; created_at: string }
+      | undefined;
+    if (!row) return null;
+    if (new Date(row.expires_at).getTime() <= Date.now()) {
+      this.deleteMfaChallenge(id);
+      return null;
+    }
+    return {
+      id: row.id,
+      userId: row.user_id,
+      next: row.next,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+    };
+  }
+
+  consumeMfaChallenge(id: string): MfaChallenge | null {
+    const tx = this.db.transaction(() => {
+      const challenge = this.getMfaChallenge(id);
+      if (!challenge) return null;
+      const deleted = this.db.prepare(`DELETE FROM mfa_challenges WHERE id = ?`).run(id);
+      return deleted.changes === 1 ? challenge : null;
+    });
+    return tx();
+  }
+
+  completeMfaChallenge(
+    challengeId: string,
+    factor: { totpEpoch: number } | { recoveryCodeHash: string },
+    sessionTtlMs = 30 * 24 * 3_600_000,
+  ): { challenge: MfaChallenge; session: Session } | null {
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT c.id, c.user_id, c.next, c.expires_at, c.created_at,
+                  s.totp_enabled, s.last_totp_epoch, s.recovery_code_hashes_json
+           FROM mfa_challenges c
+           JOIN user_security s ON s.user_id = c.user_id
+           WHERE c.id = ?`,
+        )
+        .get(challengeId) as ChallengeFactorRow | undefined;
+      if (!row || !row.totp_enabled) return null;
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        this.db.prepare(`DELETE FROM mfa_challenges WHERE id = ?`).run(challengeId);
+        return null;
+      }
+      if (!this.securityFactorIsFresh(row, factor)) return null;
+
+      const deleted = this.db.prepare(`DELETE FROM mfa_challenges WHERE id = ?`).run(challengeId);
+      if (deleted.changes !== 1) return null;
+
+      if ('totpEpoch' in factor) {
+        const updated = this.db
+          .prepare(
+            `UPDATE user_security SET last_totp_epoch = ?, updated_at = ?
+             WHERE user_id = ? AND totp_enabled = 1
+               AND (last_totp_epoch IS NULL OR last_totp_epoch < ?)`,
+          )
+          .run(factor.totpEpoch, new Date().toISOString(), row.user_id, factor.totpEpoch);
+        if (updated.changes !== 1) throw new Error('MFA replay state changed during challenge completion');
+      } else {
+        const hashes = parseStringArray(row.recovery_code_hashes_json);
+        const remaining = hashes.filter((hash) => hash !== factor.recoveryCodeHash);
+        const updated = this.db
+          .prepare(
+            `UPDATE user_security SET recovery_code_hashes_json = ?, updated_at = ?
+             WHERE user_id = ? AND totp_enabled = 1 AND recovery_code_hashes_json = ?`,
+          )
+          .run(
+            JSON.stringify(remaining),
+            new Date().toISOString(),
+            row.user_id,
+            row.recovery_code_hashes_json,
+          );
+        if (updated.changes !== 1) throw new Error('MFA recovery state changed during challenge completion');
+      }
+
+      this.clearMfaAttempts(row.user_id);
+      return {
+        challenge: {
+          id: row.id,
+          userId: row.user_id,
+          next: row.next,
+          expiresAt: row.expires_at,
+          createdAt: row.created_at,
+        },
+        session: this.createSession(row.user_id, sessionTtlMs),
+      };
+    });
+    return tx();
+  }
+
+  deleteMfaChallenge(id: string): void {
+    this.db.prepare(`DELETE FROM mfa_challenges WHERE id = ?`).run(id);
+  }
+
+  deleteMfaChallengesForUser(userId: string): void {
+    this.db.prepare(`DELETE FROM mfa_challenges WHERE user_id = ?`).run(userId);
+  }
+
+  private securityFactorRow(userId: string): SecurityFactorRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT totp_enabled, last_totp_epoch, recovery_code_hashes_json
+         FROM user_security WHERE user_id = ?`,
+      )
+      .get(userId) as SecurityFactorRow | undefined;
+    return row ?? null;
+  }
+
+  private securityFactorIsFresh(
+    row: SecurityFactorRow,
+    factor: { totpEpoch: number } | { recoveryCodeHash: string },
+  ): boolean {
+    if (!row.totp_enabled) return false;
+    if ('totpEpoch' in factor) {
+      return validTotpEpoch(factor.totpEpoch)
+        && (row.last_totp_epoch === null || row.last_totp_epoch < factor.totpEpoch);
+    }
+    return parseStringArray(row.recovery_code_hashes_json).includes(factor.recoveryCodeHash);
+  }
+
+  private clearMfaStateForUser(userId: string): void {
+    this.db.prepare(`DELETE FROM mfa_challenges WHERE user_id = ?`).run(userId);
+    this.db
+      .prepare(`DELETE FROM auth_rate_limits WHERE rate_key IN (?, ?, ?, ?)`)
+      .run(
+        `mfa:${userId}`,
+        `security:enable:${userId}`,
+        `security:disable:${userId}`,
+        `security:recovery:${userId}`,
+      );
+  }
+
+  private replaceUserSessions(userId: string, ttlMs = 30 * 24 * 3_600_000): Session {
+    this.db.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(userId);
+    return this.createSession(userId, ttlMs);
   }
 
   /** True if any email/password account exists — used to require login. */
@@ -877,6 +1616,10 @@ export class AppDatabase {
 
   deleteSession(sessionId: string): void {
     this.db.prepare(`DELETE FROM sessions WHERE id = ?`).run(sessionId);
+  }
+
+  deleteSessionsForUser(userId: string): number {
+    return this.db.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(userId).changes;
   }
 
   // ——— Workspace membership ———
@@ -1086,6 +1829,10 @@ export class AppDatabase {
     findingsNew?: number;
     findingsFixed?: number;
     findingsOpen?: number;
+    /** `@orvex deep` run — weighted as 2 quota/overage units. Defaults to 0. */
+    deep?: boolean;
+    /** run started under a trial/free plan — feeds the global free-tier cap. */
+    freeTier?: boolean;
     /** Test seam only — backdate the row to exercise time-windowed limit checks
      *  (e.g. reviewsPerMonth vs reviewsPerHour) without waiting real time.
      *  Production code never passes this; it always defaults to now. */
@@ -1097,8 +1844,8 @@ export class AppDatabase {
       .prepare(
         `INSERT INTO review_runs
          (id, tenant_id, installation_id, owner, repo, pr, head_sha, action, status,
-          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, deep, free_tier, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1116,6 +1863,8 @@ export class AppDatabase {
         input.findingsNew ?? 0,
         input.findingsFixed ?? 0,
         input.findingsOpen ?? 0,
+        input.deep ? 1 : 0,
+        input.freeTier ? 1 : 0,
         now,
       );
     return {
@@ -1134,6 +1883,8 @@ export class AppDatabase {
       findingsNew: input.findingsNew ?? 0,
       findingsFixed: input.findingsFixed ?? 0,
       findingsOpen: input.findingsOpen ?? 0,
+      costUsd: 0,
+      deep: Boolean(input.deep),
       createdAt: now,
     };
   }
@@ -1151,6 +1902,10 @@ export class AppDatabase {
     pr: number;
     headSha: string;
     action: string;
+    /** true for `@orvex deep` runs — drives the deep-vs-normal scorecard */
+    deep?: boolean;
+    /** true when this run is on a trial/free plan — powers the global daily cap */
+    freeTier?: boolean;
   }): string {
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -1158,8 +1913,8 @@ export class AppDatabase {
       .prepare(
         `INSERT INTO review_runs
          (id, tenant_id, installation_id, owner, repo, pr, head_sha, action, status,
-          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, 0, 0, 0, 0, ?)`,
+          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, deep, free_tier, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, 0, 0, 0, 0, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1170,9 +1925,35 @@ export class AppDatabase {
         input.pr,
         input.headSha,
         input.action,
+        input.deep ? 1 : 0,
+        input.freeTier ? 1 : 0,
         now,
       );
     return id;
+  }
+
+  /** Global count of free-tier reviews started across ALL accounts in the last
+   *  `sinceMs` — the anchor for the free-tier daily spend circuit-breaker. Counts
+   *  running + completed (a farm's in-flight reviews cost money too). */
+  countGlobalFreeTierReviewsSince(sinceMs: number): number {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM review_runs
+         WHERE free_tier = 1 AND status IN ('running', 'completed')
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND created_at >= ?`,
+      )
+      .get(since) as { n: number };
+    return row.n;
+  }
+
+  /** Re-point a running review at the ACTUAL head SHA being reviewed. The run row
+   *  is created from the webhook payload's headSha up front, but by the time the
+   *  worker fetches the PR a newer commit may have landed — the run must be
+   *  recorded on the SHA that was really reviewed (cooldown/dedup/scorecard all
+   *  key on head_sha). */
+  setReviewRunHeadSha(id: string, headSha: string): void {
+    this.db.prepare(`UPDATE review_runs SET head_sha = ? WHERE id = ?`).run(headSha, id);
   }
 
   /** Finalize a row created by startReviewRun with its terminal status + counts. */
@@ -1189,6 +1970,8 @@ export class AppDatabase {
       inputTokens?: number;
       outputTokens?: number;
       costUsd?: number;
+      /** what this run NEWLY posted — feeds the deep-vs-normal scorecard */
+      newFindings?: Array<{ severity: string; file: string; line?: number }>;
     },
   ): void {
     this.db
@@ -1196,7 +1979,8 @@ export class AppDatabase {
         `UPDATE review_runs
          SET status = ?, skip_reason = ?, error = ?, duration_ms = ?,
              findings_new = ?, findings_fixed = ?, findings_open = ?,
-             input_tokens = ?, output_tokens = ?, cost_usd = ?
+             input_tokens = ?, output_tokens = ?, cost_usd = ?,
+             new_findings_json = ?
          WHERE id = ?`,
       )
       .run(
@@ -1210,8 +1994,52 @@ export class AppDatabase {
         patch.inputTokens ?? 0,
         patch.outputTokens ?? 0,
         patch.costUsd ?? 0,
+        patch.newFindings ? JSON.stringify(patch.newFindings) : null,
         id,
       );
+  }
+
+  /** Completed runs (all tenants) for the deep-vs-normal scorecard, oldest
+   *  first so pairing walks each commit's runs in execution order. */
+  listScorecardRuns(limit = 500): ScorecardRun[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, owner, repo, pr, head_sha, deep, duration_ms, cost_usd, created_at, new_findings_json
+         FROM review_runs WHERE status = 'completed'
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(limit) as Array<{
+      id: string;
+      owner: string;
+      repo: string;
+      pr: number;
+      head_sha: string;
+      deep: number;
+      duration_ms: number;
+      cost_usd: number;
+      created_at: string;
+      new_findings_json: string | null;
+    }>;
+    return rows.reverse().map((r) => {
+      let newFindings: ScorecardRun['newFindings'] = [];
+      try {
+        newFindings = r.new_findings_json ? JSON.parse(r.new_findings_json) : [];
+      } catch {
+        /* malformed row — treat as no detail */
+      }
+      return {
+        id: r.id,
+        owner: r.owner,
+        repo: r.repo,
+        pr: r.pr,
+        headSha: r.head_sha,
+        deep: r.deep === 1,
+        durationMs: r.duration_ms,
+        costUsd: r.cost_usd,
+        createdAt: r.created_at,
+        newFindings,
+      };
+    });
   }
 
   /** Total LLM cost (USD) for an account over `sinceMs` — for owner spend
@@ -1296,6 +2124,7 @@ export class AppDatabase {
           default_branch, enabled, review_mode, auto_apply, added_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal', 0, ?, ?)
          ON CONFLICT(installation_id, github_repo_id) DO UPDATE SET
+           tenant_id = excluded.tenant_id,
            owner = excluded.owner, name = excluded.name, full_name = excluded.full_name,
            private = excluded.private, default_branch = excluded.default_branch,
            updated_at = excluded.updated_at`,
@@ -1466,6 +2295,7 @@ export class AppDatabase {
           head_sha, url, opened_at, closed_at, merged_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(installation_id, repo_full_name, number) DO UPDATE SET
+           tenant_id = excluded.tenant_id,
            title = excluded.title, author = excluded.author, state = excluded.state,
            draft = excluded.draft, head_sha = excluded.head_sha, url = excluded.url,
            closed_at = excluded.closed_at, merged_at = excluded.merged_at,
@@ -1817,7 +2647,46 @@ interface UserRow {
   name: string | null;
   avatar_url: string | null;
   email: string | null;
+  google_id?: string | null;
+  is_superadmin: number;
   created_at: string;
+}
+
+function syntheticUserId(seed: string): number {
+  // Deterministic negative github_id for non-GitHub (password / Google) users —
+  // real GitHub ids are positive, so negatives never collide with them. Uses 48
+  // bits of a sha256 (well within JS safe-integer and SQLite's 64-bit INTEGER):
+  // birthday collisions only near ~2^24 (~16M) users, vs the old 31-bit string
+  // hash which collided at ~54k and broke email/Google signups at that scale.
+  const n = createHash('sha256').update(seed).digest().readUIntBE(0, 6); // 48-bit
+  return -(n || 1);
+}
+
+interface SecurityFactorRow {
+  totp_enabled: number;
+  last_totp_epoch: number | null;
+  recovery_code_hashes_json: string;
+}
+
+interface ChallengeFactorRow extends SecurityFactorRow {
+  id: string;
+  user_id: string;
+  next: string;
+  expires_at: string;
+  created_at: string;
+}
+
+function validTotpEpoch(epoch: number): boolean {
+  return Number.isSafeInteger(epoch) && epoch >= 0;
+}
+
+function parseStringArray(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 function mapUser(row: UserRow): User {
@@ -1828,16 +2697,14 @@ function mapUser(row: UserRow): User {
     name: row.name ?? undefined,
     avatarUrl: row.avatar_url ?? undefined,
     email: row.email ?? undefined,
+    isSuperAdmin: Boolean(row.is_superadmin),
     createdAt: row.created_at,
   };
 }
 
 /** Stable 31-bit int hash of a string (for synthetic github ids). */
-function hashToInt(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
-  return (h & 0x7fffffff) || 1;
-}
+/** Stripe subscription statuses that revoke paid access (dunning / failed / ended). */
+const DOWNGRADED_SUB_STATUSES = new Set(['past_due', 'unpaid', 'canceled', 'incomplete_expired']);
 
 interface ReviewRunRow {
   id: string;
@@ -1855,6 +2722,8 @@ interface ReviewRunRow {
   findings_new: number;
   findings_fixed: number;
   findings_open: number;
+  cost_usd: number;
+  deep: number;
   created_at: string;
 }
 
@@ -1875,6 +2744,8 @@ function mapReviewRun(row: ReviewRunRow): ReviewRun {
     findingsNew: row.findings_new,
     findingsFixed: row.findings_fixed,
     findingsOpen: row.findings_open,
+    costUsd: row.cost_usd ?? 0,
+    deep: row.deep === 1,
     createdAt: row.created_at,
   };
 }

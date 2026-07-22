@@ -5,7 +5,8 @@ export function escapeHtml(s: string): string {
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;'); // also escape single quotes so the helper is safe in attribute context
 }
 
 const SHELL_CSS = `
@@ -54,7 +55,7 @@ const SHELL_CSS = `
     padding: 28px; margin-top: 18px;
     box-shadow: 0 1px 2px rgba(0,0,0,.05), 0 8px 28px rgba(0,0,0,.06);
   }
-  h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: 0; }
   p.lead { color: var(--ink-2); margin: 0 0 20px; }
   label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 5px; }
   input {

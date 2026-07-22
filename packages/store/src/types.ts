@@ -32,6 +32,8 @@ export interface PrReviewState {
   findings: StoredFinding[];
   lastReviewAt: string;
   lastSummaryCommentId?: number;
+  /** Codex CLI session id; one per PR so re-reviews resume the same session. */
+  codexThreadId?: string;
 }
 
 export interface PrKey {
@@ -46,6 +48,14 @@ export interface Tenant {
   slug: string;
   name: string;
   createdAt: string;
+}
+
+export interface TenantBilling {
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripeSubscriptionStatus?: string;
+  stripeCurrentPeriodStart?: string;
+  stripeCurrentPeriodEnd?: string;
 }
 
 export interface GitHubInstallation {
@@ -66,6 +76,24 @@ export interface User {
   name?: string;
   avatarUrl?: string;
   email?: string;
+  isSuperAdmin: boolean;
+  createdAt: string;
+}
+
+export interface UserSecurity {
+  userId: string;
+  totpEnabled: boolean;
+  totpSecretEncrypted?: string;
+  lastTotpEpoch?: number;
+  recoveryCodeHashes: string[];
+  updatedAt: string;
+}
+
+export interface MfaChallenge {
+  id: string;
+  userId: string;
+  next: string;
+  expiresAt: string;
   createdAt: string;
 }
 
@@ -103,7 +131,24 @@ export interface ReviewRun {
   findingsNew: number;
   findingsFixed: number;
   findingsOpen: number;
+  costUsd: number;
+  deep: boolean;
   createdAt: string;
+}
+
+/** One completed run's row for the deep-vs-normal scorecard. */
+export interface ScorecardRun {
+  id: string;
+  owner: string;
+  repo: string;
+  pr: number;
+  headSha: string;
+  deep: boolean;
+  durationMs: number;
+  costUsd: number;
+  createdAt: string;
+  /** what this run newly posted (parsed from new_findings_json; [] when absent) */
+  newFindings: Array<{ severity: string; file: string; line?: number }>;
 }
 
 export interface PrSettings {

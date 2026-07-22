@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" font-family="ui-monospace, 'SF Mono', Menlo, monospace">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0e13"/>
+      <stop offset="1" stop-color="#0a0c10"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="82%" cy="20%" r="55%">
+      <stop offset="0" stop-color="#3ddc97" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#3ddc97" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <!-- faint grid -->
+  <g stroke="#161b22" stroke-width="1">
+    <line x1="0" y1="157" x2="1200" y2="157"/><line x1="0" y1="472" x2="1200" y2="472"/>
+    <line x1="400" y1="0" x2="400" y2="630"/><line x1="800" y1="0" x2="800" y2="630"/>
+  </g>
+
+  <!-- brand -->
+  <g transform="translate(80,86)">
+    <rect width="46" height="46" rx="11" fill="#3ddc97"/>
+    <text x="23" y="34" font-size="30" font-weight="700" text-anchor="middle" fill="#0a0c10">±</text>
+    <text x="62" y="33" font-size="27" font-weight="600" fill="#e8ecf2">Orvex</text>
+    <text x="150" y="33" font-size="15" fill="#5b6472">// automated PR review</text>
+  </g>
+
+  <!-- slogan -->
+  <text x="80" y="300" font-size="76" font-weight="700" fill="#e8ecf2" letter-spacing="-1.5">Catch bugs</text>
+  <text x="80" y="392" font-size="76" font-weight="700" letter-spacing="-1.5" fill="#e8ecf2">before</text>
+  <text x="390" y="392" font-size="76" font-weight="700" letter-spacing="-1.5" fill="#3ddc97">production.</text>
+
+  <!-- proof strip -->
+  <g transform="translate(80,486)" font-family="ui-monospace, Menlo, monospace">
+    <text x="0" y="0" font-size="19" fill="#9aa4b2">Three focused review passes per pull request.</text>
+    <text x="0" y="30" font-size="19" fill="#9aa4b2">Strict verification before findings are posted.</text>
+  </g>
+
+  <!-- caught chip, top-right -->
+  <g transform="translate(864,120)">
+    <rect width="256" height="120" rx="14" fill="#101722" stroke="#1c2a20"/>
+    <circle cx="30" cy="42" r="7" fill="#3ddc97"/>
+    <text x="50" y="48" font-size="17" fill="#3ddc97" font-weight="700">P1 caught</text>
+    <text x="24" y="84" font-size="14" fill="#9aa4b2">null deref reaches prod</text>
+    <text x="24" y="104" font-size="14" fill="#9aa4b2">on the retry path</text>
+  </g>
+</svg>

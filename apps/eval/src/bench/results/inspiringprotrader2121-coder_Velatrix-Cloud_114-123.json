@@ -1,0 +1,170 @@
+{
+  "batch": "inspiringprotrader2121-coder_Velatrix-Cloud_114-123",
+  "prNums": [
+    114,
+    115,
+    116,
+    117,
+    118,
+    119,
+    120,
+    121,
+    122,
+    123
+  ],
+  "pairwise": [
+    {
+      "competitor": "codex",
+      "prs": [
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123
+      ],
+      "all": {
+        "total": 28,
+        "both": 4,
+        "compOnly": 6,
+        "orvexOnly": 18
+      },
+      "actionable": {
+        "total": 19,
+        "both": 4,
+        "compOnly": 6,
+        "orvexOnly": 9
+      },
+      "total": 28,
+      "both": 4,
+      "compOnly": 6,
+      "orvexOnly": 18
+    },
+    {
+      "competitor": "greptile",
+      "prs": [
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123
+      ],
+      "all": {
+        "total": 32,
+        "both": 6,
+        "compOnly": 10,
+        "orvexOnly": 16
+      },
+      "actionable": {
+        "total": 23,
+        "both": 6,
+        "compOnly": 10,
+        "orvexOnly": 7
+      },
+      "total": 32,
+      "both": 6,
+      "compOnly": 10,
+      "orvexOnly": 16
+    },
+    {
+      "competitor": "coderabbit",
+      "prs": [
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120
+      ],
+      "all": {
+        "total": 19,
+        "both": 3,
+        "compOnly": 3,
+        "orvexOnly": 13
+      },
+      "actionable": {
+        "total": 9,
+        "both": 3,
+        "compOnly": 1,
+        "orvexOnly": 5
+      },
+      "total": 19,
+      "both": 3,
+      "compOnly": 3,
+      "orvexOnly": 13
+    },
+    {
+      "competitor": "qodo",
+      "prs": [
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123
+      ],
+      "all": {
+        "total": 28,
+        "both": 7,
+        "compOnly": 6,
+        "orvexOnly": 15
+      },
+      "actionable": {
+        "total": 19,
+        "both": 7,
+        "compOnly": 6,
+        "orvexOnly": 6
+      },
+      "total": 28,
+      "both": 7,
+      "compOnly": 6,
+      "orvexOnly": 15
+    },
+    {
+      "competitor": "gitar",
+      "prs": [
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123
+      ],
+      "all": {
+        "total": 26,
+        "both": 3,
+        "compOnly": 4,
+        "orvexOnly": 19
+      },
+      "actionable": {
+        "total": 16,
+        "both": 3,
+        "compOnly": 3,
+        "orvexOnly": 10
+      },
+      "total": 26,
+      "both": 3,
+      "compOnly": 4,
+      "orvexOnly": 19
+    }
+  ],
+  "generatedFrom": "#114-#123"
+}

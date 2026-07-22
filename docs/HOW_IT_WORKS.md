@@ -106,19 +106,21 @@ off by default.
 
 ## 5. Plans
 
-The tenant's `plan` column drives depth and features — enforced in the engine, not
-just marketing.
+PRODUCT RULE (2026-07-09): **every plan runs the IDENTICAL pipeline** — 3
+passes (general / deep-dive / perf+completeness), top-28 retrieval, strict
+verification, autofix, code execution. Plans differ ONLY by (a) which MODELS
+run and (b) volume/rate/price. Depth is never the tier differentiator.
 
-| Capability | Free trial | Review | Verify | Enterprise |
-|---|---|---|---|---|
-| Review passes | 1 | 2 | 3 | 3 |
-| Index retrieval (top-K files) | 10 | 25 | 30 | 40 |
-| Whole-repo sweep | — | — | ✓ | ✓ |
-| Typical review time | ~1–2 min | ~3 min | ~10 min | ~10 min |
-| Commit fixes / `@orvex` commands | — | ✓ | ✓ | ✓ |
-| Code execution (runtime verify) | — | — | ✓ (flag) | ✓ (flag) |
-| Nightly whole-repo scans | — | — | ✓ (flag) | ✓ (flag) |
-| Reviews | 10 lifetime, 2/hr | 30/hr, 550/mo | 20/hr, 240/mo | ∞ |
+| Capability | Free trial | Panel (`review`) | Panel Unlimited | Verify | Enterprise |
+|---|---|---|---|---|---|
+| Review passes | 3 | 3 | 3 | 3 | 3 |
+| Index retrieval (top-K files) | 28 | 28 | 28 | 28 | 28 |
+| Models | MiniMax + DeepSeek | MiniMax + DeepSeek | MiniMax + DeepSeek | OpenAI (codex CLI, agentic repo explore) + DeepSeek + MiniMax | MiniMax + DeepSeek |
+| Strict verification | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Commit fixes / `@orvex` commands | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Code execution (runtime verify) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
+| Nightly whole-repo scans | — (uncapped-cost risk on unpaid) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
+| Reviews | 10 lifetime, 2/hr | 5/hr, 75/mo (+$0.50 overage) | ∞ @ 10/hr | 10/hr, 150/mo (+$1.50 overage) | custom |
 
 The hourly/monthly numbers are **safety ceilings, not usage targets** — sized as
 tail-risk insurance (see `packages/tenants/src/plans.ts` for the cost math) so a
@@ -128,10 +130,11 @@ they're a backstop, not a constraint. Command/manual re-review of an unchanged
 commit also has a 2-minute cooldown for the same reason — a fresh push is never
 affected.
 
-The tiers differ by **depth and time**, enforced in the engine: Free is a
-single-pass trial; Review is a fast 2-pass index-aware review; Verify adds the
-exhaustive whole-repo sweep and runs ~10 minutes of genuinely deeper analysis;
-code execution and nightly scans are Verify features behind an ops flag.
+The tiers differ by **model mix and volume**, never depth: dual-model plans
+run MiniMax (passes 1+3) + DeepSeek v4 Pro at max reasoning (pass 2); Verify
+swaps pass 1 to the OpenAI frontier model via the codex CLI (API-key auth),
+which agentically explores a full repo checkout. Code execution and nightly
+scans sit behind ops flags (`ORVEX_CODE_EXECUTION`, `ORVEX_NIGHTLY_SCANS`).
 
 Free is a **lifetime trial (10 reviews, 2/hour) anchored to the GitHub account** —
 a second workspace or a reinstall can't reset it. Defined in
@@ -146,7 +149,7 @@ execution runs. Over the free cap, Orvex nudges — it never silently drops.
 
 ## 6. Triggers
 
-All triggers work on every plan; what differs is the **depth/features** they invoke
+All triggers work on every plan; what differs is the **models/limits** they invoke
 (table above). Comment commands require the commenter to have write access
 (OWNER/MEMBER/COLLABORATOR). The trigger word is `@orvex` (configurable via
 `ORVEX_TRIGGER`).
