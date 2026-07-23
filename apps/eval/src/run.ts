@@ -8,9 +8,13 @@ import {
   fetchPrDiff,
 } from '@orvex-review/github';
 import {
+  DEEP_DIVE_FOCUS,
   dropSelfNegatingFindings,
+  fingerprintFinding,
   llmFindingsToReviewFindings,
+  REVIEW_INCOMPLETE_SUMMARY,
   runLlmReview,
+  THIRD_ANGLE_FOCUS,
   verifyFindings,
   type ReviewFinding,
 } from '@orvex-review/review';
@@ -56,7 +60,55 @@ function llmEnv() {
   return { apiKey: anthropic, baseUrl: undefined, model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514' };
 }
 
-async function reviewPr(c: EvalCase): Promise<ReviewFinding[]> {
+/** LLM target for one production-mirror pass. */
+interface PassTarget {
+  apiKey: string;
+  baseUrl?: string;
+  model: string;
+  api?: 'chat' | 'responses' | 'anthropic';
+  reasoningEffort?: string;
+}
+
+/** Mirror production's multi-model tier: pass 1 the frontier OpenAI model,
+ *  pass 2 DeepSeek's heavy reasoning with the deep-dive lens, pass 3 the
+ *  standard model with the perf/completeness lens. A missing key falls back to
+ *  the standard target for that pass, exactly like modelForPass does. */
+function passTargets(): Array<{ tag: string; target: PassTarget; focus?: string }> {
+  const standard = llmEnv();
+  const openaiKey = process.env.ORVEX_OPENAI_API_KEY;
+  const openai: PassTarget | null = openaiKey
+    ? {
+        apiKey: openaiKey,
+        baseUrl: process.env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+        model: process.env.ORVEX_OPENAI_MODEL ?? 'gpt-5.6-luna',
+        api: process.env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
+        reasoningEffort: process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'xhigh',
+      }
+    : null;
+  const deepseekKey = process.env.ORVEX_DEEPSEEK_API_KEY;
+  const deepseek: PassTarget | null = deepseekKey
+    ? {
+        apiKey: deepseekKey,
+        baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: process.env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
+        reasoningEffort: process.env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+      }
+    : null;
+  return [
+    { tag: 'general', target: openai ?? standard },
+    { tag: 'deep-dive', target: deepseek ?? standard, focus: DEEP_DIVE_FOCUS },
+    { tag: 'perf/completeness', target: standard, focus: THIRD_ANGLE_FOCUS },
+  ];
+}
+
+interface PrReviewResult {
+  findings: ReviewFinding[];
+  /** passes that completed and produced a real (possibly empty) review */
+  okPasses: number;
+  totalPasses: number;
+}
+
+async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   const octokit = await createBenchmarkOctokit(c.owner, c.repo);
   const ref = { owner: c.owner, repo: c.repo, number: c.pr };
   const { data: pr } = await octokit.rest.pulls.get({ owner: c.owner, repo: c.repo, pull_number: c.pr });
@@ -64,9 +116,9 @@ async function reviewPr(c: EvalCase): Promise<ReviewFinding[]> {
 
   const files = await fetchPrDiff(octokit, ref, { maxFileBytes: 120_000, maxFiles: 40, headSha: sha });
   const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
-  if (reviewable.length === 0) return [];
+  const passes = passTargets();
+  if (reviewable.length === 0) return { findings: [], okPasses: passes.length, totalPasses: passes.length };
 
-  const llm = llmEnv();
   let context;
   try {
     // Match PRODUCTION context limits so the eval isn't starved relative to what
@@ -81,21 +133,50 @@ async function reviewPr(c: EvalCase): Promise<ReviewFinding[]> {
     /* diff-only fallback */
   }
 
-  const resp = await runLlmReview(
-    reviewable.map((f) => ({ filename: f.filename, status: f.status, patch: f.patch })),
-    { ...llm, context: { ...(context ?? {}), prTitle: pr.title, prBody: pr.body ?? undefined } },
-  );
-  let findings = llmFindingsToReviewFindings(resp.findings);
+  const reviewFiles = reviewable.map((f) => ({ filename: f.filename, status: f.status, patch: f.patch }));
+  const baseCtx = { ...(context ?? {}), prTitle: pr.title, prBody: pr.body ?? undefined };
+
+  // Sequential (never concurrent) so eval runs can't trip the OpenAI TPM limit
+  // the way the 9-at-once batch did in production.
+  const accumulated: ReviewFinding[] = [];
+  let okPasses = 0;
+  for (const p of passes) {
+    try {
+      const resp = await runLlmReview(reviewFiles, {
+        ...p.target,
+        context: p.focus ? { ...baseCtx, extraFocus: p.focus } : baseCtx,
+      });
+      const got = llmFindingsToReviewFindings(resp.findings);
+      // The unparseable sentinel with zero findings is a DEGRADED pass, not a
+      // clean empty review — do not count it as measured.
+      const degraded = got.length === 0 && resp.summary === REVIEW_INCOMPLETE_SUMMARY;
+      if (!degraded) okPasses++;
+      console.log(`    pass(${p.tag}) [${p.target.model}]: +${got.length}${degraded ? ' (degraded)' : ''}`);
+      accumulated.push(...got);
+    } catch (err) {
+      console.log(`    pass(${p.tag}) [${p.target.model}] FAILED: ${(err as Error).message.slice(0, 120)}`);
+    }
+  }
+
+  // Same bug from multiple passes → one finding (mirrors the pipeline's dedupe).
+  const seenFp = new Set<string>();
+  let findings = accumulated.filter((f) => {
+    const fp = fingerprintFinding(f);
+    if (seenFp.has(fp)) return false;
+    seenFp.add(fp);
+    return true;
+  });
 
   findings = dropSelfNegatingFindings(findings).kept;
 
   const ctxFiles = context
     ? [...context.changedContents, ...context.related, ...context.dependents]
     : [];
-  if (ctxFiles.length > 0) {
-    findings = (await verifyFindings(findings, ctxFiles, { ...llm, prIntent: [pr.title, pr.body].filter(Boolean).join('\n\n') })).kept;
+  if (ctxFiles.length > 0 && findings.length > 0) {
+    const std = llmEnv();
+    findings = (await verifyFindings(findings, ctxFiles, { ...std, prIntent: [pr.title, pr.body].filter(Boolean).join('\n\n') })).kept;
   }
-  return findings;
+  return { findings, okPasses, totalPasses: passes.length };
 }
 
 const SEV_RANK: Record<string, number> = { P1: 3, P2: 2, P3: 1, info: 0 };
@@ -145,11 +226,21 @@ async function main() {
     groups.set(key, group);
   }
 
+  let invalidCases = 0;
   for (const [key, group] of groups) {
-    process.stdout.write(`▶ ${key} (${group.length} case${group.length === 1 ? '' : 's'}) … `);
+    process.stdout.write(`▶ ${key} (${group.length} case${group.length === 1 ? '' : 's'}) …\n`);
     try {
-      const findings = await reviewPr(group[0]);
-      console.log(`${findings.length} findings`);
+      const { findings, okPasses, totalPasses } = await reviewPr(group[0]);
+      console.log(`  ${findings.length} findings (${okPasses}/${totalPasses} passes measured)`);
+      // GUARD: if NO pass produced a real review, nothing was measured — the
+      // cases are INVALID, not missed. The first bench170 run 404'd on every
+      // call yet printed a tidy "recall 0/8"; a harness that can't distinguish
+      // "model found nothing" from "model was never reached" lies.
+      if (okPasses === 0) {
+        invalidCases += group.length;
+        for (const c of group) console.log(`    🚫 ${c.name}: INVALID (no pass completed — excluded from recall)`);
+        continue;
+      }
       for (const c of group) {
         const r = scoreCase(c, findings);
         results.push(r);
@@ -161,7 +252,8 @@ async function main() {
         for (const fp of r.falsePos) console.log(`       ✗ false positive: /${fp}/`);
       }
     } catch (err) {
-      console.log(`ERROR ${(err as Error).message}`);
+      invalidCases += group.length;
+      console.log(`  🚫 ERROR — ${group.length} case(s) INVALID: ${(err as Error).message}`);
     }
   }
 
@@ -172,6 +264,11 @@ async function main() {
   console.log('\n── summary ──');
   console.log(`recall:    ${recallHits}/${recallTotal} real bugs caught`);
   console.log(`precision: ${fpChecks - fp}/${fpChecks} noise checks passed (${fp} false positives)`);
+  if (invalidCases > 0) console.log(`⚠️ INVALID: ${invalidCases} case(s) not measured (harness/provider failure) — fix before trusting this run`);
+  if (results.length === 0) {
+    console.error('\nEVAL FAILED: zero cases were actually measured.');
+    process.exitCode = 1;
+  }
 }
 
 main().then(() => process.exit(0)).catch((e) => {
