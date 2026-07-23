@@ -28,16 +28,31 @@ interface CaseResult {
 }
 
 function llmEnv() {
+  // Prefer the production 'standard' target (what real reviews run on) so the
+  // eval measures the same model+endpoint. MINIMAX_API=anthropic (or an
+  // /anthropic base URL) must route via the Anthropic-compatible client —
+  // POSTing chat/completions at that base 404s and the whole eval silently
+  // scores 0/N (2026-07-23: every call returned "404 page not found").
+  const stdKey = process.env.ORVEX_STANDARD_API_KEY;
   const minimax = process.env.MINIMAX_API_KEY;
   const anthropic = process.env.ANTHROPIC_API_KEY;
-  if (minimax) {
-    return {
-      apiKey: minimax,
-      baseUrl: process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1',
-      model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3',
-    };
+  if (stdKey) {
+    const baseUrl = process.env.ORVEX_STANDARD_BASE_URL ?? 'https://api.minimax.io/v1';
+    const api =
+      process.env.ORVEX_STANDARD_API === 'anthropic' || baseUrl.includes('/anthropic')
+        ? ('anthropic' as const)
+        : undefined;
+    return { apiKey: stdKey, baseUrl, model: process.env.ORVEX_STANDARD_MODEL ?? 'MiniMax-M3', api };
   }
-  if (!anthropic) throw new Error('MINIMAX_API_KEY or ANTHROPIC_API_KEY required');
+  if (minimax) {
+    const baseUrl = process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1';
+    const api =
+      process.env.MINIMAX_API === 'anthropic' || baseUrl.includes('/anthropic')
+        ? ('anthropic' as const)
+        : undefined;
+    return { apiKey: minimax, baseUrl, model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3', api };
+  }
+  if (!anthropic) throw new Error('ORVEX_STANDARD_API_KEY, MINIMAX_API_KEY or ANTHROPIC_API_KEY required');
   return { apiKey: anthropic, baseUrl: undefined, model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514' };
 }
 
