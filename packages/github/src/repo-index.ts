@@ -15,7 +15,14 @@
 
 // Shell + SQL included so a changed script/migration can find its textual callers
 // (a file referencing "backup.sh", or a query site hitting a migrated table).
-const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte|sh|bash|sql)$/;
+// Infra/config files (compose, k8s, nginx, terraform, Dockerfile…) are
+// retrieval candidates too: benchmark PRs 161-170 showed most missed P1s were
+// infra bugs whose evidence lives in a SIBLING manifest (compose service parity,
+// k8s ↔ compose drift, nginx map directives) — retrieval-by-identifier-overlap
+// is exactly the mechanism that surfaces those, but it was gated to code files.
+const CODE_FILE_RE =
+  /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte|sh|bash|sql|ya?ml|toml|ini|conf|tf|tfvars|hcl|properties|nginx|service)$/;
+const INFRA_FILENAME_RE = /(^|\/)(Dockerfile[^/]*|docker-compose[^/]*|Makefile|Caddyfile|Procfile|nginx\.conf|\.env\.[^/]*example[^/]*)$/i;
 const IDENT_RE = /[A-Za-z_][A-Za-z0-9_]{2,}/g;
 
 // Language keywords + ubiquitous names carry no relevance signal — they appear
@@ -106,7 +113,7 @@ export function retrieveRelevantFiles(
   const docs: Array<{ path: string; tokens: Set<string> }> = [];
   const df = new Map<string, number>();
   for (const [path, content] of snapshot) {
-    if (!CODE_FILE_RE.test(path) || changed.has(path)) continue;
+    if ((!CODE_FILE_RE.test(path) && !INFRA_FILENAME_RE.test(path)) || changed.has(path)) continue;
     const tokens = tokenize(content.slice(0, maxScanBytes));
     docs.push({ path, tokens });
     for (const t of tokens) df.set(t, (df.get(t) ?? 0) + 1);

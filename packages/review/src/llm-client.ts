@@ -119,7 +119,72 @@ function splitKeys(apiKey: string): string[] {
     .filter(Boolean);
 }
 
+/** Parse a provider's "try again in N" hint into milliseconds. OpenAI embeds it
+ * in the 429 body ("Please try again in 49.174s" / "in 120ms"); Anthropic and
+ * others use "retry-after". Returns undefined when no explicit delay is given. */
+export function parseRetryAfterMs(message: string): number | undefined {
+  const ms = /try again in\s*([\d.]+)\s*ms\b/i.exec(message);
+  if (ms) return Math.ceil(parseFloat(ms[1]));
+  // "retry-after: 30" / "retry after 12 seconds" — the HTTP header value is bare
+  // seconds, so the unit suffix is optional here.
+  const ra = /retry[-\s]?after[:\s]+([\d.]+)\s*(?:s(?:ec(?:onds?)?)?)?\b/i.exec(message);
+  if (ra) return Math.ceil(parseFloat(ra[1]) * 1000);
+  const sec = /try again in\s*([\d.]+)\s*s(?:ec(?:onds?)?)?\b/i.exec(message);
+  if (sec) return Math.ceil(parseFloat(sec[1]) * 1000);
+  return undefined;
+}
+
+/** A rate limit that RECOVERS by waiting — a per-minute TPM/RPM 429, a 529
+ * "overloaded", a "try again in Ns". Deliberately DISTINCT from a hard
+ * credit/quota exhaustion (402 "insufficient credits"), which waiting will not
+ * fix: that must fail fast so the job requeues instead of looping pointlessly. */
+export function isRetryableRateLimit(message: string): boolean {
+  if (/\b402\b/.test(message) && /credit|insufficient|afford|top-?up/i.test(message)) return false;
+  return /\b429\b|\b529\b|rate.?limit|tokens? per min|requests? per min|\bTPM\b|\bRPM\b|try again in|overloaded|please try again/i.test(
+    message,
+  );
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Public entry point. Wraps the multi-key + provider-failover logic below in a
+ * WAIT-AND-RETRY loop: a recoverable rate limit HOLDS the call and retries
+ * (honoring the provider's advertised retry-after) instead of failing the pass
+ * and discarding the whole review — the "queue it, don't cancel it" behavior.
+ * Provider-agnostic: every model (OpenAI/Luna, DeepSeek, MiniMax, Anthropic)
+ * funnels through here, so all get it for free. Ordinary errors and hard quota
+ * exhaustion propagate immediately (no wasted waiting).
+ */
 export async function llmChat(system: string, user: string, opts: LlmClientOptions): Promise<string> {
+  const maxAttempts = Math.max(1, Math.floor(Number(process.env.ORVEX_RATELIMIT_MAX_RETRIES ?? 4)));
+  const maxWaitMs = Math.max(1_000, Number(process.env.ORVEX_RATELIMIT_MAX_WAIT_MS ?? 60_000));
+  const baseMs = Math.max(250, Number(process.env.ORVEX_RATELIMIT_BASE_MS ?? 2_000));
+  let lastErr: Error | undefined;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await llmChatWithFailover(system, user, opts);
+    } catch (err) {
+      lastErr = err as Error;
+      if (attempt === maxAttempts - 1 || !isRetryableRateLimit(lastErr.message)) throw lastErr;
+      // Honor the provider's advertised retry-after; otherwise exponential
+      // backoff. Always add jitter so concurrent passes don't retry in lockstep,
+      // and never exceed the per-wait cap.
+      const advertised = parseRetryAfterMs(lastErr.message);
+      const backoff = Math.min(baseMs * 2 ** attempt, maxWaitMs);
+      const jitter = Math.floor(Math.random() * 1_000);
+      const waitMs = Math.min((advertised ?? backoff) + jitter, maxWaitMs);
+      console.warn(
+        `[llm] rate-limited — holding ${Math.round(waitMs / 1000)}s then retrying ` +
+          `(attempt ${attempt + 1}/${maxAttempts}): ${lastErr.message.slice(0, 140)}`,
+      );
+      await sleep(waitMs);
+    }
+  }
+  throw lastErr!;
+}
+
+async function llmChatWithFailover(system: string, user: string, opts: LlmClientOptions): Promise<string> {
   const keys = splitKeys(opts.apiKey);
   if (keys.length > 1) {
     const start = keyCursor++;

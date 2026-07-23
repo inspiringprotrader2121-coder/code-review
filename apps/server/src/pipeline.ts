@@ -882,6 +882,8 @@ async function executeReview(
       '- STATED-CONTRACT VIOLATIONS: the code/comment/docstring CLAIMS a behavior (fail-open, idempotent, atomic, retries) — verify the implementation actually delivers it on every path; a claimed contract the code breaks is a bug even if each line looks fine.\n' +
       '- EDGE CASES: null/empty/boundary/malformed input, off-by-one, error paths, tests whose assertions no longer match the code they test.\n' +
       '- ENVIRONMENT: every NEW/moved file must load in its package’s module system — CJS globals (__dirname/require) in an ESM ("type": "module") package = ReferenceError at collection = P1; check the nearest package.json.\n' +
+      '- ALIASING & IN-PLACE MUTATION: any code that writes to an object it did not create (deleting/overwriting fields on a caller-supplied object, a shared config/headers/request object, a cached entry) mutates state its owner still uses — serializers, redactors, and loggers are the classic offenders; require a copy-on-write. A logger that scrubs err.config.headers IN PLACE corrupts the live request = P1.\n' +
+      '- CONFIG TOPOLOGY (compose/k8s/nginx/terraform/CI): treat infra files as first-class review targets. Check PARITY across sibling services/blocks (an env var, flag, or mount added to one compose/k8s service but not its siblings that need it); propagation (does the setting actually reach the runtime that reads it?); proxy/trust directives (real-ip/forwarded-for maps trusting values a direct client can spoof); widened exposure (a host/port/root grant broadened beyond localhost); and drift between compose, k8s, scripts, and docs describing the SAME deployment. A missing per-service flag that re-runs migrations on every restart = P1.\n' +
       'Report anything real the first pass would plausibly have overlooked. Do not repeat obvious findings; go deeper.\n' +
       'Before finalizing, take ONE more look at the 2-3 most complex changed areas — the subtlest bug is usually there.';
     const THIRD_ANGLE_FOCUS =
@@ -906,6 +908,11 @@ async function executeReview(
       ctx: typeof baseCtx;
       target: LlmTarget;
       tier: PassTier;
+      // Best-effort passes (the perf/completeness breadth lens, the optional
+      // `deep` extra lenses) enrich the review but must NEVER discard it: if one
+      // times out or errors, the review still posts from the passes that
+      // completed. The core general + deep-dive reasoners remain required.
+      bestEffort?: boolean;
     };
     // When ORVEX_CODEX_CLI=1, route the OpenAI-tier pass through the local
     // `codex` CLI (API-key auth — see codexCliModel in loadWorkerConfig)
@@ -956,6 +963,10 @@ async function executeReview(
         ctx: angle.focus ? { ...passCtx, extraFocus: angle.focus } : passCtx,
         target,
         tier,
+        // The perf/completeness breadth lens (pass 3+) is best-effort — commonly
+        // MiniMax, whose reasoning can exceed the wall-clock cap on large PRs.
+        // A timeout here must not throw away the general + deep-dive findings.
+        bestEffort: angle.tag === 'perf/completeness/api',
       });
     }
     for (const [i, extra] of DEEP_EXTRA_ANGLES.entries()) {
@@ -966,6 +977,7 @@ async function executeReview(
         ctx: { ...passCtx, extraFocus: extra.focus },
         target,
         tier,
+        bestEffort: true, // `deep` extras are bonus lenses — never abort the review
       });
     }
 
@@ -1035,6 +1047,9 @@ async function executeReview(
       summary: string | undefined;
       findings: ReviewFinding[];
       kind: 'pass' | 'sweep';
+      // Carried from the ReviewCall so the abort gate can exclude a failed
+      // best-effort pass (breadth/deep-extra) from the "required pass" check.
+      bestEffort?: boolean;
     };
 
     const runSingleCall = async (call: (typeof toRun)[number]): Promise<Outcome> => {
@@ -1124,11 +1139,17 @@ async function executeReview(
       // the same thread from the previous call). API calls can still run in parallel.
       const cliCalls = toRun.filter((c) => c.kind === 'codex-cli');
       const apiCalls = toRun.filter((c) => c.kind !== 'codex-cli');
+      // Attach each call's best-effort flag onto its outcome (runSingleCall has
+      // many return sites; wrapping here keeps the flag in exactly one place).
+      const runOne = async (call: (typeof toRun)[number]): Promise<Outcome> => ({
+        ...(await runSingleCall(call)),
+        bestEffort: call.bestEffort ?? false,
+      });
       const cliOutcomes: Outcome[] = [];
       for (const call of cliCalls) {
-        cliOutcomes.push(await runSingleCall(call));
+        cliOutcomes.push(await runOne(call));
       }
-      const apiOutcomes = await mapLimit(apiCalls, concurrency, runSingleCall);
+      const apiOutcomes = await mapLimit(apiCalls, concurrency, runOne);
       outcomes = [...cliOutcomes, ...apiOutcomes];
     } finally {
       clearInterval(abortPoll);
@@ -1175,14 +1196,23 @@ async function executeReview(
       );
     }
 
-    // The named review passes are the product contract. Posting Luna/DeepSeek
-    // findings while MiniMax timed out made a Verify badge look complete when
-    // one of its promised reviewers never finished. Sweeps may degrade, but a
-    // failed core pass aborts the run and posts nothing.
-    const failedRequiredPasses = outcomes.filter((o) => o.kind === 'pass' && !o.ok);
+    // The CORE review passes (general + deep-dive) are the product contract — if
+    // one of those fails, abort and post nothing. But the breadth/completeness
+    // lens (pass 3, commonly MiniMax) and the optional `deep` extra lenses are
+    // BEST-EFFORT: a MiniMax wall-clock timeout must not throw away the real
+    // findings the core reasoners already produced. So exclude best-effort passes
+    // from the required-pass gate; log them for transparency instead.
+    const failedRequiredPasses = outcomes.filter((o) => o.kind === 'pass' && !o.ok && !o.bestEffort);
     if (failedRequiredPasses.length > 0) {
       throw new Error(
         `review aborted: ${failedRequiredPasses.length}/${passes} required model pass(es) failed; no partial review was posted`,
+      );
+    }
+    const skippedBestEffort = outcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort).length;
+    if (skippedBestEffort > 0) {
+      console.warn(
+        `[worker] ${skippedBestEffort} best-effort pass(es) failed (e.g. a breadth/completeness pass timed out) — ` +
+          `posting the review from the core passes that completed`,
       );
     }
 

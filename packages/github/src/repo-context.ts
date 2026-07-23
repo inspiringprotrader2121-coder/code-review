@@ -96,7 +96,16 @@ export async function fetchRepoTree(
 // sibling scripts, cron/compose refs) — a real recall gap on script/migration
 // bugs. They're still reviewed when changed (they have a patch); this lets them
 // pull related files too.
-const CODE_FILE_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte|sh|bash|sql)$/;
+//
+// Include infra/config too (yaml/toml/conf/Dockerfile/nginx/k8s/terraform):
+// benchmark PRs 161-170 showed ~8 of 19 missed P1s were in compose/k8s/nginx
+// files — e.g. "RUN_STARTUP_MIGRATIONS missing from the api service block" is
+// only visible with the WHOLE compose file and sibling manifests in context,
+// not a lone hunk. Reviewing infra hunks blind was a systematic P1 blind spot.
+const CODE_FILE_RE =
+  /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte|sh|bash|sql|ya?ml|toml|ini|conf|tf|tfvars|hcl|properties|nginx|service)$/;
+const INFRA_FILENAME_RE = /(^|\/)(Dockerfile[^/]*|docker-compose[^/]*|Makefile|Caddyfile|Procfile|nginx\.conf|\.env\.[^/]*example[^/]*)$/i;
+const isReviewableRepoFile = (path: string): boolean => CODE_FILE_RE.test(path) || INFRA_FILENAME_RE.test(path);
 
 /**
  * Download the repo tarball at `sha` and extract it IN MEMORY into a
@@ -245,7 +254,7 @@ export async function buildRepoContext(
   const seen = new Set<string>();
   for (const { path, content } of changedContents) {
     if (relatedPaths.length >= maxRelated) break;
-    if (!CODE_FILE_RE.test(path)) continue;
+    if (!isReviewableRepoFile(path)) continue;
     for (const spec of parseRelativeImports(content)) {
       const resolved = resolveImportToTreePath(path, spec, tree);
       if (!resolved || changed.has(resolved) || seen.has(resolved)) continue;
@@ -300,7 +309,7 @@ export async function buildRepoContext(
   if (snapshot) {
     for (const [path, content] of snapshot) {
       if (dependents.length >= maxDependents) break;
-      if (changed.has(path) || seen.has(path) || !CODE_FILE_RE.test(path)) continue;
+      if (changed.has(path) || seen.has(path) || !isReviewableRepoFile(path)) continue;
       for (const spec of parseRelativeImports(content)) {
         const resolved = resolveImportToTreePath(path, spec, tree);
         if (resolved && changed.has(resolved)) {

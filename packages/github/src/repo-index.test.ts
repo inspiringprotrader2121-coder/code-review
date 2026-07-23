@@ -100,3 +100,25 @@ test('SQL/shell keywords are stopwords — keyword overlap alone scores nothing'
   );
   assert.equal(out[0]?.path, 'db/related.sql', 'a real shared identifier (users) still ranks');
 });
+
+test('infra/config files are retrieval candidates (compose/k8s/nginx/Dockerfile)', () => {
+  // Benchmark PRs 161-170: most missed P1s were infra bugs whose evidence lived
+  // in a SIBLING manifest. These must rank as candidates, not be gated out.
+  const snapshot = snap({
+    'docker-compose.yml': 'services:\n  api:\n    environment:\n      RUN_STARTUP_MIGRATIONS: "false"\n',
+    'k8s/backend-deployment.yaml': 'env:\n  - name: RUN_STARTUP_MIGRATIONS\n    value: "false"\n',
+    'frontend/nginx.conf': 'map $http_x_real_ip $client_ip { default $remote_addr; }\n',
+    'Dockerfile': 'FROM node:22\nENV RUN_STARTUP_MIGRATIONS=false\n',
+    'src/unrelated.ts': 'export function renderInvoicePdf(order) { return pdf(order); }',
+  });
+  const withChanged = new Map(snapshot);
+  withChanged.set('scripts/sync-production.sh', 'wait_for_scheduler\nexport RUN_STARTUP_MIGRATIONS=false\n');
+  const out = retrieveRelevantFiles(withChanged, ['scripts/sync-production.sh'], { k: 10 });
+  // the yaml/conf/Dockerfile candidates are eligible (nginx.conf shares no
+  // identifiers with the query so it may not rank — eligibility is what matters)
+  const paths = out.map((f) => f.path);
+  assert.ok(
+    paths.includes('docker-compose.yml') || paths.includes('k8s/backend-deployment.yaml') || paths.includes('Dockerfile'),
+    `expected infra files among candidates, got: ${paths.join(', ')}`,
+  );
+});

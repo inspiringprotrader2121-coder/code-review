@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isTransientLlmError } from './llm.js';
-import { isRateLimitOrQuotaError, resolveMaxOutputTokens } from './llm-client.js';
+import {
+  isRateLimitOrQuotaError,
+  resolveMaxOutputTokens,
+  parseRetryAfterMs,
+  isRetryableRateLimit,
+} from './llm-client.js';
 
 test('provider failover fires on rate-limit/quota errors specifically (narrower than transient)', () => {
   // These trigger the MiniMax→fallback/Anthropic failover.
@@ -39,6 +44,29 @@ test('uses a funded-provider-friendly 64k output ceiling by default', (t) => {
   assert.equal(resolveMaxOutputTokens(12_345.9), 12_345);
   process.env.ORVEX_MAX_OUTPUT_TOKENS = 'not-a-number';
   assert.equal(resolveMaxOutputTokens(), 64_000);
+});
+
+test('parseRetryAfterMs extracts the provider retry-after hint', () => {
+  // The exact OpenAI TPM 429 that dropped reviews in the batch run.
+  assert.equal(parseRetryAfterMs('Rate limit reached ... Please try again in 49.174s. Visit'), 49_174);
+  assert.equal(parseRetryAfterMs('try again in 6.015s'), 6_015);
+  assert.equal(parseRetryAfterMs('try again in 120ms'), 120);
+  assert.equal(parseRetryAfterMs('retry-after: 30'), 30_000);
+  assert.equal(parseRetryAfterMs('retry after 12 seconds'), 12_000);
+  assert.equal(parseRetryAfterMs('some error with no delay hint'), undefined);
+});
+
+test('isRetryableRateLimit: waits on recoverable limits, fails fast on hard quota', () => {
+  // Recoverable — waiting clears these.
+  assert.equal(isRetryableRateLimit('Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 200000'), true);
+  assert.equal(isRetryableRateLimit('LLM request failed (429): too many requests'), true);
+  assert.equal(isRetryableRateLimit('LLM request failed (529): overloaded'), true);
+  assert.equal(isRetryableRateLimit('Please try again in 6s'), true);
+  // NOT recoverable by waiting — a credit top-up is required; must fail fast.
+  assert.equal(isRetryableRateLimit('LLM request failed (402): requires more credits, insufficient balance'), false);
+  // Not a rate limit at all.
+  assert.equal(isRetryableRateLimit('terminated'), false);
+  assert.equal(isRetryableRateLimit('LLM request failed (400): bad request'), false);
 });
 
 test('clamps an oversized ceiling to the safe cap (the 200k prod misconfig)', (t) => {
