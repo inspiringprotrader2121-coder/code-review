@@ -163,4 +163,56 @@ export const CASES: EvalCase[] = [
     shouldFlagSevere: [{ pattern: /(Database for panel|missing tenant).*(503|unavailable|misclass)|tenant.*(error|message|variant).*(404|503)/i, minSeverity: 'P2' }],
     note: 'The production pool manager emits a second missing-database message that the new 404 classifier does not match.',
   },
+
+  // ——— bench170: P1s from the 161-170 competitor benchmark that Orvex MISSED ———
+  // (competitor consensus = ground truth; each was verified in the bench output.
+  //  These are the permanent regression set for high-severity recall.)
+  {
+    name: 'bench170-logger-header-mutation',
+    owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 163,
+    shouldFlagSevere: [{ pattern: /logger.*(mutat|in.?place|modif).*(header|shared|caller)|(mutat|modif)\w*.*(err\.config|request headers|shared object)|scrub\w*.*in.?place/i, minSeverity: 'P2' }],
+    note: 'greptile+coderabbit+codex consensus P1: serializeError/scrub mutates err.config.headers in place, corrupting the live request object.',
+  },
+  {
+    name: 'bench170-mysql-root-host-widened',
+    owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 165,
+    shouldFlagSevere: [{ pattern: /MYSQL_ROOT_HOST|root.*(host|grant).*(widen|['"%]|any host|network)/i, minSeverity: 'P2' }],
+    note: 'gitar+codex consensus P1: MYSQL_ROOT_HOST default widened localhost → % lets any data_net peer connect as root.',
+  },
+  {
+    name: 'bench170-compose-api-migrations-parity',
+    owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 165,
+    shouldFlagSevere: [{ pattern: /RUN_STARTUP_MIGRATIONS.*(api|missing|also|service)|api service.*(missing|lacks).*migration/i, minSeverity: 'P2' }],
+    note: 'coderabbit+codex consensus P1: the api compose service is missing RUN_STARTUP_MIGRATIONS=false — service-parity bug, needs whole-file/sibling context.',
+  },
+  {
+    name: 'bench170-provision-retry-stale-resources',
+    owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 167,
+    shouldFlagSevere: [{ pattern: /(stale|previous|earlier).*(attempt|retry).*(_?resources|payload|state)|_resources.*(leak|carr|persist).*(attempt|retry)|resumed? job.*(stale|inherit)/i, minSeverity: 'P2' }],
+    note: 'gitar+codex consensus P1: _executeProvisionJob retry reuses stale _resources from a prior attempt.',
+  },
+  {
+    name: 'bench170-webhook-success-stays-pending',
+    owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 168,
+    shouldFlagSevere: [{ pattern: /(success|delivered).*(remain|stuck|stays|left).*(pending|queue)|completion update fail.*(pending|retry|redeliver)|(retry|pending) row.*(success|deliver)/i, minSeverity: 'P2' }],
+    note: 'greptile+qodo consensus P1: when delivery succeeds but the completion update fails, the pre-created retry row stays pending → duplicate delivery.',
+  },
+  {
+    name: 'bench170-nginx-real-ip-spoof',
+    owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 170,
+    shouldFlagSevere: [{ pattern: /X-Real-IP|real.?ip.*(spoof|trust|forward|direct)|(spoof|forge).*client (ip|identity)/i, minSeverity: 'P2' }],
+    note: 'greptile P1: the nginx map forwards client-supplied X-Real-IP when requests bypass the edge — identity spoofing.',
+  },
+  {
+    name: 'bench170-redis-end-stays-unready',
+    owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 169,
+    shouldFlagSevere: [{ pattern: /redis.*(end|disconnect).*(unready|not recreated|stays|never)|client reference.*(clear|null).*(recreat|reconnect)/i, minSeverity: 'P2' }],
+    note: 'greptile P1: on Redis `end` the shared module clears the client and never recreates it — readiness stays failed forever.',
+  },
+  {
+    name: 'bench170-inherited-slug-rollback',
+    owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 167,
+    shouldFlagSevere: [{ pattern: /(inherit|resumed?|earlier).*(slug|panelSlug).*(rollback|destr|delete)|panelSlug.*(stale|previous attempt)/i, minSeverity: 'P2' }],
+    note: 'greptile P1: a resumed job initializes panelSlug from an earlier attempt, so an early failure can destructively roll back the wrong panel.',
+  },
 ];
