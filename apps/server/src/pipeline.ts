@@ -151,10 +151,20 @@ export function modelForPass(
   config: WorkerConfig,
   plan: { modelTier?: ModelTier },
   passIndex: number,
+  /** `codexRoutable` = the codex CLI can ACTUALLY run for this repo (flag on AND
+   *  repo allowlisted). `codexCliModel` is a STUB target — `apiKey: ''`, no
+   *  baseUrl, no api — usable only through the CLI, which authenticates via
+   *  CODEX_HOME. Selecting it when the CLI won't run sends pass 1 down the plain
+   *  HTTP path with an empty key: it resolves to the Anthropic client, 401s, and
+   *  since pass 1 is a REQUIRED pass the whole review aborts and posts nothing.
+   *  Defaults to false so a caller that doesn't know can never trip that. */
+  opts?: { codexRoutable?: boolean },
 ): { target: LlmTarget; tier: PassTier } {
   if (plan.modelTier === 'codex-hybrid') {
     // general → codex (CLI if enabled, else paid API); deep-dive + further passes → MiniMax
-    if (passIndex === 0 && config.codexCliModel) return { target: config.codexCliModel, tier: 'openai' };
+    if (passIndex === 0 && config.codexCliModel && opts?.codexRoutable) {
+      return { target: config.codexCliModel, tier: 'openai' };
+    }
     if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
     return { target: config.standardModel, tier: 'standard' };
   }
@@ -165,7 +175,9 @@ export function modelForPass(
     // model, but with real repo-exploration tool calls (rg/cat/git diff)
     // instead of a single-shot call — the repo-sweep capability, without any
     // OAuth session fragility since API keys don't expire/rotate/get revoked.
-    if (passIndex === 0 && config.codexCliModel) return { target: config.codexCliModel, tier: 'openai' };
+    if (passIndex === 0 && config.codexCliModel && opts?.codexRoutable) {
+      return { target: config.codexCliModel, tier: 'openai' };
+    }
     if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
     // pass 2 (deep-dive) → DeepSeek's heavy reasoning, built for hunting the
     // subtle defects a first read misses.
@@ -917,7 +929,7 @@ async function executeReview(
     // the repo is on the first-party allowlist (ORVEX_CODEX_CLI_REPOS) — codex
     // runs unsandboxed, so sweeping arbitrary third-party repos is an RCE surface.
     const codexRepoDir =
-      useCodexCli && modelForPass(config, plan, 0).tier === 'openai' && isCodexRepoAllowed(`${owner}/${repo}`)
+      useCodexCli && modelForPass(config, plan, 0, { codexRoutable: true }).tier === 'openai'
         ? await checkoutRepoForCodex(octokit, owner, repo, effectiveSha)
         : null;
     if (codexRepoDir) console.log(`[worker] codex repo sweep: checked out ${owner}/${repo}@${effectiveSha.slice(0, 7)}`);
@@ -944,7 +956,7 @@ async function executeReview(
 
     const reviewCalls: ReviewCall[] = [];
     for (let p = 0; p < passes; p++) {
-      const { target, tier } = modelForPass(config, plan, p);
+      const { target, tier } = modelForPass(config, plan, p, { codexRoutable: useCodexCli });
       const angle = PASS_ANGLES[Math.min(p, PASS_ANGLES.length - 1)];
       reviewCalls.push({
         label: `pass ${p + 1}/${totalPasses} (${angle.tag}) [${target.model}]`,
@@ -956,7 +968,8 @@ async function executeReview(
       });
     }
     for (const [i, extra] of DEEP_EXTRA_ANGLES.entries()) {
-      const { target, tier } = modelForPass(config, plan, extra.modelIdx);
+      // deep extras always take the plain API path, so codex is never routable here
+      const { target, tier } = modelForPass(config, plan, extra.modelIdx, { codexRoutable: false });
       reviewCalls.push({
         label: `pass ${passes + i + 1}/${totalPasses} (${extra.tag}) [${target.model}]`,
         kind: 'pass', // deep extras always use the plain API path, never codex CLI
@@ -973,7 +986,7 @@ async function executeReview(
     const sweepSource = plan.repoSweep ? (reviewContext?.others ?? []).slice(plan.retrievalTopK) : [];
     if (sweepSource.length > 0) {
       // P3-7: sweep cost tier must derive from the plan, not be hard-coded premium.
-      const sweepModel = modelForPass(config, plan, 0);
+      const sweepModel = modelForPass(config, plan, 0, { codexRoutable: useCodexCli });
       const budget = Number(process.env.ORVEX_MAX_OTHER_CHARS ?? 45_000) - 2_000;
       // Read a meaningful chunk of each swept file (deeper than a skim) so the
       // Verify sweep is thorough, not just broad. ~4 files/batch at this size.
@@ -1054,6 +1067,9 @@ async function executeReview(
               context: call.ctx,
               cwd: codexRepoDir ?? undefined,
               repoId: `${owner}/${repo}`,
+              // Without this the agentic pass — by far the most expensive — was
+              // reported as $0 and spend was invisible exactly where it matters.
+              onUsage: onUsageFor(call.tier),
             });
             codexThreadId = threadId;
             const got = llmFindingsToReviewFindings(response.findings);

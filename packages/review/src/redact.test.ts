@@ -117,3 +117,46 @@ test('redaction does not eat ordinary code or config', () => {
     assert.equal(redactSecrets(clean), clean, `must not over-redact: ${clean}`);
   }
 });
+
+test('redaction is linear-time on adversarial input (no ReDoS worker stall)', () => {
+  // An unanchored greedy prefix made this quadratic: 50kB of hex blocked the
+  // single-threaded worker for 6.3s, fully controlled by PR content.
+  for (const size of [50_000, 100_000]) {
+    const started = Date.now();
+    redactSecrets('deadbeef'.repeat(size / 8));
+    const ms = Date.now() - started;
+    assert.ok(ms < 1_000, `${size}B took ${ms}ms — redaction must stay linear`);
+  }
+});
+
+test('redaction never corrupts reviewable source code', () => {
+  // Rewriting `const passwordOk = verifyPassword(password, hash)` to
+  // `= [REDACTED],` blinded the reviewer to the auth logic it exists to audit
+  // AND handed the model syntactically invalid code.
+  for (const line of [
+    'const passwordOk = verifyPassword(password, storedHash ?? DUMMY_PASSWORD_HASH);',
+    "fetch(url, {credentials: 'same-origin'})",
+    'const passwordHash = bcrypt.hashSync(password,10);',
+    'export function hashPassword(password: string): string {',
+    'export function encryptTotpSecret(secret: string, masterSecret: string): string {',
+    'interface Opts { apiKey: string; webhookSecret: string; }',
+  ]) {
+    assert.equal(redactSecrets(line), line, `must not corrupt source: ${line}`);
+  }
+});
+
+test('k8s env secrets are redacted inside DIFFS, not just whole files', () => {
+  // Patches are the primary payload of every review; the first draft's
+  // whitespace class did not tolerate the `+` prefix.
+  const diff = '+        - name: DB_PASSWORD\n+          value: Sup3rS3cretInDiff';
+  const out = redactSecrets(diff);
+  assert.match(out, /REDACTED/);
+  assert.doesNotMatch(out, /Sup3rS3cretInDiff/, 'the secret itself must not survive');
+});
+
+test('base64 PEM redaction does not swallow neighbouring keys', () => {
+  const manifest = 'kind: Secret\ndata:\n  tls.key: LS0tLS1CRUdJTiBQUklWQVRF\n  replicas: 3\n  imageTag: v1.2.3';
+  const out = redactSecrets(manifest);
+  assert.match(out, /replicas: 3/, 'following lines must survive');
+  assert.match(out, /imageTag: v1\.2\.3/);
+});
