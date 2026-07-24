@@ -116,3 +116,38 @@ test('does NOT treat a genuine parse/model failure as transient (those degrade t
   assert.ok(!isTransientLlmError('Unexpected token in JSON'));
   assert.ok(!isTransientLlmError('LLM returned no text content'));
 });
+
+test('NaN env vars cannot defeat retry bounds (infinite-loop guard)', () => {
+  // `Math.max(1, Math.floor(Number('abc')))` is NaN, and `i >= NaN` is ALWAYS
+  // false — a typo'd env var turned the codex retry into an infinite loop that
+  // re-ran a full agentic pass every 90s. Both consumers must be NaN-proof.
+  const finite = (raw: string | undefined, fallback: number): number => {
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  assert.equal(finite('abc', 4), 4);
+  assert.equal(finite(undefined, 4), 4);
+  assert.equal(finite('', 4), 4, 'empty string must not become 0 via Number("")');
+  assert.equal(finite('7', 4), 7);
+  assert.ok(Number.isFinite(Math.max(1, Math.floor(finite('abc', 4)))));
+});
+
+test('hard quota is never retried, however the provider dresses it', () => {
+  // OpenAI ships insufficient_quota as HTTP 429 — retrying it waits forever on
+  // every review. And a 402 inside a message body must not mask a real 429.
+  assert.equal(isRetryableRateLimit('LLM request failed (429): insufficient_quota, please check billing'), false);
+  assert.equal(isRetryableRateLimit('You exceeded your current quota, please check your plan'), false);
+  assert.equal(
+    isRetryableRateLimit('LLM request failed (429): used 402 of 500 credits this minute; rate limit'),
+    true,
+    'an unrelated 402 in the body must not misclassify a recoverable 429',
+  );
+});
+
+test('an overloaded provider triggers failover, not just waiting', () => {
+  // 529/overloaded is exactly when rotating keys / failing over is right; it was
+  // retryable but NOT failover-eligible, so a configured fallback went untried.
+  assert.equal(isRateLimitOrQuotaError('LLM request failed (529): overloaded'), true);
+  assert.equal(isRetryableRateLimit('LLM request failed (529): overloaded'), true);
+});

@@ -67,7 +67,13 @@ function thinkingEnabled(opts: LlmClientOptions): boolean {
  * Exported so it's independently unit-tested rather than a silent duplicate.
  */
 export function isRateLimitOrQuotaError(message: string): boolean {
-  return /\b429\b|\b402\b[^\n]*(?:credit|quota|payment)|rate.?limit|usage limit|quota|token plan|insufficient|more credits?/i.test(message);
+  // 529/overloaded belongs here too: an overloaded provider is exactly the case
+  // where rotating keys / failing over to another provider is right. Without it
+  // `llmChat` would sit and retry the SAME dead endpoint while a configured
+  // fallback went untried.
+  return /\b429\b|\b529\b|overloaded|\b402\b[^\n]*(?:credit|quota|payment)|rate.?limit|usage limit|quota|token plan|insufficient|more credits?/i.test(
+    message,
+  );
 }
 
 /**
@@ -139,7 +145,15 @@ export function parseRetryAfterMs(message: string): number | undefined {
  * credit/quota exhaustion (402 "insufficient credits"), which waiting will not
  * fix: that must fail fast so the job requeues instead of looping pointlessly. */
 export function isRetryableRateLimit(message: string): boolean {
-  if (/\b402\b/.test(message) && /credit|insufficient|afford|top-?up/i.test(message)) return false;
+  // Hard billing exhaustion is NOT recoverable by waiting, however it is dressed:
+  //  - a 402 status carrying credit wording, and
+  //  - OpenAI's `insufficient_quota`, which ships as HTTP *429* and would
+  //    otherwise be retried forever on every review.
+  // Anchor the 402 to the STATUS position so an unrelated "402" inside a message
+  // body ("used 402 of 500 credits") can't misclassify a genuine 429.
+  const status = /\brequest failed\s*\(\s*(\d{3})\b/i.exec(message)?.[1];
+  if (status === '402' && /credit|insufficient|afford|top-?up/i.test(message)) return false;
+  if (/insufficient_quota|exceeded your current quota|billing_hard_limit/i.test(message)) return false;
   return /\b429\b|\b529\b|rate.?limit|tokens? per min|requests? per min|\bTPM\b|\bRPM\b|try again in|overloaded|please try again/i.test(
     message,
   );
@@ -157,9 +171,24 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * exhaustion propagate immediately (no wasted waiting).
  */
 export async function llmChat(system: string, user: string, opts: LlmClientOptions): Promise<string> {
-  const maxAttempts = Math.max(1, Math.floor(Number(process.env.ORVEX_RATELIMIT_MAX_RETRIES ?? 4)));
-  const maxWaitMs = Math.max(1_000, Number(process.env.ORVEX_RATELIMIT_MAX_WAIT_MS ?? 60_000));
-  const baseMs = Math.max(250, Number(process.env.ORVEX_RATELIMIT_BASE_MS ?? 2_000));
+  const finite = (raw: string | undefined, fallback: number): number => {
+    // Empty/whitespace means UNSET — `Number('')` is 0 and would pass a bare
+    // isFinite check, turning `FOO=` into a real zero.
+    if (raw === undefined || raw.trim() === '') return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const maxAttempts = Math.max(1, Math.floor(finite(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4)));
+  const maxWaitMs = Math.max(1_000, finite(process.env.ORVEX_RATELIMIT_MAX_WAIT_MS, 60_000));
+  const baseMs = Math.max(250, finite(process.env.ORVEX_RATELIMIT_BASE_MS, 2_000));
+  // TOTAL sleep budget across this call. Each attempt replays the whole key
+  // rotation + provider-failover chain, and `runLlmReview` wraps the result in a
+  // second retry — so an unbounded per-attempt wait compounded into tens of
+  // minutes of a worker slot held asleep. That starves the queue AND hides
+  // failures from the circuit breaker (which only counts *failed jobs*), so the
+  // breaker never trips while every slot naps. Bound the total, not just each nap.
+  const totalWaitBudgetMs = Math.max(5_000, finite(process.env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 120_000));
+  let sleptMs = 0;
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
@@ -171,9 +200,27 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
       // backoff. Always add jitter so concurrent passes don't retry in lockstep,
       // and never exceed the per-wait cap.
       const advertised = parseRetryAfterMs(lastErr.message);
+      // An advertised delay LONGER than we're willing to wait means waiting
+      // cannot help (an hourly/daily window) — fail fast instead of burning the
+      // remaining attempts on retries guaranteed to land inside the same window.
+      if (advertised !== undefined && advertised > maxWaitMs) {
+        console.warn(
+          `[llm] rate limit window ${Math.round(advertised / 1000)}s exceeds max wait ` +
+            `${Math.round(maxWaitMs / 1000)}s — failing fast instead of retrying into it`,
+        );
+        throw lastErr;
+      }
       const backoff = Math.min(baseMs * 2 ** attempt, maxWaitMs);
       const jitter = Math.floor(Math.random() * 1_000);
       const waitMs = Math.min((advertised ?? backoff) + jitter, maxWaitMs);
+      if (sleptMs + waitMs > totalWaitBudgetMs) {
+        console.warn(
+          `[llm] rate-limit wait budget exhausted (${Math.round(sleptMs / 1000)}s slept of ` +
+            `${Math.round(totalWaitBudgetMs / 1000)}s) — failing so the job requeues instead of holding a worker slot`,
+        );
+        throw lastErr;
+      }
+      sleptMs += waitMs;
       console.warn(
         `[llm] rate-limited — holding ${Math.round(waitMs / 1000)}s then retrying ` +
           `(attempt ${attempt + 1}/${maxAttempts}): ${lastErr.message.slice(0, 140)}`,

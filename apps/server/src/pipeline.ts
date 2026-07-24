@@ -760,6 +760,9 @@ async function executeReview(
   });
 
   let llmSummary: string | undefined;
+  // Best-effort passes that failed — surfaced in the posted review so a partial
+  // run can never read as a full sign-off.
+  let skippedLenses: string[] = [];
   let llmFindings: ReviewFinding[] = [];
   // Token usage per model tier — a hybrid review runs two different models, so
   // cost is tracked separately (each has its own $/token) and summed.
@@ -872,10 +875,13 @@ async function executeReview(
     // skip — performance, completeness/what's-missing, and API/contract breakage.
     // Distinct focus is what makes extra passes catch meaningfully more.
     // Per-pass lens; pass index beyond the list reuses the last (deepest) angle.
-    const PASS_ANGLES: Array<{ tag: string; focus?: string }> = [
+    const PASS_ANGLES: Array<{ tag: string; focus?: string; bestEffort?: boolean }> = [
       { tag: 'general' },
       { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS },
-      { tag: 'perf/completeness/api', focus: THIRD_ANGLE_FOCUS },
+      // Breadth lens — commonly MiniMax, whose reasoning can exceed the wall-clock
+      // cap on large PRs. Declared here (not derived from the tag string) so a
+      // rename can't silently change which passes are required.
+      { tag: 'perf/completeness/api', focus: THIRD_ANGLE_FOCUS, bestEffort: true },
     ];
 
     type ReviewCall = {
@@ -896,9 +902,16 @@ async function executeReview(
     // exploration (rg/cat/git diff tool calls). SCOPED to the tiers actually
     // designed to use it — an allowlist, not "any pass that happens to be
     // tier 'openai'", so a future tier can't get silently CLI-routed by accident.
+    // The allowlist gates whether codex RUNS AT ALL — not merely whether it gets a
+    // repo checkout. codex executes with `--dangerously-bypass-approvals-and-sandbox`
+    // (a real shell as this OS user, with filesystem + network access), so routing a
+    // third-party tenant's PR through it on the strength of their PLAN TIER alone was
+    // an RCE surface: every multi-model/Verify customer would have run unsandboxed
+    // against attacker-authored PR content. Repo allowlist is the trust boundary.
     const useCodexCli =
       process.env.ORVEX_CODEX_CLI === '1' &&
-      (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model');
+      (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model') &&
+      isCodexRepoAllowed(`${owner}/${repo}`);
     // Check out the repo (read-only) so codex can sweep the whole codebase, not
     // just the diff. Only when codex-cli is the pass-1 model for this plan AND
     // the repo is on the first-party allowlist (ORVEX_CODEX_CLI_REPOS) — codex
@@ -939,10 +952,7 @@ async function executeReview(
         ctx: angle.focus ? { ...passCtx, extraFocus: angle.focus } : passCtx,
         target,
         tier,
-        // The perf/completeness breadth lens (pass 3+) is best-effort — commonly
-        // MiniMax, whose reasoning can exceed the wall-clock cap on large PRs.
-        // A timeout here must not throw away the general + deep-dive findings.
-        bestEffort: angle.tag === 'perf/completeness/api',
+        bestEffort: angle.bestEffort === true,
       });
     }
     for (const [i, extra] of DEEP_EXTRA_ANGLES.entries()) {
@@ -1026,6 +1036,8 @@ async function executeReview(
       // Carried from the ReviewCall so the abort gate can exclude a failed
       // best-effort pass (breadth/deep-extra) from the "required pass" check.
       bestEffort?: boolean;
+      /** human label ("pass 3/3 (perf/completeness/api) [MiniMax-M3]") for disclosure */
+      label?: string;
     };
 
     const runSingleCall = async (call: (typeof toRun)[number]): Promise<Outcome> => {
@@ -1120,6 +1132,7 @@ async function executeReview(
       const runOne = async (call: (typeof toRun)[number]): Promise<Outcome> => ({
         ...(await runSingleCall(call)),
         bestEffort: call.bestEffort ?? false,
+        label: call.label,
       });
       const cliOutcomes: Outcome[] = [];
       for (const call of cliCalls) {
@@ -1184,11 +1197,12 @@ async function executeReview(
         `review aborted: ${failedRequiredPasses.length}/${passes} required model pass(es) failed; no partial review was posted`,
       );
     }
-    const skippedBestEffort = outcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort).length;
-    if (skippedBestEffort > 0) {
+    const skippedBestEffort = outcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort);
+    if (skippedBestEffort.length > 0) {
+      skippedLenses = skippedBestEffort.map((o) => o.label ?? 'unnamed pass');
       console.warn(
-        `[worker] ${skippedBestEffort} best-effort pass(es) failed (e.g. a breadth/completeness pass timed out) — ` +
-          `posting the review from the core passes that completed`,
+        `[worker] ${skippedBestEffort.length} best-effort pass(es) failed (${skippedLenses.join(', ')}) — ` +
+          `posting the review from the core passes that completed, WITH a disclosure banner`,
       );
     }
 
@@ -1426,6 +1440,7 @@ async function executeReview(
       summary,
       filesReviewed: filesForLlm.map((f) => f.filename),
       isDeep: job.deep,
+      skippedLenses: skippedLenses.length > 0 ? skippedLenses : undefined,
       coverage: coverage.complete
         ? undefined
         : { reviewed: coverage.reviewed, candidates: coverage.candidates, skippedByCap: coverage.skippedByCap, truncatedFiles: coverage.truncatedFiles, omittedPatch: coverage.omittedPatch },

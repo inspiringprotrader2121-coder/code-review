@@ -1,6 +1,6 @@
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch, redactSecrets } from './redact.js';
-import { llmChat, extractJsonLoose } from './llm-client.js';
+import { llmChat, extractJsonLoose, isRetryableRateLimit } from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 
@@ -128,6 +128,12 @@ export async function runLlmReview(
     // doubled spend. Surface it immediately so the required-pass gate can stop
     // the review without posting partial results.
     if (/wall-clock cap|timed?\s*out|stalled/i.test(firstMessage)) throw err;
+    // A rate limit ALREADY consumed its full wait-and-retry budget inside
+    // llmChat. Re-entering with reasoning off just replays the whole
+    // key-rotation + failover chain against the same closed window, doubling
+    // both the attempt count and the time a worker slot is held. Fail now so the
+    // job requeues and the circuit breaker can actually see it.
+    if (isRetryableRateLimit(firstMessage)) throw err;
     // Retry transport disconnects with reasoning still enabled. Only parsing,
     // truncation, and empty-answer failures drop reasoning on the retry.
     const retryThinking = /terminated|fetch failed|econn|socket hang|network/i.test(firstMessage)

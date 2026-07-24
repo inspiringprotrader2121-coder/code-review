@@ -24,6 +24,9 @@ export interface CodexCliReviewOptions {
   /** "owner/repo" of the repo being reviewed. Required for `cwd` to be honored
    *  (first-party allowlist enforcement — see isCodexRepoAllowed). */
   repoId?: string;
+  /** token-usage callback for cost tracking. Without this the agentic pass —
+   *  the most expensive one — reported $0 and spend was invisible. */
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
 }
 
 /**
@@ -102,6 +105,17 @@ function fallbackModel(): { model: string; reasoningEffort?: string } {
     model: 'gpt-5.5',
     reasoningEffort: process.env.ORVEX_CODEX_CLI_REASONING_EFFORT ?? 'xhigh',
   };
+}
+
+/** Parse a numeric env var, falling back when unset/non-numeric. A bare
+ *  `Number(x)` yields NaN for a typo'd value, and NaN silently defeats every
+ *  comparison it touches (`i >= NaN` is always false → infinite retry loop). */
+function finiteEnv(raw: string | undefined, fallback: number): number {
+  // Treat empty/whitespace as UNSET: `Number('')` is 0 (finite!), so a bare
+  // `FOO=` in .env would otherwise become a real zero rather than the default.
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function codexBinary(): string {
@@ -271,7 +285,10 @@ function buildPrompt(files: ReviewableFile[], context?: ReviewPromptContext, has
   // Codex runs as an AGENT with the full repo checked out at its CWD — push it to
   // actually investigate instead of one-shotting from the excerpts below. This is
   // the whole point of using the Codex CLI over a plain API call.
-  const explore = [
+  // ONLY claim a checkout exists when one actually does. Without this guard every
+  // non-allowlisted repo got a prompt insisting the repo was at its CWD while
+  // --cd pointed at an empty temp dir — codex burned turns rg'ing nothing.
+  const explore = !hasRepoCheckout ? '' : [
     '## You are an agent — INVESTIGATE the repo, do not one-shot',
     'The COMPLETE repository is checked out at your current working directory. The',
     'diffs and file excerpts below are a STARTING POINT, not the whole story. Before',
@@ -291,7 +308,7 @@ function buildPrompt(files: ReviewableFile[], context?: ReviewPromptContext, has
     '— the last look regularly turns up the subtlest bug.',
     '',
   ].join('\n');
-  return `${system}\n\n${explore}\n${user}`;
+  return explore ? `${system}\n\n${explore}\n${user}` : `${system}\n\n${user}`;
 }
 
 async function runCodexExec(
@@ -306,6 +323,8 @@ async function runCodexExec(
     home?: string;
     /** pool index of the account (selects its sticky ISP proxy) */
     homeIdx?: number;
+    /** token-usage callback for cost tracking */
+    onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
   },
 ): Promise<{ text: string; threadId: string }> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-codex-'));
@@ -347,7 +366,42 @@ async function runCodexExec(
       env: shellEnv(opts.home, opts.homeIdx),
       cwd: tmpDir,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Own process group, so the timeout below can kill codex AND any
+      // grandchildren it spawned (it runs with the sandbox bypassed). Without
+      // this, `process.kill(-pid)` would target our own group.
+      detached: true,
     });
+
+    // HARD WALL-CLOCK CAP — the promise MUST settle. `close` fires only once the
+    // process has exited AND all stdio pipes are closed, so a single daemonized
+    // grandchild holding a pipe (a PR's build script, a background server) would
+    // leave this pending FOREVER: the home lock serializes every later codex call
+    // behind it, the worker slot is never released, /ready never goes idle, and
+    // every future deploy aborts on its idle wait. So we reject on the timer
+    // itself rather than trusting `close` to arrive.
+    const hardMs = Math.max(60_000, finiteEnv(process.env.ORVEX_CODEX_TIMEOUT_MS, 1_800_000));
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      fn();
+    };
+    const killTimer = setTimeout(() => {
+      try {
+        process.kill(-child.pid!, 'SIGKILL'); // whole group
+      } catch {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+      finish(() => {
+        cleanup();
+        reject(new Error(`codex-cli exceeded ${hardMs}ms wall-clock cap`));
+      });
+    }, hardMs);
 
     let stdout = '';
     let stderr = '';
@@ -370,14 +424,30 @@ async function runCodexExec(
     child.stdin.end(prompt);
 
     child.on('error', (err) => {
-      cleanup();
-      reject(err);
+      finish(() => {
+        cleanup();
+        reject(err);
+      });
     });
 
     child.on('close', (code) => {
       try {
         const threadId = extractThreadId(stdout);
         const text = readLastMessage(lastMsgFile);
+        const usage = extractUsage(stdout);
+        // Report usage even on the FAILURE path: codex bills for the tokens it
+        // burned whether or not it produced a parseable answer, and this is the
+        // only place that usage is observable. Dropping it made the most
+        // expensive pass report $0 and hid spend exactly when it mattered.
+        if (usage) {
+          opts.onUsage?.({
+            inputTokens: usage.input ?? 0,
+            outputTokens: (usage.output ?? 0) + (usage.reasoning ?? 0),
+          });
+          console.warn(
+            `[codex-cli] usage: ${usage.input ?? 0} in / ${usage.reasoning ?? 0} reasoning / ${usage.output ?? 0} out tokens`,
+          );
+        }
         cleanup();
 
         if (!text) {
@@ -385,19 +455,15 @@ async function runCodexExec(
             console.warn(`[codex-cli] stderr:\n${stderr.trim().slice(0, 2000)}`);
           }
           const errMsg = extractErrorMessage(stdout, stderr) ?? `codex exited ${code ?? 'unknown'} with no output`;
-          reject(new Error(errMsg));
+          finish(() => reject(new Error(errMsg)));
           return;
         }
-        const usage = extractUsage(stdout);
-        if (usage) {
-          console.warn(
-            `[codex-cli] usage: ${usage.input ?? 0} in / ${usage.reasoning ?? 0} reasoning / ${usage.output ?? 0} out tokens`,
-          );
-        }
-        resolve({ text, threadId });
+        finish(() => resolve({ text, threadId }));
       } catch (err) {
-        cleanup();
-        reject(err);
+        finish(() => {
+          cleanup();
+          reject(err);
+        });
       }
     });
 
@@ -514,7 +580,7 @@ export async function runCodexCliReview(
     const home = CODEX_HOME_POOL[homeIdx];
     try {
       return await withHomeLock(homeIdx, () =>
-        runCodexExec(prompt, { model, reasoningEffort: effort, threadId, cwd, home, homeIdx }),
+        runCodexExec(prompt, { model, reasoningEffort: effort, threadId, cwd, home, homeIdx, onUsage: opts.onUsage }),
       );
     } catch (err) {
       const msg = (err as Error).message;
@@ -523,7 +589,7 @@ export async function runCodexCliReview(
       if (isStaleThreadError(msg) && threadId) {
         console.warn(`[codex-cli] thread ${threadId} not resumable, starting a new session`);
         return withHomeLock(homeIdx, () =>
-          runCodexExec(prompt, { model, reasoningEffort: effort, cwd, home, homeIdx }),
+          runCodexExec(prompt, { model, reasoningEffort: effort, cwd, home, homeIdx, onUsage: opts.onUsage }),
         );
       }
       if (isUnsupportedModelError(msg) && model !== fallbackModel().model) {
@@ -539,6 +605,7 @@ export async function runCodexCliReview(
             cwd,
             home,
             homeIdx,
+            onUsage: opts.onUsage,
           }),
         );
       }
@@ -556,8 +623,8 @@ export async function runCodexCliReview(
     hIdx: number,
     tId: string | undefined,
   ): Promise<{ text: string; threadId: string }> => {
-    const maxRetries = Math.max(1, Math.floor(Number(process.env.ORVEX_RATELIMIT_MAX_RETRIES ?? 4)));
-    const maxWaitMs = Math.max(1_000, Number(process.env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS ?? 90_000));
+    const maxRetries = Math.max(1, Math.floor(finiteEnv(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4)));
+    const maxWaitMs = Math.max(1_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS, 90_000));
     for (let i = 0; ; i++) {
       try {
         return await attemptOnHome(hIdx, tId);

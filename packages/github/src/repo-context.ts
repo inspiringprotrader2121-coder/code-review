@@ -104,7 +104,10 @@ export async function fetchRepoTree(
 // not a lone hunk. Reviewing infra hunks blind was a systematic P1 blind spot.
 const CODE_FILE_RE =
   /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte|sh|bash|sql|ya?ml|toml|ini|conf|tf|tfvars|hcl|properties|nginx|service)$/;
-const INFRA_FILENAME_RE = /(^|\/)(Dockerfile[^/]*|docker-compose[^/]*|Makefile|Caddyfile|Procfile|nginx\.conf|\.env\.[^/]*example[^/]*)$/i;
+// Anchored deliberately: `docker-compose[^/]*` also matched `docker-compose.env`
+// — the standard `env_file:` secrets file — and `.env.[^/]*example[^/]*` matched
+// `.env.example.bak`. Both would have pulled live credentials into retrieval.
+const INFRA_FILENAME_RE = /(^|\/)(Dockerfile(\.[A-Za-z0-9_-]+)?|docker-compose(\.[A-Za-z0-9_-]+)?\.ya?ml|Makefile|Caddyfile|Procfile|nginx\.conf|\.env\.example)$/i;
 const isReviewableRepoFile = (path: string): boolean => CODE_FILE_RE.test(path) || INFRA_FILENAME_RE.test(path);
 
 /**

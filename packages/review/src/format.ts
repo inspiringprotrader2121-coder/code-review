@@ -22,6 +22,11 @@ export interface ReviewCommentMeta {
   /** set ONLY when the PR was NOT fully reviewed — Orvex must never claim a clean
    *  "looks good to merge" when part of the change never reached the model. */
   coverage?: { reviewed: number; candidates: number; skippedByCap: number; truncatedFiles: number; omittedPatch?: number };
+  /** lens/pass names that did NOT complete (best-effort passes are allowed to fail
+   *  without aborting the review — but the review must SAY SO. A Verify badge that
+   *  reads "no issues found" while one of its promised reviewers never ran is a
+   *  false assurance the customer paid for.) */
+  skippedLenses?: string[];
 }
 
 const MAX_FILES_LISTED = 25;
@@ -73,6 +78,17 @@ export function formatReviewBody(
     lines.push(
       '',
       `> ⚠️ **Partial review — ${reviewed}/${candidates} changed files fully reviewed.** ${bits.join('; ')}. Findings below cover only the reviewed portion; this is NOT a full-PR sign-off. Split the PR or raise the limit to review the rest.`,
+    );
+  }
+
+  // Pass-level partial coverage: same honesty rule as the file-level banner above.
+  if (meta.skippedLenses && meta.skippedLenses.length > 0) {
+    const n = meta.skippedLenses.length;
+    lines.push(
+      '',
+      `> ⚠️ **${n} review pass${n === 1 ? '' : 'es'} did not complete** (${meta.skippedLenses.join(', ')}). ` +
+        `The findings below come from the passes that finished; this is NOT a full sign-off for the missing ` +
+        `lens${n === 1 ? '' : 'es'}. Re-run \`${meta.trigger ?? '@orvex'} review\` to retry.`,
     );
   }
 

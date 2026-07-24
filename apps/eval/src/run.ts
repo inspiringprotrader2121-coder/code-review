@@ -73,7 +73,7 @@ interface PassTarget {
  *  pass 2 DeepSeek's heavy reasoning with the deep-dive lens, pass 3 the
  *  standard model with the perf/completeness lens. A missing key falls back to
  *  the standard target for that pass, exactly like modelForPass does. */
-function passTargets(): Array<{ tag: string; target: PassTarget; focus?: string }> {
+function passTargets(): Array<{ tag: string; target: PassTarget; focus?: string; tier: ReviewFinding['sourceTier'] }> {
   const standard = llmEnv();
   const openaiKey = process.env.ORVEX_OPENAI_API_KEY;
   const openai: PassTarget | null = openaiKey
@@ -94,10 +94,12 @@ function passTargets(): Array<{ tag: string; target: PassTarget; focus?: string 
         reasoningEffort: process.env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
       }
     : null;
+  // tier mirrors modelForPass so the verifier's strong-reasoner rescue behaves
+  // identically; it degrades with the target when a key is missing.
   return [
-    { tag: 'general', target: openai ?? standard },
-    { tag: 'deep-dive', target: deepseek ?? standard, focus: DEEP_DIVE_FOCUS },
-    { tag: 'perf/completeness', target: standard, focus: THIRD_ANGLE_FOCUS },
+    { tag: 'general', target: openai ?? standard, tier: openai ? 'openai' : 'standard' },
+    { tag: 'deep-dive', target: deepseek ?? standard, focus: DEEP_DIVE_FOCUS, tier: deepseek ? 'deepseek' : 'standard' },
+    { tag: 'perf/completeness/api', target: standard, focus: THIRD_ANGLE_FOCUS, tier: 'standard' },
   ];
 }
 
@@ -114,10 +116,18 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   const { data: pr } = await octokit.rest.pulls.get({ owner: c.owner, repo: c.repo, pull_number: c.pr });
   const sha = pr.head.sha;
 
-  const files = await fetchPrDiff(octokit, ref, { maxFileBytes: 120_000, maxFiles: 40, headSha: sha });
+  // Match production (loadWorkerConfig defaults): 150 files / 300kB. At 40/120kB
+  // the ground-truth file could be silently dropped and scored as a miss.
+  const files = await fetchPrDiff(octokit, ref, {
+    maxFileBytes: Number(process.env.MAX_FILE_BYTES ?? 300_000),
+    maxFiles: Number(process.env.MAX_FILES ?? 150),
+    headSha: sha,
+  });
   const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
   const passes = passTargets();
-  if (reviewable.length === 0) return { findings: [], okPasses: passes.length, totalPasses: passes.length };
+  // No reviewable files => nothing was measured. Reporting okPasses=all made
+  // every case on this PR score as a genuine model miss.
+  if (reviewable.length === 0) return { findings: [], okPasses: 0, totalPasses: passes.length };
 
   let context;
   try {
@@ -128,6 +138,11 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
       maxRelated: Number(process.env.ORVEX_CTX_RELATED ?? 18),
       maxDependents: Number(process.env.ORVEX_CTX_DEPENDENTS ?? 12),
       maxFileBytes: Number(process.env.ORVEX_CTX_FILE_BYTES ?? 250_000),
+      // MUST be set: buildRepoContext defaults maxOthers to 0, so omitting it gave
+      // the model ZERO index-retrieved files while production passes
+      // plan.retrievalTopK (28). Every prior eval number was measured without the
+      // cross-file retrieval the pipeline actually ships.
+      maxOthers: Number(process.env.ORVEX_CTX_OTHERS ?? 28),
     });
   } catch {
     /* diff-only fallback */
@@ -147,6 +162,11 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
         context: p.focus ? { ...baseCtx, extraFocus: p.focus } : baseCtx,
       });
       const got = llmFindingsToReviewFindings(resp.findings);
+      // Production tags every finding with its tier, which the verifier's
+      // strong-reasoner rescue keys off (a hedged veto of an openai/deepseek
+      // finding is overridden). Without it that rescue never fires in eval and
+      // real findings are recorded as misses.
+      for (const f of got) f.sourceTier = p.tier;
       // The unparseable sentinel with zero findings is a DEGRADED pass, not a
       // clean empty review — do not count it as measured.
       const degraded = got.length === 0 && resp.summary === REVIEW_INCOMPLETE_SUMMARY;
@@ -174,7 +194,15 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
     : [];
   if (ctxFiles.length > 0 && findings.length > 0) {
     const std = llmEnv();
-    findings = (await verifyFindings(findings, ctxFiles, { ...std, prIntent: [pr.title, pr.body].filter(Boolean).join('\n\n') })).kept;
+    // strict: every plan sets deepVerify: true, so recall-mode verification
+    // measured a more permissive filter than ships.
+    findings = (
+      await verifyFindings(findings, ctxFiles, {
+        ...std,
+        strict: true,
+        prIntent: [pr.title, pr.body].filter(Boolean).join('\n\n'),
+      })
+    ).kept;
   }
   return { findings, okPasses, totalPasses: passes.length };
 }
@@ -227,6 +255,7 @@ async function main() {
   }
 
   let invalidCases = 0;
+  let degradedRuns = 0;
   for (const [key, group] of groups) {
     process.stdout.write(`▶ ${key} (${group.length} case${group.length === 1 ? '' : 's'}) …\n`);
     try {
@@ -236,6 +265,7 @@ async function main() {
       // cases are INVALID, not missed. The first bench170 run 404'd on every
       // call yet printed a tidy "recall 0/8"; a harness that can't distinguish
       // "model found nothing" from "model was never reached" lies.
+      if (okPasses > 0 && okPasses < totalPasses) degradedRuns++;
       if (okPasses === 0) {
         invalidCases += group.length;
         for (const c of group) console.log(`    🚫 ${c.name}: INVALID (no pass completed — excluded from recall)`);
@@ -264,14 +294,22 @@ async function main() {
   console.log('\n── summary ──');
   console.log(`recall:    ${recallHits}/${recallTotal} real bugs caught`);
   console.log(`precision: ${fpChecks - fp}/${fpChecks} noise checks passed (${fp} false positives)`);
-  if (invalidCases > 0) console.log(`⚠️ INVALID: ${invalidCases} case(s) not measured (harness/provider failure) — fix before trusting this run`);
+  if (degradedRuns > 0) {
+    console.log(`⚠️ ${degradedRuns} PR(s) ran with a DEGRADED pipeline (some passes failed) — recall understated`);
+  }
+  if (invalidCases > 0) {
+    console.log(`⚠️ INVALID: ${invalidCases} case(s) not measured (harness/provider failure) — fix before trusting this run`);
+    process.exitCode = 1;
+  }
   if (results.length === 0) {
     console.error('\nEVAL FAILED: zero cases were actually measured.');
     process.exitCode = 1;
   }
 }
 
-main().then(() => process.exit(0)).catch((e) => {
+// Preserve process.exitCode — `process.exit(0)` overrode the INVALID guard, so a
+// run where every case failed to execute still exited green.
+main().then(() => process.exit(process.exitCode ?? 0)).catch((e) => {
   console.error(e);
   process.exit(1);
 });

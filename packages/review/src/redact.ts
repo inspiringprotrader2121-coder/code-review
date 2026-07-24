@@ -65,6 +65,42 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
     pattern: /(hooks\.slack\.com\/services\/)[A-Za-z0-9/]+/g,
     replacement: '$1[REDACTED]',
   },
+
+  // ——— INFRA/CONFIG FILE SHAPES ———
+  // Retrieval now pulls UNCHANGED yaml/tfvars/properties/conf/k8s files into the
+  // prompt, and those hold credentials in shapes the rules above miss: the
+  // keyword must sit immediately before the separator, and the SCREAMING_SNAKE
+  // rule is uppercase-only. So `secret_key_base:`, `vault_db_pw:`,
+  // `mail.smtp.pass=` and space-delimited nginx directives all shipped in clear.
+  // Over-redaction is safe here; under-redaction sends a live credential to a
+  // third-party model.
+
+  // Lowercase / dotted / nested config keys: `secret_key_base: x`,
+  // `db.password = x`, `ldap.bind.pwd: x`, `redis_auth = x`, `admin_pass: x`.
+  {
+    pattern:
+      /([A-Za-z0-9_.-]*(?:secret|password|passwd|passphrase|pwd|_pw|\.pw|_auth|\.auth|apikey|api[_-]key|private[_-]key|access[_-]key|credential|_pass|\.pass)[A-Za-z0-9_.-]*)(\s*[:=]\s*)(['"]?)([^\s'"#;,}{]{6,})\3/gi,
+    replacement: '$1$2[REDACTED]',
+  },
+  // Kubernetes long-form env: `- name: DB_PASSWORD` then `value: <secret>` on the
+  // next line. Neither line matches on its own; the pairing is the signal.
+  {
+    pattern:
+      /(-\s*name:\s*[A-Za-z0-9_]*(?:SECRET|KEY|TOKEN|PASS|PWD|CRED|AUTH)[A-Za-z0-9_]*\s*[\r\n]+\s*value:\s*)(['"]?)([^\s'"\r\n]{4,})\2/gi,
+    replacement: '$1[REDACTED]',
+  },
+  // Space-delimited directives (nginx, Apache, systemd): every rule above needs a
+  // `:` or `=`, so `proxy_set_header X-Internal-Token abc123;` passed straight
+  // through. Require a long value so ordinary directives aren't touched.
+  {
+    pattern: /\b([A-Za-z0-9_-]*(?:token|secret|apikey|api[_-]key|password|passwd)[A-Za-z0-9_-]*)(\s+)([^\s;{}'"]{12,})(\s*;)/gi,
+    replacement: '$1$2[REDACTED]$4',
+  },
+  // Base64-wrapped PEM (k8s Secret `tls.key`, `ca.crt`): the ASCII-header rule
+  // can't see it. `LS0tLS1CRUdJTi` is base64("-----BEGIN").
+  { pattern: /\bLS0tLS1CRUdJTi[A-Za-z0-9+/=\s]{40,}/g, replacement: '[BASE64_PRIVATE_KEY_REDACTED]' },
+  // Sentry/webhook DSNs carry the key in the URL userinfo.
+  { pattern: /\bhttps?:\/\/[A-Za-z0-9]{16,}@[A-Za-z0-9.-]+\/[0-9]+/g, replacement: '[DSN_REDACTED]' },
 ];
 
 export function redactSecrets(text: string): string {

@@ -90,3 +90,30 @@ test('does NOT redact ordinary prose or short values', () => {
   const prose = 'The token is passed to the next function for validation.';
   assert.equal(redactSecrets(prose), prose, 'no assignment + short words → untouched');
 });
+
+test('infra/config credential shapes are redacted (retrieval now pulls these files)', () => {
+  const leaks: Array<[string, string]> = [
+    ['rails secrets.yml', 'secret_key_base: 3f7a9c2e8b1d4f6a0c5e7b9d2f4a6c8e'],
+    ['terraform tfvars', 'db_pw  = "Tr0ub4dor3xkcd"'],
+    ['k8s long-form env', '- name: DATABASE_PASSWORD\n  value: pgS3cretValue'],
+    ['k8s base64 PEM', 'tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JSUV2Z0lCQURBTkJna3Foa2lH'],
+    ['nginx directive', 'proxy_set_header X-Internal-Token 8f3a9c2e8b1d4f6a0c5e7b9d;'],
+    ['java properties', 'ldap.bind.pwd=SuperSecret123'],
+    ['redis auth', 'redis.auth=abc123def456'],
+    ['sentry dsn', 'SENTRY_DSN=https://9f8e7d6c5b4a3f2e1d0c9b8a@o12345.ingest.sentry.io/1234'],
+  ];
+  for (const [label, raw] of leaks) {
+    assert.match(redactSecrets(raw), /REDACTED/, `${label} must be redacted before reaching an LLM`);
+  }
+});
+
+test('redaction does not eat ordinary code or config', () => {
+  for (const clean of [
+    'const apiUrl = buildUrl(base)',
+    'replicas: 3',
+    'export function computePwStrength(input) { return score(input) }',
+    'import { getToken } from "./auth"',
+  ]) {
+    assert.equal(redactSecrets(clean), clean, `must not over-redact: ${clean}`);
+  }
+});

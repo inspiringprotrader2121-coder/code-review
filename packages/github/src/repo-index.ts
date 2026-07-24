@@ -22,7 +22,10 @@
 // is exactly the mechanism that surfaces those, but it was gated to code files.
 const CODE_FILE_RE =
   /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rb|php|java|cs|vue|svelte|sh|bash|sql|ya?ml|toml|ini|conf|tf|tfvars|hcl|properties|nginx|service)$/;
-const INFRA_FILENAME_RE = /(^|\/)(Dockerfile[^/]*|docker-compose[^/]*|Makefile|Caddyfile|Procfile|nginx\.conf|\.env\.[^/]*example[^/]*)$/i;
+// Anchored deliberately: `docker-compose[^/]*` also matched `docker-compose.env`
+// — the standard `env_file:` secrets file — and `.env.[^/]*example[^/]*` matched
+// `.env.example.bak`. Both would have pulled live credentials into retrieval.
+const INFRA_FILENAME_RE = /(^|\/)(Dockerfile(\.[A-Za-z0-9_-]+)?|docker-compose(\.[A-Za-z0-9_-]+)?\.ya?ml|Makefile|Caddyfile|Procfile|nginx\.conf|\.env\.example)$/i;
 const IDENT_RE = /[A-Za-z_][A-Za-z0-9_]{2,}/g;
 
 // Language keywords + ubiquitous names carry no relevance signal — they appear
