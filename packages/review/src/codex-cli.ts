@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch, redactSecrets } from './redact.js';
-import { extractJsonLoose } from './llm-client.js';
+import { extractJsonLoose, isRetryableRateLimit, parseRetryAfterMs } from './llm-client.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 import { normalizeLlmResponse } from './llm.js';
 
@@ -546,6 +546,38 @@ export async function runCodexCliReview(
     }
   };
 
+  // A per-minute TPM/RPM rate limit is RECOVERABLE by waiting — on a Tier-1
+  // OpenAI account an agentic pass (many calls, growing context) hits it
+  // routinely. Losing the whole agentic review to a limit that clears in ~60s
+  // was silently degrading Verify to a plain one-shot API call, so HOLD and
+  // retry instead. Wrapped around attemptOnHome so these waits don't consume
+  // the outer loop's auth-failover budget. Hard quota (402) is NOT retried.
+  const attemptWithRateLimitRetry = async (
+    hIdx: number,
+    tId: string | undefined,
+  ): Promise<{ text: string; threadId: string }> => {
+    const maxRetries = Math.max(1, Math.floor(Number(process.env.ORVEX_RATELIMIT_MAX_RETRIES ?? 4)));
+    const maxWaitMs = Math.max(1_000, Number(process.env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS ?? 90_000));
+    for (let i = 0; ; i++) {
+      try {
+        return await attemptOnHome(hIdx, tId);
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (i >= maxRetries - 1 || !isRetryableRateLimit(msg)) throw err;
+        // Honor the provider's advertised delay; otherwise back off toward the
+        // ~1-minute TPM window. Jitter keeps concurrent passes from colliding.
+        const advertised = parseRetryAfterMs(msg);
+        const backoff = Math.min(15_000 * 2 ** i, maxWaitMs);
+        const waitMs = Math.min((advertised ?? backoff) + Math.floor(Math.random() * 2_000), maxWaitMs);
+        console.warn(
+          `[codex-cli] rate-limited — holding ${Math.round(waitMs / 1000)}s then retrying ` +
+            `(attempt ${i + 1}/${maxRetries}): ${msg.slice(0, 120)}`,
+        );
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
+    }
+  };
+
   const stored = decodeThreadRef(opts.threadId);
   let homeIdx = pickHome(stored.homeIdx);
   // Resume only on the session's own home; any other home starts fresh.
@@ -554,7 +586,7 @@ export async function runCodexCliReview(
   let result: { text: string; threadId: string } | undefined;
   for (let attempts = 0; ; attempts++) {
     try {
-      result = await attemptOnHome(homeIdx, threadId);
+      result = await attemptWithRateLimitRetry(homeIdx, threadId);
       break;
     } catch (err) {
       const msg = (err as Error).message;
