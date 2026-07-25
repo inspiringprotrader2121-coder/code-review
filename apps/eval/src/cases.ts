@@ -12,11 +12,20 @@ export interface EvalCase {
   repo: string;
   pr: number;
   shouldFlag?: RegExp[];
-  /** Severity-aware recall: the pattern must match a finding rated AT LEAST
-   *  minSeverity — a P2 bug flagged as `info` does NOT count as caught (Codex
-   *  2026-07-16: text-only matching hid severity regressions). */
-  shouldFlagSevere?: Array<{ pattern: RegExp; minSeverity: 'P1' | 'P2' | 'P3' }>;
+  /** Severity-aware recall with optional FILE SCOPING. A P2 bug reported as
+   *  `info` does NOT count as caught — text-only matching hid severity
+   *  regressions. `file` is matched against
+   *  the finding's path SEPARATELY, so the path can no longer hand free tokens to
+   *  the content pattern (measured: `src/lib/redis.js` alone satisfied a
+   *  `redis.*end` pattern via the word "depends"). Patterns should carry the `s`
+   *  flag — model messages are multi-line, and a `.*` chain that can't cross a
+   *  newline fails on a correct description purely by paragraph break. */
+  shouldFlagSevere?: Array<{ pattern: RegExp; minSeverity: 'P1' | 'P2' | 'P3'; file?: RegExp }>;
   shouldNotFlag?: RegExp[];
+  /** Head SHA the case was hand-verified against. Ground truth is only true for a
+   *  specific commit: if the PR is pushed to, the bug can vanish from head and a
+   *  CORRECT review scores as a permanent miss with no signal. */
+  sha?: string;
   note?: string;
 }
 
@@ -170,49 +179,105 @@ export const CASES: EvalCase[] = [
   {
     name: 'bench170-logger-header-mutation',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 163,
-    shouldFlagSevere: [{ pattern: /logger.*(mutat|in.?place|modif).*(header|shared|caller)|(mutat|modif)\w*.*(err\.config|request headers|shared object)|scrub\w*.*in.?place/i, minSeverity: 'P2' }],
+    shouldFlagSevere: [
+      {
+        file: /logger/i,
+        pattern:
+          /^(?=[\s\S]*(serializeError|scrub|sanitiz|redact))(?=[\s\S]*(mutat|modif|rewrit|in[-\s]?place|rather than a copy|not a copy|reassign|overwrit))(?=[\s\S]*(header|err\.config|request (config|object)|shared object|caller|live request))/is,
+        minSeverity: 'P2',
+      },
+    ],
     note: 'greptile+coderabbit+codex consensus P1: serializeError/scrub mutates err.config.headers in place, corrupting the live request object.',
   },
   {
     name: 'bench170-mysql-root-host-widened',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 165,
-    shouldFlagSevere: [{ pattern: /MYSQL_ROOT_HOST|root.*(host|grant).*(widen|['"%]|any host|network)/i, minSeverity: 'P2' }],
+    shouldFlagSevere: [
+      {
+        file: /docker-compose|\.env|mysql/i,
+        pattern:
+          /^(?=[\s\S]*(MYSQL_ROOT_HOST|\broot\b))(?=[\s\S]*(%|wildcard|any host|anywhere|any peer|any container|data_net|widen))/is,
+        minSeverity: 'P2',
+      },
+    ],
     note: 'gitar+codex consensus P1: MYSQL_ROOT_HOST default widened localhost → % lets any data_net peer connect as root.',
   },
   {
     name: 'bench170-compose-api-migrations-parity',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 165,
-    shouldFlagSevere: [{ pattern: /RUN_STARTUP_MIGRATIONS.*(api|missing|also|service)|api service.*(missing|lacks).*migration/i, minSeverity: 'P2' }],
+    shouldFlagSevere: [
+      {
+        file: /docker-compose|k8s|deployment|compose/i,
+        pattern:
+          /^(?=[\s\S]*(RUN_STARTUP_MIGRATIONS|startup migration))(?=[\s\S]*\bapi\b)(?=[\s\S]*(missing|absent|not set|unset|omit|lacks|does not|only|parity|forgot))/is,
+        minSeverity: 'P2',
+      },
+    ],
     note: 'coderabbit+codex consensus P1: the api compose service is missing RUN_STARTUP_MIGRATIONS=false — service-parity bug, needs whole-file/sibling context.',
   },
   {
     name: 'bench170-provision-retry-stale-resources',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 167,
-    shouldFlagSevere: [{ pattern: /(stale|previous|earlier).*(attempt|retry).*(_?resources|payload|state)|_resources.*(leak|carr|persist).*(attempt|retry)|resumed? job.*(stale|inherit)/i, minSeverity: 'P2' }],
+    shouldFlagSevere: [
+      {
+        file: /tenantProvisioning/i,
+        pattern:
+          /^(?=[\s\S]*_resources)(?=[\s\S]*(stale|previous|prior|earlier|reused|re-used|carried|not reset|leak|inherit|persist))(?=[\s\S]*(retry|attempt|resume|re-?run))/is,
+        minSeverity: 'P2',
+      },
+    ],
     note: 'gitar+codex consensus P1: _executeProvisionJob retry reuses stale _resources from a prior attempt.',
   },
   {
     name: 'bench170-webhook-success-stays-pending',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 168,
-    shouldFlagSevere: [{ pattern: /(success|delivered).*(remain|stuck|stays|left).*(pending|queue)|completion update fail.*(pending|retry|redeliver)|(retry|pending) row.*(success|deliver)/i, minSeverity: 'P2' }],
+    shouldFlagSevere: [
+      {
+        file: /webhook/i,
+        pattern:
+          /^(?=[\s\S]*(pending|retry (row|record|queue|entry)|queued))(?=[\s\S]*(succe|delivered|2xx))(?=[\s\S]*(surviv|never (cleared|completed|resolved|removed)|stays?|remains?|left|duplicate|redeliver|not (cleared|removed)))/is,
+        minSeverity: 'P2',
+      },
+    ],
     note: 'greptile+qodo consensus P1: when delivery succeeds but the completion update fails, the pre-created retry row stays pending → duplicate delivery.',
   },
   {
     name: 'bench170-nginx-real-ip-spoof',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 170,
-    shouldFlagSevere: [{ pattern: /X-Real-IP|real.?ip.*(spoof|trust|forward|direct)|(spoof|forge).*client (ip|identity)/i, minSeverity: 'P2' }],
+    shouldFlagSevere: [
+      {
+        file: /nginx|\.conf$/i,
+        pattern:
+          /^(?=[\s\S]*(X-Real-IP|real_ip|realip))(?=[\s\S]*(spoof|forge|impersonat|untrusted|attacker|client[-\s]?(supplied|controlled|provided|sent)|bypass|trusts? (the )?client))/is,
+        minSeverity: 'P2',
+      },
+    ],
     note: 'greptile P1: the nginx map forwards client-supplied X-Real-IP when requests bypass the edge — identity spoofing.',
   },
   {
     name: 'bench170-redis-end-stays-unready',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 169,
-    shouldFlagSevere: [{ pattern: /redis.*(end|disconnect).*(unready|not recreated|stays|never)|client reference.*(clear|null).*(recreat|reconnect)/i, minSeverity: 'P2' }],
+    shouldFlagSevere: [
+      {
+        file: /redis|readiness/i,
+        pattern:
+          /^(?=[\s\S]*(['"`]end['"`]|\bend\b event|on\(\s*['"`]end|disconnect|connection closed|client\s*=\s*null))(?=[\s\S]*(never|nothing|not|no longer))(?=[\s\S]*(re-?creat|re-?connect|re-?initial|unready|stays? false|remains? false|forever))/is,
+        minSeverity: 'P2',
+      },
+    ],
     note: 'greptile P1: on Redis `end` the shared module clears the client and never recreates it — readiness stays failed forever.',
   },
   {
     name: 'bench170-inherited-slug-rollback',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 167,
-    shouldFlagSevere: [{ pattern: /(inherit|resumed?|earlier).*(slug|panelSlug).*(rollback|destr|delete)|panelSlug.*(stale|previous attempt)/i, minSeverity: 'P2' }],
+    shouldFlagSevere: [
+      {
+        file: /tenantProvisioning/i,
+        pattern:
+          /^(?=[\s\S]*panelSlug)(?=[\s\S]*(earlier|previous|prior|resumed?|inherit))(?=[\s\S]*(rollback|roll back|delet|destro|teardown|wrong panel|another panel))/is,
+        minSeverity: 'P2',
+      },
+    ],
     note: 'greptile P1: a resumed job initializes panelSlug from an earlier attempt, so an early failure can destructively roll back the wrong panel.',
   },
 ];

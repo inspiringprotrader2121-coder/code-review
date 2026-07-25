@@ -73,7 +73,13 @@ interface PassTarget {
  *  pass 2 DeepSeek's heavy reasoning with the deep-dive lens, pass 3 the
  *  standard model with the perf/completeness lens. A missing key falls back to
  *  the standard target for that pass, exactly like modelForPass does. */
-function passTargets(): Array<{ tag: string; target: PassTarget; focus?: string; tier: ReviewFinding['sourceTier'] }> {
+function passTargets(): Array<{
+  tag: string;
+  target: PassTarget;
+  focus?: string;
+  tier: ReviewFinding['sourceTier'];
+  bestEffort?: boolean;
+}> {
   const standard = llmEnv();
   const openaiKey = process.env.ORVEX_OPENAI_API_KEY;
   const openai: PassTarget | null = openaiKey
@@ -99,7 +105,8 @@ function passTargets(): Array<{ tag: string; target: PassTarget; focus?: string;
   return [
     { tag: 'general', target: openai ?? standard, tier: openai ? 'openai' : 'standard' },
     { tag: 'deep-dive', target: deepseek ?? standard, focus: DEEP_DIVE_FOCUS, tier: deepseek ? 'deepseek' : 'standard' },
-    { tag: 'perf/completeness/api', target: standard, focus: THIRD_ANGLE_FOCUS, tier: 'standard' },
+    // mirrors PASS_ANGLES[2].bestEffort in the pipeline — the only optional pass
+    { tag: 'perf/completeness/api', target: standard, focus: THIRD_ANGLE_FOCUS, tier: 'standard', bestEffort: true },
   ];
 }
 
@@ -108,6 +115,10 @@ interface PrReviewResult {
   /** passes that completed and produced a real (possibly empty) review */
   okPasses: number;
   totalPasses: number;
+  /** passes production treats as REQUIRED (it posts nothing if one fails) */
+  requiredPasses: number;
+  /** required passes that actually completed */
+  okRequired: number;
 }
 
 async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
@@ -127,7 +138,10 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   const passes = passTargets();
   // No reviewable files => nothing was measured. Reporting okPasses=all made
   // every case on this PR score as a genuine model miss.
-  if (reviewable.length === 0) return { findings: [], okPasses: 0, totalPasses: passes.length };
+  const requiredPasses = passes.filter((p) => !p.bestEffort).length;
+  if (reviewable.length === 0) {
+    return { findings: [], okPasses: 0, totalPasses: passes.length, requiredPasses, okRequired: 0 };
+  }
 
   let context;
   try {
@@ -155,6 +169,7 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   // the way the 9-at-once batch did in production.
   const accumulated: ReviewFinding[] = [];
   let okPasses = 0;
+  let okRequired = 0;
   for (const p of passes) {
     try {
       const resp = await runLlmReview(reviewFiles, {
@@ -170,7 +185,10 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
       // The unparseable sentinel with zero findings is a DEGRADED pass, not a
       // clean empty review — do not count it as measured.
       const degraded = got.length === 0 && resp.summary === REVIEW_INCOMPLETE_SUMMARY;
-      if (!degraded) okPasses++;
+      if (!degraded) {
+        okPasses++;
+        if (!p.bestEffort) okRequired++;
+      }
       console.log(`    pass(${p.tag}) [${p.target.model}]: +${got.length}${degraded ? ' (degraded)' : ''}`);
       accumulated.push(...got);
     } catch (err) {
@@ -204,12 +222,12 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
       })
     ).kept;
   }
-  return { findings, okPasses, totalPasses: passes.length };
+  return { findings, okPasses, totalPasses: passes.length, requiredPasses, okRequired };
 }
 
 const SEV_RANK: Record<string, number> = { P1: 3, P2: 2, P3: 1, info: 0 };
 
-function scoreCase(c: EvalCase, findings: ReviewFinding[]): CaseResult {
+function scoreCase(c: EvalCase, findings: ReviewFinding[], claimed?: Set<ReviewFinding>): CaseResult {
   const blob = findings.map((f) => `${f.severity} ${f.file} ${f.message}`).join('\n');
   const missing: string[] = [];
   let recallHits = 0;
@@ -220,11 +238,24 @@ function scoreCase(c: EvalCase, findings: ReviewFinding[]): CaseResult {
   // Severity-aware recall: the pattern must match a finding AT the required
   // severity or higher — a P2 bug reported as info is NOT a catch.
   for (const req of c.shouldFlagSevere ?? []) {
-    const hit = findings.some(
-      (f) => req.pattern.test(`${f.file} ${f.message}`) && (SEV_RANK[f.severity] ?? 0) >= SEV_RANK[req.minSeverity],
+    // Match the FILE separately from the message, so a path token can't satisfy
+    // a content pattern. Normalize whitespace so a multi-line model message
+    // doesn't fail a `.*` chain purely on where it wrapped.
+    // ONE-TO-ONE binding: a finding already credited to another case on this PR
+    // cannot be re-used, which previously let a single finding score 2/2.
+    const match = findings.find(
+      (f) =>
+        !claimed?.has(f) &&
+        (req.file ? req.file.test(f.file) : true) &&
+        req.pattern.test(`${f.file} ${f.message}`.replace(/\s+/g, ' ')) &&
+        (SEV_RANK[f.severity] ?? 0) >= SEV_RANK[req.minSeverity],
     );
-    if (hit) recallHits++;
-    else missing.push(`${req.pattern.source} @≥${req.minSeverity}`);
+    if (match) {
+      claimed?.add(match);
+      recallHits++;
+    } else {
+      missing.push(`${req.pattern.source} @≥${req.minSeverity}${req.file ? ` in ${req.file.source}` : ''}`);
+    }
   }
   const falsePos: string[] = [];
   for (const re of c.shouldNotFlag ?? []) {
@@ -259,20 +290,29 @@ async function main() {
   for (const [key, group] of groups) {
     process.stdout.write(`▶ ${key} (${group.length} case${group.length === 1 ? '' : 's'}) …\n`);
     try {
-      const { findings, okPasses, totalPasses } = await reviewPr(group[0]);
-      console.log(`  ${findings.length} findings (${okPasses}/${totalPasses} passes measured)`);
+      const { findings, okPasses, totalPasses, requiredPasses, okRequired } = await reviewPr(group[0]);
+      console.log(
+        `  ${findings.length} findings (${okPasses}/${totalPasses} passes, ${okRequired}/${requiredPasses} required)`,
+      );
       // GUARD: if NO pass produced a real review, nothing was measured — the
       // cases are INVALID, not missed. The first bench170 run 404'd on every
       // call yet printed a tidy "recall 0/8"; a harness that can't distinguish
       // "model found nothing" from "model was never reached" lies.
+      // Production treats passes 1-2 as REQUIRED and discards the whole review if
+      // either fails, so a run missing a core pass is a configuration production
+      // would never have posted — INVALID, not merely "degraded".
       if (okPasses > 0 && okPasses < totalPasses) degradedRuns++;
-      if (okPasses === 0) {
+      if (okRequired < requiredPasses) {
         invalidCases += group.length;
-        for (const c of group) console.log(`    🚫 ${c.name}: INVALID (no pass completed — excluded from recall)`);
+        for (const c of group) {
+          console.log(`    🚫 ${c.name}: INVALID (${okPasses}/${totalPasses} passes — a required pass failed; excluded from recall)`);
+        }
         continue;
       }
+      // One finding may satisfy at most ONE case per PR.
+      const claimed = new Set<ReviewFinding>();
       for (const c of group) {
-        const r = scoreCase(c, findings);
+        const r = scoreCase(c, findings, claimed);
         results.push(r);
         const parts: string[] = [];
         if (r.recallTotal) parts.push(`recall ${r.recallHits}/${r.recallTotal}`);

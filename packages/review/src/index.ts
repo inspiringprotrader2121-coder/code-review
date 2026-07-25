@@ -10,7 +10,7 @@ export {
   REVIEW_INCOMPLETE_SUMMARY,
   type LlmReviewOptions,
 } from './llm.js';
-export { runCodexCliReview, closeCodexSession, isCodexRepoAllowed, type CodexCliReviewOptions, type CodexCliReviewResult } from './codex-cli.js';
+export { runCodexCliReview, closeCodexSession, isCodexRepoAllowed, killAllCodexChildren, type CodexCliReviewOptions, type CodexCliReviewResult } from './codex-cli.js';
 export {
   type ReviewFinding,
   fingerprintFinding,

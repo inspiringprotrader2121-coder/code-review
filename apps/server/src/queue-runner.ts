@@ -7,7 +7,7 @@ import {
   getInstallationIdForRepo,
 } from '@orvex-review/github';
 import { TenantService } from '@orvex-review/tenants';
-import { isTransientLlmError } from '@orvex-review/review';
+import { isTransientLlmError, killAllCodexChildren } from '@orvex-review/review';
 import { processReviewJob, loadWorkerConfig } from './worker.js';
 
 // Live count of in-flight jobs, exposed on /ready so deploys can WAIT FOR IDLE
@@ -224,6 +224,18 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     }
     if (inFlight.size === 0) {
       return;
+    }
+    // Kill any in-flight codex agent BEFORE requeueing. codex children are
+    // spawned `detached` (own process group, so a timeout can kill their
+    // grandchildren), which also means they OUTLIVE this worker — every deploy
+    // would otherwise orphan an unsandboxed agent still running against a PR
+    // checkout, accumulating one per deploy with no one left to clean up its
+    // temp dirs.
+    try {
+      const killed = killAllCodexChildren();
+      if (killed > 0) console.log(`[worker] shutdown: killed ${killed} in-flight codex process group(s)`);
+    } catch (err) {
+      console.warn('[worker] shutdown: codex kill failed:', (err as Error).message);
     }
     let requeued = 0;
     let dropped = 0;

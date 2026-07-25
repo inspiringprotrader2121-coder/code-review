@@ -118,6 +118,28 @@ function finiteEnv(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Live codex children, so a worker shutdown can kill them. `detached: true`
+ *  puts each child in its own process group (needed to kill grandchildren on
+ *  timeout) but that ALSO means it survives the parent — every deploy would
+ *  otherwise orphan an unsandboxed agent still running against a PR checkout. */
+const liveCodexChildren = new Set<number>();
+
+/** Kill every in-flight codex process group. Called from the worker's shutdown
+ *  path so a deploy doesn't leave agents running. */
+export function killAllCodexChildren(): number {
+  let killed = 0;
+  for (const pid of liveCodexChildren) {
+    try {
+      process.kill(-pid, 'SIGKILL');
+      killed++;
+    } catch {
+      /* already gone */
+    }
+  }
+  liveCodexChildren.clear();
+  return killed;
+}
+
 function codexBinary(): string {
   return process.env.ORVEX_CODEX_CLI_PATH ?? 'codex';
 }
@@ -403,6 +425,8 @@ async function runCodexExec(
       });
     }, hardMs);
 
+    if (child.pid !== undefined) liveCodexChildren.add(child.pid);
+
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -468,6 +492,7 @@ async function runCodexExec(
     });
 
     function cleanup() {
+      if (child.pid !== undefined) liveCodexChildren.delete(child.pid);
       try {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       } catch {
@@ -625,6 +650,12 @@ export async function runCodexCliReview(
   ): Promise<{ text: string; threadId: string }> => {
     const maxRetries = Math.max(1, Math.floor(finiteEnv(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4)));
     const maxWaitMs = Math.max(1_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS, 90_000));
+    // Total sleep budget for this review's codex pass. llmChat got one; this loop
+    // did not, yet each attempt here re-runs a FULL agentic pass (~30 min cap), so
+    // unbounded retrying is what actually holds a worker slot long enough to
+    // outlive the queue's 2h lease and let a second worker duplicate the review.
+    const totalWaitBudgetMs = Math.max(5_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_TOTAL_WAIT_MS, 180_000));
+    let sleptMs = 0;
     for (let i = 0; ; i++) {
       try {
         return await attemptOnHome(hIdx, tId);
@@ -634,8 +665,25 @@ export async function runCodexCliReview(
         // Honor the provider's advertised delay; otherwise back off toward the
         // ~1-minute TPM window. Jitter keeps concurrent passes from colliding.
         const advertised = parseRetryAfterMs(msg);
+        // An advertised window longer than we'll ever wait can't be waited out —
+        // retrying into it just burns another full agentic pass. Fail fast.
+        if (advertised !== undefined && advertised > maxWaitMs) {
+          console.warn(
+            `[codex-cli] rate-limit window ${Math.round(advertised / 1000)}s exceeds max wait ` +
+              `${Math.round(maxWaitMs / 1000)}s — failing fast rather than re-running the agentic pass`,
+          );
+          throw err;
+        }
         const backoff = Math.min(15_000 * 2 ** i, maxWaitMs);
         const waitMs = Math.min((advertised ?? backoff) + Math.floor(Math.random() * 2_000), maxWaitMs);
+        if (sleptMs + waitMs > totalWaitBudgetMs) {
+          console.warn(
+            `[codex-cli] rate-limit wait budget exhausted (${Math.round(sleptMs / 1000)}s of ` +
+              `${Math.round(totalWaitBudgetMs / 1000)}s) — failing so the job requeues instead of holding a slot`,
+          );
+          throw err;
+        }
+        sleptMs += waitMs;
         console.warn(
           `[codex-cli] rate-limited — holding ${Math.round(waitMs / 1000)}s then retrying ` +
             `(attempt ${i + 1}/${maxRetries}): ${msg.slice(0, 120)}`,

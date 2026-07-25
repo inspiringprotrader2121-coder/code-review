@@ -111,7 +111,12 @@ export function formatReviewBody(
       '',
       meta.coverage
         ? '✅ **No issues found in the reviewed files.** Note the partial-coverage warning above — the un-reviewed files were NOT checked, so this is not a full sign-off.'
-        : '✅ **No issues found.** Nothing in this change looked unsafe or incorrect on this pass — it looks good to merge.',
+        : meta.skippedLenses && meta.skippedLenses.length > 0
+          ? // A pass that never ran cannot vouch for what it would have found, so
+            // this must NOT read as a clean bill of health. Previously the banner
+            // above was immediately contradicted by "it looks good to merge".
+            '✅ **No issues found by the passes that completed.** One or more review passes did not finish (see the warning above), so this is NOT a full sign-off — re-run to cover the missing lens.'
+          : '✅ **No issues found.** Nothing in this change looked unsafe or incorrect on this pass — it looks good to merge.',
     );
   } else if (tableFindings.length === 0 && nitpicks.length > 0 && !hasStillOpen) {
     lines.push('', `✅ **No blocking issues.** Just ${nitpicks.length} low-severity ${nitpicks.length === 1 ? 'note' : 'notes'}, folded below.`);
