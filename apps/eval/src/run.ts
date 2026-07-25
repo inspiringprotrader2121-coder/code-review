@@ -125,7 +125,14 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   const octokit = await createBenchmarkOctokit(c.owner, c.repo);
   const ref = { owner: c.owner, repo: c.repo, number: c.pr };
   const { data: pr } = await octokit.rest.pulls.get({ owner: c.owner, repo: c.repo, pull_number: c.pr });
-  const sha = pr.head.sha;
+  // Ground truth is only true for the commit it was verified against. These PRs
+  // are live and get pushed to — and those pushes are FIXES for the very bugs
+  // the cases assert, so reviewing head would score a correct reviewer as
+  // missing everything, forever, with no signal that anything was wrong.
+  const sha = c.sha ?? pr.head.sha;
+  if (c.sha && !pr.head.sha.startsWith(c.sha)) {
+    console.log(`    ↩ pinned to ${c.sha} (head has moved to ${pr.head.sha.slice(0, 7)})`);
+  }
 
   // Match production (loadWorkerConfig defaults): 150 files / 300kB. At 40/120kB
   // the ground-truth file could be silently dropped and scored as a miss.

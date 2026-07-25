@@ -178,6 +178,7 @@ export const CASES: EvalCase[] = [
   //  These are the permanent regression set for high-severity recall.)
   {
     name: 'bench170-logger-header-mutation',
+    sha: '3a37fb5',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 163,
     shouldFlagSevere: [
       {
@@ -191,6 +192,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-mysql-root-host-widened',
+    sha: '2111b11',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 165,
     shouldFlagSevere: [
       {
@@ -204,6 +206,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-compose-api-migrations-parity',
+    sha: '2111b11',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 165,
     shouldFlagSevere: [
       {
@@ -217,6 +220,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-provision-retry-stale-resources',
+    sha: '2e06339',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 167,
     shouldFlagSevere: [
       {
@@ -230,6 +234,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-webhook-success-stays-pending',
+    sha: '42d731c',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 168,
     shouldFlagSevere: [
       {
@@ -243,6 +248,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-nginx-real-ip-spoof',
+    sha: 'f4d7631',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 170,
     shouldFlagSevere: [
       {
@@ -256,6 +262,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-redis-end-stays-unready',
+    sha: '0e7cbcc',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 169,
     shouldFlagSevere: [
       {
@@ -269,6 +276,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-inherited-slug-rollback',
+    sha: '2e06339',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 167,
     shouldFlagSevere: [
       {
