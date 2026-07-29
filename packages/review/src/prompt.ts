@@ -92,6 +92,73 @@ export function loadOrvexRules(): string {
   return DEFAULT_RULES;
 }
 
+/**
+ * FILE-TYPE RULES — targeted checklists injected only when a matching file is in
+ * the diff, instead of shipping every rule to every review.
+ *
+ * The universal rules are ~2.8k tokens and previously went out identically
+ * whether the model was reviewing a React component or a Dockerfile. Most of it
+ * was irrelevant to any given file, and irrelevant instructions dilute attention
+ * as well as costing tokens. Splitting lets each rule set be MORE specific
+ * (infra/CI checks that would be noise in the universal core) while the prompt
+ * stays smaller for the common case.
+ *
+ * Order matters only for determinism; each doc is included at most once.
+ */
+const FILE_RULE_GLOBS: Array<{ doc: string; test: (path: string) => boolean }> = [
+  {
+    doc: 'migrations',
+    test: (p) => /(^|\/)migrations?\//i.test(p) || /\.sql$/i.test(p) || /schema\.(prisma|sql)$/i.test(p),
+  },
+  {
+    doc: 'javascript',
+    test: (p) => /\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(p) || /(^|\/)package\.json$/i.test(p),
+  },
+  {
+    doc: 'infra',
+    test: (p) =>
+      /(^|\/)(docker-compose|compose)[^/]*\.ya?ml$/i.test(p) ||
+      /(^|\/)Dockerfile([.-][\w.-]+)?$/i.test(p) ||
+      /(^|\/)(k8s|kubernetes|helm|charts|deploy|manifests)\//i.test(p) ||
+      /\.(tf|tfvars|hcl)$/i.test(p) ||
+      /(^|\/)nginx[^/]*\.conf$/i.test(p) ||
+      /(^|\/)(Caddyfile|Procfile)$/i.test(p),
+  },
+  {
+    doc: 'workflows',
+    test: (p) => /(^|\/)\.github\/workflows\//i.test(p) || /(^|\/)\.gitlab-ci\.ya?ml$/i.test(p),
+  },
+];
+
+function readFileRuleDoc(name: string): string | null {
+  const candidates = [
+    path.resolve(process.cwd(), `rules/file-rules/${name}.md`),
+    path.resolve(__dirname, `../../../rules/file-rules/${name}.md`),
+  ];
+  for (const file of candidates) {
+    if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8').trim();
+  }
+  return null;
+}
+
+/**
+ * The file-type rule docs matching any changed file, concatenated. Empty string
+ * when nothing matches — a plain code change pays nothing for infra/CI rules.
+ */
+export function fileRulesFor(paths: string[]): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const { doc, test } of FILE_RULE_GLOBS) {
+    if (seen.has(doc)) continue;
+    if (!paths.some((p) => test(p))) continue;
+    const body = readFileRuleDoc(doc);
+    if (!body) continue;
+    seen.add(doc);
+    out.push(body);
+  }
+  return out.join('\n\n');
+}
+
 export interface ReviewPromptContext {
   /** PR title — the author's stated intent */
   prTitle?: string;
@@ -246,6 +313,23 @@ export function buildUserPrompt(
   }
 
   // The per-pass lens instruction goes LAST — see the prompt-caching note above.
+  // File-type rules go BEFORE extraFocus but AFTER the diff/context: they are
+  // stable for a given PR (same changed files on every pass), so they stay
+  // inside the cacheable prefix while the per-pass lens remains the only
+  // varying tail.
+  const fileRules = fileRulesFor(files.map((f) => f.filename));
+  if (fileRules) {
+    parts.push(
+      '',
+      '## Rules for the file types in this change',
+      '',
+      'These apply IN ADDITION to the general rules — they are included because',
+      'this diff touches files of these kinds.',
+      '',
+      fileRules,
+    );
+  }
+
   if (context?.extraFocus) {
     parts.push('', context.extraFocus);
   }
