@@ -148,22 +148,42 @@ function premiumTarget(config: WorkerConfig): LlmTarget {
  *  - 'openai'   → the OpenAI reasoning model (gpt-5.x/Luna) on every pass.
  *  - 'hybrid'   → pass 1 (general) on MiniMax, pass 2+ (deep-dive) on GLM-5.2.
  *  - 'standard' → MiniMax on every pass.  'premium' → GLM on every pass. */
+/**
+ * Can this review run the AGENTIC path (codex CLI with a repo checkout) instead
+ * of a one-shot API call? This is the ONLY place the question is answered.
+ *
+ * All three conditions are load-bearing:
+ *  1. the feature flag is on;
+ *  2. the plan designates an OpenAI-model pass 1 (other tiers were never
+ *     designed for it, and shouldn't get CLI-routed by accident);
+ *  3. the repo is ALLOWLISTED. codex runs with
+ *     `--dangerously-bypass-approvals-and-sandbox` — a real shell as this OS
+ *     user with filesystem and network access, against attacker-authored PR
+ *     code. This is a security boundary, not a preference. Unset = no repo.
+ */
+export function canRunAgentic(plan: { modelTier?: ModelTier }, repoId: string): boolean {
+  return (
+    process.env.ORVEX_CODEX_CLI === '1' &&
+    (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model') &&
+    isCodexRepoAllowed(repoId)
+  );
+}
+
 export function modelForPass(
   config: WorkerConfig,
   plan: { modelTier?: ModelTier },
   passIndex: number,
-  /** `codexRoutable` = the codex CLI can ACTUALLY run for this repo (flag on AND
-   *  repo allowlisted). `codexCliModel` is a STUB target — `apiKey: ''`, no
-   *  baseUrl, no api — usable only through the CLI, which authenticates via
+  /** Pass `canRunAgentic(...)`. `codexCliModel` is a STUB target (`apiKey: ''`,
+   *  no baseUrl) usable ONLY through the CLI, which authenticates via
    *  CODEX_HOME. Selecting it when the CLI won't run sends pass 1 down the plain
-   *  HTTP path with an empty key: it resolves to the Anthropic client, 401s, and
-   *  since pass 1 is a REQUIRED pass the whole review aborts and posts nothing.
-   *  Defaults to false so a caller that doesn't know can never trip that. */
-  opts?: { codexRoutable?: boolean },
+   *  HTTP path with an empty key — it resolves to the Anthropic client, 401s,
+   *  and since pass 1 is required the whole review aborts. Defaults to false so
+   *  a caller that doesn't know can never trip that. */
+  agentic = false,
 ): { target: LlmTarget; tier: PassTier } {
   if (plan.modelTier === 'codex-hybrid') {
     // general → codex (CLI if enabled, else paid API); deep-dive + further passes → MiniMax
-    if (passIndex === 0 && config.codexCliModel && opts?.codexRoutable) {
+    if (passIndex === 0 && config.codexCliModel && agentic) {
       return { target: config.codexCliModel, tier: 'openai' };
     }
     if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
@@ -176,7 +196,7 @@ export function modelForPass(
     // model, but with real repo-exploration tool calls (rg/cat/git diff)
     // instead of a single-shot call — the repo-sweep capability, without any
     // OAuth session fragility since API keys don't expire/rotate/get revoked.
-    if (passIndex === 0 && config.codexCliModel && opts?.codexRoutable) {
+    if (passIndex === 0 && config.codexCliModel && agentic) {
       return { target: config.codexCliModel, tier: 'openai' };
     }
     if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
@@ -906,7 +926,15 @@ async function executeReview(
 
     type ReviewCall = {
       label: string;
-      kind: 'pass' | 'sweep' | 'codex-cli';
+      /** WHAT this call is. 'pass' = a named review lens that the abort gate
+       *  cares about; 'sweep' = a breadth batch over extra repo files. */
+      kind: 'pass' | 'sweep';
+      /** HOW it executes — orthogonal to `kind`. 'agentic' runs the codex CLI
+       *  with a real repo checkout and shell tools; 'api' is a single-shot
+       *  HTTPS call. These were previously conflated into one `kind` field
+       *  ('codex-cli'), which forced a coercion back to 'pass' at every return
+       *  site and made a failed agentic SWEEP count as a failed required PASS. */
+      mode: 'agentic' | 'api';
       ctx: typeof baseCtx;
       target: LlmTarget;
       tier: PassTier;
@@ -916,30 +944,14 @@ async function executeReview(
       // completed. The core general + deep-dive reasoners remain required.
       bestEffort?: boolean;
     };
-    // When ORVEX_CODEX_CLI=1, route the OpenAI-tier pass through the local
-    // `codex` CLI (API-key auth — see codexCliModel in loadWorkerConfig)
-    // instead of a plain single-shot /v1/responses call, for real repo
-    // exploration (rg/cat/git diff tool calls). SCOPED to the tiers actually
-    // designed to use it — an allowlist, not "any pass that happens to be
-    // tier 'openai'", so a future tier can't get silently CLI-routed by accident.
-    // The allowlist gates whether codex RUNS AT ALL — not merely whether it gets a
-    // repo checkout. codex executes with `--dangerously-bypass-approvals-and-sandbox`
-    // (a real shell as this OS user, with filesystem + network access), so routing a
-    // third-party tenant's PR through it on the strength of their PLAN TIER alone was
-    // an RCE surface: every multi-model/Verify customer would have run unsandboxed
-    // against attacker-authored PR content. Repo allowlist is the trust boundary.
-    const useCodexCli =
-      process.env.ORVEX_CODEX_CLI === '1' &&
-      (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model') &&
-      isCodexRepoAllowed(`${owner}/${repo}`);
-    // Check out the repo (read-only) so codex can sweep the whole codebase, not
-    // just the diff. Only when codex-cli is the pass-1 model for this plan AND
-    // the repo is on the first-party allowlist (ORVEX_CODEX_CLI_REPOS) — codex
-    // runs unsandboxed, so sweeping arbitrary third-party repos is an RCE surface.
-    const codexRepoDir =
-      useCodexCli && modelForPass(config, plan, 0, { codexRoutable: true }).tier === 'openai'
-        ? await checkoutRepoForCodex(octokit, owner, repo, effectiveSha)
-        : null;
+    // ONE answer to "does this review run agentically?", used by every site
+    // below. Previously this decision was re-derived in five places with subtly
+    // different conditions, which is how the pass-1 routing bug got in.
+    const useCodexCli = canRunAgentic(plan, `${owner}/${repo}`);
+    // Read-only checkout so codex can explore the whole repo, not just the diff.
+    const codexRepoDir = useCodexCli
+      ? await checkoutRepoForCodex(octokit, owner, repo, effectiveSha)
+      : null;
     if (codexRepoDir) console.log(`[worker] codex repo sweep: checked out ${owner}/${repo}@${effectiveSha.slice(0, 7)}`);
     // `@orvex deep` (paid plans): two EXTRA lenses beyond the standard three,
     // unioned into the same review — deliberately different angles, not reruns.
@@ -964,11 +976,12 @@ async function executeReview(
 
     const reviewCalls: ReviewCall[] = [];
     for (let p = 0; p < passes; p++) {
-      const { target, tier } = modelForPass(config, plan, p, { codexRoutable: useCodexCli });
+      const { target, tier } = modelForPass(config, plan, p, useCodexCli);
       const angle = PASS_ANGLES[Math.min(p, PASS_ANGLES.length - 1)];
       reviewCalls.push({
         label: `pass ${p + 1}/${totalPasses} (${angle.tag}) [${target.model}]`,
-        kind: useCodexCli && tier === 'openai' ? 'codex-cli' : 'pass',
+        kind: 'pass',
+        mode: useCodexCli && tier === 'openai' ? 'agentic' : 'api',
         ctx: angle.focus ? { ...passCtx, extraFocus: angle.focus } : passCtx,
         target,
         tier,
@@ -977,10 +990,11 @@ async function executeReview(
     }
     for (const [i, extra] of DEEP_EXTRA_ANGLES.entries()) {
       // deep extras always take the plain API path, so codex is never routable here
-      const { target, tier } = modelForPass(config, plan, extra.modelIdx, { codexRoutable: false });
+      const { target, tier } = modelForPass(config, plan, extra.modelIdx, false);
       reviewCalls.push({
         label: `pass ${passes + i + 1}/${totalPasses} (${extra.tag}) [${target.model}]`,
-        kind: 'pass', // deep extras always use the plain API path, never codex CLI
+        kind: 'pass',
+        mode: 'api',
         ctx: { ...passCtx, extraFocus: extra.focus },
         target,
         tier,
@@ -994,7 +1008,7 @@ async function executeReview(
     const sweepSource = plan.repoSweep ? (reviewContext?.others ?? []).slice(plan.retrievalTopK) : [];
     if (sweepSource.length > 0) {
       // P3-7: sweep cost tier must derive from the plan, not be hard-coded premium.
-      const sweepModel = modelForPass(config, plan, 0, { codexRoutable: useCodexCli });
+      const sweepModel = modelForPass(config, plan, 0, useCodexCli);
       const budget = Number(process.env.ORVEX_MAX_OTHER_CHARS ?? 45_000) - 2_000;
       // Read a meaningful chunk of each swept file (deeper than a skim) so the
       // Verify sweep is thorough, not just broad. ~4 files/batch at this size.
@@ -1006,7 +1020,8 @@ async function executeReview(
         const files = batch;
         reviewCalls.push({
           label: `sweep (${files.length}f)`,
-          kind: useCodexCli && sweepModel.tier === 'openai' ? 'codex-cli' : 'sweep',
+          kind: 'sweep',
+          mode: useCodexCli && sweepModel.tier === 'openai' ? 'agentic' : 'api',
           ctx: { ...baseCtx, related: [], dependents: [], others: files },
           target: sweepModel.target,
           tier: sweepModel.tier,
@@ -1061,12 +1076,17 @@ async function executeReview(
       label?: string;
     };
 
-    const runSingleCall = async (call: (typeof toRun)[number]): Promise<Outcome> => {
+    /** What ONE call produced. `kind`/`bestEffort`/`label` are attached by
+     *  runOne from the ReviewCall itself — this function only reports outcome,
+     *  so no return site can misdescribe what the call WAS. */
+    type CallResult = Omit<Outcome, 'kind' | 'bestEffort' | 'label'>;
+
+    const runSingleCall = async (call: (typeof toRun)[number]): Promise<CallResult> => {
       if (prClosedMidRun) {
-        return { ok: false, transient: false, degraded: false, summary: undefined, findings: [], kind: 'pass' };
+        return { ok: false, transient: false, degraded: false, summary: undefined, findings: [] };
       }
       try {
-        if (call.kind === 'codex-cli') {
+        if (call.mode === 'agentic') {
           try {
             const { response, threadId } = await runCodexCliReview(filesForLlm, {
               threadId: codexThreadId,
@@ -1084,7 +1104,7 @@ async function executeReview(
             for (const f of got) f.sourceTier = call.tier; // codex findings → protected in verification
             const degraded = got.length === 0 && response.summary === REVIEW_INCOMPLETE_SUMMARY;
             console.log(`[worker] ${call.label}: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
-            return { ok: !degraded, transient: false, degraded, summary: response.summary, findings: got, kind: 'pass' };
+            return { ok: !degraded, transient: false, degraded, summary: response.summary, findings: got };
           } catch (err) {
             const msg = (err as Error).message;
             // FALLBACK CHAIN on a codex CLI failure (mechanical — spawn/sandbox
@@ -1102,7 +1122,7 @@ async function executeReview(
                 for (const f of got) f.sourceTier = 'openai';
                 const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
                 console.log(`[worker] ${call.label} [api-fallback]: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
-                return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got, kind: 'pass' };
+                return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got };
               } catch (apiErr) {
                 console.error(`[worker] ${call.label} plain API fallback also failed: ${(apiErr as Error).message.slice(0, 140)}`);
               }
@@ -1118,7 +1138,7 @@ async function executeReview(
             for (const f of got) f.sourceTier = 'deepseek';
             const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
             console.log(`[worker] ${call.label} [deepseek-fallback]: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
-            return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got, kind: 'pass' };
+            return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got };
           }
         }
 
@@ -1130,7 +1150,7 @@ async function executeReview(
         // review fails/retries instead of posting a contradictory clean pass.
         const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
         console.log(`[worker] ${call.label}: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
-        return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got, kind: call.kind };
+        return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got };
       } catch (err) {
         const msg = (err as Error).message;
         console.warn(`[worker] ${call.label} failed:`, msg);
@@ -1140,21 +1160,23 @@ async function executeReview(
           degraded: false,
           summary: undefined,
           findings: [],
-          kind: call.kind === 'codex-cli' ? 'pass' : call.kind,
         };
       }
     };
 
     let outcomes: Outcome[];
     try {
-      // Codex CLI calls share a session per PR and must run sequentially (resuming
-      // the same thread from the previous call). API calls can still run in parallel.
-      const cliCalls = toRun.filter((c) => c.kind === 'codex-cli');
-      const apiCalls = toRun.filter((c) => c.kind !== 'codex-cli');
-      // Attach each call's best-effort flag onto its outcome (runSingleCall has
-      // many return sites; wrapping here keeps the flag in exactly one place).
+      // Agentic calls share one codex session per PR, so they must run
+      // sequentially (each resumes the previous thread). API calls parallelize.
+      const cliCalls = toRun.filter((c) => c.mode === 'agentic');
+      const apiCalls = toRun.filter((c) => c.mode === 'api');
+      // Describe the outcome from the CALL, in exactly one place. Previously
+      // `kind` was recomputed at every return site inside runSingleCall and
+      // coerced ('codex-cli' -> 'pass'), which made a failed agentic SWEEP look
+      // like a failed required PASS and abort the whole review.
       const runOne = async (call: (typeof toRun)[number]): Promise<Outcome> => ({
         ...(await runSingleCall(call)),
+        kind: call.kind,
         bestEffort: call.bestEffort ?? false,
         label: call.label,
       });

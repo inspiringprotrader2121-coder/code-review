@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveReviewConfig, modelForPass, type WorkerConfig } from './pipeline.js';
+import { canRunAgentic, effectiveReviewConfig, modelForPass, type WorkerConfig } from './pipeline.js';
 import { isHedgedRejection } from '@orvex-review/review';
 
 function modelRoutingConfig(): WorkerConfig {
@@ -81,4 +81,51 @@ test('Verify routes its first pass to the direct OpenAI Luna target', () => {
   assert.equal(thirdPass.tier, 'standard');
   assert.equal(thirdPass.target.model, 'MiniMax-M3');
   assert.equal(thirdPass.target.api, 'anthropic');
+});
+
+test('canRunAgentic: all three conditions are load-bearing', (t) => {
+  const prev = { flag: process.env.ORVEX_CODEX_CLI, repos: process.env.ORVEX_CODEX_CLI_REPOS };
+  t.after(() => {
+    if (prev.flag === undefined) delete process.env.ORVEX_CODEX_CLI;
+    else process.env.ORVEX_CODEX_CLI = prev.flag;
+    if (prev.repos === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
+    else process.env.ORVEX_CODEX_CLI_REPOS = prev.repos;
+  });
+
+  process.env.ORVEX_CODEX_CLI = '1';
+  process.env.ORVEX_CODEX_CLI_REPOS = 'acme/api';
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), true);
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'ACME/API'), true, 'allowlist is case-insensitive');
+
+  // 3. repo NOT allowlisted — codex runs an unsandboxed shell, so this is a
+  //    security boundary. A third-party tenant must never reach it on plan alone.
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'evil/repo'), false);
+  // 2. wrong tier
+  assert.equal(canRunAgentic({ modelTier: 'standard' }, 'acme/api'), false);
+  // 1. flag off
+  process.env.ORVEX_CODEX_CLI = '0';
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), false);
+  // fail-closed when the allowlist is unset entirely
+  process.env.ORVEX_CODEX_CLI = '1';
+  delete process.env.ORVEX_CODEX_CLI_REPOS;
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), false, 'unset allowlist = never');
+});
+
+test('modelForPass never hands back the CLI stub when codex cannot run', () => {
+  // The stub has apiKey:'' and no baseUrl — on the plain HTTP path it resolves
+  // to the Anthropic client and 401s. Pass 1 is required, so that aborted every
+  // review on the affected tiers.
+  const config = {
+    codexCliModel: { apiKey: '', model: 'gpt-5.6-luna' },
+    openaiModel: { apiKey: 'k', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-luna' },
+    standardModel: { apiKey: 's', baseUrl: 'https://x/v1', model: 'MiniMax-M3' },
+    deepseekModel: null,
+  } as unknown as WorkerConfig;
+
+  const notAgentic = modelForPass(config, { modelTier: 'multi-model' }, 0, false);
+  assert.equal(notAgentic.target.apiKey, 'k', 'falls through to the real API target');
+  assert.equal(modelForPass(config, { modelTier: 'multi-model' }, 0).target.apiKey, 'k', 'defaults to non-agentic');
+
+  const agentic = modelForPass(config, { modelTier: 'multi-model' }, 0, true);
+  assert.equal(agentic.target.apiKey, '', 'the CLI stub is only selected when codex will actually run');
 });
