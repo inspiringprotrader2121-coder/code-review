@@ -367,8 +367,13 @@ const STANDARD_COST_OUT = Number(process.env.ORVEX_STANDARD_COST_OUTPUT_PER_M ??
 // OpenAI reasoning models bill reasoning tokens as output. Default is Luna's
 // confirmed launch pricing ($1 / $6 per 1M in/out) — override via env if the
 // configured ORVEX_OPENAI_MODEL is priced differently.
-const OPENAI_COST_IN = Number(process.env.ORVEX_OPENAI_COST_INPUT_PER_M ?? 1);
-const OPENAI_COST_OUT = Number(process.env.ORVEX_OPENAI_COST_OUTPUT_PER_M ?? 6);
+// gpt-5.6-luna list price as of 2026-07: $0.20 in / $1.20 out per 1M
+// (cached input $0.10). The previous $1/$6 defaults were the pre-cut rates and
+// OVERSTATED every OpenAI-tier review by ~5x — the dashboard cost tile,
+// sumAccountCost, and any spend alerting were all wrong in the same direction.
+// Reasoning tokens bill as OUTPUT, which is why the output rate dominates here.
+const OPENAI_COST_IN = Number(process.env.ORVEX_OPENAI_COST_INPUT_PER_M ?? 0.2);
+const OPENAI_COST_OUT = Number(process.env.ORVEX_OPENAI_COST_OUTPUT_PER_M ?? 1.2);
 // DeepSeek (reasoning-heavy, cheap) — placeholder rate, override once billed usage confirms it.
 const DEEPSEEK_COST_IN = Number(process.env.ORVEX_DEEPSEEK_COST_INPUT_PER_M ?? 0.55);
 const DEEPSEEK_COST_OUT = Number(process.env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M ?? 2.19);
