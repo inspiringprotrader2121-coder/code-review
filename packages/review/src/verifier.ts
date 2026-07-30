@@ -447,3 +447,19 @@ export async function verifyFixes(
     };
   }
 }
+
+/**
+ * TIER-RESCUE GATE (reason-based): the verification pass runs on a cheaper
+ * model, so its veto of a strong-reasoner finding is only trusted when it
+ * FACTUALLY REFUTES the finding against the code. Hedged / low-information
+ * rejections — "cannot verify", "not enough context", "validated elsewhere" —
+ * are exactly the failure mode the protected-tier rescue exists for, and those
+ * get rescued. A concrete refutation (states what the code actually does, and
+ * why the claim is wrong) stands even against a protected tier.
+ */
+export function isHedgedRejection(reason: string): boolean {
+  const r = reason.toLowerCase();
+  return /cannot (?:independently )?(?:verify|confirm|re-derive|reproduce|determine)|can'?t (?:verify|confirm)|insufficient|not enough (?:context|evidence|information)|lack(?:s|ing)? (?:of )?(?:context|evidence|information)|no evidence|unclear|uncertain|unable to|unverifiable|not enough information|could not (?:verify|confirm|find)|(?:validated|handled|checked|guarded|mitigated) elsewhere|assum|presum|likely (?:intentional|fine|safe)|probably|seems? (?:fine|correct|okay|ok|safe|intentional)|appears? (?:fine|correct|safe|intentional)/i.test(
+    r,
+  );
+}

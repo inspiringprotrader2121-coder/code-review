@@ -61,3 +61,16 @@ test('different PRs are unaffected — each still runs concurrently', async () =
   assert.ok(a && b, 'two different PRs both dequeue');
   assert.notEqual(a!.pr, b!.pr);
 });
+
+test('a queue without leases is safe to heartbeat (optional-method contract)', async () => {
+  // queue-runner heartbeats via `queue.renewLease?.(job)`. MemoryReviewQueue is
+  // single-process and has no lease, so the method is absent — the optional call
+  // must stay a no-op rather than throwing inside the review loop.
+  const q = new MemoryReviewQueue();
+  const j = job();
+  const optional = q as { renewLease?: (x: ReviewJobPayload) => Promise<void> };
+  assert.equal(optional.renewLease, undefined, 'memory queue has no lease to renew');
+  await assert.doesNotReject(async () => {
+    await optional.renewLease?.(j);
+  });
+});

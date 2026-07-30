@@ -1972,6 +1972,11 @@ export class AppDatabase {
       costUsd?: number;
       /** what this run NEWLY posted — feeds the deep-vs-normal scorecard */
       newFindings?: Array<{ severity: string; file: string; line?: number }>;
+      /** Correct the `deep` flag to what was actually DELIVERED. The row is
+       *  created before the passes run, so a deep request whose extra lenses all
+       *  failed would otherwise stay marked deep — and be counted (and billed)
+       *  as 2 units by completedReviewUnitsSince. */
+      deep?: boolean;
     },
   ): void {
     this.db
@@ -1980,7 +1985,8 @@ export class AppDatabase {
          SET status = ?, skip_reason = ?, error = ?, duration_ms = ?,
              findings_new = ?, findings_fixed = ?, findings_open = ?,
              input_tokens = ?, output_tokens = ?, cost_usd = ?,
-             new_findings_json = ?
+             new_findings_json = ?,
+             deep = COALESCE(?, deep)
          WHERE id = ?`,
       )
       .run(
@@ -1995,6 +2001,7 @@ export class AppDatabase {
         patch.outputTokens ?? 0,
         patch.costUsd ?? 0,
         patch.newFindings ? JSON.stringify(patch.newFindings) : null,
+        patch.deep === undefined ? null : patch.deep ? 1 : 0,
         id,
       );
   }

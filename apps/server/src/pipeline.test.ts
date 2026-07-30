@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveReviewConfig, isHedgedRejection, modelForPass, type WorkerConfig } from './pipeline.js';
+import { effectiveReviewConfig, modelForPass, type WorkerConfig } from './pipeline.js';
+import { isHedgedRejection } from '@orvex-review/review';
 
 function modelRoutingConfig(): WorkerConfig {
   return {

@@ -68,6 +68,20 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
       `[worker] start inst=${job.installationId} ${pk} @ ${job.headSha.slice(0, 7)} kind=${kind} action=${job.action} (active=${active}/${MAX_CONCURRENT})`,
     );
 
+    // Heartbeat the in-flight lease. Without this the lease is a fixed TTL taken
+    // at claim time: a review that outruns it lets another worker's SET NX
+    // succeed and review the SAME PR concurrently — duplicate comments and a
+    // double overage charge. Renewing at a third of the TTL tolerates two missed
+    // beats. A crashed worker stops renewing, so the lock still expires.
+    const leaseTimer = queue.renewLease
+      ? setInterval(() => {
+          queue.renewLease?.(job).catch((err) => {
+            console.warn(`[worker] lease renewal failed for ${pk}:`, (err as Error).message);
+          });
+        }, Number(process.env.ORVEX_LEASE_RENEW_MS ?? 300_000))
+      : undefined;
+    if (leaseTimer) leaseTimer.unref?.();
+
     try {
       const config = loadWorkerConfig();
       if (kind === 'fix') {
@@ -139,6 +153,9 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         );
       }
     } finally {
+      // Stop heartbeating BEFORE releasing the lock, so a renewal can never
+      // resurrect a lease the completion path just compare-and-deleted.
+      if (leaseTimer) clearInterval(leaseTimer);
       inFlight.delete(job);
       const next = await queue.releaseLockAndDrain(pk);
       if (next) {

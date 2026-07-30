@@ -54,6 +54,12 @@ export interface ReviewQueue {
   enqueue(job: ReviewJobPayload): Promise<EnqueueResult>;
   dequeue(): Promise<ReviewJobPayload | null>;
   markCompleted(job: ReviewJobPayload): Promise<void>;
+  /** Extend this job's in-flight lease while it is still running.
+   *  The Redis lease is a fixed TTL taken at claim time; a long review can
+   *  outlive it, at which point another worker's SET NX succeeds and the SAME
+   *  PR is reviewed twice — duplicate GitHub comments and a double overage
+   *  charge. Callers heartbeat this; implementations without a lease no-op. */
+  renewLease?(job: ReviewJobPayload): Promise<void>;
   markFailed(job: ReviewJobPayload, error: string): Promise<void>;
   releaseLockAndDrain(prKey: string): Promise<ReviewJobPayload | null>;
   /** Startup cleanup: clear stale in-flight locks + requeue pending. Returns count. */

@@ -67,6 +67,20 @@ ${COALESCE_SNIPPET}
 return 'pending'`;
 
 // Compare-and-delete: DEL the key only if it still holds our exact value.
+// Compare-and-EXTEND: only refresh the TTL while the lock is still OURS. An
+// unconditional EXPIRE would extend a lock another worker legitimately took
+// over after ours expired.
+/** In-flight lease TTL. Heartbeated by renewLease() while a job runs, so this
+ *  bounds how long a CRASHED worker's PR stays locked — not how long a review
+ *  may take. */
+const LEASE_TTL_SECONDS = 900;
+
+const CASEXPIRE_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0`;
+
 const CASDEL_LUA = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
@@ -152,7 +166,7 @@ export class RedisReviewQueue implements ReviewQueue {
         `${PENDING_PREFIX}${pk}`,
         raw,
         job.kind ?? 'review',
-        7200,
+        LEASE_TTL_SECONDS,
       );
       if (claimed === 'pending') continue;
       return job;
@@ -167,6 +181,16 @@ export class RedisReviewQueue implements ReviewQueue {
     // review outran its TTL and another run re-claimed the PR, an unconditional
     // DEL would delete the new run's lock and let a third run start concurrently.
     await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, JSON.stringify(job));
+  }
+
+  async renewLease(job: ReviewJobPayload): Promise<void> {
+    await this.redis.eval(
+      CASEXPIRE_LUA,
+      1,
+      `${INFLIGHT_PREFIX}${prKey(job)}`,
+      JSON.stringify(job),
+      LEASE_TTL_SECONDS,
+    );
   }
 
   async markFailed(job: ReviewJobPayload, _error: string): Promise<void> {

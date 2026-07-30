@@ -28,6 +28,7 @@ import {
 } from '@orvex-review/rules';
 import {
   applyCheckboxLine,
+  isHedgedRejection,
   checkImportBindings,
   commandTrigger,
   dedupeByFileLine,
@@ -349,6 +350,11 @@ export interface ProcessResult {
   costUsd?: number;
   /** severity/file/line of what this run NEWLY posted — deep-vs-normal scorecard */
   newFindings?: Array<{ severity: string; file: string; line?: number }>;
+  /** `@orvex deep` only: did at least one of the EXTRA deep lenses actually
+   *  complete? Deep bills 2x, and the extra lenses are best-effort — so when
+   *  every one of them fails the customer paid double for a review that is
+   *  byte-for-byte a standard one. Billing keys off this, not off the request. */
+  deepLensesRan?: boolean;
 }
 
 // LLM cost model (USD per 1M tokens), PER MODEL TIER — a Review (MiniMax) review
@@ -470,21 +476,6 @@ export function accountLimitReason(
   return null;
 }
 
-/**
- * TIER-RESCUE GATE (reason-based): the verification pass runs on a cheaper
- * model, so its veto of a strong-reasoner finding is only trusted when it
- * FACTUALLY REFUTES the finding against the code. Hedged / low-information
- * rejections — "cannot verify", "not enough context", "validated elsewhere" —
- * are exactly the failure mode the protected-tier rescue exists for, and those
- * get rescued. A concrete refutation (states what the code actually does, and
- * why the claim is wrong) stands even against a protected tier.
- */
-export function isHedgedRejection(reason: string): boolean {
-  const r = reason.toLowerCase();
-  return /cannot (?:independently )?(?:verify|confirm|re-derive|reproduce|determine)|can'?t (?:verify|confirm)|insufficient|not enough (?:context|evidence|information)|lack(?:s|ing)? (?:of )?(?:context|evidence|information)|no evidence|unclear|uncertain|unable to|unverifiable|not enough information|could not (?:verify|confirm|find)|(?:validated|handled|checked|guarded|mitigated) elsewhere|assum|presum|likely (?:intentional|fine|safe)|probably|seems? (?:fine|correct|okay|ok|safe|intentional)|appears? (?:fine|correct|safe|intentional)/i.test(
-    r,
-  );
-}
 
 /** Post the upgrade nudge for a blocked free-tier review (best-effort). */
 async function postLimitNudge(
@@ -595,12 +586,22 @@ export async function processReviewJob(
       outputTokens: result.outputTokens,
       costUsd: result.costUsd,
       newFindings: result.newFindings,
+      // Correct the row's `deep` flag to what was actually DELIVERED — the
+      // scorecard and completedReviewUnitsSince both read this column.
+      deep: Boolean(job.deep) && result.deepLensesRan === true,
     });
     // Metered-overage plans (have an included quota + per-review overage price).
     // 'review-plus' (unlimited) and 'enterprise'/'free' are excluded — no overage.
     if (!result.skipReason && (plan.id === 'review' || plan.id === 'verify-lite' || plan.id === 'verify')) {
       try {
-        await reportStripeReviewOverage({ store: config.store, tenantId: job.tenantId, plan: plan.id, runId, deep: Boolean(job.deep) });
+        // Charge the 2x deep rate ONLY if an extra deep lens actually completed.
+        // They are best-effort, so an all-failed deep run delivers a standard
+        // review — billing double for that is charging for undelivered work.
+        const billedDeep = Boolean(job.deep) && result.deepLensesRan === true;
+        if (job.deep && !billedDeep) {
+          console.warn(`[billing] run ${runId}: deep requested but no extra lens completed — billing at standard rate`);
+        }
+        await reportStripeReviewOverage({ store: config.store, tenantId: job.tenantId, plan: plan.id, runId, deep: billedDeep });
       } catch (err) {
         console.error(`[billing] failed to report Stripe overage for run ${runId}:`, err);
       }
@@ -775,6 +776,8 @@ async function executeReview(
   // Best-effort passes that failed — surfaced in the posted review so a partial
   // run can never read as a full sign-off.
   let skippedLenses: string[] = [];
+  // Only true once an extra deep lens has actually produced a review.
+  let deepLensesRan = false;
   let llmFindings: ReviewFinding[] = [];
   // Token usage per model tier — a hybrid review runs two different models, so
   // cost is tracked separately (each has its own $/token) and summed.
@@ -1213,6 +1216,8 @@ async function executeReview(
         `review aborted: ${failedRequiredPasses.length}/${passes} required model pass(es) failed; no partial review was posted`,
       );
     }
+    // `deep:` labels come from DEEP_EXTRA_ANGLES — the lenses the 2x charge buys.
+    deepLensesRan = outcomes.some((o) => o.ok && (o.label ?? '').includes('deep:'));
     const skippedBestEffort = outcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort);
     if (skippedBestEffort.length > 0) {
       skippedLenses = skippedBestEffort.map((o) => o.label ?? 'unnamed pass');
@@ -1578,16 +1583,24 @@ async function executeReview(
     const openAny = finalFindings.some((f) => f.status === 'open');
     // Advisory: never fail the check (no red ✗). Findings show as 'neutral';
     // set ORVEX_FAIL_CHECK_ON_P1=1 to hard-fail on open P1s if you want gating.
+    // A green ✅ next to the merge button is the strongest signal Orvex sends. It
+    // must never say "success" when one of the promised passes never ran — that
+    // directly contradicts the "did not complete" banner in the review body and
+    // is exactly the false assurance the banner exists to prevent.
+    const incomplete = skippedLenses.length > 0;
     const conclusion =
       openP1 && process.env.ORVEX_FAIL_CHECK_ON_P1 === '1'
         ? 'failure'
-        : openAny
+        : openAny || incomplete
           ? 'neutral'
           : 'success';
+    const summary = `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open`;
     await createCheckRun(octokit, ref, effectiveSha, {
       conclusion,
-      title: 'Orvex Review',
-      summary: `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open`,
+      title: incomplete ? 'Orvex Review (incomplete)' : 'Orvex Review',
+      summary: incomplete
+        ? `${summary} — ${skippedLenses.length} review pass(es) did not complete; NOT a full sign-off`
+        : summary,
     });
   }
 
@@ -1629,6 +1642,7 @@ async function executeReview(
     outputTokens,
     costUsd,
     newFindings: merged.toPost.map((f) => ({ severity: f.severity, file: f.file, line: f.line })),
+    deepLensesRan,
   };
 }
 

@@ -11,6 +11,7 @@ import {
   DEEP_DIVE_FOCUS,
   dropSelfNegatingFindings,
   fingerprintFinding,
+  isHedgedRejection,
   llmFindingsToReviewFindings,
   REVIEW_INCOMPLETE_SUMMARY,
   runLlmReview,
@@ -221,13 +222,24 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
     const std = llmEnv();
     // strict: every plan sets deepVerify: true, so recall-mode verification
     // measured a more permissive filter than ships.
-    findings = (
-      await verifyFindings(findings, ctxFiles, {
-        ...std,
-        strict: true,
-        prIntent: [pr.title, pr.body].filter(Boolean).join('\n\n'),
-      })
-    ).kept;
+    const verified = await verifyFindings(findings, ctxFiles, {
+      ...std,
+      strict: true,
+      prIntent: [pr.title, pr.body].filter(Boolean).join('\n\n'),
+    });
+    // MIRROR PRODUCTION'S STRONG-REASONER RESCUE. verifyFindings does not read
+    // sourceTier at all — the rescue lives in the pipeline, so tagging tiers
+    // without replicating this left the eval applying production's STRICT filter
+    // WITHOUT its counterweight, systematically under-reporting recall on
+    // exactly the frontier-model findings bench170 exists to track.
+    const PROTECTED_TIERS = new Set(['openai', 'deepseek', 'deterministic']);
+    const rescued = verified.dropped.filter(
+      (d) => d.finding.sourceTier && PROTECTED_TIERS.has(d.finding.sourceTier) && isHedgedRejection(d.reason),
+    );
+    if (rescued.length > 0) {
+      console.log(`    ↺ rescued ${rescued.length} strong-reasoner finding(s) dropped on hedged grounds`);
+    }
+    findings = [...verified.kept, ...rescued.map((d) => d.finding)];
   }
   return { findings, okPasses, totalPasses: passes.length, requiredPasses, okRequired };
 }
