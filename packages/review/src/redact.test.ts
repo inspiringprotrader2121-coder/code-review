@@ -195,3 +195,15 @@ test('quoted-key redaction does not touch ordinary JSON', () => {
     assert.equal(redactSecrets(clean), clean);
   }
 });
+
+test('redaction stays linear on identifier-run input (ReDoS guard)', () => {
+  // Unbounded quantifiers straddling the keyword alternation backtracked
+  // quadratically on a run like 'a-b_a-b_…' — measured 9.7s at 80kB of BLOCKED
+  // event loop, from attacker-controlled PR file content.
+  for (const size of [80_000, 200_000]) {
+    const started = Date.now();
+    redactSecrets('a-b_'.repeat(size / 4));
+    const ms = Date.now() - started;
+    assert.ok(ms < 500, `${size}B took ${ms}ms — redaction must stay linear`);
+  }
+});

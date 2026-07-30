@@ -114,7 +114,11 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // `:` or `=`, so `proxy_set_header X-Internal-Token abc123;` passed straight
   // through. Require a long value so ordinary directives aren't touched.
   {
-    pattern: /\b([A-Za-z0-9_-]*(?:token|secret|apikey|api[_-]key|password|passwd)[A-Za-z0-9_-]*)(\s+)([^\s;{}'"]{12,})(\s*;)/gi,
+    // BOUNDED quantifiers. Unbounded `[A-Za-z0-9_-]*` on BOTH sides of the
+    // alternation backtracks quadratically: 'a-b_' repeated measured
+    // 5kB=41ms / 20kB=669ms / 80kB=9.7s of BLOCKED event loop, and the input is
+    // attacker-controlled PR file content. A real directive key is short.
+    pattern: /\b([A-Za-z0-9_-]{0,48}(?:token|secret|apikey|api[_-]key|password|passwd)[A-Za-z0-9_-]{0,24})([ \t]+)([^\s;{}'"]{12,})([ \t]*;)/gi,
     replacement: '$1$2[REDACTED]$4',
   },
   // Base64-wrapped PEM (k8s Secret `tls.key`, `ca.crt`): the ASCII-header rule
