@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { canRunAgentic, effectiveReviewConfig, modelForPass, type WorkerConfig } from './pipeline.js';
-import { isHedgedRejection } from '@orvex-review/review';
+import { isHedgedRejection, isTransientLlmError } from '@orvex-review/review';
 
 function modelRoutingConfig(): WorkerConfig {
   return {
@@ -128,4 +128,22 @@ test('modelForPass never hands back the CLI stub when codex cannot run', () => {
 
   const agentic = modelForPass(config, { modelTier: 'multi-model' }, 0, true);
   assert.equal(agentic.target.apiKey, '', 'the CLI stub is only selected when codex will actually run');
+});
+
+test('a rate-limited required pass REQUEUES; a genuine failure does not', () => {
+  // queue-runner decides requeue by pattern-matching the thrown message. A
+  // generic "required pass failed" matched nothing, so a review whose Luna pass
+  // was merely rate-limited (while the others succeeded) was silently DROPPED
+  // rather than retried — the most likely failure mode on a throttled tier, and
+  // what lost 4 of 9 PRs in the 2026-07-22 batch.
+  assert.equal(
+    isTransientLlmError('review aborted: 1/2 required model pass(es) failed — rate-limit/transport errors; will retry'),
+    true,
+    'a transient cause must requeue the job',
+  );
+  assert.equal(
+    isTransientLlmError('review aborted: 1/2 required model pass(es) failed; no partial review was posted'),
+    false,
+    'a genuine model failure must NOT loop forever',
+  );
 });

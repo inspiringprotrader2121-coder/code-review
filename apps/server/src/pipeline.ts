@@ -1239,8 +1239,21 @@ async function executeReview(
     // from the required-pass gate; log them for transparency instead.
     const failedRequiredPasses = outcomes.filter((o) => o.kind === 'pass' && !o.ok && !o.bestEffort);
     if (failedRequiredPasses.length > 0) {
+      // PRESERVE TRANSIENCE. queue-runner decides whether to requeue by pattern-
+      // matching this message with isTransientLlmError. A generic "required pass
+      // failed" matches nothing, so a review whose Luna pass was merely
+      // RATE-LIMITED — while the other passes succeeded — was silently DROPPED
+      // instead of retried. That is the single most likely failure on a
+      // rate-limited tier, and it is exactly what lost 4 of 9 PRs in the
+      // 2026-07-22 batch. Naming the transient cause makes the job requeue.
+      const transientFailures = failedRequiredPasses.filter((o) => o.transient).length;
+      const requiredCount = reviewCalls.filter((c) => c.kind === 'pass' && !c.bestEffort).length;
+      const cause =
+        transientFailures > 0
+          ? ' — rate-limit/transport errors; will retry'
+          : '; no partial review was posted';
       throw new Error(
-        `review aborted: ${failedRequiredPasses.length}/${passes} required model pass(es) failed; no partial review was posted`,
+        `review aborted: ${failedRequiredPasses.length}/${requiredCount} required model pass(es) failed${cause}`,
       );
     }
     // `deep:` labels come from DEEP_EXTRA_ANGLES — the lenses the 2x charge buys.
