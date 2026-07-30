@@ -1,7 +1,13 @@
 const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // PEM private-key blocks (multi-line) — redact the whole block.
   {
-    pattern: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g,
+    // Terminate on the END marker OR on end-of-input. Context files are CLIPPED
+    // to a byte budget BEFORE redaction runs (repo-context clip(), pipeline
+    // per-file slice), so a key straddling the cut lost its `-----END-----`,
+    // failed to match, and shipped its header + first base64 lines to the model
+    // in clear. Also covers PGP's `PRIVATE KEY BLOCK` armor.
+    pattern:
+      /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY(?: BLOCK)?-----|$)/g,
     replacement: '[PRIVATE_KEY_REDACTED]',
   },
   // GitHub tokens.
@@ -116,6 +122,14 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // `\s` inside the class made this greedily eat following YAML keys/paragraphs.
   // Match the base64 run itself, optionally continued on further indented lines.
   { pattern: /\bLS0tLS1CRUdJTi[A-Za-z0-9+/=]{20,}(?:[ \t]*\r?\n[ \t]+[A-Za-z0-9+/=]+)*/g, replacement: '[BASE64_PRIVATE_KEY_REDACTED]' },
+  // JSON / dict-quoted keys: `"password": "x"`, `'client_secret': 'x'`. The
+  // quote between the key and the colon defeats every rule above. Bounded
+  // quantifiers only — an unbounded prefix here was a measured ReDoS.
+  {
+    pattern:
+      /(["'])([A-Za-z0-9_.-]{0,64}(?:secret|password|passwd|passphrase|pwd|token|apikey|api[_-]?key|private[_-]?key|access[_-]?key|credential)[A-Za-z0-9_.-]{0,32})\1(\s*:\s*)(["'])([^"'\n]{4,})\4/gi,
+    replacement: '$1$2$1$3$4[REDACTED]$4',
+  },
   // Sentry/webhook DSNs carry the key in the URL userinfo.
   { pattern: /\bhttps?:\/\/[A-Za-z0-9]{16,}@[A-Za-z0-9.-]+\/[0-9]+/g, replacement: '[DSN_REDACTED]' },
 ];

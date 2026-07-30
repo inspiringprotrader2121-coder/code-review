@@ -160,3 +160,38 @@ test('base64 PEM redaction does not swallow neighbouring keys', () => {
   assert.match(out, /replicas: 3/, 'following lines must survive');
   assert.match(out, /imageTag: v1\.2\.3/);
 });
+
+test('a PEM key TRUNCATED by context clipping is still redacted', () => {
+  // Context files are clipped to a byte budget BEFORE redaction runs, so a key
+  // straddling the cut lost its `-----END-----`, failed the block match, and
+  // shipped its header + first base64 lines to a third-party model in clear.
+  const key =
+    '-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0ZxSECRETKEYMATERIAL\nMORESECRET2\n-----END RSA PRIVATE KEY-----';
+  assert.match(redactSecrets(key), /PRIVATE_KEY_REDACTED/, 'whole key');
+  const truncated = key.slice(0, 90);
+  assert.match(redactSecrets(truncated), /PRIVATE_KEY_REDACTED/, 'truncated key');
+  assert.doesNotMatch(redactSecrets(truncated), /SECRETKEYMATERIAL/, 'no key material may survive');
+  // PGP armor says "PRIVATE KEY BLOCK", which the old pattern did not match.
+  assert.match(
+    redactSecrets('-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBGF3x\n-----END PGP PRIVATE KEY BLOCK-----'),
+    /PRIVATE_KEY_REDACTED/,
+  );
+});
+
+test('JSON/dict-quoted secrets are redacted (the quote defeated every other rule)', () => {
+  for (const [label, raw, secret] of [
+    ['settings.json', '{"password": "Sup3rS3cretJson"}', 'Sup3rS3cretJson'],
+    ['oauth config', '{"client_secret": "abc123def456"}', 'abc123def456'],
+    ['bare pair', '"apiKey": "live_abc123def"', 'live_abc123def'],
+  ] as const) {
+    const out = redactSecrets(raw);
+    assert.match(out, /REDACTED/, `${label} must be redacted`);
+    assert.doesNotMatch(out, new RegExp(secret), `${label}: the secret itself must not survive`);
+  }
+});
+
+test('quoted-key redaction does not touch ordinary JSON', () => {
+  for (const clean of ['{"name": "my-service"}', '{"tokenCount": 42}', '{"replicas": 3}']) {
+    assert.equal(redactSecrets(clean), clean);
+  }
+});

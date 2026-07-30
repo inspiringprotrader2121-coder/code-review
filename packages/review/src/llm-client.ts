@@ -36,7 +36,12 @@ export function estimateTokens(chars: number): number {
 }
 
 /** Hard ceiling on any single LLM call so a hung provider can't wedge a job. */
-const LLM_TIMEOUT_MS = Number(process.env.ORVEX_LLM_TIMEOUT_MS ?? 240_000);
+const LLM_TIMEOUT_MS = (() => {
+  // A typo'd value yielded NaN, and setTimeout(NaN) fires at ~1ms — every call
+  // would abort instantly as "stalled". Same guard as the other numeric envs.
+  const n = Number(process.env.ORVEX_LLM_TIMEOUT_MS ?? 240_000);
+  return Number.isFinite(n) && n > 0 ? n : 240_000;
+})();
 
 /** Total time allowed for one provider attempt, including active streaming. */
 function maxTotalMs(): number {
