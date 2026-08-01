@@ -992,19 +992,32 @@ async function executeReview(
     // skip — performance, completeness/what's-missing, and API/contract breakage.
     // Distinct focus is what makes extra passes catch meaningfully more.
     // Per-pass lens; pass index beyond the list reuses the last (deepest) angle.
+    // Lens sequence, chosen by TIER rather than index-clamped.
+    //
+    // Relying on the clamp broke the 3-pass tiers: inserting the 4th lens in the
+    // middle silently pushed the breadth lens off the end, so free/review lost
+    // it entirely AND lost their only best-effort pass (a MiniMax timeout there
+    // would then abort the whole review instead of degrading). The breadth lens
+    // must stay LAST for every tier, so it is appended, not positioned.
+    const FOURTH_LENS_TIERS = new Set<ModelTier>(['multi-model', 'codex-hybrid']);
+    const BREADTH_ANGLE = {
+      tag: 'perf/completeness/api',
+      focus: THIRD_ANGLE_FOCUS,
+      // Commonly MiniMax, whose reasoning can exceed the wall-clock cap on large
+      // PRs. Declared here (not derived from the tag string) so a rename cannot
+      // silently change which passes are required.
+      bestEffort: true,
+    };
     const PASS_ANGLES: Array<{ tag: string; focus?: string; bestEffort?: boolean }> = [
       { tag: 'general' },
       { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS },
-      // Fourth lens, on a SECOND independent reasoner (DeepSeek v4 Flash).
-      // Ordered before the breadth pass so the index-clamped fallback still
-      // lands on breadth, and required — this is the lens targeting the bug
-      // class the benchmarks showed we miss.
-      { tag: 'removed-behavior/callers', focus: REMOVED_BEHAVIOR_FOCUS },
-      // Breadth lens — commonly MiniMax, whose reasoning can exceed the wall-clock
-      // cap on large PRs. Declared here (not derived from the tag string) so a
-      // rename can't silently change which passes are required. Stays LAST so
-      // any pass beyond the list clamps to a best-effort angle, not a required one.
-      { tag: 'perf/completeness/api', focus: THIRD_ANGLE_FOCUS, bestEffort: true },
+      // Only the tiers that actually have a SECOND independent reasoner to run
+      // it on (DeepSeek v4 Flash + v4 Pro). On a 2-model tier this lens would
+      // just re-run the model that already did pass 1.
+      ...(FOURTH_LENS_TIERS.has(plan.modelTier as ModelTier)
+        ? [{ tag: 'removed-behavior/callers', focus: REMOVED_BEHAVIOR_FOCUS }]
+        : []),
+      BREADTH_ANGLE,
     ];
 
     type ReviewCall = {

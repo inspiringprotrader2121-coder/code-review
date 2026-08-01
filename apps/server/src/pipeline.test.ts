@@ -147,3 +147,30 @@ test('a rate-limited required pass REQUEUES; a genuine failure does not', () => 
     'a genuine model failure must NOT loop forever',
   );
 });
+
+test('the 4th lens is tier-scoped and breadth stays LAST on every tier', () => {
+  // Regression: the 4th lens was inserted mid-list and relied on index-clamping.
+  // That silently pushed the breadth lens off the end of the 3-pass tiers, so
+  // free/review lost it entirely AND lost their only best-effort pass — a
+  // MiniMax timeout there would then abort the whole review instead of
+  // degrading it.
+  const anglesFor = (tier: string, passes: number): string[] => {
+    const fourth = tier === 'multi-model' || tier === 'codex-hybrid';
+    const list = ['general', 'deep-dive', ...(fourth ? ['removed-behavior/callers'] : []), 'perf/completeness/api'];
+    return Array.from({ length: passes }, (_, p) => list[Math.min(p, list.length - 1)]);
+  };
+  // 3-pass volume tier: breadth must survive as the final lens.
+  assert.deepEqual(anglesFor('dual-model', 3), ['general', 'deep-dive', 'perf/completeness/api']);
+  // 4-pass quality tier: the new lens sits between deep-dive and breadth.
+  assert.deepEqual(anglesFor('multi-model', 4), [
+    'general',
+    'deep-dive',
+    'removed-behavior/callers',
+    'perf/completeness/api',
+  ]);
+  // Breadth is last on BOTH, so an over-configured pass count clamps onto a
+  // best-effort angle rather than a required one.
+  for (const [tier, passes] of [['dual-model', 5], ['multi-model', 6]] as const) {
+    assert.equal(anglesFor(tier, passes).at(-1), 'perf/completeness/api', `${tier} must end on breadth`);
+  }
+});
