@@ -421,29 +421,43 @@ export interface ProcessResult {
   deepLensesRan?: boolean;
 }
 
-// LLM cost model (USD per 1M tokens), PER MODEL TIER — a Review (MiniMax) review
-// must not be costed at Verify (GLM-5.2) rates. Premium defaults to GLM-5.2
-// pricing, standard to MiniMax-M3; override via env if you switch providers.
+// ——— LLM cost model (USD per 1M tokens), PER MODEL TIER ———
+//
+// Verified against published pricing 2026-08-01. Every rate is the STANDARD
+// short-context, cache-MISS rate — the conservative choice, since we bill the
+// full input at this rate and never discount for cache hits (see below).
+//
+//   tier            model             in      out     cached-in   long-context
+//   premium         GLM-5.2           1.40    4.40    0.26        (3x peak surcharge 14-18 Beijing)
+//   standard        MiniMax-M3        0.30    1.20    0.06        >512K in -> 0.60 / 2.40
+//   openai          gpt-5.6-luna      0.20    1.20    0.02        >272K in -> 0.40 / 1.80
+//   deepseek        deepseek-v4-pro   0.435   0.87    0.003625
+//   deepseek-flash  deepseek-v4-flash 0.14    0.28    0.0028
+//
+// TWO KNOWN INACCURACIES, both of which make us OVER-report cost (safe direction):
+//  1. Cache hits are billed here at the full input rate. Real hit rates are high
+//     — a repeated 36k prefix measured 99.99% cached on Luna — and cached input
+//     is 10% (Luna), 20% (MiniMax) or <1% (DeepSeek) of the miss rate. Providers
+//     do report cached_tokens; wiring that through would sharpen this materially.
+//  2. Long-context surcharges are NOT modelled. Review prompts run ~180k input,
+//     under both thresholds, so this is currently inert — but an agentic codex
+//     pass has been observed at 1.1M cumulative tokens, and any SINGLE call over
+//     272k would bill Luna at 2x in / 1.5x out for the whole request.
+// Every rate stays env-overridable so a price change needs no deploy.
 const PREMIUM_COST_IN = Number(process.env.ORVEX_COST_INPUT_PER_M ?? 1.4);
 const PREMIUM_COST_OUT = Number(process.env.ORVEX_COST_OUTPUT_PER_M ?? 4.4);
 const STANDARD_COST_IN = Number(process.env.ORVEX_STANDARD_COST_INPUT_PER_M ?? 0.3);
 const STANDARD_COST_OUT = Number(process.env.ORVEX_STANDARD_COST_OUTPUT_PER_M ?? 1.2);
-// OpenAI reasoning models bill reasoning tokens as output. Default is Luna's
-// confirmed launch pricing ($1 / $6 per 1M in/out) — override via env if the
-// configured ORVEX_OPENAI_MODEL is priced differently.
-// gpt-5.6-luna list price as of 2026-07: $0.20 in / $1.20 out per 1M
-// (cached input $0.10). The previous $1/$6 defaults were the pre-cut rates and
-// OVERSTATED every OpenAI-tier review by ~5x — the dashboard cost tile,
-// sumAccountCost, and any spend alerting were all wrong in the same direction.
-// Reasoning tokens bill as OUTPUT, which is why the output rate dominates here.
+// gpt-5.6-luna after the 2026-07-30 cut (was 1.00 / 6.00 — an 80% reduction).
 const OPENAI_COST_IN = Number(process.env.ORVEX_OPENAI_COST_INPUT_PER_M ?? 0.2);
 const OPENAI_COST_OUT = Number(process.env.ORVEX_OPENAI_COST_OUTPUT_PER_M ?? 1.2);
-// DeepSeek (reasoning-heavy, cheap) — placeholder rate, override once billed usage confirms it.
-const DEEPSEEK_COST_IN = Number(process.env.ORVEX_DEEPSEEK_COST_INPUT_PER_M ?? 0.55);
-const DEEPSEEK_COST_OUT = Number(process.env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M ?? 2.19);
-// DeepSeek v4 Flash — cheaper than v4 Pro. Priced separately so the dashboard
-// doesn't bill a Flash pass at Pro rates. Override once billed usage confirms.
-const DEEPSEEK_FLASH_COST_IN = Number(process.env.ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M ?? 0.07);
+// deepseek-v4-pro. The previous 0.55 / 2.19 defaults were guesses and overstated
+// OUTPUT by 2.5x — and output dominates a reasoning model's bill, so every
+// DeepSeek pass was costed far too high.
+const DEEPSEEK_COST_IN = Number(process.env.ORVEX_DEEPSEEK_COST_INPUT_PER_M ?? 0.435);
+const DEEPSEEK_COST_OUT = Number(process.env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M ?? 0.87);
+// deepseek-v4-flash — roughly a third of v4-pro on both sides.
+const DEEPSEEK_FLASH_COST_IN = Number(process.env.ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M ?? 0.14);
 const DEEPSEEK_FLASH_COST_OUT = Number(process.env.ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M ?? 0.28);
 function computeCostUsd(inputTokens: number, outputTokens: number, tier: PassTier): number {
   const [inRate, outRate] =
