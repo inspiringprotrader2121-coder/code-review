@@ -60,7 +60,13 @@ export class TenantService {
     const existing = this.db.getTenantBySlug(tenantSlug);
     let tenant: Tenant;
     if (existing) {
-      if (this.db.tenantHasMembers(existing.id) && !this.db.getMembership(existing.id, userId)) {
+      // A workspace is claimable ONLY if it has no members and owns no
+      // installation. The old check was `tenantHasMembers` alone, but the
+      // webhook auto-creates member-less tenants that DO own an installation
+      // (slug `org-<accountLogin>`, fully predictable from the public org
+      // name) — so any signed-in user could take over another org's workspace
+      // by requesting its slug, with no proof of control over that org.
+      if (!this.db.getMembership(existing.id, userId) && !this.db.tenantIsClaimable(existing.id)) {
         throw new WorkspaceAccessError(`Workspace slug "${existing.slug}" is already taken`);
       }
       if (!this.db.getMembership(existing.id, userId)) {
@@ -78,8 +84,8 @@ export class TenantService {
   /**
    * Pre-auth connect flow, used only while user login (OAuth) is not
    * configured. No membership is created; the first user to sign in after
-   * accounts are enabled can claim the workspace (member-less tenants are
-   * claimable in startConnect).
+   * accounts are enabled can claim the workspace — but only while it owns no
+   * installation (see tenantIsClaimable).
    */
   startConnectLegacy(tenantSlug: string, displayName?: string): { tenant: Tenant; installUrl: string } {
     const tenant = this.db.getOrCreateTenant(tenantSlug, displayName);

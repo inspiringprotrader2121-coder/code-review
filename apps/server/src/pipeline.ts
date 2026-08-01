@@ -695,10 +695,17 @@ async function executeReview(
   // PR93 died in 8s on a raw 502 here, before any LLM call ran).
   let repoConfigYaml: string | null = null;
   try {
+    // READ THE CONFIG FROM THE BASE REF, NOT THE PR HEAD. The head is
+    // attacker-controlled on any fork PR, and this config overrides workspace
+    // settings outright — so a PR that added `.orvex-review.yml` with
+    // `ignore: ["**"]` produced a deterministic "no issues found, looks good to
+    // merge" on itself, with no model involved. The base ref is what the repo's
+    // maintainers actually approved.
+    const configRef = pr.baseSha || effectiveSha;
     repoConfigYaml =
-      (await fetchRepoFile(octokit, owner, repo, '.orvex-review.yml', effectiveSha)) ??
+      (await fetchRepoFile(octokit, owner, repo, '.orvex-review.yml', configRef)) ??
       // deprecated pre-rename config filename; remove after customers migrate
-      (await fetchRepoFile(octokit, owner, repo, '.velatrix-review.yml', effectiveSha));
+      (await fetchRepoFile(octokit, owner, repo, '.velatrix-review.yml', configRef));
   } catch (err) {
     console.error(`[worker] repo config fetch failed, using defaults: ${(err as Error).message}`);
   }

@@ -1666,6 +1666,27 @@ export class AppDatabase {
   }
 
   /** True if the tenant has no members yet (pre-auth workspace or freshly created). */
+  /**
+   * Is this workspace safe for any signed-in user to CLAIM by slug?
+   *
+   * Only when it has no members AND owns no GitHub installation. A tenant
+   * auto-created by `syncInstallationFromWebhook` has zero members but DOES own
+   * a live installation plus its repos, PRs and findings — treating "no
+   * members" alone as claimable let anyone take over another org's workspace by
+   * guessing the predictable `org-<login>` slug, gaining read access to private
+   * findings and (via autoApply) write access to their repos.
+   *
+   * Claiming a workspace that owns an installation requires proving control of
+   * the GitHub org, which only the signed install callback can establish.
+   */
+  tenantIsClaimable(tenantId: string): boolean {
+    if (this.tenantHasMembers(tenantId)) return false;
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM github_installations WHERE tenant_id = ?`)
+      .get(tenantId) as { n: number };
+    return row.n === 0;
+  }
+
   tenantHasMembers(tenantId: string): boolean {
     const row = this.db
       .prepare(`SELECT COUNT(*) AS n FROM workspace_members WHERE tenant_id = ?`)

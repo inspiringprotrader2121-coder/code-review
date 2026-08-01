@@ -41,3 +41,49 @@ test('does NOT block a same-tenant reinstall', async () => {
     (e) => !(e instanceof WorkspaceAccessError),
   );
 });
+
+test('a workspace that OWNS AN INSTALLATION is not claimable by slug', () => {
+  // The webhook auto-creates member-less tenants named `org-<accountLogin>`
+  // that own a live installation. Treating "no members" as claimable let any
+  // signed-in user take over another org's workspace by guessing that slug —
+  // gaining private findings and, via autoApply, write access to their repos.
+  let granted = false;
+  const svc = new TenantService(
+    mockDb({
+      getTenantBySlug: (slug: string) => ({ id: 'victim', slug, name: slug }),
+      getMembership: () => undefined,
+      tenantIsClaimable: () => false, // has no members BUT owns an installation
+      addWorkspaceMember: () => {
+        granted = true;
+      },
+    }),
+  );
+  assert.throws(
+    () => svc.startConnect('org-victimcorp', 'attacker-user'),
+    (e) => e instanceof WorkspaceAccessError && /already taken/i.test((e as Error).message),
+  );
+  assert.equal(granted, false, 'no membership may be granted on a refused claim');
+});
+
+test('a genuinely orphaned workspace (no members, no installation) stays claimable', () => {
+  let grantedRole: string | undefined;
+  const svc = new TenantService(
+    mockDb({
+      getTenantBySlug: (slug: string) => ({ id: 'orphan', slug, name: slug }),
+      getMembership: () => undefined,
+      tenantIsClaimable: () => true,
+      addWorkspaceMember: (_t: string, _u: string, role: string) => {
+        grantedRole = role;
+      },
+    }),
+  );
+  // Same pattern as the rebind test above: the guard passing means we proceed
+  // to buildGitHubInstallUrl, which needs real GitHub config. A
+  // NON-WorkspaceAccessError therefore proves the claim was allowed through.
+  assert.throws(
+    () => svc.startConnect('legacy-orphan', 'first-user'),
+    (e) => !(e instanceof WorkspaceAccessError),
+    'an orphan with no installation must still be claimable',
+  );
+  assert.equal(grantedRole, 'owner', 'legacy reclaim still grants ownership');
+});
