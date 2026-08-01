@@ -195,7 +195,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     // $0.75/review overage. COGS ~$0.27/review → 50 × $0.27 = ~$14 worst-case
     // COGS under $49; overage is ~2.8x margin. Everything Verify has, just
     // capped lower — appeals to solo devs and small teams, not just funded ones.
-    reviewPasses: 3,
+    reviewPasses: 4,
     retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,
@@ -227,7 +227,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     // Replaces the earlier codex-CLI design: model diversity across 3 real
     // providers beats a single OAuth-fragile "sharp" pass + 2 MiniMax lenses,
     // and retires the account-pool/proxy/watchdog complexity entirely.
-    reviewPasses: 3,
+    reviewPasses: 4,
     retrievalTopK: 28, // slightly deeper cross-file context than Panel (+12%)
     repoSweep: false,
     sweepMaxFiles: 0,
@@ -253,7 +253,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   enterprise: {
     id: 'enterprise',
     label: 'Enterprise',
-    reviewPasses: 3,
+    reviewPasses: 4,
     retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,
@@ -267,7 +267,10 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     reviewsPerMonth: null, // custom-contract tier — negotiated limits, not a code default
     includedReviewsPerMonth: null,
     overageCentsPerReview: null,
-    modelTier: 'dual-model', // MiniMax + DeepSeek; same pipeline as every tier
+    // Enterprise was 'dual-model' — MiniMax + DeepSeek, and NEVER Luna — so the
+    // most expensive plan ran a weaker stack than Verify. Now the full
+    // four-model ensemble.
+    modelTier: 'multi-model',
     priority: 4,
   },
 };

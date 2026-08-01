@@ -33,6 +33,7 @@ import {
   commandTrigger,
   dedupeByFileLine,
   DEEP_DIVE_FOCUS,
+  REMOVED_BEHAVIOR_FOCUS,
   THIRD_ANGLE_FOCUS,
   filterAndCapFindings,
   fingerprintFinding,
@@ -120,6 +121,10 @@ export interface WorkerConfig {
   /** optional Codex CLI target (OAuth/login) used when ORVEX_CODEX_CLI=1; null
    *  when the CLI path is disabled. */
   codexCliModel: LlmTarget | null;
+  /** DeepSeek v4 Flash — a SECOND, independent DeepSeek reasoner on the same
+   *  key. Distinct model weights, so it is genuine ensemble diversity rather
+   *  than a re-run of v4 Pro. */
+  deepseekFlashModel: LlmTarget | null;
   /** optional DeepSeek model (reasoning-heavy, cheap) — a standalone pass
    *  target for 'multi-model' tiers, and the automatic fallback when codex
    *  CLI's OAuth is down. null when ORVEX_DEEPSEEK_API_KEY is not set. */
@@ -131,7 +136,7 @@ export interface WorkerConfig {
 }
 
 type ModelTier = 'premium' | 'standard' | 'hybrid' | 'openai' | 'codex-hybrid' | 'multi-model' | 'dual-model';
-export type PassTier = 'premium' | 'standard' | 'openai' | 'deepseek';
+export type PassTier = 'premium' | 'standard' | 'openai' | 'deepseek' | 'deepseek-flash';
 
 function premiumTarget(config: WorkerConfig): LlmTarget {
   return { apiKey: config.llmApiKey, baseUrl: config.llmBaseUrl, model: config.llmModel, api: config.llmApi };
@@ -202,8 +207,21 @@ export function modelForPass(
     if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
     // pass 2 (deep-dive) → DeepSeek's heavy reasoning, built for hunting the
     // subtle defects a first read misses.
+    // pass 2 (deep-dive) → the STRONGER DeepSeek. v4 Flash currently
+    // outperforms v4 Pro, so it gets the highest-value lens (hunting the subtle
+    // defects a first read misses). Swap these two lines to A/B them — the
+    // lenses are independent of which model runs them.
+    if (passIndex === 1 && config.deepseekFlashModel) {
+      return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
+    }
     if (passIndex === 1 && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
-    // pass 3 (perf/completeness) + any missing-key fallback → MiniMax.
+    // pass 3 (removed-behavior / caller audit) → v4 Pro. A SECOND, independent
+    // reasoner rather than a re-run: the 161-180 benchmarks showed our misses
+    // concentrated in multi-step state and data-flow bugs, which is exactly
+    // what this lens hunts, and ensemble diversity is where the unique-finding
+    // lead comes from.
+    if (passIndex === 2 && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+    // pass 4 (perf/completeness breadth) + any missing-key fallback → MiniMax.
     return { target: config.standardModel, tier: 'standard' };
   }
   if (plan.modelTier === 'dual-model') {
@@ -233,6 +251,20 @@ export function modelForPass(
  *  reviewer, so it always runs on the cheaper standard model (MiniMax) — even when
  *  the review passes use an expensive model (e.g. codex). */
 export function modelForPlan(config: WorkerConfig, plan: { modelTier?: ModelTier }): LlmTarget {
+  // VERIFICATION IS THE PRECISION GATE — it decides what the customer actually
+  // sees. On the multi-model tiers it now runs on the frontier OpenAI model
+  // rather than the cheap standard one: a weak verifier over-vetoes, which is
+  // why a strong-reasoner "rescue" had to be bolted on for hedged rejections.
+  // Luna's price cut (5x) made this affordable; the verify prompt is far
+  // smaller than a review prompt, so the marginal cost is small.
+  // Override with ORVEX_VERIFY_ON_STANDARD=1 to fall back to the cheap model.
+  if (
+    (plan.modelTier === 'multi-model' || plan.modelTier === 'codex-hybrid') &&
+    config.openaiModel &&
+    process.env.ORVEX_VERIFY_ON_STANDARD !== '1'
+  ) {
+    return config.openaiModel;
+  }
   if (
     plan.modelTier === 'standard' ||
     plan.modelTier === 'openai' ||
@@ -342,6 +374,17 @@ export function loadWorkerConfig(): WorkerConfig {
       }
     : null;
 
+  // DeepSeek v4 Flash rides the SAME API key as v4 Pro — only the model id
+  // differs — so enabling it costs no new credential.
+  const deepseekFlashModel: LlmTarget | null = deepseekKey
+    ? {
+        apiKey: deepseekKey,
+        baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: process.env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
+        reasoningEffort: process.env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
+      }
+    : null;
+
   return {
     github,
     llmApiKey: premiumApiKey,
@@ -352,6 +395,7 @@ export function loadWorkerConfig(): WorkerConfig {
     openaiModel,
     codexCliModel,
     deepseekModel,
+    deepseekFlashModel,
     maxFileBytes: Number(process.env.MAX_FILE_BYTES ?? 300_000),
     maxFiles: Number(process.env.MAX_FILES ?? 150),
     enableCheckRuns: process.env.CHECK_RUNS_ENABLED === '1',
@@ -397,6 +441,10 @@ const OPENAI_COST_OUT = Number(process.env.ORVEX_OPENAI_COST_OUTPUT_PER_M ?? 1.2
 // DeepSeek (reasoning-heavy, cheap) — placeholder rate, override once billed usage confirms it.
 const DEEPSEEK_COST_IN = Number(process.env.ORVEX_DEEPSEEK_COST_INPUT_PER_M ?? 0.55);
 const DEEPSEEK_COST_OUT = Number(process.env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M ?? 2.19);
+// DeepSeek v4 Flash — cheaper than v4 Pro. Priced separately so the dashboard
+// doesn't bill a Flash pass at Pro rates. Override once billed usage confirms.
+const DEEPSEEK_FLASH_COST_IN = Number(process.env.ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M ?? 0.07);
+const DEEPSEEK_FLASH_COST_OUT = Number(process.env.ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M ?? 0.28);
 function computeCostUsd(inputTokens: number, outputTokens: number, tier: PassTier): number {
   const [inRate, outRate] =
     tier === 'standard'
@@ -405,7 +453,9 @@ function computeCostUsd(inputTokens: number, outputTokens: number, tier: PassTie
         ? [OPENAI_COST_IN, OPENAI_COST_OUT]
         : tier === 'deepseek'
           ? [DEEPSEEK_COST_IN, DEEPSEEK_COST_OUT]
-          : [PREMIUM_COST_IN, PREMIUM_COST_OUT];
+          : tier === 'deepseek-flash'
+            ? [DEEPSEEK_FLASH_COST_IN, DEEPSEEK_FLASH_COST_OUT]
+            : [PREMIUM_COST_IN, PREMIUM_COST_OUT];
   return (inputTokens / 1e6) * inRate + (outputTokens / 1e6) * outRate;
 }
 
@@ -414,20 +464,25 @@ type TierUsage = {
   premium: { in: number; out: number };
   openai: { in: number; out: number };
   deepseek: { in: number; out: number };
+  'deepseek-flash': { in: number; out: number };
 };
 
 /** Total tokens + cost from per-tier usage (a review can mix models, each with
  *  its own $/token). */
 function totalUsage(usage: TierUsage): { inputTokens: number; outputTokens: number; costUsd: number } {
-  return {
-    inputTokens: usage.standard.in + usage.premium.in + usage.openai.in + usage.deepseek.in,
-    outputTokens: usage.standard.out + usage.premium.out + usage.openai.out + usage.deepseek.out,
-    costUsd:
-      computeCostUsd(usage.standard.in, usage.standard.out, 'standard') +
-      computeCostUsd(usage.premium.in, usage.premium.out, 'premium') +
-      computeCostUsd(usage.openai.in, usage.openai.out, 'openai') +
-      computeCostUsd(usage.deepseek.in, usage.deepseek.out, 'deepseek'),
-  };
+  // ITERATE the tiers rather than summing them by hand. The hand-written
+  // version silently omitted any newly-added tier — adding 'deepseek-flash'
+  // would have under-reported its cost with no type error, which is the same
+  // class of defect as the 5x Luna mispricing.
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let costUsd = 0;
+  for (const [tier, u] of Object.entries(usage) as Array<[PassTier, { in: number; out: number }]>) {
+    inputTokens += u.in;
+    outputTokens += u.out;
+    costUsd += computeCostUsd(u.in, u.out, tier);
+  }
+  return { inputTokens, outputTokens, costUsd };
 }
 
 /** Run async tasks with a bounded concurrency limit, preserving input order.
@@ -818,6 +873,7 @@ async function executeReview(
     premium: { in: 0, out: 0 },
     openai: { in: 0, out: 0 },
     deepseek: { in: 0, out: 0 },
+    'deepseek-flash': { in: 0, out: 0 },
   };
   const onUsageFor = (tier: PassTier) => (u: { inputTokens: number; outputTokens: number }) => {
     usage[tier].in += u.inputTokens;
@@ -925,9 +981,15 @@ async function executeReview(
     const PASS_ANGLES: Array<{ tag: string; focus?: string; bestEffort?: boolean }> = [
       { tag: 'general' },
       { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS },
+      // Fourth lens, on a SECOND independent reasoner (DeepSeek v4 Flash).
+      // Ordered before the breadth pass so the index-clamped fallback still
+      // lands on breadth, and required — this is the lens targeting the bug
+      // class the benchmarks showed we miss.
+      { tag: 'removed-behavior/callers', focus: REMOVED_BEHAVIOR_FOCUS },
       // Breadth lens — commonly MiniMax, whose reasoning can exceed the wall-clock
       // cap on large PRs. Declared here (not derived from the tag string) so a
-      // rename can't silently change which passes are required.
+      // rename can't silently change which passes are required. Stays LAST so
+      // any pass beyond the list clamps to a best-effort angle, not a required one.
       { tag: 'perf/completeness/api', focus: THIRD_ANGLE_FOCUS, bestEffort: true },
     ];
 

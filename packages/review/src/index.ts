@@ -69,5 +69,5 @@ export {
 export { dropSelfNegatingFindings } from './noise.js';
 export { checkImportBindings, enumerateExports, extractNamedImports } from './import-check.js';
 export { isRateLimitOrQuotaError, llmChat, type LlmClientOptions } from './llm-client.js';
-export { DEEP_DIVE_FOCUS, THIRD_ANGLE_FOCUS } from './lenses.js';
+export { DEEP_DIVE_FOCUS, THIRD_ANGLE_FOCUS, REMOVED_BEHAVIOR_FOCUS } from './lenses.js';
 export { isHedgedRejection } from './verifier.js';

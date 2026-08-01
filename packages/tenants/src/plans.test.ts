@@ -9,8 +9,15 @@ test('model tiers: Free/Panel/Panel Unlimited/Enterprise on the MiniMax+DeepSeek
   // Pure API billing on every tier now — no OAuth/account-pool dependency.
   assert.equal(planFeatures('free').modelTier, 'dual-model');
   assert.equal(planFeatures('review').modelTier, 'dual-model');
-  assert.equal(planFeatures('enterprise').modelTier, 'dual-model');
-  assert.equal(planFeatures('verify').modelTier, 'multi-model', 'Verify: MiniMax + DeepSeek + Luna');
+  // Enterprise was 'dual-model' — MiniMax + DeepSeek and NEVER Luna — so the
+  // most expensive plan ran a weaker stack than Verify. It is now the full
+  // four-model ensemble.
+  assert.equal(planFeatures('enterprise').modelTier, 'multi-model');
+  assert.equal(
+    planFeatures('verify').modelTier,
+    'multi-model',
+    'Verify: Luna + DeepSeek v4 Pro + DeepSeek v4 Flash + MiniMax',
+  );
 });
 
 test('IDENTICAL pipeline on every plan: 3 passes, same retrieval depth, strict verify — plans differ by MODEL + limits only', () => {
@@ -18,11 +25,14 @@ test('IDENTICAL pipeline on every plan: 3 passes, same retrieval depth, strict v
   // NEVER the tier differentiator. Every plan runs 3 passes + strict verify;
   // Verify differs by using 3 distinct models instead of the 2-model ensemble.
   for (const p of ['free', 'review', 'review-plus', 'verify', 'enterprise'] as const) {
-    assert.equal(planFeatures(p).reviewPasses, 3, `${p} runs the full 3-pass pipeline`);
+    // Volume track (dual-model) stays at 3; the quality track runs a 4th
+    // reasoner (DeepSeek v4 Flash) on the removed-behaviour/caller lens.
+    const expected = planFeatures(p).modelTier === 'multi-model' ? 4 : 3;
+    assert.equal(planFeatures(p).reviewPasses, expected, `${p} runs its full pipeline`);
     assert.equal(planFeatures(p).retrievalTopK, 28, `${p} gets the same retrieval depth`);
     assert.equal(planFeatures(p).deepVerify, true, `${p} gets the strict verification`);
   }
-  assert.equal(planFeatures('verify').modelTier, 'multi-model', 'Verify: Luna + DeepSeek + MiniMax');
+  assert.equal(planFeatures('verify').modelTier, 'multi-model', 'Verify: the four-model ensemble');
   assert.equal(planFeatures('review').modelTier, 'dual-model', 'Panel: MiniMax + DeepSeek ensemble');
 });
 
@@ -82,7 +92,7 @@ test('pricing structure: Starter $29 (100/mo @ 5/hr, $0.50 overage) < Pro Unlimi
   assert.equal(planFeatures('review-plus').includedReviewsPerMonth, null);
   assert.equal(planFeatures('review-plus').overageCentsPerReview, null);
   // Verify Lite: budget entry to the premium (multi-model) track.
-  assert.equal(planFeatures('verify-lite').modelTier, 'multi-model', 'same 3-model quality as Verify');
+  assert.equal(planFeatures('verify-lite').modelTier, 'multi-model', 'same four-model quality as Verify');
   assert.equal(planFeatures('verify-lite').reviewsPerHour, 5);
   assert.equal(planFeatures('verify-lite').reviewsPerMonth, 50);
   assert.equal(planFeatures('verify-lite').includedReviewsPerMonth, 50);

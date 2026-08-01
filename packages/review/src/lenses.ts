@@ -32,3 +32,21 @@ export const THIRD_ANGLE_FOCUS =
   '- DESIGN (only when it will cause real bugs or heavy future cost): a bandaid special-case that should be a deeper fix, duplicated logic that will drift out of sync, an abstraction that invites misuse.\n' +
   'Every finding must name a concrete failure or measurable cost. Skip anything the correctness/security passes would already catch.\n' +
   'Before finalizing, take ONE more look at the 2-3 most complex changed areas through this lens — the subtlest miss is usually there.';
+
+/**
+ * FOURTH PASS — removed behaviour & caller audit.
+ *
+ * Promoted from the `@orvex deep` extras to a standard pass on the top tiers.
+ * The 161-180 competitor benchmarks showed our residual misses concentrated in
+ * multi-step STATE and DATA-FLOW bugs (state surviving a retry, a guard dropped
+ * on one path, a caller broken by a changed contract) — the class a
+ * hunk-focused read is worst at. This lens targets exactly that, and running it
+ * on a DIFFERENT model from the deep-dive pass is what makes it an ensemble
+ * rather than a re-run.
+ */
+export const REMOVED_BEHAVIOR_FOCUS =
+  'This is a FOURTH review pass with a lens the earlier passes do NOT cover. Do not repeat their findings; hunt these two things specifically:\n' +
+  '- REMOVED / WEAKENED BEHAVIOUR: for every line this diff DELETES or replaces, name the invariant it enforced (a guard, validation, error path, cleanup, ordering constraint, permission check), then find where the new code re-establishes it. A dropped guard, a narrowed validation, a deleted error branch, or a cleanup that now only runs on the happy path is a finding. State what input now gets through that previously did not.\n' +
+  '- CALLER & CONTRACT AUDIT: trace every changed function to its CALLERS. Does any call site break on a new precondition, a changed return shape or type, a new thrown error, a changed null/empty result, or a different ordering/timing? Check the tests that exercise it too — a test that still passes because it asserts the OLD contract is a finding.\n' +
+  '- STATE ACROSS ATTEMPTS: for any retry, resume, reconnect, or replay path, enumerate what state SURVIVES from the previous attempt and what must be reset. State carried into a retry that should have been cleared is a bug even when each line looks correct.\n' +
+  'Report only concrete breakages with file:line and the input or sequence that triggers them.';
