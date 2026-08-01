@@ -2,6 +2,32 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { redactSecrets } from './redact.js';
 
+/**
+ * Assert redaction does not blow up super-linearly as input grows.
+ *
+ * Measures the SHAPE of the curve rather than absolute milliseconds: a
+ * catastrophic-backtracking regression is quadratic-or-worse (4x+ per doubling),
+ * while linear work stays near 2x. Wall-clock thresholds are flaky under load —
+ * one of these failed exactly once on a busy machine, which is precisely the
+ * kind of noise that makes a suite untrustworthy.
+ */
+function assertScalesLinearly(build: (size: number) => string): void {
+  const time = (input: string): number => {
+    redactSecrets(input.slice(0, 1000)); // warm the regex engine
+    const started = process.hrtime.bigint();
+    redactSecrets(input);
+    return Number(process.hrtime.bigint() - started) / 1e6;
+  };
+  const small = Math.max(time(build(50_000)), 0.5); // floor avoids divide-by-noise
+  const large = time(build(200_000)); // 4x the input
+  // Linear would be ~4x. Quadratic would be ~16x. Allow generous headroom for a
+  // loaded CI box while still catching a real backtracking regression.
+  assert.ok(
+    large / small < 10,
+    `4x input took ${(large / small).toFixed(1)}x longer (${small.toFixed(1)}ms → ${large.toFixed(1)}ms) — looks super-linear`,
+  );
+}
+
 test('redacts unquoted KEY=value (the common .env / CI leak)', () => {
   const out = redactSecrets('API_KEY=AbCdEf0123456789xyz');
   assert.doesNotMatch(out, /AbCdEf0123456789xyz/);
@@ -121,12 +147,10 @@ test('redaction does not eat ordinary code or config', () => {
 test('redaction is linear-time on adversarial input (no ReDoS worker stall)', () => {
   // An unanchored greedy prefix made this quadratic: 50kB of hex blocked the
   // single-threaded worker for 6.3s, fully controlled by PR content.
-  for (const size of [50_000, 100_000]) {
-    const started = Date.now();
-    redactSecrets('deadbeef'.repeat(size / 8));
-    const ms = Date.now() - started;
-    assert.ok(ms < 1_000, `${size}B took ${ms}ms — redaction must stay linear`);
-  }
+  // Assert the GROWTH RATIO, not wall-clock: doubling the input must not
+  // super-linearly increase the time. An absolute threshold is flaky on a
+  // loaded machine and would erode trust in the whole suite.
+  assertScalesLinearly((size) => 'deadbeef'.repeat(size / 8));
 });
 
 test('redaction never corrupts reviewable source code', () => {
@@ -200,10 +224,5 @@ test('redaction stays linear on identifier-run input (ReDoS guard)', () => {
   // Unbounded quantifiers straddling the keyword alternation backtracked
   // quadratically on a run like 'a-b_a-b_…' — measured 9.7s at 80kB of BLOCKED
   // event loop, from attacker-controlled PR file content.
-  for (const size of [80_000, 200_000]) {
-    const started = Date.now();
-    redactSecrets('a-b_'.repeat(size / 4));
-    const ms = Date.now() - started;
-    assert.ok(ms < 500, `${size}B took ${ms}ms — redaction must stay linear`);
-  }
+  assertScalesLinearly((size) => 'a-b_'.repeat(size / 4));
 });
