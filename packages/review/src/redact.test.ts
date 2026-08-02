@@ -3,29 +3,24 @@ import assert from 'node:assert/strict';
 import { redactSecrets } from './redact.js';
 
 /**
- * Assert redaction does not blow up super-linearly as input grows.
+ * Assert redaction cannot be wedged by adversarial input.
  *
- * Measures the SHAPE of the curve rather than absolute milliseconds: a
- * catastrophic-backtracking regression is quadratic-or-worse (4x+ per doubling),
- * while linear work stays near 2x. Wall-clock thresholds are flaky under load —
- * one of these failed exactly once on a busy machine, which is precisely the
- * kind of noise that makes a suite untrustworthy.
+ * Uses a GENEROUS ABSOLUTE ceiling, not a ratio. The ratio version was itself
+ * flaky: healthy runs are sub-millisecond, so ordinary GC or scheduler noise
+ * made large/small exceed the multiplier even though both were fast.
+ *
+ * The bound is chosen from measurements, not taste: the catastrophic-
+ * backtracking regressions were 6,311ms and 9,752ms, while healthy linear work
+ * on the same inputs is ~20-50ms. A 2,000ms ceiling therefore has ~40x headroom
+ * over healthy and still fails loudly on a real regression.
  */
-function assertScalesLinearly(build: (size: number) => string): void {
-  const time = (input: string): number => {
-    redactSecrets(input.slice(0, 1000)); // warm the regex engine
-    const started = process.hrtime.bigint();
-    redactSecrets(input);
-    return Number(process.hrtime.bigint() - started) / 1e6;
-  };
-  const small = Math.max(time(build(50_000)), 0.5); // floor avoids divide-by-noise
-  const large = time(build(200_000)); // 4x the input
-  // Linear would be ~4x. Quadratic would be ~16x. Allow generous headroom for a
-  // loaded CI box while still catching a real backtracking regression.
-  assert.ok(
-    large / small < 10,
-    `4x input took ${(large / small).toFixed(1)}x longer (${small.toFixed(1)}ms → ${large.toFixed(1)}ms) — looks super-linear`,
-  );
+function assertNoBacktrackingBlowup(build: (size: number) => string): void {
+  const input = build(200_000);
+  redactSecrets(input.slice(0, 1000)); // warm the regex engine
+  const started = process.hrtime.bigint();
+  redactSecrets(input);
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(ms < 2_000, `200kB took ${ms.toFixed(0)}ms — catastrophic backtracking (healthy is ~20-50ms)`);
 }
 
 test('redacts unquoted KEY=value (the common .env / CI leak)', () => {
@@ -150,7 +145,7 @@ test('redaction is linear-time on adversarial input (no ReDoS worker stall)', ()
   // Assert the GROWTH RATIO, not wall-clock: doubling the input must not
   // super-linearly increase the time. An absolute threshold is flaky on a
   // loaded machine and would erode trust in the whole suite.
-  assertScalesLinearly((size) => 'deadbeef'.repeat(size / 8));
+  assertNoBacktrackingBlowup((size) => 'deadbeef'.repeat(size / 8));
 });
 
 test('redaction never corrupts reviewable source code', () => {
@@ -224,5 +219,5 @@ test('redaction stays linear on identifier-run input (ReDoS guard)', () => {
   // Unbounded quantifiers straddling the keyword alternation backtracked
   // quadratically on a run like 'a-b_a-b_…' — measured 9.7s at 80kB of BLOCKED
   // event loop, from attacker-controlled PR file content.
-  assertScalesLinearly((size) => 'a-b_'.repeat(size / 4));
+  assertNoBacktrackingBlowup((size) => 'a-b_'.repeat(size / 4));
 });
