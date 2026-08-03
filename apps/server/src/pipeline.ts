@@ -1700,6 +1700,16 @@ async function executeReview(
     ...newStored.filter((s) => !knownFps.has(s.fingerprint)),
   ];
 
+  // Persist manual-review candidates so `@orvex ignore <file>:<line>` can
+  // resolve them. They have no inline comment, so the thread-reply form of
+  // `ignore` (which matches on githubCommentId) can never reach them — leaving
+  // the team no way to silence a candidate that reappears on every push. The
+  // suppression filter at the top of this function already covers reviewOnly;
+  // it simply never had a route to receive their fingerprints.
+  const manualStored: StoredFinding[] = merged.reviewOnly.map(({ finding }) =>
+    toStoredFinding(finding, effectiveSha),
+  );
+
   const state: PrReviewState = {
     installationId,
     tenantId,
@@ -1708,6 +1718,7 @@ async function executeReview(
     pr: number,
     lastSha: effectiveSha,
     findings: finalFindings,
+    manualReview: manualStored,
     lastReviewAt: new Date().toISOString(),
     codexThreadId,
   };

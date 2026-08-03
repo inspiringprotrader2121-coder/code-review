@@ -34,6 +34,19 @@ export interface PrReviewState {
   lastSummaryCommentId?: number;
   /** Codex CLI session id; one per PR so re-reviews resume the same session. */
   codexThreadId?: string;
+  /**
+   * Candidates shown in the collapsed "manual review" table rather than posted
+   * inline. Persisted ONLY so `@orvex ignore <file>:<line>` can resolve them:
+   * they have no inline comment, so the thread-reply form of `ignore` (which
+   * matches on githubCommentId) could never reach them, and the pipeline's
+   * suppression filter — which does already cover reviewOnly — had no way of
+   * ever receiving their fingerprint. The result was unsuppressable noise that
+   * reappeared on every push, forever.
+   *
+   * Deliberately NOT part of `findings`: these are unconfirmed, and must not
+   * count toward new/open/fixed stats or the still-open carry-forward.
+   */
+  manualReview?: StoredFinding[];
 }
 
 export interface PrKey {

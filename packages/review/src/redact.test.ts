@@ -221,3 +221,34 @@ test('redaction stays linear on identifier-run input (ReDoS guard)', () => {
   // event loop, from attacker-controlled PR file content.
   assertNoBacktrackingBlowup((size) => 'a-b_'.repeat(size / 4));
 });
+
+test('redaction preserves line count so downstream line numbers stay valid', () => {
+  // Redaction runs BEFORE chunkChangedFileContext (which slices redacted
+  // content using ORIGINAL `@@` line numbers), before truncateAroundLine, and
+  // before the verifier sees a file. A multi-line secret collapsing to one
+  // line displaced every line below it — a 302-line PEM shifted the ±80-line
+  // hunk window by ~300 lines, so the model got unrelated code labelled
+  // "around changed hunk" and never saw the change.
+  const pem = [
+    '-----BEGIN RSA PRIVATE KEY-----',
+    ...Array.from({ length: 300 }, (_, i) => `AAAA${i}`),
+    '-----END RSA PRIVATE KEY-----',
+  ].join('\n');
+  const file = ['before1', 'before2', pem, 'AFTER_MARKER', 'tail'].join('\n');
+  const red = redactSecrets(file);
+
+  assert.equal(red.split('\n').length, file.split('\n').length, 'line count must not change');
+  assert.equal(
+    red.split('\n').indexOf('AFTER_MARKER'),
+    file.split('\n').indexOf('AFTER_MARKER'),
+    'lines after a multi-line secret must keep their original numbers',
+  );
+  assert.ok(!red.includes('AAAA5'), 'the key body is still redacted');
+});
+
+test('line preservation also covers the multi-line k8s name/value pair', () => {
+  const y = ['a: 1', '- name: DB_PASSWORD', '  value: hunter2supersecret', 'b: 2'].join('\n');
+  const red = redactSecrets(y);
+  assert.equal(red.split('\n').length, y.split('\n').length);
+  assert.ok(!red.includes('hunter2supersecret'));
+});

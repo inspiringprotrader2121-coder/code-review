@@ -339,6 +339,53 @@ export function webhookRoutes(queue: ReviewQueue) {
           instruction: command.instruction,
         });
         return 'ask_enqueued';
+      case 'ignore_at': {
+        // Suppress by location. This is the ONLY route to a manual-review
+        // candidate: those are rendered in a collapsed table with no inline
+        // comment, so `ignore` as a thread reply can never resolve them and
+        // they reappeared on every push forever.
+        const key = { installationId: installation.installationId, owner, repo, pr };
+        const state = db.getState(key);
+        const wanted = command.file.replace(/^[`'"]|[`'"]$/g, '');
+        const matches = (f: { file: string; line?: number }) =>
+          (f.file === wanted || f.file.endsWith(`/${wanted}`)) &&
+          (command.line === undefined || f.line === command.line);
+        const target =
+          (state?.manualReview ?? []).find(matches) ?? (state?.findings ?? []).find(matches);
+        if (!target) {
+          await replyToIssueComment(
+            octokit,
+            ref,
+            formatFixSkippedReply(
+              `no Orvex finding matches \`${wanted}${command.line ? `:${command.line}` : ''}\` on this PR. ` +
+                'Use the exact `file:line` shown in the review.',
+            ),
+          );
+          return 'ignore_no_finding';
+        }
+        db.addSuppression({
+          installationId: installation.installationId,
+          owner,
+          repo,
+          fingerprint: target.fingerprint,
+          ruleId: target.ruleId,
+          suppressedBy: requestedBy,
+        });
+        if (state) {
+          const still = state.findings.find((f) => f.fingerprint === target.fingerprint);
+          if (still) still.status = 'ignored';
+          state.manualReview = (state.manualReview ?? []).filter(
+            (f) => f.fingerprint !== target.fingerprint,
+          );
+          db.saveState(state);
+        }
+        await replyToIssueComment(
+          octokit,
+          ref,
+          `🙈 **Ignored** \`${target.file}${target.line ? `:${target.line}` : ''}\` — Orvex won't report this finding again on \`${owner}/${repo}\` (suppressed by @${requestedBy}).`,
+        );
+        return 'finding_ignored';
+      }
       case 'fix_this':
       case 'ignore':
       case 'explain':
@@ -346,7 +393,8 @@ export function webhookRoutes(queue: ReviewQueue) {
           octokit,
           ref,
           formatFixSkippedReply(
-            `reply directly on one of Orvex's inline findings to use \`${commandTrigger()} fix this\`, \`ignore\`, or \`explain\`.`,
+            `reply directly on one of Orvex's inline findings to use \`${commandTrigger()} fix this\`, \`ignore\`, or \`explain\` — ` +
+              `or use \`${commandTrigger()} ignore <file>:<line>\` here to silence a manual-review candidate.`,
           ),
         );
         return 'needs_thread_context';

@@ -5,6 +5,14 @@ export type OrvexCommand =
   | { kind: 'fix_all' } // also generate fixes for findings without one
   | { kind: 'fix_this' } // thread reply on one finding
   | { kind: 'ignore' } // thread reply: suppress this finding permanently
+  /**
+   * PR-level: suppress a specific candidate by location. Manual-review
+   * candidates are rendered in a collapsed table with NO inline comment, so
+   * the thread-reply form of `ignore` (which resolves via githubCommentId)
+   * can never reach them — they repeated on every push with no way to silence
+   * them. `@orvex ignore src/a.ts:42` gives them a handle.
+   */
+  | { kind: 'ignore_at'; file: string; line?: number }
   | { kind: 'explain' } // thread reply: deep-dive explanation of the finding
   | { kind: 'resolve_conflicts' } // attempt to resolve merge conflicts
   | { kind: 'auto_apply'; enabled: boolean }
@@ -61,6 +69,19 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
   if (normalized === 'fix') return { kind: 'fix' };
   if (normalized === 'ignore' || normalized === 'ignore this' || normalized === 'dismiss') {
     return { kind: 'ignore' };
+  }
+  // `ignore <path>` / `ignore <path>:<line>` — matched on the RAW rest so the
+  // path keeps its original case (paths are case-sensitive; `normalized` is
+  // lowercased and would never match a file named `Auth.ts`).
+  {
+    const at = /^(?:ignore|dismiss)\s+(?:this\s+)?([^\s:][^\s]*?)(?::(\d+))?$/i.exec(
+      rest.replace(/[.!]+$/, '').trim(),
+    );
+    if (at) {
+      return at[2]
+        ? { kind: 'ignore_at', file: at[1], line: Number(at[2]) }
+        : { kind: 'ignore_at', file: at[1] };
+    }
   }
   if (normalized === 'explain' || normalized === 'explain this' || normalized === 'why') {
     return { kind: 'explain' };

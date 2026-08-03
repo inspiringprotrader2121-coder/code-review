@@ -139,3 +139,62 @@ test('repos: upsert refreshes tenant_id when an installation is re-linked', () =
   assert.equal(db.listRepos(t1.id).length, 0);
   assert.equal(db.listRepos(t2.id).length, 1);
 });
+
+test('manual-review candidates round-trip separately from findings', () => {
+  // They are persisted ONLY so `@orvex ignore <file>:<line>` can resolve them:
+  // a manual candidate has no inline comment, so the thread-reply form of
+  // `ignore` (which matches on githubCommentId) could never reach it and the
+  // noise repeated on every push forever. They must stay OUT of `findings` so
+  // they never reach the dashboard projection or the new/open/fixed stats.
+  const db = freshDb();
+  const key = { installationId: 1, owner: 'o', repo: 'r', pr: 5 };
+  db.saveState({
+    installationId: 1,
+    tenantId: 't',
+    owner: 'o',
+    repo: 'r',
+    pr: 5,
+    lastSha: 'sha1',
+    findings: [],
+    lastReviewAt: new Date().toISOString(),
+    manualReview: [
+      {
+        id: 'm1',
+        fingerprint: 'fp-manual-1',
+        file: 'src/a.ts',
+        line: 42,
+        severity: 'P1',
+        category: 'logic',
+        message: 'unconfirmed candidate',
+        confidence: 0.3,
+        ruleId: 'llm.general',
+        status: 'open',
+        firstSeenSha: 'sha1',
+      } as never,
+    ],
+  });
+  const back = db.getState(key);
+  assert.equal(back?.manualReview?.length, 1);
+  assert.equal(back?.manualReview?.[0]?.fingerprint, 'fp-manual-1');
+  assert.deepEqual(back?.findings, [], 'manual candidates must not leak into findings');
+});
+
+test('a pr_reviews row written before manual_review_json existed still loads', () => {
+  // Guards the ALTER-TABLE migration: the live DB predates this column, and a
+  // failure here would break every existing PR's state on deploy.
+  const db = freshDb();
+  const key = { installationId: 2, owner: 'o', repo: 'r', pr: 7 };
+  db.saveState({
+    installationId: 2,
+    tenantId: 't',
+    owner: 'o',
+    repo: 'r',
+    pr: 7,
+    lastSha: 'sha1',
+    findings: [],
+    lastReviewAt: new Date().toISOString(),
+  });
+  const back = db.getState(key);
+  assert.ok(back, 'state without manualReview must still load');
+  assert.equal(back?.manualReview, undefined);
+});

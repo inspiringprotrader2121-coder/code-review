@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
   last_review_at TEXT NOT NULL,
   last_summary_comment_id INTEGER,
   codex_thread_id TEXT,
+  manual_review_json TEXT,
   PRIMARY KEY (installation_id, owner, repo, pr)
 );
 
@@ -294,15 +295,22 @@ export class AppDatabase {
     this.migrateTenantBillingColumns();
     this.migrateRepoAutomationToggles();
     this.migrateReviewRunCostColumns();
-    this.migrateCodexThreadIdColumn();
+    this.migratePrReviewColumns();
   }
 
-  /** Add Codex CLI session id column to pr_reviews on existing DBs. */
-  private migrateCodexThreadIdColumn(): void {
+  /** Add later pr_reviews columns (codex thread id, manual-review candidates) to existing DBs. */
+  private migratePrReviewColumns(): void {
     const cols = this.db.prepare(`PRAGMA table_info(pr_reviews)`).all() as Array<{ name: string }>;
     const names = new Set(cols.map((c) => c.name));
     if (!names.has('codex_thread_id')) {
       this.db.exec(`ALTER TABLE pr_reviews ADD COLUMN codex_thread_id TEXT`);
+    }
+    // Manual-review candidates, kept apart from findings_json because they are
+    // UNCONFIRMED and must not reach the dashboard projection or the
+    // new/open/fixed stats. Stored solely so `@orvex ignore <file>:<line>` can
+    // resolve a candidate that has no inline comment to reply to.
+    if (!names.has('manual_review_json')) {
+      this.db.exec(`ALTER TABLE pr_reviews ADD COLUMN manual_review_json TEXT`);
     }
   }
 
@@ -894,7 +902,7 @@ export class AppDatabase {
   getState(key: PrKey): PrReviewState | null {
     const row = this.db
       .prepare(
-        `SELECT tenant_id, last_sha, findings_json, last_review_at, last_summary_comment_id, codex_thread_id
+        `SELECT tenant_id, last_sha, findings_json, last_review_at, last_summary_comment_id, codex_thread_id, manual_review_json
          FROM pr_reviews
          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr = ?`,
       )
@@ -906,6 +914,7 @@ export class AppDatabase {
           last_review_at: string;
           last_summary_comment_id: number | null;
           codex_thread_id: string | null;
+          manual_review_json: string | null;
         }
       | undefined;
 
@@ -922,6 +931,7 @@ export class AppDatabase {
       lastReviewAt: row.last_review_at,
       lastSummaryCommentId: row.last_summary_comment_id ?? undefined,
       codexThreadId: row.codex_thread_id ?? undefined,
+      manualReview: row.manual_review_json ? JSON.parse(row.manual_review_json) : undefined,
     };
   }
 
@@ -933,15 +943,16 @@ export class AppDatabase {
       this.db
         .prepare(
           `INSERT INTO pr_reviews
-         (installation_id, owner, repo, pr, tenant_id, last_sha, findings_json, last_review_at, last_summary_comment_id, codex_thread_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (installation_id, owner, repo, pr, tenant_id, last_sha, findings_json, last_review_at, last_summary_comment_id, codex_thread_id, manual_review_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(installation_id, owner, repo, pr) DO UPDATE SET
            tenant_id = excluded.tenant_id,
            last_sha = excluded.last_sha,
            findings_json = excluded.findings_json,
            last_review_at = excluded.last_review_at,
            last_summary_comment_id = excluded.last_summary_comment_id,
-           codex_thread_id = excluded.codex_thread_id`,
+           codex_thread_id = excluded.codex_thread_id,
+           manual_review_json = excluded.manual_review_json`,
         )
         .run(
           state.installationId,
@@ -954,6 +965,7 @@ export class AppDatabase {
           state.lastReviewAt,
           state.lastSummaryCommentId ?? null,
           state.codexThreadId ?? null,
+          state.manualReview ? JSON.stringify(state.manualReview) : null,
         );
 
       // keep the dashboard findings projection in sync with the operational blob

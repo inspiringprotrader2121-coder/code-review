@@ -138,10 +138,52 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   { pattern: /\bhttps?:\/\/[A-Za-z0-9]{16,}@[A-Za-z0-9.-]+\/[0-9]+/g, replacement: '[DSN_REDACTED]' },
 ];
 
+/**
+ * Expand `$1`..`$9` backreferences in a replacement template by hand.
+ * Needed because line-preserving redaction has to use a function replacer,
+ * and a function replacer does NOT expand `$n` itself.
+ */
+function expandTemplate(template: string, groups: Array<string | undefined>): string {
+  return template.replace(/\$(\d)/g, (_, d: string) => groups[Number(d) - 1] ?? '');
+}
+
+/**
+ * Redact secrets WITHOUT changing the line count.
+ *
+ * Several rules match across newlines — a PEM block, a base64-wrapped key, a
+ * Kubernetes `name:`/`value:` pair — and collapsing those to a single-line
+ * placeholder silently shifted every line number below them. That broke three
+ * separate consumers, because redaction runs BEFORE anything that reasons
+ * about line numbers:
+ *
+ *   - `chunkChangedFileContext` parses `@@ -a +b,c @@` headers, which carry
+ *     ORIGINAL numbering, then slices the REDACTED content by those numbers.
+ *     A 302-line PEM collapsing to one line displaced the ±80-line window by
+ *     ~300 lines, so the model was handed unrelated code labelled "around
+ *     changed hunk" and never saw the change at all.
+ *   - `truncateAroundLine` (llm-fix.ts) windows the redacted file around a
+ *     finding's line — same displacement, so an auto-fix could be generated
+ *     against the wrong region.
+ *   - the verifier receives redacted full files and is asked to confirm
+ *     findings that cite specific lines.
+ *
+ * Padding each multi-line match back to its original line count keeps every
+ * line number in the system valid, and costs nothing but blank lines.
+ */
 export function redactSecrets(text: string): string {
   let out = text;
   for (const { pattern, replacement } of SECRET_PATTERNS) {
-    out = out.replace(pattern, replacement);
+    out = out.replace(pattern, (...args) => {
+      const match = args[0] as string;
+      // No named groups in these patterns, so the trailing two args are
+      // always (offset, wholeString) and everything between is a capture.
+      const groups = args.slice(1, -2) as Array<string | undefined>;
+      const expanded = expandTemplate(replacement, groups);
+      const matchedLines = (match.match(/\n/g) ?? []).length;
+      const emittedLines = (expanded.match(/\n/g) ?? []).length;
+      const missing = matchedLines - emittedLines;
+      return missing > 0 ? expanded + '\n'.repeat(missing) : expanded;
+    });
   }
   return out;
 }

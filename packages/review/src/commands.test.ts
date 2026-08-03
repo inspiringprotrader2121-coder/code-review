@@ -68,3 +68,28 @@ test('parseOrvexCommand', async (t) => {
     assert.deepEqual(parseOrvexCommand('@orvex looks great here', '@orvex'), { kind: 'help' });
   });
 });
+
+test('`ignore <file>:<line>` targets a candidate that has no inline thread', () => {
+  // Manual-review candidates render in a collapsed table with no inline
+  // comment, so thread-reply `ignore` can never resolve them. Without this
+  // form they were unsuppressable and reappeared on every push.
+  assert.deepEqual(parseOrvexCommand('@orvex ignore src/a.ts:42'), {
+    kind: 'ignore_at',
+    file: 'src/a.ts',
+    line: 42,
+  });
+  assert.deepEqual(parseOrvexCommand('@orvex dismiss lib/x.js:7'), {
+    kind: 'ignore_at',
+    file: 'lib/x.js',
+    line: 7,
+  });
+  // Path case must survive: `normalized` is lowercased and would never match
+  // a file actually named `Auth.ts`.
+  assert.deepEqual(parseOrvexCommand('@orvex ignore src/Auth.ts'), {
+    kind: 'ignore_at',
+    file: 'src/Auth.ts',
+  });
+  // The bare forms must keep their existing thread-reply meaning.
+  assert.deepEqual(parseOrvexCommand('@orvex ignore'), { kind: 'ignore' });
+  assert.deepEqual(parseOrvexCommand('@orvex ignore this'), { kind: 'ignore' });
+});
