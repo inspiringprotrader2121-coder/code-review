@@ -32,7 +32,9 @@ Focus on issues that impact CORRECTNESS, PERFORMANCE, SECURITY, MAINTAINABILITY,
 - Environment/module-system mismatch: every NEW or moved file must actually RUN in its package's environment — CJS globals (__dirname/__filename/require) in an ESM ("type": "module") package throw ReferenceError at load; a test file that crashes at collection breaks the whole suite = P1. Check the nearest package.json and runner config.
 
 ## Accuracy
-- Read the FULL files provided, not just the hunks — a guard or handler elsewhere in the same file often decides whether a hunk is a bug.
+- Read every supplied source excerpt around the diff before judging. The diff is
+  the primary evidence; nearby guards, handlers, and error paths often decide
+  whether a hunk is a bug.
 - Before claiming a helper/wrapper the diff calls "does not handle X" (pagination, escaping, retries, null cases), READ that helper's source if it is in the context — wrappers often handle the case internally (a list helper that loops on a continuation token is NOT limited to one page). A Proxy/wrapper with a FALLTHROUGH (Reflect.get, a default branch, or delegation) forwards property/method access transparently, so "the wrapper hides/lacks member .foo" or "reads 0 because the Proxy has no .foo" is almost always WRONG unless the trap actually intercepts that key — trace the trap first.
 - If a finding's entire premise is how an EXTERNAL system behaves (a database's config-file parser, a cloud API's paging or limits, a library's internals) and nothing in the provided code or manifests evidences it, state that assumption explicitly in the message and cap confidence at 0.5 — never assert external internals from memory as certain fact. Confidently-wrong "X won't work because [external system] doesn't support it" claims are a known failure mode.
 - For each finding, state a concrete FAILURE SCENARIO (input/state → wrong outcome). If you cannot construct one, it is not a finding (mention it in the summary at most).
@@ -170,7 +172,7 @@ export interface ReviewPromptContext {
   related?: Array<{ path: string; content: string }>;
   /** files that import the changed code (reverse dependencies) */
   dependents?: Array<{ path: string; content: string }>;
-  /** full contents of the changed files (hunks lack surrounding logic) */
+  /** source contents of the changed files (hunks lack surrounding logic) */
   changedContents?: Array<{ path: string; content: string }>;
   /** every remaining repo code file — full-repo review context */
   others?: Array<{ path: string; content: string }>;
@@ -178,22 +180,122 @@ export interface ReviewPromptContext {
   extraFocus?: string;
 }
 
-// Prompt-size backstops. Bigger = more context but slower/costlier reasoning;
-// a ~130k-token prompt pushes MiniMax reviews past 10 minutes. Defaults target
-// a few-minute review; all env-tunable for teams that accept more latency.
-// Budgets sized for GLM-5.2's 1M-token context window (~4M chars): give the
-// model as much as possible so it can reason over FULL files, not truncated
-// fragments (truncation past a bug's line is why real bugs were missed). These
-// are CAPS — a small PR sends little; only large PRs use the headroom. Kept well
-// under 1M tokens to leave room for reasoning output. All env-tunable.
+// Prompt-size backstops. The diff is always rendered first. Large source files
+// are then represented by focused chunks around changed hunks, so the reviewer
+// receives the local control flow it needs without a huge unrelated-file dump
+// crowding out the actual patch. All limits remain env-tunable.
 const MAX_TREE_PATHS = Number(process.env.ORVEX_MAX_TREE_PATHS ?? 3000);
-// CHANGED files get a big budget — full files are the review target, and a bug
-// past the old cutoff was invisible. Supplementary (related/dependents/others)
-// is kept MODEST: it's cross-file context, not the thing under review, and
-// over-inflating it is what drove one 24-file review to ~$1.
-const MAX_CHANGED_CHARS = Number(process.env.ORVEX_MAX_CHANGED_CHARS ?? 700_000);
-const MAX_RELATED_CHARS = Number(process.env.ORVEX_MAX_RELATED_CHARS ?? 120_000);
-const MAX_OTHER_CHARS = Number(process.env.ORVEX_MAX_OTHER_CHARS ?? 80_000);
+const MAX_CHANGED_CHARS = Number(process.env.ORVEX_MAX_CHANGED_CHARS ?? 180_000);
+const MAX_RELATED_CHARS = Number(process.env.ORVEX_MAX_RELATED_CHARS ?? 60_000);
+const MAX_OTHER_CHARS = Number(process.env.ORVEX_MAX_OTHER_CHARS ?? 40_000);
+const FULL_CHANGED_FILE_CHARS = Number(process.env.ORVEX_FULL_CHANGED_FILE_CHARS ?? 32_000);
+const CHANGED_CONTEXT_LINES = Number(process.env.ORVEX_CHANGED_CONTEXT_LINES ?? 80);
+const MAX_CHANGED_CHUNKS_PER_FILE = Number(process.env.ORVEX_MAX_CHANGED_CHUNKS_PER_FILE ?? 6);
+const MAX_CHANGED_CHUNK_CHARS = Number(process.env.ORVEX_MAX_CHANGED_CHUNK_CHARS ?? 24_000);
+
+interface ChangedHunk {
+  start: number;
+  end: number;
+}
+
+interface SourceChunk extends ChangedHunk {
+  content: string;
+}
+
+interface SourceRange extends ChangedHunk {
+  focusStart: number;
+  focusEnd: number;
+}
+
+function changedHunks(patch: string | undefined): ChangedHunk[] {
+  if (!patch) return [];
+  const hunks: ChangedHunk[] = [];
+  for (const line of patch.split('\n')) {
+    const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!match) continue;
+    const start = Math.max(1, Number(match[1]));
+    // A deletion-only hunk has a zero-length new range. Its neighbouring new
+    // line is still the right source location for understanding the removal.
+    const count = Math.max(1, Number(match[2] ?? 1));
+    hunks.push({ start, end: start + count - 1 });
+  }
+  return hunks;
+}
+
+function selectHunks(hunks: ChangedHunk[]): ChangedHunk[] {
+  if (hunks.length <= MAX_CHANGED_CHUNKS_PER_FILE) return hunks;
+  if (MAX_CHANGED_CHUNKS_PER_FILE <= 1) return [hunks[0]];
+  const selected: ChangedHunk[] = [];
+  for (let i = 0; i < MAX_CHANGED_CHUNKS_PER_FILE; i++) {
+    const index = Math.round((i * (hunks.length - 1)) / (MAX_CHANGED_CHUNKS_PER_FILE - 1));
+    const hunk = hunks[index];
+    if (!selected.includes(hunk)) selected.push(hunk);
+  }
+  return selected;
+}
+
+function clipChunkAroundFocus(content: string, focusStart: number, focusEnd: number): string {
+  if (content.length <= MAX_CHANGED_CHUNK_CHARS) return content;
+  const focusLength = Math.max(1, focusEnd - focusStart);
+  const roomBefore = Math.max(0, Math.floor((MAX_CHANGED_CHUNK_CHARS - focusLength) / 2));
+  const start = Math.max(0, Math.min(focusStart - roomBefore, content.length - MAX_CHANGED_CHUNK_CHARS));
+  const end = Math.min(content.length, start + MAX_CHANGED_CHUNK_CHARS);
+  return `${start > 0 ? '… [chunk clipped before]\n' : ''}${content.slice(start, end)}${end < content.length ? '\n… [chunk clipped after]' : ''}`;
+}
+
+function renderSourceChunk(lines: string[], range: SourceRange): SourceChunk {
+  const raw = lines.slice(range.start - 1, range.end).join('\n');
+  const beforeFocus = lines.slice(range.start - 1, range.focusStart - 1).join('\n');
+  const focusStart = beforeFocus.length === 0 ? 0 : beforeFocus.length + 1;
+  const focusEnd = focusStart + lines.slice(range.focusStart - 1, range.focusEnd).join('\n').length;
+  return {
+    start: range.start,
+    end: range.end,
+    content: clipChunkAroundFocus(raw, focusStart, focusEnd),
+  };
+}
+
+/** Build compact source chunks around changed hunks for a large changed file. */
+export function chunkChangedFileContext(content: string, patch: string | undefined): SourceChunk[] {
+  const lines = content.split('\n');
+  if (content.length <= FULL_CHANGED_FILE_CHARS) {
+    return [{ start: 1, end: lines.length, content }];
+  }
+
+  const ranges = selectHunks(changedHunks(patch))
+    .map((hunk) => ({
+      start: Math.max(1, hunk.start - CHANGED_CONTEXT_LINES),
+      end: Math.min(lines.length, hunk.end + CHANGED_CONTEXT_LINES),
+      focusStart: hunk.start,
+      focusEnd: hunk.end,
+    }))
+    .sort((a, b) => a.start - b.start);
+  if (ranges.length === 0) {
+    const end = Math.min(lines.length, Math.max(1, CHANGED_CONTEXT_LINES * 2));
+    return [renderSourceChunk(lines, { start: 1, end, focusStart: 1, focusEnd: end })];
+  }
+
+  const mergedRanges: SourceRange[] = [];
+  for (const range of ranges) {
+    const previous = mergedRanges[mergedRanges.length - 1];
+    if (previous && range.start <= previous.end + 1) {
+      const candidate: SourceRange = {
+        start: previous.start,
+        end: Math.max(previous.end, range.end),
+        focusStart: Math.min(previous.focusStart, range.focusStart),
+        focusEnd: Math.max(previous.focusEnd, range.focusEnd),
+      };
+      // Merge normal nearby hunks, but retain separate chunks when extremely
+      // long lines would force clipping away one of the changed locations.
+      if (lines.slice(candidate.start - 1, candidate.end).join('\n').length <= MAX_CHANGED_CHUNK_CHARS) {
+        mergedRanges[mergedRanges.length - 1] = candidate;
+        continue;
+      }
+    }
+    mergedRanges.push(range);
+  }
+  return mergedRanges.map((range) => renderSourceChunk(lines, range));
+}
 
 export function buildUserPrompt(
   files: Array<{ filename: string; status: string; patch?: string }>,
@@ -245,18 +347,25 @@ export function buildUserPrompt(
   if (context?.changedContents?.length) {
     parts.push(
       '',
-      '## Full content of the changed files',
-      'The diff above shows only hunks. Read the full files before judging: logic elsewhere',
-      'in the same file (runners, guards, error handling) often changes whether a hunk is a bug.',
+      '## Focused source context for changed hunks',
+      'The diff above is the primary review target. These snippets add nearby control flow,',
+      'guards, and error handling; do not assume code omitted from a large file is safe or unsafe.',
     );
     let used = 0;
     for (const f of context.changedContents) {
-      const block = `\n### ${f.path} (full file)\n\`\`\`\n${f.content}\n\`\`\``;
-      // `continue`, not `break`: one oversized file must NOT starve every smaller
-      // later file of its full content — skip the one that won't fit and keep going.
-      if (used + block.length > MAX_CHANGED_CHARS) continue;
-      parts.push(block);
-      used += block.length;
+      const patch = files.find((file) => file.filename === f.path)?.patch;
+      const chunks = chunkChangedFileContext(f.content, patch);
+      for (const chunk of chunks) {
+        const label = chunks.length === 1 && chunk.start === 1 && chunk.end === f.content.split('\n').length
+          ? 'full file'
+          : `lines ${chunk.start}-${chunk.end} around changed hunk`;
+        const block = `\n### ${f.path} (${label})\n\`\`\`\n${chunk.content}\n\`\`\``;
+        // `continue`, not `break`: one oversized chunk must not starve later
+        // changed files. The full diff remains above even when a chunk is skipped.
+        if (used + block.length > MAX_CHANGED_CHARS) continue;
+        parts.push(block);
+        used += block.length;
+      }
     }
   }
 

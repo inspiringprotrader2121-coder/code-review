@@ -92,8 +92,9 @@ maintainability, or developer experience**.
   pagination / limit bugs, boundary off-by-ones.
 ## Accuracy (important)
 
-- Read the **full files** provided, not just the hunks — a guard or handler
-  elsewhere in the same file often decides whether a hunk is actually a bug.
+- Read every supplied **source excerpt around the diff** before judging. The
+  diff is the primary evidence; nearby guards, handlers, and error paths often
+  decide whether a hunk is actually a bug.
 - Before claiming a helper or wrapper the diff calls "does not handle X"
   (pagination, escaping, retries, null cases), **read that helper's source** if
   it is in the context — wrappers often handle the case internally (e.g. a list
