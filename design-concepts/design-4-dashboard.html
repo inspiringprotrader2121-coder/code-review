@@ -583,27 +583,27 @@
 
       </section>
 
-      <!-- ---------- Catch rate chart + Findings by severity ---------- -->
+      <!-- ---------- Review activity chart + Findings by severity ---------- -->
       <section class="grid-2">
 
-        <!-- Catch-rate area chart -->
+        <!-- Review activity chart -->
         <div class="panel">
           <div class="panel-h">
             <div>
-              <h2>Defect catch rate</h2>
-              <span class="sub">Share of real bugs surfaced · last 12 weeks</span>
+              <h2>Review activity</h2>
+              <span class="sub">Completed review evidence · recent weeks</span>
             </div>
             <div class="spacer"></div>
-            <span class="plan-badge" style="background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 30%,transparent)"><span class="dot"></span>43% this week</span>
+            <span class="plan-badge" style="background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 30%,transparent)"><span class="dot"></span>current period</span>
           </div>
 
           <div class="chart-legend">
-            <span class="lg"><span class="swatch"></span>Orvex ensemble</span>
-            <span class="lg"><span class="swatch dash"></span>Best competitor (29%)</span>
+            <span class="lg"><span class="swatch"></span>Review evidence</span>
+            <span class="lg"><span class="swatch dash"></span>Baseline</span>
           </div>
 
           <div class="chart-wrap">
-            <svg width="100%" viewBox="0 0 740 236" role="img" aria-label="Catch rate area chart trending from 31% to 43% over 12 weeks, above the best competitor line at 29%.">
+            <svg width="100%" viewBox="0 0 740 236" role="img" aria-label="Review activity area chart over recent weeks.">
               <defs>
                 <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%"  stop-color="var(--accent)" stop-opacity="0.28"/>
@@ -622,14 +622,14 @@
               </g>
               <!-- y labels -->
               <g class="axis-lab mono" fill="var(--ink-3)" text-anchor="end">
-                <text x="38" y="34">50%</text>
-                <text x="38" y="66">40%</text>
-                <text x="38" y="98">30%</text>
-                <text x="38" y="130">20%</text>
-                <text x="38" y="162">10%</text>
+                <text x="38" y="34">50</text>
+                <text x="38" y="66">40</text>
+                <text x="38" y="98">30</text>
+                <text x="38" y="130">20</text>
+                <text x="38" y="162">10</text>
               </g>
 
-              <!-- competitor benchmark (dashed) at 29% -> y = 190-(29/50)*160 = 97.2 -->
+              <!-- review baseline -->
               <line x1="46" y1="97.2" x2="712" y2="97.2" stroke="var(--ink-3)" stroke-width="2" stroke-dasharray="5 6" opacity=".8"/>
 
               <!-- area -->
@@ -653,7 +653,7 @@
               </g>
             </svg>
           </div>
-          <div class="tip">Benchmarked head-to-head across 80 real PRs — Orvex 43% vs Codex 29% · CodeRabbit 28% · Qodo 22%.</div>
+          <div class="tip">Use this view to track review volume and the evidence attached to each finding.</div>
         </div>
 
         <!-- Findings by severity -->

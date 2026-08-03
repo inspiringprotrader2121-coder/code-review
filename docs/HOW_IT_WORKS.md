@@ -59,6 +59,23 @@ so a deep review finishes in a few minutes, not tens of minutes:
   error, after retries). Fix verification fails closed (never commits an unverified
   change).
 
+The first-pass review sees code and diff context, not the PR author's explanation.
+Author intent is an untrusted claim reserved for the independent verifier when it
+can concretely establish that a reported behavior change was deliberate. Confidence
+is recorded as telemetry; it is not a normal-surface deletion or inline-comment gate.
+The verifier can instead demote a refuted candidate to the visible manual-review
+surface with its reason.
+
+**Optional repeated-run aggregation.** It is off by default. When explicitly
+enabled, Orvex performs five to ten complete independent samples at a low
+temperature, then uses a bounded merge step to group candidate duplicates. A
+finding needs to recur in at least two distinct samples before it is posted
+normally; one-off candidates remain visible for manual review instead of being
+discarded. Whole-repo sweep work is reserved before repetition, and the feature
+falls back to one ordinary review when the call budget cannot support five full
+samples. Enable it only after measuring both precision and recall against the
+pinned evaluation corpus; this behavior does not imply a measured recall gain.
+
 Noise control: a rules prompt (`rules/orvex-rules.md`), a self-negating-finding
 filter, per-repo `@orvex ignore` suppression, and a per-review comment cap.
 
@@ -213,6 +230,12 @@ callback refuses to rebind an installation already owned by another workspace
 | `ORVEX_REVIEW_CONCURRENCY` | parallel model calls within one review (default 3 — paces Verify to ~10 min) |
 | `ORVEX_SWEEP_FILE_CHARS` | per-file read depth in the whole-repo sweep (default 10000) |
 | `ORVEX_REVIEW_MAX_CALLS` | hard cap on model calls per review (default 28) |
+| `ORVEX_REVIEW_AGGREGATION_RUNS` | `1` disables repeat aggregation; otherwise 5–10 complete samples |
+| `ORVEX_REVIEW_AGGREGATION_MIN_OCCURRENCES` | distinct samples required for a normal finding (default 2) |
+| `ORVEX_REVIEW_AGGREGATION_TEMPERATURE` | sampling temperature for repeated API calls (default 0.2) |
+| `ORVEX_REVIEW_AGGREGATION_MAX_CANDIDATES` | bounded candidates sent to the merge step (default 120) |
+| `ORVEX_OPENAI_MODEL` / `ORVEX_CODEX_CLI_MODEL` | explicit direct-API and agentic-review model ids |
+| `ORVEX_OPENAI_REASONING_EFFORT` / `ORVEX_CODEX_CLI_REASONING_EFFORT` | explicit reasoning effort for those targets |
 | `ORVEX_REVIEW_THINKING` | `0` disables reasoning (on by default) |
 | `ORVEX_CODE_EXECUTION` | `1` enables Verify-tier runtime verification (off by default) |
 | `ORVEX_MAX_SANDBOXES` | global concurrent sandbox cap (default 2) |

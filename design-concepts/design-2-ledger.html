@@ -504,32 +504,32 @@
         </div>
       </div>
 
-      <aside class="proof-card reveal" id="heroProof" aria-label="Catch-rate proof">
-        <div class="pc-label">Defect-cluster catch rate · 80 real PRs</div>
+      <aside class="proof-card reveal" id="heroProof" aria-label="Review evidence">
+        <div class="pc-label">Evidence-backed review</div>
         <div class="proof-stat">
-          <span class="num">43</span><span class="unit">% caught</span>
+          <span class="num">+</span><span class="unit">independent checks</span>
         </div>
-        <p class="proof-caption"><strong>#1 catch rate</strong> — head-to-head against Codex, CodeRabbit and Qodo. Orvex surfaced bugs the others missed.</p>
+        <p class="proof-caption"><strong>Review the change from more than one angle.</strong> Rules, code context, verification, and optional runtime checks work together.</p>
         <div class="mini-bars">
           <div class="mini-row">
-            <span class="mini-name me">Orvex</span>
+            <span class="mini-name me">Rules</span>
             <span class="mini-track"><span class="mini-fill me" style="--w:1"></span></span>
-            <span class="mini-val me">43%</span>
+            <span class="mini-val me">first</span>
           </div>
           <div class="mini-row">
-            <span class="mini-name">Codex</span>
-            <span class="mini-track"><span class="mini-fill" style="--w:0.674"></span></span>
-            <span class="mini-val">29%</span>
+            <span class="mini-name">Context</span>
+            <span class="mini-track"><span class="mini-fill" style="--w:0.8"></span></span>
+            <span class="mini-val">focused</span>
           </div>
           <div class="mini-row">
-            <span class="mini-name">CodeRabbit</span>
-            <span class="mini-track"><span class="mini-fill" style="--w:0.651"></span></span>
-            <span class="mini-val">28%</span>
+            <span class="mini-name">Verifier</span>
+            <span class="mini-track"><span class="mini-fill" style="--w:0.6"></span></span>
+            <span class="mini-val">evidence</span>
           </div>
           <div class="mini-row">
-            <span class="mini-name">Qodo</span>
-            <span class="mini-track"><span class="mini-fill" style="--w:0.512"></span></span>
-            <span class="mini-val">22%</span>
+            <span class="mini-name">Runtime</span>
+            <span class="mini-track"><span class="mini-fill" style="--w:0.4"></span></span>
+            <span class="mini-val">optional</span>
           </div>
         </div>
       </aside>
@@ -581,61 +581,61 @@
   <section class="section proof-sec" id="proof">
     <div class="wrap">
       <div class="section-head reveal">
-        <span class="kicker">The scoreboard</span>
-        <h2>Caught more real bugs than any single competitor.</h2>
-        <p>Benchmarked head-to-head on 80 real pull requests, measured by defect-cluster catch rate. More models and more passes mean more real bugs surfaced — including ones the others never flagged.</p>
+        <span class="kicker">The review path</span>
+        <h2>More evidence before a finding is posted.</h2>
+        <p>Orvex combines deterministic checks, focused code review, verification, and optional runtime evidence into one pull-request conversation.</p>
       </div>
 
       <div class="chart reveal" id="chart">
         <div class="chart-top">
-          <div class="ct-title">Defect-cluster catch rate — 80 real PRs</div>
-          <div class="ct-meta">Higher is better · head-to-head, same PRs</div>
+          <div class="ct-title">Review evidence by stage</div>
+          <div class="ct-meta">Each stage adds a different kind of signal</div>
         </div>
         <div class="bars">
           <div class="bar-row me">
             <div class="bar-label">
-              <span class="bl-name">Orvex</span>
-              <span class="bl-tag">Rank #1</span>
+              <span class="bl-name">Deterministic rules</span>
+              <span class="bl-tag">first</span>
             </div>
             <div class="bar-wrap">
               <div class="bar-track"><span class="bar-fill" style="--w:100%"></span></div>
-              <span class="bar-num">43<span class="pct">%</span></span>
+              <span class="bar-num">check</span>
             </div>
           </div>
           <div class="bar-row">
             <div class="bar-label">
-              <span class="bl-name">Codex</span>
-              <span class="bl-tag">Runner-up</span>
+              <span class="bl-name">Focused context</span>
+              <span class="bl-tag">code</span>
             </div>
             <div class="bar-wrap">
-              <div class="bar-track"><span class="bar-fill" style="--w:67.4%"></span></div>
-              <span class="bar-num">29<span class="pct">%</span></span>
+              <div class="bar-track"><span class="bar-fill" style="--w:80%"></span></div>
+              <span class="bar-num">review</span>
             </div>
           </div>
           <div class="bar-row">
             <div class="bar-label">
-              <span class="bl-name">CodeRabbit</span>
-              <span class="bl-tag">Third</span>
+              <span class="bl-name">Independent verifier</span>
+              <span class="bl-tag">evidence</span>
             </div>
             <div class="bar-wrap">
-              <div class="bar-track"><span class="bar-fill" style="--w:65.1%"></span></div>
-              <span class="bar-num">28<span class="pct">%</span></span>
+              <div class="bar-track"><span class="bar-fill" style="--w:60%"></span></div>
+              <span class="bar-num">verify</span>
             </div>
           </div>
           <div class="bar-row">
             <div class="bar-label">
-              <span class="bl-name">Qodo</span>
-              <span class="bl-tag">Fourth</span>
+              <span class="bl-name">Runtime checks</span>
+              <span class="bl-tag">optional</span>
             </div>
             <div class="bar-wrap">
-              <div class="bar-track"><span class="bar-fill" style="--w:51.2%"></span></div>
-              <span class="bar-num">22<span class="pct">%</span></span>
+              <div class="bar-track"><span class="bar-fill" style="--w:40%"></span></div>
+              <span class="bar-num">run</span>
             </div>
           </div>
         </div>
         <div class="chart-foot">
-          <span class="lead"><b>+14 points</b> clear of the next-best bot.</span>
-          <span>The story is coverage: more models, more passes, more bugs found — not a precision claim.</span>
+          <span class="lead"><b>Multiple stages</b> contribute evidence before a finding posts.</span>
+          <span>Review coverage and precision need a published immutable evaluation before they become marketing claims.</span>
         </div>
       </div>
     </div>
@@ -853,7 +853,7 @@
             <a href="#signal">Signal, not noise</a>
             <a href="#signal">@orvex deep</a>
             <a href="#how">Sandbox execution</a>
-            <a href="#proof">Catch rate</a>
+            <a href="#proof">Review evidence</a>
           </div>
           <div class="fcol">
             <h5>Company</h5>

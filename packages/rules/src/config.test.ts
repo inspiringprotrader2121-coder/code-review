@@ -6,7 +6,7 @@ test('valid YAML parses; defaults apply for omitted keys', () => {
   const cfg = parseReviewConfigYaml('max_comments: 10\nignore:\n  - "**/gen/**"\n');
   assert.equal(cfg.max_comments, 10);
   assert.deepEqual(cfg.ignore, ['**/gen/**']);
-  assert.equal(cfg.inline_min_confidence, DEFAULT_REVIEW_CONFIG.inline_min_confidence);
+  assert.equal(cfg.fold_medium, DEFAULT_REVIEW_CONFIG.fold_medium);
 });
 
 test('malformed YAML falls back to defaults AND logs a warning (never silent)', () => {

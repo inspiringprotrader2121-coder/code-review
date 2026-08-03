@@ -30,16 +30,11 @@ export function filterAndCapFindings(
   const inline: ReviewFinding[] = [];
   const summaryOnly: ReviewFinding[] = [];
 
-  // inline_min_confidence: a finding that cleared min_confidence (so it WAS
-  // reported) but sits below the INLINE floor goes to the summary table rather
-  // than a line comment — the repo's "tell me, but don't interrupt the diff"
-  // knob. Default 0.5 (see ReviewConfigSchema).
-  const inlineMin = config.inline_min_confidence ?? 0.5;
   for (const f of capped) {
-    // Anchored actionable findings at/above the inline floor get an inline
-    // comment (with apply-fix checkbox); ones we couldn't anchor — or that fall
-    // below the inline floor — fall back to the summary table.
-    if (typeof f.line === 'number' && f.confidence >= inlineMin) inline.push(f);
+    // Confidence is telemetry, not an output gate. Severity and a usable diff
+    // anchor determine the normal review surface; the verifier may still demote
+    // a concretely refuted candidate to manual review with its evidence.
+    if (typeof f.line === 'number') inline.push(f);
     else summaryOnly.push(f);
   }
 

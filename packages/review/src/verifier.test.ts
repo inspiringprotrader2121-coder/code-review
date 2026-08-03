@@ -98,12 +98,12 @@ test('verification demotes rejected candidates instead of deleting them after th
   const normal = finding({ message: 'normal rejection', sourceTier: 'standard' });
   const flash = finding({ message: 'flash hedge', sourceTier: 'deepseek-flash' });
   const factual = finding({ message: 'flash factual refutation', sourceTier: 'deepseek-flash' });
-  const low = finding({ message: 'low confidence candidate', confidence: 0.3 });
+  const manual = finding({ message: 'manual recurrence candidate', confidence: 0.3 });
   const out = partitionVerifiedFindings(
     [confirmed, normal, flash, factual],
-    [{ finding: low, reason: 'Model confidence 0.30 is below the configured confirmation floor (0.60).' }],
+    [{ finding: manual, reason: 'Seen in only one repeated review sample.' }],
     {
-      kept: [confirmed, low],
+      kept: [confirmed, manual],
       dropped: [
         { finding: normal, reason: 'the finding is not supported by the source' },
         { finding: flash, reason: 'cannot independently verify this from the code shown' },
@@ -122,7 +122,7 @@ test('verification demotes rejected candidates instead of deleting them after th
   assert.equal(out.refuted.length, 1, 'factual protected refutations are not restored as confirmed');
   assert.deepEqual(
     out.reviewOnly.map((item) => item.finding.message).sort(),
-    ['flash factual refutation', 'low confidence candidate', 'normal rejection'].sort(),
+    ['flash factual refutation', 'manual recurrence candidate', 'normal rejection'].sort(),
     'ordinary and factual verifier rejections remain visible for manual review',
   );
   assert.match(

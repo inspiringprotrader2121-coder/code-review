@@ -7,13 +7,6 @@ export const ReviewConfigSchema = z.object({
   ignore: z.array(z.string()).default([]),
   include_docs: z.boolean().default(false),
   max_comments: z.number().int().min(1).max(100).default(25),
-  // Recall-biased (was 0.6/0.7, which silently dropped real bugs). The
-  // adversarial verification pass (fail-open, "when in doubt CONFIRM") filters
-  // the truly-wrong ones, so a moderate floor surfaces real defects while
-  // lower-confidence minor notes fall to the summary rather than inline noise.
-  // Raise per-repo via .orvex-review.yml if a team wants a quieter review.
-  min_confidence: z.number().min(0).max(1).default(0.4),
-  inline_min_confidence: z.number().min(0).max(1).default(0.5),
   run_semgrep: z.boolean().default(true),
   ignore_labels: z.array(z.string()).default(['review-bot:ignore']),
   // Medium (P3) findings are real bugs, not nitpicks — surfaced inline by default

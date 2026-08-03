@@ -244,6 +244,7 @@ export interface WorkspaceSettings {
   tenantId: string;
   defaultReviewMode: 'normal' | 'strict';
   autoApplyDefault: boolean;
+  /** Legacy setting retained for database compatibility; it no longer gates review findings. */
   minConfidence: number;
   maxComments: number;
   /** auto-enable newly-added repos for review */

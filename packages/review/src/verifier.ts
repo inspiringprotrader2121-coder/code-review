@@ -33,10 +33,9 @@ export interface VerifierOptions {
   /** PR title + description, so the verifier can reject intentional-change findings */
   prIntent?: string;
   /**
-   * How many leading `findings` cleared `min_confidence`. The batch is
-   * `[...toPost, ...reviewOnly]`, so anything beyond this index is a candidate
-   * the pipeline already declined to trust and must not be able to escalate a
-   * posted finding's severity via `duplicateOf`. Omit for an all-confirmed batch.
+   * How many leading `findings` are normal-surface candidates. The batch is
+   * `[...toPost, ...reviewOnly]`, so a manual candidate cannot escalate a normal
+   * finding's severity via `duplicateOf`. Omit for an all-normal batch.
    */
   confirmedCount?: number;
   /**
@@ -421,9 +420,8 @@ export function applyVerdicts(
   findings: ReviewFinding[],
   parsed: Verdicts,
   /**
-   * Number of leading `findings` that were CONFIRMED candidates (i.e. cleared
-   * `min_confidence`). Anything at or beyond this index is a manual-review
-   * candidate the pipeline had already ruled below the confirmation floor.
+   * Number of leading `findings` that are normal-surface candidates. Anything at
+   * or beyond this index is already on the manual-review surface.
    *
    * The verification batch is `[...toPost, ...reviewOnly]`, so every manual
    * candidate has a HIGHER index than every confirmed one — which is exactly

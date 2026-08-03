@@ -216,7 +216,6 @@ export function apiRoutes() {
     const body: {
       defaultReviewMode?: 'normal' | 'strict';
       autoApplyDefault?: boolean;
-      minConfidence?: number;
       maxComments?: number;
       autoEnableNewRepos?: boolean;
     } = await c.req.json().catch(() => ({}));
@@ -224,7 +223,6 @@ export function apiRoutes() {
     const patch: Record<string, unknown> = {};
     if (body.defaultReviewMode) patch.defaultReviewMode = body.defaultReviewMode;
     if (typeof body.autoApplyDefault === 'boolean') patch.autoApplyDefault = body.autoApplyDefault;
-    if (typeof body.minConfidence === 'number') patch.minConfidence = clamp(body.minConfidence, 0, 1);
     if (typeof body.maxComments === 'number') patch.maxComments = clamp(body.maxComments, 1, 50);
     if (typeof body.autoEnableNewRepos === 'boolean') patch.autoEnableNewRepos = body.autoEnableNewRepos;
 

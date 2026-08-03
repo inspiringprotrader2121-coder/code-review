@@ -133,7 +133,7 @@
 
 ### M10 — `config.ts` (github) silent config discard ✅
 - **File:** `packages/rules/src/config.ts` (where `parseReviewConfigYaml` actually lives)
-- **Fix:** `safeParse` + `console.warn` on malformed YAML and on schema-validation failure (never silently discards all keys); `inline_min_confidence` is now WIRED — below-floor findings go to the summary table instead of inline (`filter.ts` + tests).
+- **Fix:** `safeParse` + `console.warn` on malformed YAML and on schema-validation failure (never silently discards all keys). The original inline-confidence routing was later superseded: confidence is now telemetry only, while recurrence and verifier refutation can route a finding to the visible manual-review surface (`filter.ts`, `merge.ts`, and tests).
 
 ### M11 — Eval harness scoring integrity ✅
 - **Files:** `apps/eval/src/bench/{competitors,severity-check,judge,diagnose}.ts` (+ new shared `severity.ts`)

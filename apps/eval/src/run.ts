@@ -9,19 +9,23 @@ import {
 } from '@orvex-review/github';
 import {
   DEEP_DIVE_FOCUS,
+  aggregateRepeatedFindings,
   dropSelfNegatingFindings,
+  fitReviewAggregationToBudget,
   fingerprintFinding,
-  isHedgedRejection,
-  isProtectedSourceTier,
+  llmChat,
   llmFindingsToReviewFindings,
+  partitionVerifiedFindings,
+  readReviewAggregationConfig,
   REVIEW_INCOMPLETE_SUMMARY,
   runLlmReview,
   REMOVED_BEHAVIOR_FOCUS,
   THIRD_ANGLE_FOCUS,
   verifyFindings,
   type ReviewFinding,
+  type ReviewSurfaceFinding,
 } from '@orvex-review/review';
-import { CASES, type EvalCase } from './cases.js';
+import { CASES, evaluationCorpusFingerprint, evaluationCorpusLabelCounts, type EvalCase } from './cases.js';
 import { createBenchmarkOctokit } from './bench/github-auth.js';
 
 interface CaseResult {
@@ -72,10 +76,24 @@ interface PassTarget {
   reasoningEffort?: string;
 }
 
-/** Cases that ran against live head instead of a pinned commit, collected
- *  across the run so the summary can name them. Module scope because the case
- *  runner and the summary printer are separate functions. */
-const unpinnedCases: string[] = [];
+function openAiTarget(): PassTarget | null {
+  const apiKey = process.env.ORVEX_OPENAI_API_KEY;
+  return apiKey
+    ? {
+        apiKey,
+        baseUrl: process.env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+        model: process.env.ORVEX_OPENAI_MODEL ?? 'gpt-5.6-luna',
+        api: process.env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
+        reasoningEffort: process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'xhigh',
+      }
+    : null;
+}
+
+/** Mirrors pipeline.ts modelForPlan for the production multi-model tier. */
+function verifierTarget(): PassTarget {
+  const openai = openAiTarget();
+  return openai && process.env.ORVEX_VERIFY_ON_STANDARD !== '1' ? openai : llmEnv();
+}
 
 /** Mirror production's multi-model tier (modelForPass + PASS_ANGLES), pass for
  *  pass: 1 the frontier OpenAI model, 2 DeepSeek v4 FLASH with the deep-dive
@@ -98,16 +116,7 @@ function passTargets(): Array<{
   bestEffort?: boolean;
 }> {
   const standard = llmEnv();
-  const openaiKey = process.env.ORVEX_OPENAI_API_KEY;
-  const openai: PassTarget | null = openaiKey
-    ? {
-        apiKey: openaiKey,
-        baseUrl: process.env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
-        model: process.env.ORVEX_OPENAI_MODEL ?? 'gpt-5.6-luna',
-        api: process.env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
-        reasoningEffort: process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'xhigh',
-      }
-    : null;
+  const openai = openAiTarget();
   const deepseekKey = process.env.ORVEX_DEEPSEEK_API_KEY;
   const deepseek: PassTarget | null = deepseekKey
     ? {
@@ -144,12 +153,14 @@ function passTargets(): Array<{
 
 interface PrReviewResult {
   findings: ReviewFinding[];
+  /** Candidates production keeps on the manual-review surface, excluded from scored normal findings. */
+  manualReviewCount: number;
   /** passes that completed and produced a real (possibly empty) review */
   okPasses: number;
   totalPasses: number;
-  /** passes production treats as REQUIRED (it posts nothing if one fails) */
+  /** minimum required samples production needs before it will post a review */
   requiredPasses: number;
-  /** required passes that actually completed */
+  /** required samples that actually completed */
   okRequired: number;
 }
 
@@ -161,22 +172,12 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   // are live and get pushed to — and those pushes are FIXES for the very bugs
   // the cases assert, so reviewing head would score a correct reviewer as
   // missing everything, forever, with no signal that anything was wrong.
-  const sha = c.sha ?? pr.head.sha;
-  if (c.sha && !pr.head.sha.startsWith(c.sha)) {
+  const sha = c.sha;
+  if (!/^[0-9a-f]{40}$/i.test(sha)) {
+    throw new Error(`eval case ${c.name} has no immutable 40-character SHA`);
+  }
+  if (!pr.head.sha.startsWith(sha)) {
     console.log(`    ↩ pinned to ${c.sha} (head has moved to ${pr.head.sha.slice(0, 7)})`);
-  } else if (!c.sha) {
-    // UNPINNED: the comment above describes exactly the failure this hits, but
-    // only pinned cases were ever warned about. An unpinned case silently
-    // reviews whatever head is TODAY; once the PR is merged or force-pushed,
-    // its ground truth describes code that is no longer there, and the case
-    // scores as a miss forever with no indication the result is meaningless.
-    // Say so on every run — a benchmark that quietly measures nothing is worse
-    // than one that fails loudly.
-    console.log(
-      `    ⚠ UNPINNED (reviewing head ${pr.head.sha.slice(0, 7)}, state=${pr.state}) — ` +
-        `result is NOT reproducible; pin \`sha\` to the commit the ground truth was verified against`,
-    );
-    unpinnedCases.push(`${c.repo}#${c.pr}`);
   }
 
   // Match production (loadWorkerConfig defaults): 150 files / 300kB. At 40/120kB
@@ -188,11 +189,29 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   });
   const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
   const passes = passTargets();
+  const requestedAggregation = readReviewAggregationConfig();
+  const configuredMaxCalls = Number(process.env.ORVEX_REVIEW_MAX_CALLS ?? 28);
+  const maxCalls = Number.isFinite(configuredMaxCalls) ? Math.max(1, Math.floor(configuredMaxCalls)) : 28;
+  // The multi-model production tier has no whole-repo sweep today, so no calls
+  // are reserved here. Keep the same bounded policy as the worker nonetheless.
+  const aggregation = fitReviewAggregationToBudget(requestedAggregation, passes.length, maxCalls);
+  if (requestedAggregation.enabled && !aggregation.enabled) {
+    console.log(`    aggregation disabled: ${aggregation.disabledReason}`);
+  }
+  const samples = aggregation.enabled ? aggregation.effectiveRuns : 1;
+  const requiredPerLens = aggregation.enabled ? aggregation.minOccurrences : 1;
   // No reviewable files => nothing was measured. Reporting okPasses=all made
   // every case on this PR score as a genuine model miss.
-  const requiredPasses = passes.filter((p) => !p.bestEffort).length;
+  const requiredPasses = passes.filter((p) => !p.bestEffort).length * requiredPerLens;
   if (reviewable.length === 0) {
-    return { findings: [], okPasses: 0, totalPasses: passes.length, requiredPasses, okRequired: 0 };
+    return {
+      findings: [],
+      manualReviewCount: 0,
+      okPasses: 0,
+      totalPasses: passes.length * samples,
+      requiredPasses,
+      okRequired: 0,
+    };
   }
 
   let context;
@@ -215,76 +234,126 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   }
 
   const reviewFiles = reviewable.map((f) => ({ filename: f.filename, status: f.status, patch: f.patch }));
-  const baseCtx = { ...(context ?? {}), prTitle: pr.title, prBody: pr.body ?? undefined };
+  // Mirror production: first-pass reviewers do not receive author intent.
+  const baseCtx = { ...(context ?? {}) };
 
   // Sequential (never concurrent) so eval runs can't trip the OpenAI TPM limit
   // the way the 9-at-once batch did in production.
   const accumulated: ReviewFinding[] = [];
+  const repeated: Array<{ sample: number; finding: ReviewFinding }> = [];
   let okPasses = 0;
-  let okRequired = 0;
-  for (const p of passes) {
-    try {
-      const resp = await runLlmReview(reviewFiles, {
-        ...p.target,
-        context: p.focus ? { ...baseCtx, extraFocus: p.focus } : baseCtx,
-      });
-      const got = llmFindingsToReviewFindings(resp.findings);
-      // Production tags every finding with its tier, which the verifier's
-      // strong-reasoner rescue keys off (a hedged veto of an openai/deepseek
-      // finding is overridden). Without it that rescue never fires in eval and
-      // real findings are recorded as misses.
-      for (const f of got) f.sourceTier = p.tier;
-      // The unparseable sentinel with zero findings is a DEGRADED pass, not a
-      // clean empty review — do not count it as measured.
-      const degraded = got.length === 0 && resp.summary === REVIEW_INCOMPLETE_SUMMARY;
-      if (!degraded) {
-        okPasses++;
-        if (!p.bestEffort) okRequired++;
+  const successfulRequiredByLens = new Map<number, number>();
+  for (let sample = 0; sample < samples; sample++) {
+    for (const [passIndex, p] of passes.entries()) {
+      try {
+        const resp = await runLlmReview(reviewFiles, {
+          ...p.target,
+          temperature: aggregation.enabled ? aggregation.temperature : undefined,
+          context: p.focus ? { ...baseCtx, extraFocus: p.focus } : baseCtx,
+        });
+        const got = llmFindingsToReviewFindings(resp.findings);
+        // Production tags every finding with its tier, which the verifier's
+        // strong-reasoner rescue keys off (a hedged veto of an openai/deepseek
+        // finding is overridden). Without it that rescue never fires in eval and
+        // real findings are recorded as misses.
+        for (const f of got) f.sourceTier = p.tier;
+        // The unparseable sentinel with zero findings is a DEGRADED pass, not a
+        // clean empty review — do not count it as measured.
+        const degraded = got.length === 0 && resp.summary === REVIEW_INCOMPLETE_SUMMARY;
+        if (!degraded) {
+          okPasses++;
+          if (!p.bestEffort) {
+            successfulRequiredByLens.set(passIndex, (successfulRequiredByLens.get(passIndex) ?? 0) + 1);
+          }
+          if (aggregation.enabled) repeated.push(...got.map((finding) => ({ sample, finding })));
+        }
+        console.log(
+          `    pass(${p.tag}) [${p.target.model}] sample ${sample + 1}/${samples}: +${got.length}${degraded ? ' (degraded)' : ''}`,
+        );
+        if (!aggregation.enabled) accumulated.push(...got);
+      } catch (err) {
+        console.log(
+          `    pass(${p.tag}) [${p.target.model}] sample ${sample + 1}/${samples} FAILED: ` +
+            `${(err as Error).message.slice(0, 120)}`,
+        );
       }
-      console.log(`    pass(${p.tag}) [${p.target.model}]: +${got.length}${degraded ? ' (degraded)' : ''}`);
-      accumulated.push(...got);
-    } catch (err) {
-      console.log(`    pass(${p.tag}) [${p.target.model}] FAILED: ${(err as Error).message.slice(0, 120)}`);
     }
   }
+  const okRequired = [...successfulRequiredByLens.values()].reduce(
+    (total, successes) => total + Math.min(successes, requiredPerLens),
+    0,
+  );
 
   // Same bug from multiple passes → one finding (mirrors the pipeline's dedupe).
   const seenFp = new Set<string>();
-  let findings = accumulated.filter((f) => {
+  const dedupe = (candidates: ReviewFinding[]) => candidates.filter((f) => {
     const fp = fingerprintFinding(f);
     if (seenFp.has(fp)) return false;
     seenFp.add(fp);
     return true;
   });
+  let findings: ReviewFinding[];
+  let manualCandidates: ReviewSurfaceFinding[] = [];
+  if (aggregation.enabled) {
+    const target = verifierTarget();
+    const merged = await aggregateRepeatedFindings(repeated, {
+      minOccurrences: aggregation.minOccurrences,
+      maxCandidates: aggregation.maxCandidates,
+      mergeWithLlm: (system, user) =>
+        llmChat(system, user, {
+          ...target,
+          temperature: aggregation.temperature,
+          json: true,
+        }),
+    });
+    findings = dedupe(merged.findings);
+    manualCandidates = merged.reviewOnly;
+    console.log(
+      `    aggregation: ${merged.findings.length} recurring, ${merged.reviewOnly.length} manual, ` +
+        `${merged.usedLlmMerge ? 'LLM merge' : 'fingerprint fallback'}`,
+    );
+  } else {
+    findings = dedupe(accumulated);
+  }
 
   findings = dropSelfNegatingFindings(findings).kept;
+  const keptManual = new Set(
+    dropSelfNegatingFindings(manualCandidates.map(({ finding }) => finding)).kept.map(fingerprintFinding),
+  );
+  manualCandidates = manualCandidates.filter(({ finding }) => keptManual.has(fingerprintFinding(finding)));
 
   const ctxFiles = context
-    ? [...context.changedContents, ...context.related, ...context.dependents]
+    ? [...context.changedContents, ...context.related, ...context.dependents, ...context.others]
     : [];
-  if (ctxFiles.length > 0 && findings.length > 0) {
-    const std = llmEnv();
-    // strict: every plan sets deepVerify: true, so recall-mode verification
-    // measured a more permissive filter than ships.
-    const verified = await verifyFindings(findings, ctxFiles, {
-      ...std,
+  const contextPaths = new Set(ctxFiles.map((file) => file.path));
+  for (const file of reviewFiles) {
+    if (!contextPaths.has(file.filename) && file.patch) {
+      ctxFiles.push({ path: file.filename, content: `Diff (changed lines) for this file:\n${file.patch}` });
+      contextPaths.add(file.filename);
+    }
+  }
+  let manualReviewCount = manualCandidates.length;
+  const verificationCandidates = [...findings, ...manualCandidates.map(({ finding }) => finding)];
+  if (ctxFiles.length > 0 && verificationCandidates.length > 0) {
+    // strict: every plan sets deepVerify: true. Use the same OpenAI-vs-standard
+    // target selection as production rather than measuring a cheaper verifier.
+    const verified = await verifyFindings(verificationCandidates, ctxFiles, {
+      ...verifierTarget(),
       strict: true,
       prIntent: [pr.title, pr.body].filter(Boolean).join('\n\n'),
+      confirmedCount: findings.length,
     });
-    // MIRROR PRODUCTION'S STRONG-REASONER RESCUE. verifyFindings does not read
-    // sourceTier at all — the rescue lives in the pipeline, so tagging tiers
-    // without replicating this left the eval applying production's STRICT filter
-    // WITHOUT its counterweight, systematically under-reporting recall on
-    // exactly the frontier-model findings bench170 exists to track.
-    const rescued = verified.dropped.filter(
-      (d) => isProtectedSourceTier(d.finding.sourceTier) && isHedgedRejection(d.reason),
-    );
-    if (rescued.length > 0) {
-      console.log(`    ↺ rescued ${rescued.length} strong-reasoner finding(s) dropped on hedged grounds`);
+    // Apply the exact post-verifier partition used by production. A candidate
+    // that the verifier demotes stays visible for manual review, but it does not
+    // inflate normal-surface precision/recall.
+    const disposition = partitionVerifiedFindings(findings, manualCandidates, verified);
+    if (disposition.rescued.length > 0) {
+      console.log(`    ↺ rescued ${disposition.rescued.length} strong-reasoner finding(s) dropped on hedged grounds`);
     }
-    findings = [...verified.kept, ...rescued.map((d) => d.finding)];
+    findings = disposition.toPost;
+    manualReviewCount = disposition.reviewOnly.length;
   }
-  return { findings, okPasses, totalPasses: passes.length, requiredPasses, okRequired };
+  return { findings, manualReviewCount, okPasses, totalPasses: passes.length * samples, requiredPasses, okRequired };
 }
 
 const SEV_RANK: Record<string, number> = { P1: 3, P2: 2, P3: 1, info: 0 };
@@ -337,11 +406,16 @@ function scoreCase(c: EvalCase, findings: ReviewFinding[], claimed?: Set<ReviewF
 async function main() {
   const only = process.argv[2];
   const cases = only ? CASES.filter((c) => c.name.includes(only)) : CASES;
+  const labels = evaluationCorpusLabelCounts(CASES);
+  console.log(
+    `corpus sha256: ${evaluationCorpusFingerprint(CASES)} ` +
+      `(${CASES.length} cases; ${labels.positive} positive and ${labels.negative} negative labels; ${cases.length} selected)`,
+  );
   const results: CaseResult[] = [];
 
   const groups = new Map<string, EvalCase[]>();
   for (const c of cases) {
-    const key = `${c.owner}/${c.repo}#${c.pr}`;
+    const key = `${c.owner}/${c.repo}#${c.pr}@${c.sha}`;
     const group = groups.get(key) ?? [];
     group.push(c);
     groups.set(key, group);
@@ -352,9 +426,9 @@ async function main() {
   for (const [key, group] of groups) {
     process.stdout.write(`▶ ${key} (${group.length} case${group.length === 1 ? '' : 's'}) …\n`);
     try {
-      const { findings, okPasses, totalPasses, requiredPasses, okRequired } = await reviewPr(group[0]);
+      const { findings, manualReviewCount, okPasses, totalPasses, requiredPasses, okRequired } = await reviewPr(group[0]);
       console.log(
-        `  ${findings.length} findings (${okPasses}/${totalPasses} passes, ${okRequired}/${requiredPasses} required)`,
+        `  ${findings.length} normal findings, ${manualReviewCount} manual candidates (${okPasses}/${totalPasses} passes, ${okRequired}/${requiredPasses} required)`,
       );
       // GUARD: if NO pass produced a real review, nothing was measured — the
       // cases are INVALID, not missed. The first bench170 run 404'd on every
@@ -402,16 +476,6 @@ async function main() {
   if (invalidCases > 0) {
     console.log(`⚠️ INVALID: ${invalidCases} case(s) not measured (harness/provider failure) — fix before trusting this run`);
     process.exitCode = 1;
-  }
-  if (unpinnedCases.length > 0) {
-    // Deliberately NOT exitCode 1 — these cases still ran and their result may
-    // be fine if the PR happens not to have moved. But the recall number above
-    // is only as trustworthy as its least-pinned case, so name them every time
-    // rather than letting a stale-code miss look like a reviewer miss.
-    console.log(
-      `⚠️ ${unpinnedCases.length} UNPINNED case(s) reviewed live head — not reproducible: ${unpinnedCases.join(', ')}`,
-    );
-    console.log('   Recall above is unreliable for these; pin `sha` in cases.ts to make them measurable.');
   }
   if (results.length === 0) {
     console.error('\nEVAL FAILED: zero cases were actually measured.');

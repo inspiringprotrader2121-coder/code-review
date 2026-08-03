@@ -81,8 +81,8 @@ function fixLanded(originalCode: string | undefined, fixedCode: string | undefin
 
 export interface MergeResult {
   toPost: ReviewFinding[];
-  /** Findings below the configured confirmation floor. They remain visible in
-   *  the review's manual-review section instead of being deleted. */
+  /** Candidates explicitly demoted by a prior safety stage. They remain visible
+   *  in the review's manual-review section instead of being deleted. */
   reviewOnly: ReviewSurfaceFinding[];
   stillOpen: StoredFinding[];
   newlyFixed: StoredFinding[];
@@ -90,7 +90,12 @@ export interface MergeResult {
 }
 
 export interface MergeOptions {
-  minConfidence: number;
+  /** Candidates that a prior stage (for example repeated-run recurrence) kept
+   *  for human review. They still count as seen so existing findings never flip
+   *  to fixed merely because a recurrence threshold was not met. `incoming`
+   *  contains only normal-surface candidates; a matching normal candidate wins
+   *  over this manual copy regardless of confidence. */
+  manualCandidates?: ReviewSurfaceFinding[];
   /**
    * The set of file paths ACTUALLY reviewed this run. A prior finding is only
    * eligible to be marked "fixed" (by not being re-detected) if its file was
@@ -120,37 +125,43 @@ export function mergeFindings(
   headSha: string,
   opts: MergeOptions,
 ): MergeResult {
-  // Multiple passes can describe the same fingerprint at different confidence
-  // levels. Keep its strongest copy before deciding which surface it belongs
-  // on, otherwise a low-confidence first copy could create a duplicate manual
-  // row beside a later confirmed copy.
+  const manualByFingerprint = new Map(
+    (opts.manualCandidates ?? []).map((item) => [fingerprintFinding(item.finding), item]),
+  );
+  // Multiple NORMAL passes can describe the same fingerprint at different
+  // confidence levels. Keep their strongest copy. Manual candidates stay out of
+  // this map: an explicitly demoted candidate must never displace a normal
+  // deterministic, sweep, or recurring finding merely because it has a higher
+  // reported confidence.
   const incomingByFingerprint = new Map<string, ReviewFinding>();
   for (const f of incoming) {
     const fp = fingerprintFinding(f);
     const existing = incomingByFingerprint.get(fp);
     if (!existing || f.confidence > existing.confidence) incomingByFingerprint.set(fp, f);
   }
-  const incomingFp = new Set(incomingByFingerprint.keys());
+  // A manual candidate is still evidence that an existing finding remains seen,
+  // even though it is not eligible for the normal posting surface.
+  const incomingFp = new Set([...incomingByFingerprint.keys(), ...manualByFingerprint.keys()]);
   const toPost: ReviewFinding[] = [];
   const reviewOnly: ReviewSurfaceFinding[] = [];
 
   for (const f of incomingByFingerprint.values()) {
     const fp = fingerprintFinding(f);
     const priorOpen = prior.find((p) => p.fingerprint === fp && p.status === 'open');
-    // A low-confidence re-detection is still enough to keep an existing
-    // finding open, but it should not repeat a manual-review row that has
-    // already been posted as a normal finding.
+    // A re-detection is enough to keep an existing finding open, but it should
+    // not repeat a manual-review row that has already been posted normally.
     if (priorOpen) continue;
 
-    if (f.confidence < opts.minConfidence) {
-      reviewOnly.push({
-        finding: f,
-        reason: `Model confidence ${f.confidence.toFixed(2)} is below the configured confirmation floor (${opts.minConfidence.toFixed(2)}).`,
-      });
-      continue;
-    }
-
     toPost.push(f);
+  }
+
+  // Add manual candidates that have no normal equivalent. If the fingerprint is
+  // already open, the existing finding remains visible in its normal location;
+  // repeating it in the manual table would only create noise.
+  for (const [fp, manual] of manualByFingerprint) {
+    if (incomingByFingerprint.has(fp)) continue;
+    if (prior.some((p) => p.fingerprint === fp && p.status === 'open')) continue;
+    reviewOnly.push(manual);
   }
 
   const stillOpen: StoredFinding[] = [];

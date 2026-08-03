@@ -10,7 +10,16 @@ export {
   REVIEW_INCOMPLETE_SUMMARY,
   type LlmReviewOptions,
 } from './llm.js';
-export { runCodexCliReview, closeCodexSession, isCodexRepoAllowed, killAllCodexChildren, type CodexCliReviewOptions, type CodexCliReviewResult } from './codex-cli.js';
+export {
+  runCodexCliReview,
+  closeCodexSession,
+  isCodexRepoAllowed,
+  killAllCodexChildren,
+  DEFAULT_CODEX_CLI_MODEL,
+  DEFAULT_CODEX_CLI_REASONING_EFFORT,
+  type CodexCliReviewOptions,
+  type CodexCliReviewResult,
+} from './codex-cli.js';
 export {
   type ReviewFinding,
   type ReviewSurfaceFinding,
@@ -72,5 +81,14 @@ export {
 export { dropSelfNegatingFindings } from './noise.js';
 export { checkImportBindings, enumerateExports, extractNamedImports } from './import-check.js';
 export { isRateLimitOrQuotaError, llmChat, type LlmClientOptions } from './llm-client.js';
+export {
+  aggregateRepeatedFindings,
+  fitReviewAggregationToBudget,
+  readReviewAggregationConfig,
+  type EffectiveReviewAggregation,
+  type RepeatedFinding,
+  type RepeatedFindingAggregation,
+  type ReviewAggregationConfig,
+} from './aggregation.js';
 export { DEEP_DIVE_FOCUS, THIRD_ANGLE_FOCUS, REMOVED_BEHAVIOR_FOCUS } from './lenses.js';
 export { isHedgedRejection } from './verifier.js';

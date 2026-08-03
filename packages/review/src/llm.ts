@@ -46,6 +46,8 @@ export interface LlmReviewOptions {
   api?: 'chat' | 'responses' | 'anthropic';
   /** reasoning effort for /v1/responses models */
   reasoningEffort?: string;
+  /** Sampling temperature for deliberately repeated review runs. */
+  temperature?: number;
   maxTokens?: number;
   /** cross-file context: repo tree + imported files */
   context?: ReviewPromptContext;
@@ -76,10 +78,6 @@ export async function runLlmReview(
     files?.map((f) => ({ ...f, content: redactSecrets(f.content) }));
   const context = opts.context
     ? {
-        // PR intent must survive the rebuild — it's what stops "you removed X"
-        // findings on deliberate changes. (Was silently dropped here before.)
-        prTitle: opts.context.prTitle,
-        prBody: opts.context.prBody,
         treePaths: opts.context.treePaths,
         related: redactAll(opts.context.related),
         dependents: redactAll(opts.context.dependents),
@@ -98,6 +96,7 @@ export async function runLlmReview(
       baseUrl: opts.baseUrl,
       api: opts.api,
       reasoningEffort: opts.reasoningEffort,
+      temperature: opts.temperature,
       // no cap — pass through (undefined → client's high ceiling) so the review
       // has room for full reasoning + detailed findings with fix code
       maxTokens: opts.maxTokens,

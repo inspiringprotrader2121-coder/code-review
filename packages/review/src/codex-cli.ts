@@ -29,6 +29,10 @@ export interface CodexCliReviewOptions {
   onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
 }
 
+/** One canonical, documented fallback prevents worker and CLI routing drift. */
+export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.5';
+export const DEFAULT_CODEX_CLI_REASONING_EFFORT = 'xhigh';
+
 /**
  * FIRST-PARTY REPO ALLOWLIST — defense in depth, INDEPENDENT of the
  * ORVEX_CODEX_CLI feature flag. codex runs with
@@ -97,13 +101,13 @@ export async function closeCodexSession(threadRef: string): Promise<void> {
 }
 
 function defaultModel(): string {
-  return process.env.ORVEX_CODEX_CLI_MODEL ?? 'gpt-5.5';
+  return process.env.ORVEX_CODEX_CLI_MODEL?.trim() || DEFAULT_CODEX_CLI_MODEL;
 }
 
 function fallbackModel(): { model: string; reasoningEffort?: string } {
   return {
-    model: 'gpt-5.5',
-    reasoningEffort: process.env.ORVEX_CODEX_CLI_REASONING_EFFORT ?? 'xhigh',
+    model: DEFAULT_CODEX_CLI_MODEL,
+    reasoningEffort: process.env.ORVEX_CODEX_CLI_REASONING_EFFORT?.trim() || DEFAULT_CODEX_CLI_REASONING_EFFORT,
   };
 }
 
@@ -289,11 +293,9 @@ function buildPrompt(files: ReviewableFile[], context?: ReviewPromptContext, has
   // that inversion hit 1.5M input / 3.8k reasoning tokens for a 2-file PR and
   // codex missed a P1 it had already read the evidence for: a huge prompt DROWNS
   // attention on small PRs instead of helping. Diff + full changed files + tree
-  // + intent stay in; everything else codex pulls on demand.
+  // stay in; everything else codex pulls on demand.
   const ctx = context
     ? {
-        prTitle: context.prTitle,
-        prBody: context.prBody,
         treePaths: context.treePaths,
         related: hasRepoCheckout ? undefined : redactAll(context.related),
         dependents: hasRepoCheckout ? undefined : redactAll(context.dependents),
@@ -595,7 +597,7 @@ export async function runCodexCliReview(
   const prompt = buildPrompt(files, opts.context, Boolean(cwd));
   const model = opts.model ?? defaultModel();
 
-  const effort = opts.reasoningEffort ?? process.env.ORVEX_CODEX_CLI_REASONING_EFFORT ?? 'xhigh';
+  const effort = opts.reasoningEffort ?? (process.env.ORVEX_CODEX_CLI_REASONING_EFFORT?.trim() || DEFAULT_CODEX_CLI_REASONING_EFFORT);
 
   // One full attempt on a given home: exec + stale-thread retry + model fallback.
   const attemptOnHome = async (

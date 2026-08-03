@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Labeled review cases — the ground truth for measuring precision/recall.
  * Each was hand-verified against the actual code during development. Add a case
@@ -22,10 +24,10 @@ export interface EvalCase {
    *  newline fails on a correct description purely by paragraph break. */
   shouldFlagSevere?: Array<{ pattern: RegExp; minSeverity: 'P1' | 'P2' | 'P3'; file?: RegExp }>;
   shouldNotFlag?: RegExp[];
-  /** Head SHA the case was hand-verified against. Ground truth is only true for a
+  /** Immutable SHA the case was hand-verified against. Ground truth is only true for a
    *  specific commit: if the PR is pushed to, the bug can vanish from head and a
    *  CORRECT review scores as a permanent miss with no signal. */
-  sha?: string;
+  sha: string;
   note?: string;
 }
 
@@ -35,6 +37,7 @@ export const CASES: EvalCase[] = [
     owner: 'inspiringprotrader2121-coder',
     repo: 'Velatrix-Cloud',
     pr: 16,
+    sha: 'd885adfc42dcece12e6a8bb6c4c3e61d4fde9902',
     shouldNotFlag: [/reus\w* .*migration version/i, /renumber\w*.*regression/i],
     note: 'The identity-based runner ~200 lines below the hunk handles the reused version by (name), so this is not a bug.',
   },
@@ -43,6 +46,7 @@ export const CASES: EvalCase[] = [
     owner: 'inspiringprotrader2121-coder',
     repo: 'Velatrix-Cloud',
     pr: 18,
+    sha: '2f38cc56d3e8209bfd3ad5ff210a17674c45423b',
     shouldNotFlag: [/MAIN_SERVER_URL fallback/i, /removed?.*fallback.*(break|outage)/i],
     note: 'Removing the MAIN_SERVER_URL fallback is the stated purpose of the PR — intentional, not a bug.',
   },
@@ -51,6 +55,7 @@ export const CASES: EvalCase[] = [
     owner: 'inspiringprotrader2121-coder',
     repo: 'Velatrix-Cloud',
     pr: 18,
+    sha: '243cff514b93021101cacf252f47950ab2f6b45d',
     shouldNotFlag: [/equals arm.*(raw|escap)/i, /escapeLikeWildcards.*divergence/i],
     note: 'Prisma equality is not a LIKE query, so the equals arm needs no wildcard escaping — self-negating nitpick.',
   },
@@ -59,6 +64,7 @@ export const CASES: EvalCase[] = [
     owner: 'inspiringprotrader2121-coder',
     repo: 'Velatrix-Cloud',
     pr: 18,
+    sha: 'e0b41179199967992e9478bae1e1abecb2e69995',
     shouldFlag: [/password.*length.*>=?\s*1|tenant.?walk|bypass/i],
     note: 'passwordLooksValid = length>=1 is bypassable with &password=x — a real hardening gap.',
   },
@@ -67,6 +73,7 @@ export const CASES: EvalCase[] = [
     owner: 'inspiringprotrader2121-coder',
     repo: 'Velatrix-Cloud',
     pr: 18,
+    sha: '2f38cc56d3e8209bfd3ad5ff210a17674c45423b',
     shouldFlag: [/upstreamName/i, /undefined (variable|reference)/i],
     note: 'poll() catch references undefined upstreamName → ReferenceError every 20 failures. A real P1 (currently missed).',
   },
@@ -78,6 +85,7 @@ export const CASES: EvalCase[] = [
     owner: 'inspiringprotrader2121-coder',
     repo: 'Velatrix-Cloud',
     pr: 118,
+    sha: '576ee02cce7e27947f2b7f4942be82331752409a',
     // Must be flagged AND rated ≥P2 — the whole point was that Orvex rated this
     // `info`. A text match alone would hide the severity regression.
     shouldFlagSevere: [{ pattern: /coupon.*(clean|leak|orphan|released|reserv)|reservation.*(leak|unreleased|unkeyed)/i, minSeverity: 'P2' }],
@@ -88,6 +96,7 @@ export const CASES: EvalCase[] = [
     owner: 'inspiringprotrader2121-coder',
     repo: 'Velatrix-Cloud',
     pr: 121,
+    sha: '387ad32bb4f66a36428bd55c39a57cc9d3e955a1',
     shouldFlagSevere: [{ pattern: /(fail|error|block).*not recorded|record.*(fail|error).*(tenant|guard)|MAC.?block|download failure/i, minSeverity: 'P2' }],
     note: 'The failure/error branch skips the tenant-guarded recording the success path performs. codex/greptile caught (P1/P2); Orvex never raised it. Recall target.',
   },
@@ -97,78 +106,91 @@ export const CASES: EvalCase[] = [
   {
     name: 'runtime-smoke-incomplete-credential-redaction',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 139,
+    sha: 'a4a051660faf53109adf533546fec2ac90e2573c',
     shouldFlagSevere: [{ pattern: /(access_token|auth_token|client_secret|credential).*(redact|leak)|redact.*(credential|secret).*query/i, minSeverity: 'P2' }],
     note: 'The new query-key allowlist leaves common secret-bearing keys in failure details. Greptile rated P1; minimum regression threshold is P2.',
   },
   {
     name: 'gdpr-export-removes-invoices-contract',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 139,
+    sha: 'a4a051660faf53109adf533546fec2ac90e2573c',
     shouldFlagSevere: [{ pattern: /invoices.*(missing|removed|response|contract)|export.*(shape|compatib).*invoices/i, minSeverity: 'P2' }],
     note: 'The successful export response removes its established invoices field without versioning or an alias.',
   },
   {
     name: 'missing-entitlement-forces-config-reload',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 140,
+    sha: 'b98fd688b8336c8cdf541f1ca1338c379017857a',
     shouldFlagSevere: [{ pattern: /entitlement.*(undefined|omit|missing).*(changed|reload|reapply)|every.*(poll|sync).*(reload|changed|config)/i, minSeverity: 'P2' }],
     note: 'The load-balancer poller omits entitlements, so undefined is treated as changed and nginx is reapplied every poll.',
   },
   {
     name: 'backup-destination-update-counted-as-create',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 140,
+    sha: 'b98fd688b8336c8cdf541f1ca1338c379017857a',
     shouldFlagSevere: [{ pattern: /(destination|update).*(count \+ 1|quota|created|not.?found|null row)|missing destination.*success/i, minSeverity: 'P2' }],
     note: 'The shared create/update helper reports created/count+1 for an update and succeeds with row:null when the ID is absent.',
   },
   {
     name: 'existing-admin-operational-state-not-repaired',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 140,
+    sha: 'b98fd688b8336c8cdf541f1ca1338c379017857a',
     shouldFlagSevere: [{ pattern: /(existing|stale|inactive).*admin.*(status|panelSlug|sign.?in)|admin.*(inactive|stale).*preserv/i, minSeverity: 'P2' }],
     note: 'Preserving credentials/MFA is intentional, but preserving an inactive status or stale admin panelSlug can leave bootstrap successful with no usable administrator.',
   },
   {
     name: 'batch-url-stale-preview-race',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 141,
+    sha: '61086b12e02ae71303c483a2b001c2553028b8c6',
     shouldFlagSevere: [{ pattern: /(stale|older|out.?of.?order).*(preview|request)|preview.*(race|overwrite|old URL)/i, minSeverity: 'P2' }],
     note: 'An older asynchronous preview can resolve after input changes and restore a stale request that Update then submits.',
   },
   {
     name: 'cumulative-refund-remainder-not-recorded',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 143,
+    sha: '65aaaf95756ecaeb47f63ccc4dc1e127d0892bf2',
     shouldFlagSevere: [{ pattern: /(cumulative|legacy|full).*(refund).*(remainder|increment|ledger|record)|refund.*(empty|missing).*list.*(drop|skip)/i, minSeverity: 'P2' }],
     note: 'With a legacy partial marker and no expanded refund rows, the full-refund transition suspends but does not record the cumulative remainder in the ledger.',
   },
   {
     name: 'shared-tunnel-destroy-bypasses-users',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 144,
+    sha: 'bda85a0855489dba68d881b39676ba386287b40a',
     shouldFlagSevere: [{ pattern: /destroyPool.*(close|tunnel).*(ephemeral|active|refcount)|tunnel.*closed.*(live|active|ephemeral)/i, minSeverity: 'P2' }],
     note: 'Orvex caught this at line 176 while competitors anchored line 198; the line-only benchmark incorrectly split the same defect.',
   },
   {
     name: 'failed-overlapping-pool-creation-leaks-tunnel',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 144,
+    sha: 'bda85a0855489dba68d881b39676ba386287b40a',
     shouldFlagSevere: [{ pattern: /(pool creation|poolCreations).*(fail|failure).*(tunnel|close)|tunnel.*(leak|left open).*pool/i, minSeverity: 'P2' }],
     note: 'A distinct nearby Codex finding: an overlapping failed pool creation suppresses ephemeral cleanup, then never closes the tunnel itself.',
   },
   {
     name: 'mag-unsigned-type-overrides-session-claim',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 146,
+    sha: '5ea35cea210cb9647d0aecffc5e229f414213a83',
     shouldFlagSevere: [{ pattern: /(unsigned|request|body|query|header).*(stb|device).*override.*(signed|session|token)|trusted.*stb.*precedence/i, minSeverity: 'P2' }],
     note: 'requestStbType checks unsigned request fields before the signed fallback, allowing a restricted device type to be replaced.',
   },
   {
     name: 'bootstrap-fallback-rejects-success-status',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 146,
+    sha: '5ea35cea210cb9647d0aecffc5e229f414213a83',
     shouldFlagSevere: [{ pattern: /(success|dry-run).*(fallback|whitelist).*(failed|reject)|online.*(never|non.?existent).*status/i, minSeverity: 'P2' }],
     note: 'The no-Python fallback accepts online|failed, but real completion states are success and dry-run, so successful installs report failed.',
   },
   {
     name: 'legacy-ciphertext-corruption-passes-as-plaintext',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 147,
+    sha: '8f6be04d672e93be4e9c988c43298146ec412861',
     shouldFlagSevere: [{ pattern: /(corrupt|truncat|malformed).*(legacy|cipher|encrypt).*(plaintext|pass|return)|legacy.*ciphertext.*fail closed/i, minSeverity: 'P2' }],
     note: 'Orvex found this but rated it P3; credential corruption must fail closed and meet the P2 threshold.',
   },
   {
     name: 'missing-tenant-error-variant-misclassified',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 147,
+    sha: '8f6be04d672e93be4e9c988c43298146ec412861',
     shouldFlagSevere: [{ pattern: /(Database for panel|missing tenant).*(503|unavailable|misclass)|tenant.*(error|message|variant).*(404|503)/i, minSeverity: 'P2' }],
     note: 'The production pool manager emits a second missing-database message that the new 404 classifier does not match.',
   },
@@ -178,7 +200,7 @@ export const CASES: EvalCase[] = [
   //  These are the permanent regression set for high-severity recall.)
   {
     name: 'bench170-logger-header-mutation',
-    sha: '3a37fb5',
+    sha: '3a37fb538526254872e892baf926911985ffb611',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 163,
     shouldFlagSevere: [
       {
@@ -192,7 +214,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-mysql-root-host-widened',
-    sha: '2111b11',
+    sha: '2111b11377ae2009c037c6c734886c42cf408e7d',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 165,
     shouldFlagSevere: [
       {
@@ -206,7 +228,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-compose-api-migrations-parity',
-    sha: '2111b11',
+    sha: '2111b11377ae2009c037c6c734886c42cf408e7d',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 165,
     shouldFlagSevere: [
       {
@@ -220,7 +242,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-provision-retry-stale-resources',
-    sha: '2e06339',
+    sha: '2e06339bd6ee219c5cfc29cb58e6ab3c578ac796',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 167,
     shouldFlagSevere: [
       {
@@ -234,7 +256,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-webhook-success-stays-pending',
-    sha: '42d731c',
+    sha: '42d731c96538303596aaffce879aeb228919d3b2',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 168,
     shouldFlagSevere: [
       {
@@ -248,7 +270,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-nginx-real-ip-spoof',
-    sha: 'f4d7631',
+    sha: 'f4d763122f5af58648c3feb98bf72b85691f443e',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 170,
     shouldFlagSevere: [
       {
@@ -262,7 +284,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-redis-end-stays-unready',
-    sha: '0e7cbcc',
+    sha: '0e7cbcc3abfb57afdfdbd5268604903a219697c9',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 169,
     shouldFlagSevere: [
       {
@@ -276,7 +298,7 @@ export const CASES: EvalCase[] = [
   },
   {
     name: 'bench170-inherited-slug-rollback',
-    sha: '2e06339',
+    sha: '2e06339bd6ee219c5cfc29cb58e6ab3c578ac796',
     owner: 'inspiringprotrader2121-coder', repo: 'Velatrix-Cloud', pr: 167,
     shouldFlagSevere: [
       {
@@ -289,3 +311,40 @@ export const CASES: EvalCase[] = [
     note: 'greptile P1: a resumed job initializes panelSlug from an earlier attempt, so an early failure can destructively roll back the wrong panel.',
   },
 ];
+
+/**
+ * A run records this digest with its precision/recall output. It covers the
+ * immutable commit pins and every existing label, so results can be tied to the
+ * exact corpus without fabricating a new ground-truth case.
+ */
+export function evaluationCorpusFingerprint(cases: readonly EvalCase[] = CASES): string {
+  const snapshot = cases.map((c) => ({
+    name: c.name,
+    owner: c.owner,
+    repo: c.repo,
+    pr: c.pr,
+    sha: c.sha,
+    shouldFlag: c.shouldFlag?.map((pattern) => [pattern.source, pattern.flags]),
+    shouldFlagSevere: c.shouldFlagSevere?.map((label) => ({
+      pattern: [label.pattern.source, label.pattern.flags],
+      minSeverity: label.minSeverity,
+      file: label.file ? [label.file.source, label.file.flags] : undefined,
+    })),
+    shouldNotFlag: c.shouldNotFlag?.map((pattern) => [pattern.source, pattern.flags]),
+    note: c.note,
+  }));
+  return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
+}
+
+export function evaluationCorpusLabelCounts(cases: readonly EvalCase[] = CASES): {
+  positive: number;
+  negative: number;
+} {
+  return cases.reduce(
+    (counts, c) => ({
+      positive: counts.positive + (c.shouldFlag?.length ?? 0) + (c.shouldFlagSevere?.length ?? 0),
+      negative: counts.negative + (c.shouldNotFlag?.length ?? 0),
+    }),
+    { positive: 0, negative: 0 },
+  );
+}

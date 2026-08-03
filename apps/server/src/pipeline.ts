@@ -36,23 +36,30 @@ import {
   THIRD_ANGLE_FOCUS,
   filterAndCapFindings,
   fingerprintFinding,
+  fitReviewAggregationToBudget,
   formatFixedReply,
   formatInlineFinding,
   formatReviewBody,
   llmFindingsToReviewFindings,
   isTransientLlmError,
+  llmChat,
   REVIEW_INCOMPLETE_SUMMARY,
   mergeFindings,
+  aggregateRepeatedFindings,
+  readReviewAggregationConfig,
   partitionVerifiedFindings,
   reconcileFixedOnHead,
   dropSelfNegatingFindings,
   runLlmReview,
   runCodexCliReview,
   isCodexRepoAllowed,
+  DEFAULT_CODEX_CLI_MODEL,
+  DEFAULT_CODEX_CLI_REASONING_EFFORT,
   toStoredFinding,
   verifyFindings,
   type ReviewFinding,
   type ReviewPromptContext,
+  type ReviewSurfaceFinding,
 } from '@orvex-review/review';
 import {
   createAppDatabase,
@@ -247,10 +254,11 @@ export function modelForPass(
   return { target: premiumTarget(config), tier: 'premium' };
 }
 
-/** The model for the single verification pass. Verification is a FILTER, not the
- *  reviewer, so it always runs on the cheaper standard model (MiniMax) — even when
- *  the review passes use an expensive model (e.g. codex). */
-export function modelForPlan(config: WorkerConfig, plan: { modelTier?: ModelTier }): LlmTarget {
+/** The target and accounting tier for the single verification pass. */
+export function modelForPlanWithTier(
+  config: WorkerConfig,
+  plan: { modelTier?: ModelTier },
+): { target: LlmTarget; tier: PassTier } {
   // VERIFICATION IS THE PRECISION GATE — it decides what the customer actually
   // sees. On the multi-model tiers it now runs on the frontier OpenAI model
   // rather than the cheap standard one: a weak verifier over-vetoes, which is
@@ -263,7 +271,7 @@ export function modelForPlan(config: WorkerConfig, plan: { modelTier?: ModelTier
     config.openaiModel &&
     process.env.ORVEX_VERIFY_ON_STANDARD !== '1'
   ) {
-    return config.openaiModel;
+    return { target: config.openaiModel, tier: 'openai' };
   }
   if (
     plan.modelTier === 'standard' ||
@@ -272,9 +280,14 @@ export function modelForPlan(config: WorkerConfig, plan: { modelTier?: ModelTier
     plan.modelTier === 'multi-model' ||
     plan.modelTier === 'dual-model'
   ) {
-    return config.standardModel;
+    return { target: config.standardModel, tier: 'standard' };
   }
-  return premiumTarget(config);
+  return { target: premiumTarget(config), tier: 'premium' };
+}
+
+/** Backward-compatible target-only selection for callers that do not meter usage. */
+export function modelForPlan(config: WorkerConfig, plan: { modelTier?: ModelTier }): LlmTarget {
+  return modelForPlanWithTier(config, plan).target;
 }
 
 let sharedStore: AppDatabase | null = null;
@@ -356,8 +369,8 @@ export function loadWorkerConfig(): WorkerConfig {
     process.env.ORVEX_CODEX_CLI === '1'
       ? {
           apiKey: '',
-          model: process.env.ORVEX_CODEX_CLI_MODEL ?? 'gpt-5.5',
-          reasoningEffort: process.env.ORVEX_CODEX_CLI_REASONING_EFFORT ?? 'xhigh',
+          model: process.env.ORVEX_CODEX_CLI_MODEL?.trim() || DEFAULT_CODEX_CLI_MODEL,
+          reasoningEffort: process.env.ORVEX_CODEX_CLI_REASONING_EFFORT?.trim() || DEFAULT_CODEX_CLI_REASONING_EFFORT,
         }
       : null;
 
@@ -733,9 +746,11 @@ async function executeReview(
   // enforced separation between tiers (Free/Review/Verify), not just wording.
   const plan = planFeatures(config.store.getTenantPlan(tenantId));
   // The review passes use modelForPass (may be codex on the Verify test); the
-  // single verification pass uses `llm` = modelForPlan (always MiniMax — a cheap
-  // filter, not the reviewer).
-  const llm = modelForPlan(config, plan);
+  // single verification pass uses a plan-aware target; retain its cost tier so
+  // usage accounting follows the model that actually received the request.
+  const verificationTarget = modelForPlanWithTier(config, plan);
+  const llm = verificationTarget.target;
+  const verificationTier = verificationTarget.tier;
   const reviewModel = modelForPass(config, plan, 0).target.model;
   console.log(`[worker] plan=${plan.id} review=${reviewModel} verify=${llm.model}`);
 
@@ -880,6 +895,7 @@ async function executeReview(
   // Only true once an extra deep lens has actually produced a review.
   let deepLensesRan = false;
   let llmFindings: ReviewFinding[] = [];
+  let aggregationManualCandidates: ReviewSurfaceFinding[] = [];
   // Token usage per model tier — a hybrid review runs two different models, so
   // cost is tracked separately (each has its own $/token) and summed.
   const usage: TierUsage = {
@@ -898,7 +914,7 @@ async function executeReview(
   // repo tree paths, hoisted so the (later) deepVerify pass can locate manifests
   let repoTreePaths: string[] = [];
 
-  // author intent — critical for not flagging deliberate changes as bugs
+  // Author intent is untrusted and supplied only to the independent verifier.
   const prIntent = [pr.title, pr.body].filter(Boolean).join('\n\n').slice(0, 4000);
 
   if (filesForLlm.length > 0) {
@@ -956,14 +972,17 @@ async function executeReview(
     // how long one model call decides to think. Higher tiers get more passes and
     // (Verify only) an exhaustive whole-repo sweep. Findings accumulate and
     // dedupe by fingerprint; a hard call-count cap prevents runaway.
-    const baseCtx: ReviewPromptContext = { ...(reviewContext ?? {}), prTitle: pr.title, prBody: pr.body };
-    const runReview = (ctx: typeof baseCtx, target: LlmTarget, tier: PassTier) =>
+    // First-pass reviewers receive diff and code context only. PR author intent
+    // remains available to the separate verifier as an untrusted claim.
+    const baseCtx: ReviewPromptContext = { ...(reviewContext ?? {}) };
+    const runReview = (ctx: typeof baseCtx, target: LlmTarget, tier: PassTier, temperature?: number) =>
       runLlmReview(filesForLlm, {
         apiKey: target.apiKey,
         baseUrl: target.baseUrl,
         model: target.model,
         api: target.api,
         reasoningEffort: target.reasoningEffort,
+        temperature,
         context: ctx,
         onUsage: onUsageFor(tier),
       });
@@ -974,8 +993,14 @@ async function executeReview(
     // per-file sweep reads (below), and MODERATE concurrency so the work spreads
     // out rather than finishing all at once. Review has few calls, so a lower
     // concurrency barely affects it — this mainly paces the many-call Verify tier.
-    const maxCalls = Math.max(passes, Number(process.env.ORVEX_REVIEW_MAX_CALLS ?? 28));
-    const concurrency = Math.max(1, Number(process.env.ORVEX_REVIEW_CONCURRENCY ?? 3));
+    const configuredMaxCalls = Number(process.env.ORVEX_REVIEW_MAX_CALLS ?? 28);
+    const maxCalls = Number.isFinite(configuredMaxCalls)
+      ? Math.max(passes, Math.floor(configuredMaxCalls))
+      : Math.max(passes, 28);
+    const configuredConcurrency = Number(process.env.ORVEX_REVIEW_CONCURRENCY ?? 3);
+    const concurrency = Number.isFinite(configuredConcurrency)
+      ? Math.max(1, Math.floor(configuredConcurrency))
+      : 3;
     const accumulated: ReviewFinding[] = [];
 
     // Build the full list of review calls up front — N passes over the change +
@@ -1034,6 +1059,12 @@ async function executeReview(
       ctx: typeof baseCtx;
       target: LlmTarget;
       tier: PassTier;
+      /** Zero-based repeated-review sample. Sweeps are always sample zero. */
+      sample: number;
+      /** Original model pass index, used to reselect an API target for repeated samples. */
+      modelPassIndex?: number;
+      /** Explicit low temperature used only by repeated API samples. */
+      temperature?: number;
       // Best-effort passes (the perf/completeness breadth lens, the optional
       // `deep` extra lenses) enrich the review but must NEVER discard it: if one
       // times out or errors, the review still posts from the passes that
@@ -1081,6 +1112,8 @@ async function executeReview(
         ctx: angle.focus ? { ...passCtx, extraFocus: angle.focus } : passCtx,
         target,
         tier,
+        sample: 0,
+        modelPassIndex: p,
         bestEffort: angle.bestEffort === true,
       });
     }
@@ -1094,6 +1127,8 @@ async function executeReview(
         ctx: { ...passCtx, extraFocus: extra.focus },
         target,
         tier,
+        sample: 0,
+        modelPassIndex: extra.modelIdx,
         bestEffort: true, // `deep` extras are bonus lenses — never abort the review
       });
     }
@@ -1121,6 +1156,7 @@ async function executeReview(
           ctx: { ...baseCtx, related: [], dependents: [], others: files },
           target: sweepModel.target,
           tier: sweepModel.tier,
+          sample: 0,
         });
         batch = [];
         used = 0;
@@ -1134,8 +1170,50 @@ async function executeReview(
       pushBatch();
     }
 
-    const toRun = reviewCalls.slice(0, maxCalls);
-    console.log(`[worker] deep review: ${toRun.length} calls (${passes} passes + ${toRun.length - passes} sweep), concurrency=${concurrency}`);
+    const requestedAggregation = readReviewAggregationConfig();
+    const passCalls = reviewCalls.filter((call) => call.kind === 'pass');
+    const sweepCalls = reviewCalls.filter((call) => call.kind === 'sweep');
+    // Reserve the sweep before expanding repeated samples. The recurrence policy
+    // must never silently squeeze out the Verify tier's documented whole-repo
+    // coverage just to fit more copies of the main pass into the call cap.
+    const reservedSweepCalls = Math.min(sweepCalls.length, Math.max(0, maxCalls - passCalls.length));
+    const aggregation = fitReviewAggregationToBudget(
+      requestedAggregation,
+      passCalls.length,
+      maxCalls,
+      reservedSweepCalls,
+    );
+    if (requestedAggregation.enabled && !aggregation.enabled) {
+      console.warn(`[worker] repeated-review aggregation disabled: ${aggregation.disabledReason}`);
+    }
+
+    let toRun: ReviewCall[];
+    if (aggregation.enabled) {
+      const repeatedCalls: ReviewCall[] = Array.from({ length: aggregation.effectiveRuns }, (_, sample) =>
+        passCalls.map((call): ReviewCall => {
+          // Agentic Codex sessions are deliberately sequential and stateful.
+          // Repeated samples must be independent, so select the equivalent
+          // direct API target rather than resuming a shared CLI conversation.
+          const routed = modelForPass(config, plan, call.modelPassIndex ?? 0, false);
+          return {
+            ...call,
+            label: `${call.label} sample ${sample + 1}/${aggregation.effectiveRuns}`,
+            mode: 'api',
+            target: routed.target,
+            tier: routed.tier,
+            sample,
+            temperature: aggregation.temperature,
+          };
+        }),
+      ).flat();
+      toRun = [...repeatedCalls, ...sweepCalls].slice(0, maxCalls);
+    } else {
+      toRun = reviewCalls.slice(0, maxCalls);
+    }
+    console.log(
+      `[worker] deep review: ${toRun.length} calls (${passes} passes + ${toRun.length - passes} sweep), ` +
+        `concurrency=${concurrency}${aggregation.enabled ? `, aggregation=${aggregation.effectiveRuns}x/${aggregation.minOccurrences}` : ''}`,
+    );
 
     // Mid-run abort: a Verify review can run ~10 minutes across many calls — if
     // the PR closes/merges partway through (the real incident this fixes: a
@@ -1170,12 +1248,16 @@ async function executeReview(
       bestEffort?: boolean;
       /** human label ("pass 3/3 (perf/completeness/api) [MiniMax-M3]") for disclosure */
       label?: string;
+      /** Repeated-review sample that produced this outcome. */
+      sample: number;
+      /** Original review lens, shared by every repeated sample of that lens. */
+      modelPassIndex?: number;
     };
 
     /** What ONE call produced. `kind`/`bestEffort`/`label` are attached by
      *  runOne from the ReviewCall itself — this function only reports outcome,
      *  so no return site can misdescribe what the call WAS. */
-    type CallResult = Omit<Outcome, 'kind' | 'bestEffort' | 'label'>;
+    type CallResult = Omit<Outcome, 'kind' | 'bestEffort' | 'label' | 'sample' | 'modelPassIndex'>;
 
     const runSingleCall = async (call: (typeof toRun)[number]): Promise<CallResult> => {
       if (prClosedMidRun) {
@@ -1238,7 +1320,7 @@ async function executeReview(
           }
         }
 
-        const llm = await runReview(call.ctx, call.target, call.tier);
+        const llm = await runReview(call.ctx, call.target, call.tier, call.temperature);
         const got = llmFindingsToReviewFindings(llm.findings);
         for (const f of got) f.sourceTier = call.tier;
         // A call that returned the "unparseable" sentinel with no findings
@@ -1275,6 +1357,8 @@ async function executeReview(
         kind: call.kind,
         bestEffort: call.bestEffort ?? false,
         label: call.label,
+        sample: call.sample,
+        modelPassIndex: call.modelPassIndex,
       });
       const cliOutcomes: Outcome[] = [];
       for (const call of cliCalls) {
@@ -1327,29 +1411,31 @@ async function executeReview(
       );
     }
 
-    // The CORE review passes (general + deep-dive) are the product contract — if
-    // one of those fails, abort and post nothing. But the breadth/completeness
-    // lens (pass 3, commonly MiniMax) and the optional `deep` extra lenses are
-    // BEST-EFFORT: a MiniMax wall-clock timeout must not throw away the real
-    // findings the core reasoners already produced. So exclude best-effort passes
-    // from the required-pass gate; log them for transparency instead.
-    const failedRequiredPasses = outcomes.filter((o) => o.kind === 'pass' && !o.ok && !o.bestEffort);
-    if (failedRequiredPasses.length > 0) {
+    // The core general + deep-dive lenses are the product contract. In normal
+    // mode each needs one completed call; in repeated mode each needs enough
+    // independent samples to meet the recurrence threshold. Breadth/deep-extra
+    // lenses remain best-effort and cannot discard the completed core review.
+    const requiredCalls = toRun.filter((call) => call.kind === 'pass' && !call.bestEffort);
+    const requiredLensIds = [...new Set(requiredCalls.map((call) => call.modelPassIndex ?? -1))];
+    const requiredSuccesses = aggregation.enabled ? aggregation.minOccurrences : 1;
+    const failedRequiredLenses = requiredLensIds.filter((lensId) => {
+      const successes = outcomes.filter((outcome) => outcome.modelPassIndex === lensId && outcome.ok).length;
+      return successes < requiredSuccesses;
+    });
+    if (failedRequiredLenses.length > 0) {
       // PRESERVE TRANSIENCE. queue-runner decides whether to requeue by pattern-
-      // matching this message with isTransientLlmError. A generic "required pass
-      // failed" matches nothing, so a review whose Luna pass was merely
-      // RATE-LIMITED — while the other passes succeeded — was silently DROPPED
-      // instead of retried. That is the single most likely failure on a
-      // rate-limited tier, and it is exactly what lost 4 of 9 PRs in the
-      // 2026-07-22 batch. Naming the transient cause makes the job requeue.
-      const transientFailures = failedRequiredPasses.filter((o) => o.transient).length;
-      const requiredCount = reviewCalls.filter((c) => c.kind === 'pass' && !c.bestEffort).length;
-      const cause =
-        transientFailures > 0
-          ? ' — rate-limit/transport errors; will retry'
-          : '; no partial review was posted';
+      // matching this message with isTransientLlmError; naming it keeps a
+      // rate-limited required lens retryable rather than silently partial.
+      const failedRequiredPasses = outcomes.filter(
+        (outcome) => failedRequiredLenses.includes(outcome.modelPassIndex ?? -1) && !outcome.ok,
+      );
+      const transientFailures = failedRequiredPasses.filter((outcome) => outcome.transient).length;
+      const cause = transientFailures > 0
+        ? ' — rate-limit/transport errors; will retry'
+        : '; no partial review was posted';
       throw new Error(
-        `review aborted: ${failedRequiredPasses.length}/${requiredCount} required model pass(es) failed${cause}`,
+        `review aborted: ${failedRequiredLenses.length}/${requiredLensIds.length} required review lens(es) ` +
+          `completed fewer than ${requiredSuccesses} sample(s)${cause}`,
       );
     }
     // `deep:` labels come from DEEP_EXTRA_ANGLES — the lenses the 2x charge buys.
@@ -1367,14 +1453,48 @@ async function executeReview(
     llmSummary = outcomes.find((o) => o.kind === 'pass' && o.ok)?.summary ?? llmSummary;
     for (const o of outcomes) accumulated.push(...o.findings);
 
-    // dedupe the same bug surfaced by multiple passes/batches
-    const seenFp = new Set<string>();
-    llmFindings = accumulated.filter((f) => {
-      const fp = fingerprintFinding(f);
-      if (seenFp.has(fp)) return false;
-      seenFp.add(fp);
-      return true;
-    });
+    const dedupeFindings = (findings: ReviewFinding[]): ReviewFinding[] => {
+      const seenFp = new Set<string>();
+      return findings.filter((finding) => {
+        const fp = fingerprintFinding(finding);
+        if (seenFp.has(fp)) return false;
+        seenFp.add(fp);
+        return true;
+      });
+    };
+    if (aggregation.enabled) {
+      const repeated = outcomes
+        .filter((outcome) => outcome.kind === 'pass' && outcome.ok)
+        .flatMap((outcome) => outcome.findings.map((finding) => ({ sample: outcome.sample, finding })));
+      const mergedRepeated = await aggregateRepeatedFindings(repeated, {
+        minOccurrences: aggregation.minOccurrences,
+        maxCandidates: aggregation.maxCandidates,
+        mergeWithLlm: (system, user) =>
+          llmChat(system, user, {
+            apiKey: llm.apiKey,
+            model: llm.model,
+            baseUrl: llm.baseUrl,
+            api: llm.api,
+            reasoningEffort: llm.reasoningEffort,
+            temperature: aggregation.temperature,
+            json: true,
+            onUsage: onUsageFor(verificationTier),
+          }),
+      });
+      aggregationManualCandidates = mergedRepeated.reviewOnly;
+      const sweepFindings = outcomes
+        .filter((outcome) => outcome.kind === 'sweep' && outcome.ok)
+        .flatMap((outcome) => outcome.findings);
+      llmFindings = dedupeFindings([...mergedRepeated.findings, ...sweepFindings]);
+      console.log(
+        `[worker] repeated aggregation ${mergedRepeated.usedLlmMerge ? 'LLM-merged' : 'fingerprint-fallback'}: ` +
+          `${mergedRepeated.findings.length} recurring, ${mergedRepeated.reviewOnly.length} manual, ` +
+          `${mergedRepeated.clusterCount} clusters`,
+      );
+    } else {
+      // Normal reviews union independently focused passes by stable fingerprint.
+      llmFindings = dedupeFindings(accumulated);
+    }
     // Don't let a failed first pass ("Review could not be completed…") headline
     // the review when later passes/sweep batches actually found bugs.
     if (llmFindings.length > 0 && llmSummary?.startsWith('Review could not be completed')) {
@@ -1383,9 +1503,12 @@ async function executeReview(
     console.log(`[worker] deep review done: ${toRun.length} model calls, ${llmFindings.length} unique findings`);
   }
 
+  // `mergeFindings` receives normal candidates separately from explicitly
+  // demoted manual ones, so a higher-confidence one-off cannot displace a
+  // deterministic, recurring, or sweep finding with the same fingerprint.
   const incoming = dedupeByFileLine([...ruleFindings, ...llmFindings]);
   const merged = mergeFindings(incoming, verifiedOpen, effectiveSha, {
-    minConfidence: reviewConfig.min_confidence,
+    manualCandidates: aggregationManualCandidates,
     // Only files actually looked at this run can retire a prior finding. On an
     // incremental push `files` is just the newly-pushed diff, so a prior finding
     // in an un-touched file is carried forward, not falsely marked "fixed".
@@ -1396,15 +1519,6 @@ async function executeReview(
     // P2-4: findings whose files hit a transient read error must not be marked fixed.
     protectedFingerprints: new Set(readErrorFps),
   });
-
-  // A model reported these below min_confidence. They remain visible in the
-  // manual-review section; never delete a candidate solely for uncertainty.
-  if (merged.reviewOnly.length > 0) {
-    console.log(
-      `[worker] confidence filter routed ${merged.reviewOnly.length} to manual review (min ${reviewConfig.min_confidence}): ` +
-        merged.reviewOnly.map(({ finding }) => `${finding.severity} ${finding.file}:${finding.line ?? '?'} conf=${finding.confidence}`).join(' | '),
-    );
-  }
 
   // drop findings the team suppressed with `@orvex ignore`
   const suppressed = config.store.getSuppressedFingerprints(installationId, owner, repo);
@@ -1485,8 +1599,8 @@ async function executeReview(
     // ONE verification pass at the end of the review (NOT a second full review) —
     // strict/premise-checking on deepVerify tiers (rejects false positives incl.
     // wrong-library-version claims, using the manifests fetched above), recall-
-    // biased otherwise. Always the standard model (MiniMax), even when the review
-    // ran on codex — verification is a cheap filter, not the reviewer.
+    // biased otherwise. It uses the plan-selected verifier target, which can be
+    // the stronger OpenAI model on multi-model tiers.
     const mode = plan.deepVerify ? 'strict' : 'recall';
     const verified = await verifyFindings(verificationCandidates, verifyFiles, {
       apiKey: llm.apiKey,
@@ -1496,14 +1610,11 @@ async function executeReview(
       reasoningEffort: llm.reasoningEffort,
       prIntent,
       strict: plan.deepVerify,
-      // The batch is [...toPost, ...reviewOnly]; everything past this index is a
-      // candidate that FAILED the confidence floor. Without the boundary, such a
-      // candidate can be marked `duplicateOf` a posted finding and max-fold its
-      // severity into it — promoting a confirmed P3 to P1 on the say-so of
-      // something we had already declined to trust.
+      // The batch is [...toPost, ...reviewOnly]. Manual candidates must not be
+      // able to promote a normal finding's severity through `duplicateOf`.
       confirmedCount: merged.toPost.length,
       // P2-2: count verification tokens in the review's cost total.
-      onUsage: onUsageFor('standard'),
+      onUsage: onUsageFor(verificationTier),
     });
     if (verified.dropped.length > 0) {
       console.log(
@@ -1731,7 +1842,7 @@ async function executeReview(
   if (config.enableCheckRuns) {
     // Manual-review candidates count toward the check run's honesty signals.
     // `finalFindings` comes only from `merged.toPost`, so a review where EVERY
-    // candidate was demoted (all below min_confidence, or all vetoed by the
+    // candidate was demoted (by recurrence or all vetoed by the
     // verifier) previously produced: conclusion 'success', "0 new, 0 fixed,
     // 0 open", and a green ✅ next to the merge button — while the review body
     // directly below rendered a table of P1 candidates. That is precisely the
@@ -1815,14 +1926,14 @@ async function executeReview(
 
 /**
  * Dashboard defaults apply when a repository has no config-as-code file.
- * Previously maxComments/minConfidence/reviewMode were stored and shown by the
- * product but silently ignored by the worker, which also made the public
+ * Previously maxComments/reviewMode were stored and shown by the product but
+ * silently ignored by the worker, which also made the public
  * "8 comments by default" promise untrue. A checked-in repo config remains the
  * source of truth when present.
  */
 export function effectiveReviewConfig(
   repoConfigYaml: string | null,
-  workspace: { defaultReviewMode: 'normal' | 'strict'; minConfidence: number; maxComments: number },
+  workspace: { defaultReviewMode: 'normal' | 'strict'; maxComments: number },
   repoReviewMode?: 'normal' | 'strict',
 ): ReviewConfig {
   const parsed = parseReviewConfigYaml(repoConfigYaml);
@@ -1830,7 +1941,6 @@ export function effectiveReviewConfig(
   return {
     ...parsed,
     mode: repoReviewMode ?? workspace.defaultReviewMode,
-    min_confidence: workspace.minConfidence,
     max_comments: workspace.maxComments,
   };
 }

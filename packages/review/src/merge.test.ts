@@ -23,7 +23,7 @@ const readerFor = (files: Record<string, string | null>): FileReader => ({
 test('a prior finding re-detected this run stays open', () => {
   const fa = finding('authz.ts', 'auth bypass');
   const prior = [toStoredFinding(fa, 'sha1')];
-  const res = mergeFindings([fa], prior, 'sha2', { minConfidence: 0.6 });
+  const res = mergeFindings([fa], prior, 'sha2', {});
   assert.equal(res.newlyFixed.length, 0);
   assert.equal(res.stillOpen.length, 1);
 });
@@ -33,7 +33,6 @@ test('a prior finding whose file WAS reviewed but is no longer detected is marke
   const prior = [toStoredFinding(fa, 'sha1')];
   // reviewedFiles includes authz.ts, incoming is empty → genuinely fixed
   const res = mergeFindings([], prior, 'sha2', {
-    minConfidence: 0.6,
     reviewedFiles: new Set(['authz.ts']),
   });
   assert.equal(res.newlyFixed.length, 1);
@@ -47,7 +46,6 @@ test('THE BUG FIX: a prior finding in an UN-reviewed file is carried forward, NO
   const auth = finding('authz.ts', 'auth bypass'); // prior P1, file not reviewed now
   const prior = [toStoredFinding(auth, 'sha1')];
   const res = mergeFindings([], prior, 'sha2', {
-    minConfidence: 0.6,
     reviewedFiles: new Set(['handler.ts']), // authz.ts NOT in the reviewed set
   });
   assert.equal(res.newlyFixed.length, 0, 'the un-reviewed P1 must NOT be marked fixed');
@@ -59,7 +57,6 @@ test('empty-diff push (reviewedFiles empty) carries ALL prior findings forward, 
   const a = toStoredFinding(finding('a.ts', 'bug a'), 'sha1');
   const b = toStoredFinding(finding('b.ts', 'bug b'), 'sha1');
   const res = mergeFindings([], [a, b], 'sha2', {
-    minConfidence: 0.6,
     reviewedFiles: new Set(), // a lockfile-only push reviewed nothing
   });
   assert.equal(res.newlyFixed.length, 0);
@@ -68,7 +65,7 @@ test('empty-diff push (reviewedFiles empty) carries ALL prior findings forward, 
 
 test('without reviewedFiles (legacy/full-review callers): a finding on a NEW sha not re-detected is fixed', () => {
   const a = toStoredFinding(finding('a.ts', 'bug a'), 'sha1'); // last seen at sha1
-  const res = mergeFindings([], [a], 'sha2', { minConfidence: 0.6 }); // reviewing sha2 (code advanced)
+  const res = mergeFindings([], [a], 'sha2', {}); // reviewing sha2 (code advanced)
   assert.equal(res.newlyFixed.length, 1);
 });
 
@@ -78,7 +75,6 @@ test('THE FLIP-FLOP FIX: re-reviewing the SAME sha never marks a finding fixed (
   // changed, so it must NOT be marked fixed — carry it forward.
   const a = toStoredFinding(finding('a.ts', 'bug a'), 'sha1'); // lastSeenSha = sha1
   const res = mergeFindings([], [a], 'sha1', {
-    minConfidence: 0.6,
     reviewedFiles: new Set(['a.ts']),
     priorReviewSha: 'sha1',
   });
@@ -90,7 +86,6 @@ test('a genuine new push (different sha) that touches the file still retires a f
   const a = toStoredFinding(finding('a.ts', 'bug a'), 'sha1'); // lastSeenSha = sha1
   // sha2 = new commit touched a.ts, finding no longer detected → genuinely fixed
   const res = mergeFindings([], [a], 'sha2', {
-    minConfidence: 0.6,
     reviewedFiles: new Set(['a.ts']),
     priorReviewSha: 'sha1',
   });
@@ -100,7 +95,6 @@ test('a genuine new push (different sha) that touches the file still retires a f
 test('a transient read-error fingerprint is protected from being marked fixed', () => {
   const a = toStoredFinding(finding('a.ts', 'bug a'), 'sha1');
   const res = mergeFindings([], [a], 'sha2', {
-    minConfidence: 0.6,
     reviewedFiles: new Set(['a.ts']),
     priorReviewSha: 'sha1',
     protectedFingerprints: new Set([a.fingerprint]),
@@ -109,11 +103,10 @@ test('a transient read-error fingerprint is protected from being marked fixed', 
   assert.equal(res.stillOpen.length, 1);
 });
 
-test('P3-8: a below-confidence re-detection still counts as "seen" and prevents false fixed', () => {
+test('a low-confidence re-detection still counts as seen and prevents false fixed', () => {
   const lowConfidence = { ...finding('a.ts', 'bug a'), confidence: 0.3 };
   const a = toStoredFinding(finding('a.ts', 'bug a'), 'sha1');
   const res = mergeFindings([lowConfidence], [a], 'sha2', {
-    minConfidence: 0.6,
     reviewedFiles: new Set(['a.ts']),
     priorReviewSha: 'sha1',
   });
@@ -122,19 +115,39 @@ test('P3-8: a below-confidence re-detection still counts as "seen" and prevents 
   assert.equal(res.reviewOnly.length, 0, 'an already-open finding is not duplicated in manual review');
 });
 
-test('a new below-confidence finding is retained on the manual-review surface', () => {
+test('a new low-confidence finding stays on the normal review surface', () => {
   const lowConfidence = { ...finding('a.ts', 'uncertain bug'), confidence: 0.3 };
-  const res = mergeFindings([lowConfidence], [], 'sha2', { minConfidence: 0.6 });
-  assert.equal(res.toPost.length, 0, 'below threshold stays out of confirmed findings');
-  assert.equal(res.reviewOnly.length, 1, 'below threshold must remain visible, not be deleted');
-  assert.equal(res.reviewOnly[0].finding.message, 'uncertain bug');
-  assert.match(res.reviewOnly[0].reason, /0\.30.*0\.60/);
+  const res = mergeFindings([lowConfidence], [], 'sha2', {});
+  assert.equal(res.toPost.length, 1, 'confidence is telemetry, not an output gate');
+  assert.equal(res.reviewOnly.length, 0);
+  assert.equal(res.toPost[0].message, 'uncertain bug');
+});
+
+test('an explicitly demoted candidate is retained on the manual-review surface', () => {
+  const candidate = finding('a.ts', 'single-run candidate');
+  const res = mergeFindings([], [], 'sha2', {
+    manualCandidates: [{ finding: candidate, reason: 'Seen in only one repeated review sample.' }],
+  });
+  assert.equal(res.toPost.length, 0);
+  assert.equal(res.reviewOnly.length, 1);
+  assert.equal(res.reviewOnly[0].finding.message, 'single-run candidate');
+});
+
+test('a manual duplicate cannot displace a normal finding with the same fingerprint', () => {
+  const normal = { ...finding('a.ts', 'same bug'), confidence: 0.2 };
+  const manual = { ...normal, confidence: 0.99 };
+  const res = mergeFindings([normal], [], 'sha2', {
+    manualCandidates: [{ finding: manual, reason: 'Seen in only one repeated review sample.' }],
+  });
+  assert.equal(res.toPost.length, 1);
+  assert.equal(res.toPost[0].confidence, 0.2, 'the normal surface owns the fingerprint');
+  assert.equal(res.reviewOnly.length, 0);
 });
 
 test('P2-9: incoming duplicates are deduped by fingerprint before posting', () => {
   const f = finding('a.ts', 'bug a');
   const dup = { ...f, line: 20 };
-  const res = mergeFindings([f, dup], [], 'sha2', { minConfidence: 0.6 });
+  const res = mergeFindings([f, dup], [], 'sha2', {});
   assert.equal(res.toPost.length, 1);
 });
 

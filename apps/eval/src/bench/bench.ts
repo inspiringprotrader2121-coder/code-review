@@ -197,8 +197,6 @@ async function reviewReversed(
     {
       ...llm,
       context: {
-        prTitle: 'Code change under review',
-        prBody: 'Review the changed code below for correctness, security, and concurrency bugs.',
         changedContents,
       },
     },

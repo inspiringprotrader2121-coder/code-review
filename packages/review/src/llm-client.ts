@@ -18,6 +18,8 @@ export interface LlmClientOptions {
   api?: 'chat' | 'responses' | 'anthropic';
   /** reasoning effort for /v1/responses models (e.g. 'low'|'medium'|'high'|'xhigh'). */
   reasoningEffort?: string;
+  /** Sampling temperature. Only set for explicitly repeated review samples. */
+  temperature?: number;
   /** internal: suppress provider-level failover (multi-key rotation tries sibling keys first) */
   disableFailover?: boolean;
   /**
@@ -367,6 +369,9 @@ async function anthropicChat(system: string, user: string, opts: LlmClientOption
     ...(think
       ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget } }
       : {}),
+    // Anthropic-compatible reasoning does not accept a temperature alongside
+    // extended thinking. Other providers receive the explicit low temperature.
+    ...(!think && opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
   });
   const startedAt = Date.now();
   let hitHardLimit = false;
@@ -442,6 +447,7 @@ async function openAiResponsesStreamChat(system: string, user: string, opts: Llm
         model: opts.model,
         instructions: system,
         input: user,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         ...(thinkingEnabled(opts) ? { reasoning: { effort } } : {}),
         max_output_tokens: maxOut,
         stream: true,
@@ -589,6 +595,7 @@ async function openAiCompatStreamChat(
       },
       body: JSON.stringify({
         model: opts.model,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         max_completion_tokens: maxOut,
         stream: true,
         ...(opts.json ? { response_format: { type: 'json_object' } } : {}),

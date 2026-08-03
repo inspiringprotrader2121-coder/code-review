@@ -15,13 +15,13 @@
 - **`@orvex deep`** — an on-demand deeper pass for critical PRs.
 - Your repo sets the rules (`.orvex-review.yml`), config-as-code.
 
-## Proof (REAL, from our competitive scoreboard — safe to feature)
-- On real PRs, benchmarked head-to-head against other review bots, Orvex led on catch rate:
-  **Orvex 43%** · Codex 29% · CodeRabbit 28% · Qodo 22% (defect-cluster catch rate across
-  80 real PRs). Frame as: "caught more real bugs than any single competitor," and
-  "caught bugs the others missed."
-- Honest nuance (do NOT overclaim precision): the story is COVERAGE — more models, more
-  passes, more real bugs surfaced. Lead with catch rate and unique catches.
+## Evidence positioning (safe to feature)
+- Describe the process, not an unverified performance claim: deterministic checks, focused
+  review passes, verification against source evidence, and optional runtime checks.
+- Confidence is telemetry, not a deletion gate. A verifier can move a disputed candidate to
+  visible manual review with its reason.
+- Do not claim comparative catch rates, unique-catch totals, benchmark percentages, or
+  precision/recall results until an immutable labeled evaluation has been run and published.
 
 ## Pricing (current, real)
 - Starter — $29/mo · 100 reviews · then $0.50/review · 2 AI models

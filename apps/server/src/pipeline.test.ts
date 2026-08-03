@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canRunAgentic, effectiveReviewConfig, modelForPass, type WorkerConfig } from './pipeline.js';
+import { canRunAgentic, effectiveReviewConfig, modelForPass, modelForPlanWithTier, type WorkerConfig } from './pipeline.js';
 import { isHedgedRejection, isTransientLlmError } from '@orvex-review/review';
 
 function modelRoutingConfig(): WorkerConfig {
@@ -22,18 +22,16 @@ function modelRoutingConfig(): WorkerConfig {
 }
 
 test('workspace review defaults apply unless config-as-code overrides them', () => {
-  const workspace = { defaultReviewMode: 'strict' as const, minConfidence: 0.6, maxComments: 8 };
+  const workspace = { defaultReviewMode: 'strict' as const, maxComments: 8 };
   const fromDashboard = effectiveReviewConfig(null, workspace);
   assert.equal(fromDashboard.mode, 'strict');
-  assert.equal(fromDashboard.min_confidence, 0.6);
   assert.equal(fromDashboard.max_comments, 8);
 
   const perRepoMode = effectiveReviewConfig(null, workspace, 'normal');
   assert.equal(perRepoMode.mode, 'normal');
 
-  const fromFile = effectiveReviewConfig('mode: normal\nmin_confidence: 0.75\nmax_comments: 12', workspace, 'strict');
+  const fromFile = effectiveReviewConfig('mode: normal\nmax_comments: 12', workspace, 'strict');
   assert.equal(fromFile.mode, 'normal');
-  assert.equal(fromFile.min_confidence, 0.75);
   assert.equal(fromFile.max_comments, 12);
 });
 
@@ -81,6 +79,25 @@ test('Verify routes its first pass to the direct OpenAI Luna target', () => {
   assert.equal(thirdPass.tier, 'standard');
   assert.equal(thirdPass.target.model, 'MiniMax-M3');
   assert.equal(thirdPass.target.api, 'anthropic');
+});
+
+test('verification usage is charged to the target that actually verifies', (t) => {
+  const previous = process.env.ORVEX_VERIFY_ON_STANDARD;
+  delete process.env.ORVEX_VERIFY_ON_STANDARD;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ORVEX_VERIFY_ON_STANDARD;
+    else process.env.ORVEX_VERIFY_ON_STANDARD = previous;
+  });
+
+  const config = modelRoutingConfig();
+  const premium = modelForPlanWithTier(config, { modelTier: 'multi-model' });
+  assert.equal(premium.tier, 'openai');
+  assert.equal(premium.target.model, 'gpt-5.6-luna');
+
+  process.env.ORVEX_VERIFY_ON_STANDARD = '1';
+  const standard = modelForPlanWithTier(config, { modelTier: 'multi-model' });
+  assert.equal(standard.tier, 'standard');
+  assert.equal(standard.target.model, 'MiniMax-M3');
 });
 
 test('canRunAgentic: all three conditions are load-bearing', (t) => {

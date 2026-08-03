@@ -125,7 +125,7 @@ export async function processScanJob(
     apiKey: config.llmApiKey,
     baseUrl: config.llmBaseUrl,
     model: config.llmModel,
-    context: { ...(context ?? {}), prTitle: `Nightly scan of ${branch}`, prBody: `Automated scan of the last ${LOOKBACK_DAYS} day(s) of commits.` },
+    context,
   });
 
   let findings = dropSelfNegatingFindings(llmFindingsToReviewFindings(llm.findings)).kept;

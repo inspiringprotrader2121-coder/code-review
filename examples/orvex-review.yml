@@ -10,8 +10,6 @@ ignore:
 
 max_comments: 8
 max_tokens: 50000
-min_confidence: 0.6
-inline_min_confidence: 0.7
 
 run_semgrep: true
 

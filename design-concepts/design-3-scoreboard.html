@@ -688,65 +688,65 @@
   <section class="hero" id="scoreboard">
     <div class="wrap hero-grid">
       <div class="hero-copy">
-        <span class="hero-tag"><span class="dot" aria-hidden="true"></span> Head-to-head · 80 real PRs</span>
+        <span class="hero-tag"><span class="dot" aria-hidden="true"></span> Evidence-backed review</span>
         <h1 class="hero-h">Catch bugs<br>before <span class="hl">production.</span></h1>
-        <p class="hero-lead">Orvex reviews every pull request with a multi-model AI ensemble — and caught more real bugs than any single competitor.</p>
+        <p class="hero-lead">Orvex reviews every pull request with deterministic checks, focused AI passes, and verification before it posts a finding.</p>
         <div class="hero-cta">
           <a class="btn btn-win btn-lg" href="#pricing">Start free — 10 reviews, no card</a>
           <a class="btn btn-ghost btn-lg" href="#benchmark">See the benchmark</a>
         </div>
-        <div class="hero-proof"><span class="chk">✓</span> Verified head-to-head on 80 real PRs — defect-cluster catch rate.</div>
+        <div class="hero-proof"><span class="chk">✓</span> Findings are grounded in the diff, code context, and verification evidence.</div>
       </div>
 
-      <!-- leaderboard -->
-      <div class="board" id="board" role="img" aria-label="Catch-rate leaderboard: Orvex 43%, Codex 29%, CodeRabbit 28%, Qodo 22%.">
+      <!-- review stages -->
+      <div class="board" id="board" role="img" aria-label="Review stages: deterministic rules, focused context, verification, and optional runtime checks.">
         <div class="board-head">
-          <span class="board-title">Defect-cluster catch rate</span>
-          <span class="board-meta num">n = 80 PRs</span>
+          <span class="board-title">Review evidence by stage</span>
+          <span class="board-meta num">one merged review</span>
         </div>
 
-        <div class="row win" data-target="43">
+        <div class="row win">
           <span class="rank" aria-hidden="true">1</span>
-          <span class="name"><b>Orvex</b> <span class="crown">Winner</span></span>
+          <span class="name"><b>Rules</b> <span class="crown">first</span></span>
           <div class="bar-line">
-            <span class="track"><span class="fill" data-w="86"></span></span>
-            <span class="pct num" data-count>0%</span>
+            <span class="track"><span class="fill" data-w="100"></span></span>
+            <span class="pct num">check</span>
           </div>
         </div>
 
-        <div class="row" data-target="29">
+        <div class="row">
           <span class="rank num" aria-hidden="true">2</span>
-          <span class="name"><b>Codex</b></span>
+          <span class="name"><b>Context</b></span>
           <div class="bar-line">
-            <span class="track"><span class="fill" data-w="58"></span></span>
-            <span class="pct num" data-count>0%</span>
+            <span class="track"><span class="fill" data-w="80"></span></span>
+            <span class="pct num">review</span>
           </div>
         </div>
 
-        <div class="row" data-target="28">
+        <div class="row">
           <span class="rank num" aria-hidden="true">3</span>
-          <span class="name"><b>CodeRabbit</b></span>
+          <span class="name"><b>Verifier</b></span>
           <div class="bar-line">
-            <span class="track"><span class="fill" data-w="56"></span></span>
-            <span class="pct num" data-count>0%</span>
+            <span class="track"><span class="fill" data-w="60"></span></span>
+            <span class="pct num">evidence</span>
           </div>
         </div>
 
-        <div class="row" data-target="22">
+        <div class="row">
           <span class="rank num" aria-hidden="true">4</span>
-          <span class="name"><b>Qodo</b></span>
+          <span class="name"><b>Runtime</b></span>
           <div class="bar-line">
-            <span class="track"><span class="fill" data-w="44"></span></span>
-            <span class="pct num" data-count>0%</span>
+            <span class="track"><span class="fill" data-w="40"></span></span>
+            <span class="pct num">optional</span>
           </div>
         </div>
 
         <div class="board-foot">
           <span class="legend">
-            <span><i class="swatch" style="background:var(--win-bright)"></i> Orvex</span>
-            <span><i class="swatch" style="background:var(--ink-3)"></i> Competitors</span>
+            <span><i class="swatch" style="background:var(--win-bright)"></i> required</span>
+            <span><i class="swatch" style="background:var(--ink-3)"></i> additional evidence</span>
           </span>
-          <span>% of defect clusters caught</span>
+          <span>stages combined into one review</span>
         </div>
       </div>
     </div>
@@ -803,30 +803,30 @@
   <section class="bench" id="benchmark">
     <div class="wrap">
       <div class="sec-head">
-        <span class="eyebrow">The receipts</span>
-        <h2 class="section-h">What “catch rate” actually means.</h2>
-        <p class="section-sub">We ran Orvex head-to-head against other review bots on 80 real pull requests. The story is coverage: more models, more passes, more real bugs surfaced.</p>
+        <span class="eyebrow">The review path</span>
+        <h2 class="section-h">What evidence a finding carries.</h2>
+        <p class="section-sub">Orvex combines deterministic checks, focused code context, and verification so each finding has a concrete basis for review.</p>
       </div>
 
       <div class="bench-grid">
         <div class="bench-defs">
           <div class="def">
-            <h4><span class="n num">01</span> Defect-cluster catch rate</h4>
-            <p>Every PR has a known set of real defects. Catch rate is the share of those defect clusters a reviewer flagged. Orvex hit <b>43%</b> — ahead of Codex (29%), CodeRabbit (28%) and Qodo (22%).</p>
+            <h4><span class="n num">01</span> Diff and context</h4>
+            <p>Each review starts with the changed lines and the code needed to understand their control flow, callers, and error paths.</p>
           </div>
           <div class="def">
-            <h4><span class="n num">02</span> Head-to-head, same PRs</h4>
-            <p>Same 80 pull requests, same defects, every bot judged against the same ground truth. No cherry-picking — a straight, comparable run.</p>
+            <h4><span class="n num">02</span> Independent verification</h4>
+            <p>A separate verifier checks findings against source evidence and sends refuted candidates to a visible manual-review surface instead of deleting them.</p>
           </div>
           <div class="def">
-            <h4><span class="n num">03</span> Coverage, honestly framed</h4>
-            <p>This is a coverage win, not a precision claim. More models and more passes surface more real bugs — including ones the others missed entirely.</p>
+            <h4><span class="n num">03</span> Clear review surfaces</h4>
+            <p>Actionable anchored findings can be posted inline, while unanchored or manually reviewed candidates remain visible in the summary.</p>
           </div>
         </div>
 
         <div class="unique">
-          <div class="cap">Unique catches — bugs only Orvex flagged</div>
-          <div class="unique-num num">+14<small>pts of catch rate clear of the nearest competitor</small></div>
+          <div class="cap">What the review combines</div>
+          <div class="unique-num num">+<small>independent sources of evidence</small></div>
           <ul class="catch-list">
             <li><span class="miss">Others missed</span> A race condition that only appeared once the changed code path actually ran in the sandbox.</li>
             <li><span class="miss">Others missed</span> An off-by-one that a diff-only read looked past — caught by a second model on the ensemble pass.</li>
@@ -940,7 +940,7 @@
 
         <!-- Verify (featured) -->
         <div class="card feat">
-          <span class="ribbon">Best catch rate</span>
+          <span class="ribbon">Full review path</span>
           <div class="plan">Verify</div>
           <div class="track-tag">The full moat</div>
           <div class="price num">$99<span class="per">/mo</span></div>

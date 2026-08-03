@@ -62,25 +62,15 @@ test('max_comments caps actionable inline only — folded notes are never capped
   assert.equal(nitpicks.length, 5, 'all folded notes kept, not subject to the inline cap');
 });
 
-test('inline_min_confidence: below-floor findings go to the summary, not inline', () => {
+test('confidence never suppresses or demotes an anchored actionable finding', () => {
   const { inline, summaryOnly } = filterAndCapFindings(
     [
       f({ severity: 'P2', line: 1, confidence: 0.9 }),
-      f({ severity: 'P2', line: 2, confidence: 0.55 }), // cleared min_confidence, below the inline floor
+      f({ severity: 'P2', line: 2, confidence: 0.01 }),
     ],
-    { max_comments: 25, inline_min_confidence: 0.7 } as never,
-  );
-  assert.equal(inline.length, 1);
-  assert.equal(inline[0].confidence, 0.9);
-  assert.equal(summaryOnly.length, 1, 'below-floor finding is summarized, not dropped');
-  assert.equal(summaryOnly[0].confidence, 0.55);
-});
-
-test('inline_min_confidence defaults to 0.5 when unset', () => {
-  const { inline, summaryOnly } = filterAndCapFindings(
-    [f({ severity: 'P2', line: 1, confidence: 0.6 }), f({ severity: 'P2', line: 2, confidence: 0.4 })],
     cfg,
   );
-  assert.equal(inline.length, 1);
-  assert.equal(summaryOnly.length, 1);
+  assert.equal(inline.length, 2);
+  assert.equal(inline[1].confidence, 0.01);
+  assert.equal(summaryOnly.length, 0);
 });
