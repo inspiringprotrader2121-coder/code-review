@@ -33,6 +33,13 @@ export interface VerifierOptions {
   /** PR title + description, so the verifier can reject intentional-change findings */
   prIntent?: string;
   /**
+   * How many leading `findings` cleared `min_confidence`. The batch is
+   * `[...toPost, ...reviewOnly]`, so anything beyond this index is a candidate
+   * the pipeline already declined to trust and must not be able to escalate a
+   * posted finding's severity via `duplicateOf`. Omit for an all-confirmed batch.
+   */
+  confirmedCount?: number;
+  /**
    * PRECISION mode (premium deepVerify pass). Because this is now the only
    * verification gate, it must still be recall-safe: reject ONLY with concrete
    * evidence of a false positive. "Cannot re-derive" is not grounds for rejection.
@@ -362,6 +369,13 @@ export async function verifyFindings(
     '',
     'Respond with JSON only: { "verdicts": [{ "id": <number>, "verdict": "confirmed"|"rejected", "reason": "<short>", "severity"?: "P1"|"P2"|"P3"|"info", "duplicateOf"?: <number> }] }',
     'Include a verdict for every id.',
+    // A rejection without evidence is treated as a HEDGE and the finding is
+    // rescued, so a reasonless "rejected" cannot quietly kill a strong
+    // reasoner's finding. Ask for the evidence explicitly. `verifyFixes`
+    // already carried this instruction; this prompt did not.
+    'Every "rejected" MUST cite concrete evidence — the line number, file, or quoted code that',
+    'disproves the claim (never a bare "rejected by verification"). If you cannot point at the',
+    'code that makes it wrong, say so plainly; an unevidenced rejection will not be honoured.',
   ].join('\n');
 
   let parsed: z.infer<typeof VerdictSchema>;
@@ -384,7 +398,7 @@ export async function verifyFindings(
     return { kept: findings, dropped: [], duplicates: [] }; // fail open
   }
 
-  return applyVerdicts(findings, parsed);
+  return applyVerdicts(findings, parsed, opts.confirmedCount ?? findings.length);
 }
 
 const SEV_RANK: Record<string, number> = { info: 0, P3: 1, P2: 2, P1: 3 };
@@ -403,7 +417,24 @@ const SEV_RANK: Record<string, number> = { info: 0, P3: 1, P2: 2, P1: 3 };
  *   a duplicate is NOT a veto — the root cause still posts — so duplicates are
  *   deliberately NOT eligible for the strong-tier rescue in the pipeline.
  */
-export function applyVerdicts(findings: ReviewFinding[], parsed: Verdicts): VerifiedFindings {
+export function applyVerdicts(
+  findings: ReviewFinding[],
+  parsed: Verdicts,
+  /**
+   * Number of leading `findings` that were CONFIRMED candidates (i.e. cleared
+   * `min_confidence`). Anything at or beyond this index is a manual-review
+   * candidate the pipeline had already ruled below the confirmation floor.
+   *
+   * The verification batch is `[...toPost, ...reviewOnly]`, so every manual
+   * candidate has a HIGHER index than every confirmed one — which is exactly
+   * the shape `duplicateOf` requires. Without this boundary a candidate that
+   * failed the floor could max-fold its severity into a posted finding and
+   * promote a P3 to P1 on the say-so of something we had already declined to
+   * trust. Defaults to `findings.length` (all confirmed) so existing callers
+   * and tests keep their previous behaviour.
+   */
+  confirmedCount: number = findings.length,
+): VerifiedFindings {
   const byId = new Map(parsed.verdicts.map((v) => [v.id, v]));
   const kept: ReviewFinding[] = [];
   const keptIndex = new Map<number, number>(); // finding idx -> position in kept
@@ -426,7 +457,10 @@ export function applyVerdicts(findings: ReviewFinding[], parsed: Verdicts): Veri
       const targetPos = keptIndex.get(dupOf)!;
       const target = kept[targetPos];
       if (target.file === confirmed.file) {
-        if ((SEV_RANK[confirmed.severity] ?? 0) > (SEV_RANK[target.severity] ?? 0)) {
+        // An unconfirmed candidate may be merged away as a duplicate, but it
+        // must never RAISE the severity of a finding that did clear the floor.
+        const mayEscalate = i < confirmedCount;
+        if (mayEscalate && (SEV_RANK[confirmed.severity] ?? 0) > (SEV_RANK[target.severity] ?? 0)) {
           kept[targetPos] = { ...target, severity: confirmed.severity };
         }
         duplicates.push({ finding: confirmed, of: kept[targetPos] });
@@ -561,9 +595,47 @@ export async function verifyFixes(
  * get rescued. A concrete refutation (states what the code actually does, and
  * why the claim is wrong) stands even against a protected tier.
  */
+/**
+ * Uncertainty vocabulary. If the verifier used any of these it is HEDGING,
+ * whatever else the sentence contains.
+ */
+const STRONG_HEDGE =
+  /\b(?:cannot|can'?t|could not|couldn'?t|unable to|not able to)\s+(?:independently\s+)?(?:verify|confirm|re-derive|reproduce|determine|tell|establish|find|check)|\b(?:unclear|uncertain|unverifiable|inconclusive|ambiguous)\b|\binsufficient\b|\bnot enough\b|\black(?:s|ing)?\s+(?:of\s+)?(?:context|evidence|information|detail)|\b(?:may|might|could)\s+(?:be|not be)\b|\bpossibly\b|\bprobably\b|\bperhaps\b|\bnot sure\b|\blikely\s+(?:intentional|fine|safe)\b|\bseems?\s+(?:fine|correct|okay|ok|safe|intentional)\b|\bappears?\s+(?:fine|correct|safe|intentional)\b|\bwithout\s+(?:the\s+)?(?:caller|context|more)\b|\b(?:validated|handled|checked|guarded|mitigated|covered|addressed)\s+elsewhere\b|\bcould not find evidence\b|\bpresumably\b/i;
+
+/**
+ * Rejections carrying no information at all. `'rejected by verification'` is
+ * the DEFAULT applyVerdicts substitutes when the model omits `reason`, so it
+ * must never be honoured as a refutation.
+ */
+const EMPTY_REJECTION = /^(?:rejected(?: by verification)?|no|n\/a|none|invalid|false)\.?$/i;
+
+/**
+ * A rejection is HEDGED (and so a protected tier's finding is rescued) unless
+ * the verifier actually refuted it with evidence.
+ *
+ * The previous implementation was a flat substring list, and it failed in BOTH
+ * directions on realistic input:
+ *
+ *  - `assum` matched as a bare substring, and the strict verifier prompt itself
+ *    instructs the model to write "it assumes a library/framework/API behaves…".
+ *    So the system's own prompt manufactured the string that defeated its
+ *    classifier: a fully concrete, manifest-backed refutation was read as
+ *    hedged, rescued, and posted as a false positive.
+ *  - `'rejected by verification'` — the DEFAULT when the model omits `reason`
+ *    (applyVerdicts) — matched nothing and was therefore treated as FACTUAL, so
+ *    the least informative possible rejection carried the most authority and
+ *    permanently killed a strong-reasoner finding. `verifyFixes` already
+ *    forbids that string in its prompt; `verifyFindings` never did.
+ *
+ * The fix is to classify on the VERIFIER'S OWN CONFIDENCE only. `assum`,
+ * `presum` and `no evidence` describe the FINDING being judged, not the
+ * verifier's certainty, so they are gone. A refutation that explains a
+ * mechanism in plain prose ("the function returns early when user is null")
+ * counts as factual even without a line citation — demanding a citation format
+ * would rescue well-reasoned refutations and reintroduce false positives.
+ */
 export function isHedgedRejection(reason: string): boolean {
-  const r = reason.toLowerCase();
-  return /cannot (?:independently )?(?:verify|confirm|re-derive|reproduce|determine)|can'?t (?:verify|confirm)|insufficient|not enough (?:context|evidence|information)|lack(?:s|ing)? (?:of )?(?:context|evidence|information)|no evidence|unclear|uncertain|unable to|unverifiable|not enough information|could not (?:verify|confirm|find)|(?:validated|handled|checked|guarded|mitigated) elsewhere|assum|presum|likely (?:intentional|fine|safe)|probably|seems? (?:fine|correct|okay|ok|safe|intentional)|appears? (?:fine|correct|safe|intentional)/i.test(
-    r,
-  );
+  const r = reason.trim();
+  if (r === '' || EMPTY_REJECTION.test(r)) return true;
+  return STRONG_HEDGE.test(r);
 }

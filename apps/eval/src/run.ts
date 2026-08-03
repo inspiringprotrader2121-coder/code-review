@@ -16,6 +16,7 @@ import {
   llmFindingsToReviewFindings,
   REVIEW_INCOMPLETE_SUMMARY,
   runLlmReview,
+  REMOVED_BEHAVIOR_FOCUS,
   THIRD_ANGLE_FOCUS,
   verifyFindings,
   type ReviewFinding,
@@ -71,10 +72,24 @@ interface PassTarget {
   reasoningEffort?: string;
 }
 
-/** Mirror production's multi-model tier: pass 1 the frontier OpenAI model,
- *  pass 2 DeepSeek's heavy reasoning with the deep-dive lens, pass 3 the
+/** Cases that ran against live head instead of a pinned commit, collected
+ *  across the run so the summary can name them. Module scope because the case
+ *  runner and the summary printer are separate functions. */
+const unpinnedCases: string[] = [];
+
+/** Mirror production's multi-model tier (modelForPass + PASS_ANGLES), pass for
+ *  pass: 1 the frontier OpenAI model, 2 DeepSeek v4 FLASH with the deep-dive
+ *  lens, 3 DeepSeek v4 PRO with the removed-behavior/caller lens, 4 the
  *  standard model with the perf/completeness lens. A missing key falls back to
- *  the standard target for that pass, exactly like modelForPass does. */
+ *  the standard target for that pass, exactly like modelForPass does.
+ *
+ *  This drifted twice and both times silently invalidated the benchmark: the
+ *  eval ran three passes while the multi-model tier ran four (so bench170 was
+ *  scored WITHOUT the removed-behavior lens that was built to catch it), and
+ *  deep-dive was pointed at v4 Pro after production moved it to v4 Flash. If
+ *  you change modelForPass or PASS_ANGLES, change this in the same commit —
+ *  otherwise every number this harness prints describes a pipeline that does
+ *  not exist. */
 function passTargets(): Array<{
   tag: string;
   target: PassTarget;
@@ -102,12 +117,27 @@ function passTargets(): Array<{
         reasoningEffort: process.env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
       }
     : null;
+  // v4 Flash shares the DeepSeek key/base URL — only the model id differs, which
+  // is why production runs both as independent reasoners on different lenses.
+  const deepseekFlash: PassTarget | null = deepseekKey
+    ? {
+        apiKey: deepseekKey,
+        baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: process.env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
+        reasoningEffort: process.env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+      }
+    : null;
   // tier mirrors modelForPass so the verifier's strong-reasoner rescue behaves
   // identically; it degrades with the target when a key is missing.
   return [
     { tag: 'general', target: openai ?? standard, tier: openai ? 'openai' : 'standard' },
-    { tag: 'deep-dive', target: deepseek ?? standard, focus: DEEP_DIVE_FOCUS, tier: deepseek ? 'deepseek' : 'standard' },
-    // mirrors PASS_ANGLES[2].bestEffort in the pipeline — the only optional pass
+    // pass 2 → FLASH, matching modelForPass: it currently outperforms v4 Pro, so
+    // it gets the highest-value lens.
+    { tag: 'deep-dive', target: deepseekFlash ?? standard, focus: DEEP_DIVE_FOCUS, tier: deepseekFlash ? 'deepseek-flash' : 'standard' },
+    // pass 3 → PRO on the removed-behavior/caller lens. A second INDEPENDENT
+    // reasoner, not a re-run; this is the lens the 161-180 misses motivated.
+    { tag: 'removed-behavior/callers', target: deepseek ?? standard, focus: REMOVED_BEHAVIOR_FOCUS, tier: deepseek ? 'deepseek' : 'standard' },
+    // mirrors the pipeline's BREADTH_ANGLE bestEffort — the only optional pass
     { tag: 'perf/completeness/api', target: standard, focus: THIRD_ANGLE_FOCUS, tier: 'standard', bestEffort: true },
   ];
 }
@@ -134,6 +164,19 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   const sha = c.sha ?? pr.head.sha;
   if (c.sha && !pr.head.sha.startsWith(c.sha)) {
     console.log(`    ↩ pinned to ${c.sha} (head has moved to ${pr.head.sha.slice(0, 7)})`);
+  } else if (!c.sha) {
+    // UNPINNED: the comment above describes exactly the failure this hits, but
+    // only pinned cases were ever warned about. An unpinned case silently
+    // reviews whatever head is TODAY; once the PR is merged or force-pushed,
+    // its ground truth describes code that is no longer there, and the case
+    // scores as a miss forever with no indication the result is meaningless.
+    // Say so on every run — a benchmark that quietly measures nothing is worse
+    // than one that fails loudly.
+    console.log(
+      `    ⚠ UNPINNED (reviewing head ${pr.head.sha.slice(0, 7)}, state=${pr.state}) — ` +
+        `result is NOT reproducible; pin \`sha\` to the commit the ground truth was verified against`,
+    );
+    unpinnedCases.push(`${c.repo}#${c.pr}`);
   }
 
   // Match production (loadWorkerConfig defaults): 150 files / 300kB. At 40/120kB
@@ -359,6 +402,16 @@ async function main() {
   if (invalidCases > 0) {
     console.log(`⚠️ INVALID: ${invalidCases} case(s) not measured (harness/provider failure) — fix before trusting this run`);
     process.exitCode = 1;
+  }
+  if (unpinnedCases.length > 0) {
+    // Deliberately NOT exitCode 1 — these cases still ran and their result may
+    // be fine if the PR happens not to have moved. But the recall number above
+    // is only as trustworthy as its least-pinned case, so name them every time
+    // rather than letting a stale-code miss look like a reviewer miss.
+    console.log(
+      `⚠️ ${unpinnedCases.length} UNPINNED case(s) reviewed live head — not reproducible: ${unpinnedCases.join(', ')}`,
+    );
+    console.log('   Recall above is unreliable for these; pin `sha` in cases.ts to make them measurable.');
   }
   if (results.length === 0) {
     console.error('\nEVAL FAILED: zero cases were actually measured.');

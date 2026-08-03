@@ -10,7 +10,7 @@
  */
 import { createBenchmarkOctokit } from './github-auth.js';
 import { parseOrvexFindingTables } from './orvex-table.js';
-import { severityOf, sevRank as rank, isBugSev as isBug, isNitSev as isNit, sameClusterLine } from './severity.js';
+import { severityOf, sevRank as rank, isBugSev as isBug, isNitSev as isNit, sameClusterLine , isOrvexStatusComment } from './severity.js';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
 const REPO = process.env.BENCH_REPO ?? 'Velatrix-Cloud';
@@ -22,7 +22,7 @@ const LOGIN_MAP: Record<string, string> = {
   'qodo-code-review[bot]': 'qodo', 'coderabbitai[bot]': 'coderabbit', 'gitar-bot[bot]': 'gitar', 'greptile-apps[bot]': 'greptile',
 };
 const botOf = (l: string) => LOGIN_MAP[l] ?? (/gitar/i.test(l) ? 'gitar' : /greptile/i.test(l) ? 'greptile' : /qodo/i.test(l) ? 'qodo' : /coderabbit/i.test(l) ? 'coderabbit' : null);
-const isOrvexStatus = (b: string) => /^(🔄|✅|⏳)|\*\*Applying|\*\*Fix applied|^## Orvex Review|already reviewed|safety limit/i.test(b.trim());
+const isOrvexStatus = (b: string) => isOrvexStatusComment(b);
 
 /** Anchored severity parse (label region, not free text) — shared module. */
 const sevOf = severityOf;

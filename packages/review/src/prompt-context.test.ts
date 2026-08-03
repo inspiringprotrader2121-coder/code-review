@@ -25,7 +25,11 @@ test('large changed files are focused on diff hunks while the diff stays first',
     { changedContents: [{ path: 'src/large.ts', content }] },
   );
   assert.ok(prompt.indexOf('```diff') < prompt.indexOf('Focused source context'));
-  assert.match(prompt, /src\/large\.ts \(lines \d+-\d+ around changed hunk\)/);
+  // The label now states the file's TOTAL line count too ("lines 820-980 of
+  // 1200"), so the model can tell a window from a whole file. Without it, a
+  // clipped chunk was rendered as "(full file)" and the model reported code it
+  // simply had not been shown as missing.
+  assert.match(prompt, /src\/large\.ts \(lines \d+-\d+ of \d+ — around changed hunk\)/);
   assert.match(prompt, /line 0900:/);
   assert.doesNotMatch(prompt, /line 0001:/);
 });

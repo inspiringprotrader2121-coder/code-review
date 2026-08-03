@@ -26,6 +26,36 @@ const WORD_TO_SEV: Record<string, Sev> = {
   info: 'info',
 };
 
+/**
+ * Markdown/HTML emphasis and badge markup, removed BEFORE the head window is
+ * taken. Two separate measurement bugs made this necessary:
+ *
+ *  1. `\b` does not fire between `_` and a letter, because `_` is a word
+ *     character. CodeRabbit's real inline header is `_🛠️ Refactor suggestion_ |
+ *     _🟠 Major_`, so `/\bmajor\b/` could NEVER match it; the line fell through
+ *     to the unanchored `suggestion` token and a competitor's MAJOR was scored
+ *     as a P3 nitpick — removing it from the "Orvex missed" ledger entirely.
+ *  2. The head window was sliced from the RAW body, so any tool that leads with
+ *     an <img> badge or <table> header (greptile, qodo) spent all 120 chars on
+ *     markup and returned null. The repo had already recorded the symptom
+ *     without anyone reading it: `coderabbit: unrated 15/17`, `qodo: 10/26`.
+ *
+ * Both biases under-read COMPETITORS only — Orvex emits clean `**P1**` labels
+ * that parse fine — so they inflated our lead in the same direction as the
+ * finding-source asymmetry. Strip first, then match.
+ */
+function stripMarkup(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, ' ') // html tags & badges
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ') // image/badge markdown
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // links -> their text
+    .replace(/[_*`~]+/g, ' ') // emphasis delimiters -> space, so \b works
+    .replace(/\s+/g, ' ');
+}
+
+/** Word match that treats `_`/`*` as delimiters rather than word characters. */
+const word = (w: string) => new RegExp(`(?<![A-Za-z0-9])(?:${w})(?![A-Za-z0-9])`, 'i');
+
 export function severityOf(body: string): Sev | null {
   // 1) Explicit machine labels. P0 folds into P1 (our taxonomy tops out at P1).
   if (/\bP0\b|alt="?P0/i.test(body)) return 'P1';
@@ -40,14 +70,14 @@ export function severityOf(body: string): Sev | null {
   // 3) Label region only: the head of the comment, where badges/headers live.
   // Negated mentions ("not critical", "no major issue") are stripped first —
   // they are prose, not a label.
-  const head = body
+  const head = stripMarkup(body)
     .trim()
     .slice(0, 120)
-    .replace(/\b(?:not|n't|no|non-?)\s+(critical|high|major|medium|minor|low|info)\b/gi, '');
-  if (/critical|🛑/i.test(head)) return 'P1';
-  if (/\bhigh\b|\bmajor\b|action required|potential issue|🐞|⚠️/i.test(head)) return 'P2';
-  if (/\bmedium\b|\bminor\b|nitpick|optional|edge case|💡|suggestion/i.test(head)) return 'P3';
-  if (/\b(low|info)\b|note:/i.test(head)) return 'info';
+    .replace(/(?<![A-Za-z0-9])(?:not|n't|no|non-?)\s+(critical|high|major|medium|minor|low|info)(?![A-Za-z0-9])/gi, '');
+  if (word('critical').test(head) || /🛑/.test(head)) return 'P1';
+  if (word('high|major').test(head) || /action required|potential issue|🐞|⚠️/i.test(head)) return 'P2';
+  if (word('medium|minor|nitpick|optional|suggestion').test(head) || /edge case|💡/i.test(head)) return 'P3';
+  if (word('low|info').test(head) || /note:/i.test(head)) return 'info';
   return null;
 }
 
@@ -75,3 +105,22 @@ export function sameClusterLine(
   if (aLine === null || bLine === null) return aLine === null && bLine === null && sameBot;
   return Math.abs(aLine - bLine) <= window;
 }
+
+/**
+ * True when an Orvex comment is bookkeeping (progress/status/apply chatter)
+ * rather than a finding.
+ *
+ * Every alternative is anchored to the START of the body. The previous form
+ * anchored only the emoji and `## Orvex Review` alternatives, leaving
+ * `**Applying`, `**Fix applied`, `already reviewed` and `safety limit` free to
+ * match ANYWHERE — which dropped real findings two ways:
+ *
+ *  - `format.ts` writes the apply line INTO the existing inline finding comment,
+ *    so every finding a user auto-fixed was classified as status and discarded.
+ *    It survived only because the summary table is parsed too — meaning the
+ *    inline/table asymmetry had quietly become load-bearing for correctness.
+ *  - Any finding whose prose happened to say "the safety limit check is
+ *    bypassed" or "already reviewed by middleware" was silently dropped.
+ */
+export const isOrvexStatusComment = (body: string): boolean =>
+  /^\s*(?:[🔄✅⏳]|\*\*Applying|\*\*Fix applied|## Orvex Review|already reviewed|safety limit)/i.test(body.trim());

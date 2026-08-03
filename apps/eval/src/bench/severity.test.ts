@@ -45,3 +45,30 @@ test('sameClusterLine: ±5 window; null==null only merges within the same bot', 
   assert.equal(sameClusterLine(null, null, false), false, 'cross-tool unanchored must NOT merge');
   assert.equal(sameClusterLine(null, 12, true), false, 'mixed anchored/unanchored never merge');
 });
+
+test('markdown emphasis does not hide a severity label (underscore is a word char)', () => {
+  // CodeRabbit's real inline header. `/\bmajor\b/` cannot match `Major_`, so
+  // this scored P3 via the unanchored `suggestion` token and the finding
+  // silently left the "Orvex missed" ledger.
+  assert.equal(severityOf('_🛠️ Refactor suggestion_ | _🟠 Major_'), 'P2');
+  assert.equal(severityOf('_🟠 Major_'), 'P2');
+  assert.equal(severityOf('_High_'), 'P2');
+  assert.equal(severityOf('_Medium_'), 'P3');
+  assert.equal(severityOf('_Low_'), 'info');
+  assert.equal(severityOf('**Major**'), 'P2');
+});
+
+test('badge/table markup does not burn the 120-char head window', () => {
+  // greptile/qodo lead with an <img> or <table>; the head slice used to be
+  // taken on the RAW body, so the severity word fell outside it and the
+  // finding was recorded as `unrated` and dropped from the actionable split.
+  assert.equal(
+    severityOf('<img src="https://img.shields.io/badge/critical-red.svg" alt="badge"><br/><b>Critical:</b> unbounded loop'),
+    'P1',
+  );
+  assert.equal(severityOf('<table><tr><td>badge</td></tr></table>\n\nHigh severity: fix it.'), 'P2');
+});
+
+test('negated severity words are still stripped after markup removal', () => {
+  assert.equal(severityOf('This is not critical at all, just a note:'), 'info');
+});

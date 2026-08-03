@@ -184,14 +184,38 @@ export interface ReviewPromptContext {
 // are then represented by focused chunks around changed hunks, so the reviewer
 // receives the local control flow it needs without a huge unrelated-file dump
 // crowding out the actual patch. All limits remain env-tunable.
-const MAX_TREE_PATHS = Number(process.env.ORVEX_MAX_TREE_PATHS ?? 3000);
-const MAX_CHANGED_CHARS = Number(process.env.ORVEX_MAX_CHANGED_CHARS ?? 180_000);
-const MAX_RELATED_CHARS = Number(process.env.ORVEX_MAX_RELATED_CHARS ?? 60_000);
-const MAX_OTHER_CHARS = Number(process.env.ORVEX_MAX_OTHER_CHARS ?? 40_000);
-const FULL_CHANGED_FILE_CHARS = Number(process.env.ORVEX_FULL_CHANGED_FILE_CHARS ?? 32_000);
-const CHANGED_CONTEXT_LINES = Number(process.env.ORVEX_CHANGED_CONTEXT_LINES ?? 80);
-const MAX_CHANGED_CHUNKS_PER_FILE = Number(process.env.ORVEX_MAX_CHANGED_CHUNKS_PER_FILE ?? 6);
-const MAX_CHANGED_CHUNK_CHARS = Number(process.env.ORVEX_MAX_CHANGED_CHUNK_CHARS ?? 24_000);
+/**
+ * `Number(process.env.X ?? default)` is unsafe in three ways that all fail
+ * SILENTLY, and every limit below used it:
+ *   - `??` does not catch the EMPTY STRING, so `X=""` yields 0. With
+ *     MAX_CHANGED_CHUNK_CHARS=0 every chunk collapsed to its elision markers;
+ *     with CHANGED_CONTEXT_LINES=0 chunks became a single line.
+ *   - Junk yields NaN. `used + len > NaN` is ALWAYS false, so
+ *     `ORVEX_MAX_CHANGED_CHARS=180k` disabled the budget outright and grew the
+ *     prompt 159k → 627k chars — a 4x cost blowup in the change written to cut
+ *     cost, with nothing logged.
+ *   - Negatives invert ranges and produce empty, mislabelled chunks.
+ * Clamp to a sane floor, and say so rather than degrading quietly.
+ */
+function numEnv(name: string, fallback: number, min = 1): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    console.warn(`[prompt] ${name}="${raw}" is not a finite number >= ${min}; using ${fallback}`);
+    return fallback;
+  }
+  return parsed;
+}
+
+const MAX_TREE_PATHS = numEnv('ORVEX_MAX_TREE_PATHS', 3000);
+const MAX_CHANGED_CHARS = numEnv('ORVEX_MAX_CHANGED_CHARS', 180_000);
+const MAX_RELATED_CHARS = numEnv('ORVEX_MAX_RELATED_CHARS', 60_000);
+const MAX_OTHER_CHARS = numEnv('ORVEX_MAX_OTHER_CHARS', 40_000);
+const FULL_CHANGED_FILE_CHARS = numEnv('ORVEX_FULL_CHANGED_FILE_CHARS', 32_000);
+const CHANGED_CONTEXT_LINES = numEnv('ORVEX_CHANGED_CONTEXT_LINES', 80);
+const MAX_CHANGED_CHUNKS_PER_FILE = numEnv('ORVEX_MAX_CHANGED_CHUNKS_PER_FILE', 6);
+const MAX_CHANGED_CHUNK_CHARS = numEnv('ORVEX_MAX_CHANGED_CHUNK_CHARS', 24_000);
 
 interface ChangedHunk {
   start: number;
@@ -234,25 +258,85 @@ function selectHunks(hunks: ChangedHunk[]): ChangedHunk[] {
   return selected;
 }
 
-function clipChunkAroundFocus(content: string, focusStart: number, focusEnd: number): string {
-  if (content.length <= MAX_CHANGED_CHUNK_CHARS) return content;
-  const focusLength = Math.max(1, focusEnd - focusStart);
-  const roomBefore = Math.max(0, Math.floor((MAX_CHANGED_CHUNK_CHARS - focusLength) / 2));
-  const start = Math.max(0, Math.min(focusStart - roomBefore, content.length - MAX_CHANGED_CHUNK_CHARS));
-  const end = Math.min(content.length, start + MAX_CHANGED_CHUNK_CHARS);
-  return `${start > 0 ? '… [chunk clipped before]\n' : ''}${content.slice(start, end)}${end < content.length ? '\n… [chunk clipped after]' : ''}`;
+/**
+ * Clip a chunk to the char budget, working entirely in LINE space.
+ *
+ * The previous implementation clipped by character offset while the caller
+ * reported the ORIGINAL line range as the label, so the two disagreed. Three
+ * separate defects fell out of that single mismatch:
+ *
+ *   - A 1000-line file whose hunk covered it end-to-end was labelled
+ *     "(full file)" while the fence held lines 1-360. "full file" is exactly
+ *     what tells the model that absent code is meaningful, so it produced
+ *     confident "the guard/cleanup is missing" findings about code that exists.
+ *   - Labels overstated their range by 2x or more, and prompt.ts tells the
+ *     model "Wrong line numbers get the comment rejected" — so real findings
+ *     were dropped at post-processing for citing a line the label invented.
+ *   - Char slicing cut mid-line at both edges, handing the model a broken
+ *     statement to reason about.
+ *
+ * Clipping by whole lines and returning the ACTUAL range fixes all three: the
+ * label is now derived from the same numbers as the content.
+ */
+function clipRangeToLineBudget(
+  lines: string[],
+  range: SourceRange,
+): { start: number; end: number; clippedBefore: boolean; clippedAfter: boolean; focusTruncated: boolean } {
+  // cum[i] = chars consumed by lines[0..i-1] including their newlines.
+  const cum: number[] = new Array(lines.length + 1);
+  cum[0] = 0;
+  for (let i = 0; i < lines.length; i++) cum[i + 1] = cum[i] + lines[i].length + 1;
+  // joined length of 1-indexed lines s..e
+  const len = (s: number, e: number) => (e < s ? 0 : Math.max(0, cum[e] - cum[s - 1] - 1));
+
+  if (len(range.start, range.end) <= MAX_CHANGED_CHUNK_CHARS) {
+    return { start: range.start, end: range.end, clippedBefore: false, clippedAfter: false, focusTruncated: false };
+  }
+
+  // The changed lines themselves are never sacrificed for context. If even the
+  // focus exceeds the budget, keep as much of it as fits and SAY it was cut —
+  // silently dropping 1147 of 1500 changed lines was the old behaviour.
+  let start = Math.max(range.start, range.focusStart);
+  let end = Math.min(range.end, range.focusEnd);
+  let focusTruncated = false;
+  if (len(start, end) > MAX_CHANGED_CHUNK_CHARS) {
+    let lo = start;
+    let hi = end;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi + 1) / 2);
+      if (len(start, mid) <= MAX_CHANGED_CHUNK_CHARS) lo = mid;
+      else hi = mid - 1;
+    }
+    end = lo;
+    focusTruncated = true;
+  } else {
+    // Grow context outward from the focus, balanced, while it still fits.
+    let canGrow = true;
+    while (canGrow) {
+      canGrow = false;
+      if (start > range.start && len(start - 1, end) <= MAX_CHANGED_CHUNK_CHARS) {
+        start--;
+        canGrow = true;
+      }
+      if (end < range.end && len(start, end + 1) <= MAX_CHANGED_CHUNK_CHARS) {
+        end++;
+        canGrow = true;
+      }
+    }
+  }
+  return { start, end, clippedBefore: start > range.start, clippedAfter: end < range.end, focusTruncated };
 }
 
 function renderSourceChunk(lines: string[], range: SourceRange): SourceChunk {
-  const raw = lines.slice(range.start - 1, range.end).join('\n');
-  const beforeFocus = lines.slice(range.start - 1, range.focusStart - 1).join('\n');
-  const focusStart = beforeFocus.length === 0 ? 0 : beforeFocus.length + 1;
-  const focusEnd = focusStart + lines.slice(range.focusStart - 1, range.focusEnd).join('\n').length;
-  return {
-    start: range.start,
-    end: range.end,
-    content: clipChunkAroundFocus(raw, focusStart, focusEnd),
-  };
+  const clip = clipRangeToLineBudget(lines, range);
+  const body = lines.slice(clip.start - 1, clip.end).join('\n');
+  const before = clip.clippedBefore ? '… [context clipped before]\n' : '';
+  const after = clip.clippedAfter
+    ? `\n… [${clip.focusTruncated ? 'CHANGED LINES TRUNCATED — this hunk continues past the budget' : 'context clipped after'}]`
+    : '';
+  // start/end describe the content actually emitted, so the caller's label and
+  // the fence can no longer disagree.
+  return { start: clip.start, end: clip.end, content: `${before}${body}${after}` };
 }
 
 /** Build compact source chunks around changed hunks for a large changed file. */
@@ -352,20 +436,43 @@ export function buildUserPrompt(
       'guards, and error handling; do not assume code omitted from a large file is safe or unsafe.',
     );
     let used = 0;
+    const omitted: string[] = [];
     for (const f of context.changedContents) {
       const patch = files.find((file) => file.filename === f.path)?.patch;
+      const totalLines = f.content.split('\n').length;
+      const allHunks = changedHunks(patch).length;
       const chunks = chunkChangedFileContext(f.content, patch);
+      // selectHunks samples at most MAX_CHANGED_CHUNKS_PER_FILE windows, so a
+      // file with more hunks than that has changed regions with NO source
+      // context. Say which, instead of letting the model assume it saw them.
+      if (allHunks > chunks.length) omitted.push(`${f.path} (${allHunks - chunks.length} of ${allHunks} changed regions not shown)`);
+      let emitted = 0;
       for (const chunk of chunks) {
-        const label = chunks.length === 1 && chunk.start === 1 && chunk.end === f.content.split('\n').length
+        const label = chunks.length === 1 && chunk.start === 1 && chunk.end === totalLines
           ? 'full file'
-          : `lines ${chunk.start}-${chunk.end} around changed hunk`;
+          : `lines ${chunk.start}-${chunk.end} of ${totalLines} — around changed hunk`;
         const block = `\n### ${f.path} (${label})\n\`\`\`\n${chunk.content}\n\`\`\``;
         // `continue`, not `break`: one oversized chunk must not starve later
         // changed files. The full diff remains above even when a chunk is skipped.
         if (used + block.length > MAX_CHANGED_CHARS) continue;
         parts.push(block);
         used += block.length;
+        emitted++;
       }
+      // The 4x budget cut (700k → 180k) means whole changed files now fall off
+      // the end. Previously they vanished with no marker at all, so the model
+      // could not distinguish "this file has no interesting code" from "this
+      // file was never shown" — which is the single biggest driver of confident
+      // "the guard is missing" false positives.
+      if (emitted === 0) omitted.push(`${f.path} (no source shown — context budget exhausted)`);
+    }
+    if (omitted.length > 0) {
+      parts.push(
+        '',
+        `⚠ Source context was NOT included for ${omitted.length} item(s) below. Their diffs ARE above.`,
+        'Do NOT report that code is missing, unguarded, or uncleaned in these — you have not seen them:',
+        ...omitted.map((o) => `  - ${o}`),
+      );
     }
   }
 

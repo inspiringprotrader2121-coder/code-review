@@ -1496,6 +1496,12 @@ async function executeReview(
       reasoningEffort: llm.reasoningEffort,
       prIntent,
       strict: plan.deepVerify,
+      // The batch is [...toPost, ...reviewOnly]; everything past this index is a
+      // candidate that FAILED the confidence floor. Without the boundary, such a
+      // candidate can be marked `duplicateOf` a posted finding and max-fold its
+      // severity into it — promoting a confirmed P3 to P1 on the say-so of
+      // something we had already declined to trust.
+      confirmedCount: merged.toPost.length,
       // P2-2: count verification tokens in the review's cost total.
       onUsage: onUsageFor('standard'),
     });
@@ -1712,8 +1718,19 @@ async function executeReview(
   config.store.markReviewedNow(installationId, `${owner}/${repo}`, number, openCount);
 
   if (config.enableCheckRuns) {
-    const openP1 = finalFindings.some((f) => f.status === 'open' && f.severity === 'P1');
-    const openAny = finalFindings.some((f) => f.status === 'open');
+    // Manual-review candidates count toward the check run's honesty signals.
+    // `finalFindings` comes only from `merged.toPost`, so a review where EVERY
+    // candidate was demoted (all below min_confidence, or all vetoed by the
+    // verifier) previously produced: conclusion 'success', "0 new, 0 fixed,
+    // 0 open", and a green ✅ next to the merge button — while the review body
+    // directly below rendered a table of P1 candidates. That is precisely the
+    // false assurance the `incomplete` branch exists to prevent; 18eeb90 added
+    // a new way to reach it by routing demoted findings to a surface the
+    // check-run path never learned about.
+    const manualP1 = merged.reviewOnly.some(({ finding }) => finding.severity === 'P1');
+    const manualAny = merged.reviewOnly.length > 0;
+    const openP1 = finalFindings.some((f) => f.status === 'open' && f.severity === 'P1') || manualP1;
+    const openAny = finalFindings.some((f) => f.status === 'open') || manualAny;
     // Advisory: never fail the check (no red ✗). Findings show as 'neutral';
     // set ORVEX_FAIL_CHECK_ON_P1=1 to hard-fail on open P1s if you want gating.
     // A green ✅ next to the merge button is the strongest signal Orvex sends. It
@@ -1727,7 +1744,13 @@ async function executeReview(
         : openAny || incomplete
           ? 'neutral'
           : 'success';
-    const summary = `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open`;
+    // Name the demoted candidates in the summary too. "0 new, 0 fixed, 0 open"
+    // is technically true of the posted set but reads as "nothing found", which
+    // is the opposite of what a body full of manual-review rows means.
+    const manualNote = manualAny
+      ? ` · ${merged.reviewOnly.length} candidate(s) need manual review${manualP1 ? ' (incl. P1)' : ''}`
+      : '';
+    const summary = `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open${manualNote}`;
     await createCheckRun(octokit, ref, effectiveSha, {
       conclusion,
       title: incomplete ? 'Orvex Review (incomplete)' : 'Orvex Review',

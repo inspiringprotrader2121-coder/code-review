@@ -8,10 +8,23 @@
  * WHAT IT MEASURES — anchored, line-level findings (file:line), because that is
  * the only thing comparable across tools. Sources per tool:
  *   - inline review comments (codex, greptile, qodo, gitar, orvex-inline)
- *   - Orvex's review-summary TABLE rows (Orvex posts un-anchored findings there,
- *     with `path:line`, instead of inline — must be parsed or Orvex is undercounted)
- *   - CodeRabbit posts prose walkthroughs with NO line-level comments on these PRs,
- *     so its anchored count is ~0 and that is reported honestly, not hidden.
+ *   - Orvex's review-summary TABLE rows — parsed so Orvex is not undercounted
+ *
+ * ⚠ READ BEFORE QUOTING ANY NUMBER FROM THIS TOOL.
+ * That second source belongs to Orvex ALONE. No competitor's prose body is
+ * mined for findings here, so a tool that posts only prose contributes zero
+ * findings while still being marked "reviewed" — its entire score is then
+ * `orvexOnly`, which is an arithmetic identity, not a capability result. It
+ * compounds: table rows have `line === null`, and `sameClusterLine` returns
+ * false whenever either side is null, so an un-anchored Orvex row can never
+ * cluster with a competitor's finding however well it matches — a guaranteed
+ * free `orvexOnly` that simultaneously inflates `compOnly`.
+ *
+ * Therefore the report prints an ANCHORED (inline-vs-inline) split — the only
+ * like-for-like comparison — alongside the legacy ALL split, which is retained
+ * for continuity and is Orvex-favourable by construction. Quote ANCHORED.
+ * Where a competitor's anchored total is 0, the tool says so explicitly rather
+ * than letting the zero read as a loss.
  *
  * Findings are clustered (same PR + file + line within ±5) into candidate defects.
  * Pairwise vs Orvex: both caught / competitor-only (Orvex missed) / Orvex-only.
@@ -29,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 import type { Octokit } from '@octokit/rest';
 import { createBenchmarkOctokit } from './github-auth.js';
 import { parseOrvexFindingTables } from './orvex-table.js';
-import { severityOf, worseSev, sameClusterLine } from './severity.js';
+import { severityOf, worseSev, sameClusterLine , isOrvexStatusComment } from './severity.js';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
 const REPO = process.env.BENCH_REPO ?? 'Velatrix-Cloud';
@@ -59,7 +72,7 @@ function botOf(login: string): string | null {
 
 /** Orvex status posts (progress / summary headers) that are NOT findings. */
 function isOrvexStatus(body: string): boolean {
-  return /^(🔄|✅|⏳)|\*\*Applying|\*\*Fix applied|^## Orvex Review|already reviewed|safety limit/i.test(body.trim());
+  return isOrvexStatusComment(body);
 }
 /** CodeRabbit review state: it often can't/doesn't post a real review. A
  *  walkthrough is only "reviewed" when it isn't one of the known no-review
@@ -70,7 +83,36 @@ function coderabbitState(body: string): 'reviewed' | 'limit' | 'skipped' {
   return 'reviewed';
 }
 
-interface Finding { pr: number; bot: string; path: string | null; line: number | null; sev: string | null; excerpt: string; }
+interface Finding {
+  pr: number;
+  bot: string;
+  path: string | null;
+  line: number | null;
+  sev: string | null;
+  excerpt: string;
+  /** true = mined from an INLINE review comment (every tool posts these);
+   *  false = mined from Orvex's summary TABLE, which no competitor has an
+   *  equivalent of in this harness. Tracked because the headline split is only
+   *  apples-to-apples over anchored findings — see `pairwise`. */
+  anchored: boolean;
+}
+
+/** Drop a bot's byte-identical re-reports of the same finding within one PR.
+ *  Orvex's "previously reported, still open" table is re-emitted by EVERY
+ *  subsequent review on a PR, and `collect` parses every review body, so a
+ *  single defect was counted once per review. Cluster-based splits mostly
+ *  absorbed that, but the raw per-tool finding counts and the severity
+ *  distribution scaled with how many times we re-reviewed, not with how many
+ *  defects existed. */
+function dedupeRepeats(findings: Finding[]): Finding[] {
+  const seen = new Set<string>();
+  return findings.filter((f) => {
+    const key = `${f.pr}|${f.bot}|${f.path ?? ''}|${f.line ?? ''}|${f.excerpt.slice(0, 80)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 /** Pull confirmed findings out of an Orvex review-summary body. */
 function parseOrvexTable(pr: number, body: string): Finding[] {
@@ -81,6 +123,7 @@ function parseOrvexTable(pr: number, body: string): Finding[] {
     line: finding.line,
     sev: finding.severity,
     excerpt: finding.message.slice(0, 140),
+    anchored: false,
   }));
 }
 
@@ -115,7 +158,7 @@ async function collect(octokit: Octokit) {
       appeared.add(bot);
       const body = c.body ?? '';
       if (bot === 'orvex' && isOrvexStatus(body)) continue;
-      findings.push({ pr, bot, path: c.path ?? null, line: c.line ?? c.original_line ?? null, sev: severityOf(body), excerpt: body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 140) });
+      findings.push({ pr, bot, path: c.path ?? null, line: c.line ?? c.original_line ?? null, sev: severityOf(body), excerpt: body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 140), anchored: true });
     }
 
     // review objects (greptile/codex/qodo/gitar post a review even with 0 findings)
@@ -130,7 +173,9 @@ async function collect(octokit: Octokit) {
         // mixed with no way to separate old vs new-prompt Orvex reviews).
         const at = r.submitted_at ?? '';
         if (at && at > (orvexReviewedAt[pr] ?? '')) orvexReviewedAt[pr] = at;
-        for (const f of parseOrvexTable(pr, body)) findings.push(f); // un-anchored findings live in Orvex's table
+        // Orvex's summary table. NOT anchored: no competitor has an equivalent
+        // source in this harness, so these must not enter the headline split.
+        for (const f of parseOrvexTable(pr, body)) findings.push({ ...f, anchored: false });
       }
     }
 
@@ -149,25 +194,65 @@ async function collect(octokit: Octokit) {
     if (crReviewed) mark('coderabbit', pr);
   }
 
-  return { prNums, findings, reviewedPrs, seenLogins, orvexReviewedAt };
+  const deduped = dedupeRepeats(findings);
+  if (deduped.length !== findings.length) {
+    console.log(
+      `[collect] dropped ${findings.length - deduped.length} repeated re-report(s) ` +
+        `(same bot re-emitting one finding across multiple reviews on a PR)`,
+    );
+  }
+  return { prNums, findings: deduped, reviewedPrs, seenLogins, orvexReviewedAt };
 }
 
-interface Cluster { pr: number; path: string | null; line: number | null; bots: Set<string>; excerpt: string; sev: string | null; }
+interface Cluster {
+  pr: number;
+  path: string | null;
+  line: number | null;
+  bots: Set<string>;
+  excerpt: string;
+  sev: string | null;
+  /** Severity as rated by EACH bot separately. The fused `sev` above is the
+   *  cluster's worst rating across ALL tools — right for display, wrong for
+   *  scoring. A cluster {orvex: P3, greptile: P1} fused to P1, and the qodo
+   *  pairwise then counted it as an actionable ORVEX-ONLY bug: one Orvex
+   *  itself called a nitpick, promoted by a severity donated by a third tool
+   *  that is not even part of that comparison. The marquee "P1/P2 only (bugs)"
+   *  row was the one most corrupted by it. */
+  sevByBot: Map<string, string | null>;
+}
 function clusterize(findings: Finding[]): Cluster[] {
   const clusters: Cluster[] = [];
   for (const f of findings) {
     const hit = clusters.find(
       (cl) => cl.pr === f.pr && cl.path === f.path && sameClusterLine(cl.line, f.line, cl.bots.has(f.bot)),
     );
-    if (hit) { hit.bots.add(f.bot); hit.sev = worseSev(hit.sev, f.sev); }
-    else clusters.push({ pr: f.pr, path: f.path, line: f.line, bots: new Set([f.bot]), excerpt: f.excerpt, sev: f.sev });
+    if (hit) {
+      hit.bots.add(f.bot);
+      hit.sev = worseSev(hit.sev, f.sev);
+      hit.sevByBot.set(f.bot, worseSev(hit.sevByBot.get(f.bot) ?? null, f.sev));
+    } else {
+      clusters.push({
+        pr: f.pr,
+        path: f.path,
+        line: f.line,
+        bots: new Set([f.bot]),
+        excerpt: f.excerpt,
+        sev: f.sev,
+        sevByBot: new Map([[f.bot, f.sev]]),
+      });
+    }
   }
   return clusters;
 }
 
 interface Split { both: number; compOnly: number; orvexOnly: number; total: number; }
 interface Pairwise { competitor: string; prs: number[]; all: Split; actionable: Split; both: number; compOnly: number; orvexOnly: number; total: number; }
-const isActionable = (c: Cluster) => c.sev === 'P1' || c.sev === 'P2';
+/** Actionable WITHIN a specific head-to-head: only the two tools being compared
+ *  may contribute severity — never the fused cross-tool `sev`. */
+const isActionableFor = (c: Cluster, bot: string) => {
+  const s = worseSev(c.sevByBot.get('orvex') ?? null, c.sevByBot.get(bot) ?? null);
+  return s === 'P1' || s === 'P2';
+};
 function splitOf(bot: string, cls: Cluster[]): Split {
   return {
     total: cls.length,
@@ -179,7 +264,7 @@ function splitOf(bot: string, cls: Cluster[]): Split {
 function pairwise(bot: string, prs: number[], clusters: Cluster[]): Pairwise {
   const cls = clusters.filter((c) => prs.includes(c.pr) && (c.bots.has('orvex') || c.bots.has(bot)));
   const all = splitOf(bot, cls);
-  const actionable = splitOf(bot, cls.filter(isActionable));
+  const actionable = splitOf(bot, cls.filter((c) => isActionableFor(c, bot)));
   return { competitor: bot, prs, all, actionable, ...all };
 }
 
@@ -271,14 +356,33 @@ async function main() {
   // its reviewedPrs is a LOWER BOUND — its "missed" is conservative (a PR where
   // codex silently reviewed-and-found-nothing is excluded, not counted as an
   // Orvex win we can't substantiate).
+  // LIKE-FOR-LIKE split. Orvex contributes findings from two sources (inline
+  // comments AND its summary table); every competitor contributes only inline
+  // comments, because this harness has no parser for their prose bodies. That
+  // asymmetry is not a small bias — an un-anchored Orvex row has line === null,
+  // and `sameClusterLine` returns false whenever either side is null, so such a
+  // row can NEVER cluster with a competitor finding no matter how well it
+  // matches. Every one was therefore a guaranteed free `orvexOnly` that also
+  // inflated `compOnly`. A prose-only tool scored 0 by construction.
+  //
+  // So the ANCHORED row below is the honest head-to-head; the ALL row is kept
+  // for continuity but is Orvex-favourable by construction. Do not quote ALL.
+  const anchoredClusters = clusterize(findings.filter((f) => f.anchored));
   const results: Pairwise[] = [];
   for (const c of COMPETITORS) {
     const prs = [...(reviewedPrs[c] ?? [])].sort((a, z) => a - z);
     const p = pairwise(c, prs, clusters);
+    const anchored = pairwise(c, prs, anchoredClusters);
     results.push(p);
     console.log(`\n=== Orvex vs ${c} — ${prs.length} PRs [${prs.join(', ')}] ===`);
-    console.log(`  ALL findings       both ${p.all.both} · ${c}-only(ORVEX MISSED) ${p.all.compOnly} · Orvex-only ${p.all.orvexOnly} · total ${p.all.total}`);
-    console.log(`  P1/P2 only (bugs)  both ${p.actionable.both} · ${c}-only(ORVEX MISSED) ${p.actionable.compOnly} · Orvex-only ${p.actionable.orvexOnly} · total ${p.actionable.total}`);
+    console.log(`  ANCHORED (compare) both ${anchored.all.both} · ${c}-only(ORVEX MISSED) ${anchored.all.compOnly} · Orvex-only ${anchored.all.orvexOnly} · total ${anchored.all.total}`);
+    console.log(`  ANCHORED P1/P2     both ${anchored.actionable.both} · ${c}-only(ORVEX MISSED) ${anchored.actionable.compOnly} · Orvex-only ${anchored.actionable.orvexOnly} · total ${anchored.actionable.total}`);
+    console.log(`  ALL findings       both ${p.all.both} · ${c}-only(ORVEX MISSED) ${p.all.compOnly} · Orvex-only ${p.all.orvexOnly} · total ${p.all.total}   [Orvex-favourable: includes table-only rows]`);
+    console.log(`  P1/P2 only (bugs)  both ${p.actionable.both} · ${c}-only(ORVEX MISSED) ${p.actionable.compOnly} · Orvex-only ${p.actionable.orvexOnly} · total ${p.actionable.total}   [same caveat]`);
+    if (anchored.all.total === 0 && p.all.total > 0) {
+      console.log(`  ⚠ ${c} posts no line-anchored comments on these PRs — it CANNOT score above zero here.`);
+      console.log(`    Its numbers are a measurement artifact, not a capability result.`);
+    }
   }
 
   // fine-tuning gold: what Orvex missed that a competitor caught

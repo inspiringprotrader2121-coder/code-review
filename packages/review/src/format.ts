@@ -33,6 +33,20 @@ export interface ReviewCommentMeta {
 }
 
 const MAX_FILES_LISTED = 25;
+/**
+ * Hard cap on manual-review rows. This table is the ONLY unbounded section of
+ * the review body: the file list is capped at 25 and the findings table is
+ * bounded by `max_comments`, but this one iterated everything.
+ *
+ * Since 18eeb90 routes EVERY verifier rejection here instead of deleting it,
+ * and each model call can return 25 findings across several passes, 100-200
+ * candidates is reachable. At ~560 chars/row that breaches GitHub's 65536-char
+ * review-body limit, `createReview` 422s, and the resilient fallback re-posts
+ * the SAME oversized body — so it throws again and the ENTIRE review is lost,
+ * including every confirmed P1 inline comment. Truncating a diagnostic table is
+ * always better than losing the review that carries it.
+ */
+const MAX_MANUAL_ROWS = 25;
 
 /** The categories every Orvex review inspects — shown so authors know the scope. */
 const CHECKLIST = [
@@ -199,11 +213,14 @@ export function formatReviewBody(
       '| Severity | File | Candidate | Why manual review |',
       '| --- | --- | --- | --- |',
     );
-    for (const { finding, reason } of manualReview) {
+    for (const { finding, reason } of manualReview.slice(0, MAX_MANUAL_ROWS)) {
       const file = finding.line ? `\`${sanitizeFileCell(finding.file)}:${finding.line}\`` : `\`${sanitizeFileCell(finding.file)}\``;
       const message = sanitizeFindingText(finding.message).replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 300);
       const why = sanitizeFindingText(reason).replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 220);
       lines.push(`| ${finding.severity} | ${file} | ${message} | ${why} |`);
+    }
+    if (manualReview.length > MAX_MANUAL_ROWS) {
+      lines.push(`| … | | **${manualReview.length - MAX_MANUAL_ROWS} more candidate(s) not shown** | body size limit |`);
     }
     lines.push('', '</details>');
   }
@@ -371,7 +388,19 @@ export function sanitizeFindingText(s: string | undefined): string {
     // Defang EVERY GFM task-list marker variant GitHub renders as a checkbox —
     // `- [ ]`, `* [ ]`, `+ [ ]`, `1. [ ]`, and blockquoted `> - [ ]` — not just
     // the dash form, so a planted checkbox can never surface in the comment.
-    .replace(/^(\s*>?\s*)(?:[-*+]|\d+\.)\s*\[( |x|X)\]/gm, '$1• [$2]');
+    .replace(/^(\s*>?\s*)(?:[-*+]|\d+\.)\s*\[( |x|X)\]/gm, '$1• [$2]')
+    // Neutralize the HTML that actually causes harm here, WITHOUT blanket-
+    // escaping every angle bracket — findings legitimately contain `Array<string>`
+    // and `if (a < b)`, and escaping those would render as literal `&lt;` inside
+    // code spans.
+    //
+    // This text is model output produced immediately after reading an
+    // attacker-controlled PR, and 18eeb90 newly embeds it inside the
+    // manual-review `<details>` block. A planted `</details>` or `</summary>`
+    // BREAKS OUT of the collapsed section and renders at the top level of the
+    // review comment; `<img>`/`<script>`/`<iframe>` render outright.
+    .replace(/<\s*\/\s*(details|summary)\s*>/gi, '&lt;/$1&gt;')
+    .replace(/<\s*(script|iframe|img|a|style|form|object|embed)\b/gi, '&lt;$1');
 }
 
 export function formatInlineFinding(r: InlineFindingRender): string {
