@@ -9,6 +9,7 @@
  *   ORVEX_INSTALL_ID=144378482 BENCH_PR_LO=129 BENCH_PR_HI=138 tsx src/bench/severity-check.ts
  */
 import { createBenchmarkOctokit } from './github-auth.js';
+import { parseOrvexFindingTables } from './orvex-table.js';
 import { severityOf, sevRank as rank, isBugSev as isBug, isNitSev as isNit, sameClusterLine } from './severity.js';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
@@ -44,14 +45,11 @@ async function main() {
       if (bot === 'orvex' && isOrvexStatus(body)) continue;
       findings.push({ pr, bot, path: c.path ?? null, line: c.line ?? c.original_line ?? null, sev: sevOf(body), text: body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 120) });
     }
-    // Orvex severities live in its summary TABLE + collapsed nitpicks section
+    // Orvex severities live in its confirmed summary tables + collapsed nitpicks section.
     for (const r of rv) {
       if (botOf(r.user?.login ?? '') !== 'orvex') continue;
-      for (const line of (r.body ?? '').split('\n')) {
-        const m = /^\|\s*(P[0-3]|info)\s*\|\s*`([^`]+)`\s*\|\s*(.+?)\s*\|\s*$/.exec(line);
-        if (!m) continue;
-        const ref = /^(.+?):(\d+)$/.exec(m[2].trim());
-        findings.push({ pr, bot: 'orvex', path: ref ? ref[1] : m[2].trim(), line: ref ? Number(ref[2]) : null, sev: m[1].toUpperCase() === 'INFO' ? 'info' : m[1].toUpperCase(), text: m[3].slice(0, 120) });
+      for (const finding of parseOrvexFindingTables(r.body ?? '')) {
+        findings.push({ pr, bot: 'orvex', path: finding.path, line: finding.line, sev: finding.severity, text: finding.message.slice(0, 120) });
       }
     }
   }

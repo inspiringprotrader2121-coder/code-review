@@ -28,6 +28,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Octokit } from '@octokit/rest';
 import { createBenchmarkOctokit } from './github-auth.js';
+import { parseOrvexFindingTables } from './orvex-table.js';
 import { severityOf, worseSev, sameClusterLine } from './severity.js';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
@@ -71,24 +72,16 @@ function coderabbitState(body: string): 'reviewed' | 'limit' | 'skipped' {
 
 interface Finding { pr: number; bot: string; path: string | null; line: number | null; sev: string | null; excerpt: string; }
 
-/** Parse `path:line` (or `path`) from an Orvex table cell like `` `a/b.js:12` ``. */
-function parseFileRef(ref: string): { path: string | null; line: number | null } {
-  const m = /^(.+?):(\d+)$/.exec(ref.trim());
-  if (m) return { path: m[1], line: Number(m[2]) };
-  return { path: ref.trim() || null, line: null };
-}
-
-/** Pull findings out of an Orvex review-summary body (table rows carry file:line). */
+/** Pull confirmed findings out of an Orvex review-summary body. */
 function parseOrvexTable(pr: number, body: string): Finding[] {
-  const out: Finding[] = [];
-  for (const line of body.split('\n')) {
-    // | P2 | `path:line` | message |   (also nitpicks + still-open tables)
-    const m = /^\|\s*(P[0-3]|info)\s*\|\s*`([^`]+)`\s*\|\s*(.+?)\s*\|\s*$/.exec(line);
-    if (!m) continue;
-    const { path: p, line: ln } = parseFileRef(m[2]);
-    out.push({ pr, bot: 'orvex', path: p, line: ln, sev: m[1].toUpperCase(), excerpt: m[3].slice(0, 140) });
-  }
-  return out;
+  return parseOrvexFindingTables(body).map((finding) => ({
+    pr,
+    bot: 'orvex',
+    path: finding.path,
+    line: finding.line,
+    sev: finding.severity,
+    excerpt: finding.message.slice(0, 140),
+  }));
 }
 
 async function collect(octokit: Octokit) {

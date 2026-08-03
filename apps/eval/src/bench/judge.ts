@@ -10,6 +10,7 @@
  */
 import { llmChat } from '@orvex-review/review';
 import { createBenchmarkOctokit } from './github-auth.js';
+import { parseOrvexFindingTables } from './orvex-table.js';
 import { severityOf, worseSev, sameClusterLine } from './severity.js';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
@@ -63,11 +64,8 @@ async function main() {
     for (const r of rv) {
       if (botOf(r.user?.login ?? '') !== 'orvex') continue;
       if ((r.submitted_at ?? '') < CUTOFF) continue;
-      for (const line of (r.body ?? '').split('\n')) {
-        const m = /^\|\s*(P[0-3]|info)\s*\|\s*`([^`]+)`\s*\|\s*(.+?)\s*\|\s*$/.exec(line);
-        if (!m) continue;
-        const ref = /^(.+?):(\d+)$/.exec(m[2].trim());
-        findings.push({ pr, bot: 'orvex', path: ref ? ref[1] : m[2].trim(), line: ref ? Number(ref[2]) : null, sev: m[1].toUpperCase(), text: m[3].trim() });
+      for (const finding of parseOrvexFindingTables(r.body ?? '')) {
+        findings.push({ pr, bot: 'orvex', path: finding.path, line: finding.line, sev: finding.severity, text: finding.message });
       }
     }
   }
