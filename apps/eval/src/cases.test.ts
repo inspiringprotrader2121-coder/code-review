@@ -7,6 +7,8 @@ test('every evaluation label is pinned to one immutable commit', () => {
 
   for (const c of CASES) {
     assert.match(c.sha, /^[0-9a-f]{40}$/i, `${c.name} must use a full commit SHA`);
+    assert.match(c.baseSha, /^[0-9a-f]{40}$/i, `${c.name} must use a full base SHA`);
+    assert.notEqual(c.baseSha, c.sha, `${c.name} must compare two distinct immutable commits`);
     assert.equal(names.has(c.name), false, `${c.name} must be unique`);
     names.add(c.name);
     assert.ok(

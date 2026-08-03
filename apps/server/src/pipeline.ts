@@ -145,6 +145,32 @@ export interface WorkerConfig {
 type ModelTier = 'premium' | 'standard' | 'hybrid' | 'openai' | 'codex-hybrid' | 'multi-model' | 'dual-model';
 export type PassTier = 'premium' | 'standard' | 'openai' | 'deepseek' | 'deepseek-flash';
 
+/** The small outcome shape used to decide whether every required lens completed. */
+export interface RequiredLensOutcome {
+  modelPassIndex?: number;
+  ok: boolean;
+  /** Bonus/deep-extra passes never satisfy a required review lens. */
+  bestEffort?: boolean;
+}
+
+/**
+ * Return required lens ids that lack enough completed required samples. Deep
+ * extras intentionally reuse a core model index, so their success must never
+ * mask a failed core pass.
+ */
+export function failedRequiredLensIds(
+  lensIds: readonly number[],
+  outcomes: readonly RequiredLensOutcome[],
+  requiredSuccesses: number,
+): number[] {
+  return lensIds.filter((lensId) => {
+    const successes = outcomes.filter(
+      (outcome) => outcome.modelPassIndex === lensId && outcome.ok && !outcome.bestEffort,
+    ).length;
+    return successes < requiredSuccesses;
+  });
+}
+
 function premiumTarget(config: WorkerConfig): LlmTarget {
   return { apiKey: config.llmApiKey, baseUrl: config.llmBaseUrl, model: config.llmModel, api: config.llmApi };
 }
@@ -914,9 +940,6 @@ async function executeReview(
   // repo tree paths, hoisted so the (later) deepVerify pass can locate manifests
   let repoTreePaths: string[] = [];
 
-  // Author intent is untrusted and supplied only to the independent verifier.
-  const prIntent = [pr.title, pr.body].filter(Boolean).join('\n\n').slice(0, 4000);
-
   if (filesForLlm.length > 0) {
     // Deep context: repo tree + files the changed code imports, so the model
     // can reason across files instead of judging hunks blind. ORVEX_DEEP_CONTEXT=0 disables.
@@ -1418,16 +1441,14 @@ async function executeReview(
     const requiredCalls = toRun.filter((call) => call.kind === 'pass' && !call.bestEffort);
     const requiredLensIds = [...new Set(requiredCalls.map((call) => call.modelPassIndex ?? -1))];
     const requiredSuccesses = aggregation.enabled ? aggregation.minOccurrences : 1;
-    const failedRequiredLenses = requiredLensIds.filter((lensId) => {
-      const successes = outcomes.filter((outcome) => outcome.modelPassIndex === lensId && outcome.ok).length;
-      return successes < requiredSuccesses;
-    });
+    const failedRequiredLenses = failedRequiredLensIds(requiredLensIds, outcomes, requiredSuccesses);
     if (failedRequiredLenses.length > 0) {
       // PRESERVE TRANSIENCE. queue-runner decides whether to requeue by pattern-
       // matching this message with isTransientLlmError; naming it keeps a
       // rate-limited required lens retryable rather than silently partial.
       const failedRequiredPasses = outcomes.filter(
-        (outcome) => failedRequiredLenses.includes(outcome.modelPassIndex ?? -1) && !outcome.ok,
+        (outcome) =>
+          failedRequiredLenses.includes(outcome.modelPassIndex ?? -1) && !outcome.bestEffort && !outcome.ok,
       );
       const transientFailures = failedRequiredPasses.filter((outcome) => outcome.transient).length;
       const cause = transientFailures > 0
@@ -1608,7 +1629,6 @@ async function executeReview(
       baseUrl: llm.baseUrl,
       api: llm.api,
       reasoningEffort: llm.reasoningEffort,
-      prIntent,
       strict: plan.deepVerify,
       // The batch is [...toPost, ...reviewOnly]. Manual candidates must not be
       // able to promote a normal finding's severity through `duplicateOf`.

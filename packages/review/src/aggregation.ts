@@ -137,8 +137,7 @@ interface Cluster {
 
 const severityRank: Record<ReviewFinding['severity'], number> = { info: 0, P3: 1, P2: 2, P1: 3 };
 
-function selectRepresentative(entries: RepeatedFinding[], memberIds: number[], preferred: number): ReviewFinding {
-  const preferredEntry = entries[preferred];
+function selectRepresentative(entries: RepeatedFinding[], memberIds: number[]): ReviewFinding {
   const sorted = [...memberIds].sort((a, b) => {
     const left = entries[a].finding;
     const right = entries[b].finding;
@@ -148,17 +147,10 @@ function selectRepresentative(entries: RepeatedFinding[], memberIds: number[], p
     if (confidence !== 0) return confidence;
     return right.message.length - left.message.length;
   });
-  const best = entries[sorted[0]].finding;
-  const representative = preferredEntry && memberIds.includes(preferred) ? preferredEntry.finding : best;
-  const maxSeverity = memberIds.reduce(
-    (highest, id) => (severityRank[entries[id].finding.severity] > severityRank[highest] ? entries[id].finding.severity : highest),
-    representative.severity,
-  );
-  const maxConfidence = memberIds.reduce(
-    (highest, id) => Math.max(highest, entries[id].finding.confidence),
-    representative.confidence,
-  );
-  return { ...representative, severity: maxSeverity, confidence: maxConfidence };
+  // The LLM can decide which candidates describe one defect, but it must not
+  // attach severity/confidence from one report to the message or anchor of a
+  // weaker report. Keep every surfaced property from the same strongest entry.
+  return entries[sorted[0]].finding;
 }
 
 function exactFingerprintClusters(entries: RepeatedFinding[], ids: number[]): Cluster[] {
@@ -311,7 +303,7 @@ export async function aggregateRepeatedFindings(
   const findings: ReviewFinding[] = [];
   const reviewOnly: ReviewSurfaceFinding[] = [];
   for (const cluster of allClusters) {
-    const representative = selectRepresentative(entries, cluster.members, cluster.representative);
+    const representative = selectRepresentative(entries, cluster.members);
     const occurrences = new Set(cluster.members.map((id) => entries[id].sample)).size;
     if (occurrences >= opts.minOccurrences) {
       findings.push(representative);

@@ -3,6 +3,7 @@
  * and score precision/recall against the ground-truth cases. Run on the server
  * where the GitHub + LLM keys live:  pnpm --filter @orvex-review/eval eval
  */
+import { pathToFileURL } from 'node:url';
 import {
   buildRepoContext,
   fetchPrDiff,
@@ -38,35 +39,6 @@ interface CaseResult {
   falsePos: string[];
 }
 
-function llmEnv() {
-  // Prefer the production 'standard' target (what real reviews run on) so the
-  // eval measures the same model+endpoint. MINIMAX_API=anthropic (or an
-  // /anthropic base URL) must route via the Anthropic-compatible client —
-  // POSTing chat/completions at that base 404s and the whole eval silently
-  // scores 0/N (2026-07-23: every call returned "404 page not found").
-  const stdKey = process.env.ORVEX_STANDARD_API_KEY;
-  const minimax = process.env.MINIMAX_API_KEY;
-  const anthropic = process.env.ANTHROPIC_API_KEY;
-  if (stdKey) {
-    const baseUrl = process.env.ORVEX_STANDARD_BASE_URL ?? 'https://api.minimax.io/v1';
-    const api =
-      process.env.ORVEX_STANDARD_API === 'anthropic' || baseUrl.includes('/anthropic')
-        ? ('anthropic' as const)
-        : undefined;
-    return { apiKey: stdKey, baseUrl, model: process.env.ORVEX_STANDARD_MODEL ?? 'MiniMax-M3', api };
-  }
-  if (minimax) {
-    const baseUrl = process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1';
-    const api =
-      process.env.MINIMAX_API === 'anthropic' || baseUrl.includes('/anthropic')
-        ? ('anthropic' as const)
-        : undefined;
-    return { apiKey: minimax, baseUrl, model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3', api };
-  }
-  if (!anthropic) throw new Error('ORVEX_STANDARD_API_KEY, MINIMAX_API_KEY or ANTHROPIC_API_KEY required');
-  return { apiKey: anthropic, baseUrl: undefined, model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514' };
-}
-
 /** LLM target for one production-mirror pass. */
 interface PassTarget {
   apiKey: string;
@@ -76,23 +48,64 @@ interface PassTarget {
   reasoningEffort?: string;
 }
 
-function openAiTarget(): PassTarget | null {
-  const apiKey = process.env.ORVEX_OPENAI_API_KEY;
+function configuredApi(
+  env: NodeJS.ProcessEnv,
+  variable: 'ORVEX_STANDARD_API' | 'MINIMAX_API',
+  baseUrl: string,
+): NonNullable<PassTarget['api']> {
+  const configured = env[variable];
+  if (configured === 'anthropic' || configured === 'responses' || configured === 'chat') return configured;
+  return baseUrl.includes('/anthropic') ? 'anthropic' : 'chat';
+}
+
+function llmEnv(env: NodeJS.ProcessEnv = process.env): PassTarget {
+  // Prefer the production 'standard' target (what real reviews run on) so the
+  // eval measures the same model+endpoint. MINIMAX_API=anthropic (or an
+  // /anthropic base URL) must route via the Anthropic-compatible client —
+  // POSTing chat/completions at that base 404s and the whole eval silently
+  // scores 0/N (2026-07-23: every call returned "404 page not found").
+  const stdKey = env.ORVEX_STANDARD_API_KEY;
+  const minimax = env.MINIMAX_API_KEY;
+  const anthropic = env.ANTHROPIC_API_KEY;
+  if (stdKey) {
+    const baseUrl = env.ORVEX_STANDARD_BASE_URL ?? 'https://api.minimax.io/v1';
+    return {
+      apiKey: stdKey,
+      baseUrl,
+      model: env.ORVEX_STANDARD_MODEL ?? 'MiniMax-M3',
+      api: configuredApi(env, 'ORVEX_STANDARD_API', baseUrl),
+    };
+  }
+  if (minimax) {
+    const baseUrl = env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1';
+    return {
+      apiKey: minimax,
+      baseUrl,
+      model: env.MINIMAX_MODEL ?? 'MiniMax-M3',
+      api: configuredApi(env, 'MINIMAX_API', baseUrl),
+    };
+  }
+  if (!anthropic) throw new Error('ORVEX_STANDARD_API_KEY, MINIMAX_API_KEY or ANTHROPIC_API_KEY required');
+  return { apiKey: anthropic, baseUrl: undefined, model: env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514' };
+}
+
+function openAiTarget(env: NodeJS.ProcessEnv = process.env): PassTarget | null {
+  const apiKey = env.ORVEX_OPENAI_API_KEY;
   return apiKey
     ? {
         apiKey,
-        baseUrl: process.env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
-        model: process.env.ORVEX_OPENAI_MODEL ?? 'gpt-5.6-luna',
-        api: process.env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
-        reasoningEffort: process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'xhigh',
+        baseUrl: env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+        model: env.ORVEX_OPENAI_MODEL ?? 'gpt-5.6-luna',
+        api: env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
+        reasoningEffort: env.ORVEX_OPENAI_REASONING_EFFORT ?? 'xhigh',
       }
     : null;
 }
 
 /** Mirrors pipeline.ts modelForPlan for the production multi-model tier. */
-function verifierTarget(): PassTarget {
-  const openai = openAiTarget();
-  return openai && process.env.ORVEX_VERIFY_ON_STANDARD !== '1' ? openai : llmEnv();
+function verifierTarget(env: NodeJS.ProcessEnv = process.env): PassTarget {
+  const openai = openAiTarget(env);
+  return openai && env.ORVEX_VERIFY_ON_STANDARD !== '1' ? openai : llmEnv(env);
 }
 
 /** Mirror production's multi-model tier (modelForPass + PASS_ANGLES), pass for
@@ -108,22 +121,22 @@ function verifierTarget(): PassTarget {
  *  you change modelForPass or PASS_ANGLES, change this in the same commit —
  *  otherwise every number this harness prints describes a pipeline that does
  *  not exist. */
-function passTargets(): Array<{
+export function evaluationPassTargets(env: NodeJS.ProcessEnv = process.env): Array<{
   tag: string;
   target: PassTarget;
   focus?: string;
   tier: ReviewFinding['sourceTier'];
   bestEffort?: boolean;
 }> {
-  const standard = llmEnv();
-  const openai = openAiTarget();
-  const deepseekKey = process.env.ORVEX_DEEPSEEK_API_KEY;
+  const standard = llmEnv(env);
+  const openai = openAiTarget(env);
+  const deepseekKey = env.ORVEX_DEEPSEEK_API_KEY;
   const deepseek: PassTarget | null = deepseekKey
     ? {
         apiKey: deepseekKey,
-        baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
-        model: process.env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
-        reasoningEffort: process.env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+        baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
+        reasoningEffort: env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
       }
     : null;
   // v4 Flash shares the DeepSeek key/base URL — only the model id differs, which
@@ -131,9 +144,9 @@ function passTargets(): Array<{
   const deepseekFlash: PassTarget | null = deepseekKey
     ? {
         apiKey: deepseekKey,
-        baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
-        model: process.env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
-        reasoningEffort: process.env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+        baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
+        reasoningEffort: env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
       }
     : null;
   // tier mirrors modelForPass so the verifier's strong-reasoner rescue behaves
@@ -167,7 +180,6 @@ interface PrReviewResult {
 async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   const octokit = await createBenchmarkOctokit(c.owner, c.repo);
   const ref = { owner: c.owner, repo: c.repo, number: c.pr };
-  const { data: pr } = await octokit.rest.pulls.get({ owner: c.owner, repo: c.repo, pull_number: c.pr });
   // Ground truth is only true for the commit it was verified against. These PRs
   // are live and get pushed to — and those pushes are FIXES for the very bugs
   // the cases assert, so reviewing head would score a correct reviewer as
@@ -176,19 +188,21 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   if (!/^[0-9a-f]{40}$/i.test(sha)) {
     throw new Error(`eval case ${c.name} has no immutable 40-character SHA`);
   }
-  if (!pr.head.sha.startsWith(sha)) {
-    console.log(`    ↩ pinned to ${c.sha} (head has moved to ${pr.head.sha.slice(0, 7)})`);
+  if (!/^[0-9a-f]{40}$/i.test(c.baseSha) || c.baseSha === sha) {
+    throw new Error(`eval case ${c.name} has no distinct immutable base SHA`);
   }
 
-  // Match production (loadWorkerConfig defaults): 150 files / 300kB. At 40/120kB
-  // the ground-truth file could be silently dropped and scored as a miss.
+  // Pin BOTH sides of the comparison. Supplying only headSha falls back to
+  // GitHub's mutable current-PR file list, which can mismatch historical source
+  // context and invalidate the label's precision/recall result.
   const files = await fetchPrDiff(octokit, ref, {
     maxFileBytes: Number(process.env.MAX_FILE_BYTES ?? 300_000),
     maxFiles: Number(process.env.MAX_FILES ?? 150),
+    sinceSha: c.baseSha,
     headSha: sha,
   });
   const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
-  const passes = passTargets();
+  const passes = evaluationPassTargets();
   const requestedAggregation = readReviewAggregationConfig();
   const configuredMaxCalls = Number(process.env.ORVEX_REVIEW_MAX_CALLS ?? 28);
   const maxCalls = Number.isFinite(configuredMaxCalls) ? Math.max(1, Math.floor(configuredMaxCalls)) : 28;
@@ -340,7 +354,6 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
     const verified = await verifyFindings(verificationCandidates, ctxFiles, {
       ...verifierTarget(),
       strict: true,
-      prIntent: [pr.title, pr.body].filter(Boolean).join('\n\n'),
       confirmedCount: findings.length,
     });
     // Apply the exact post-verifier partition used by production. A candidate
@@ -415,7 +428,7 @@ async function main() {
 
   const groups = new Map<string, EvalCase[]>();
   for (const c of cases) {
-    const key = `${c.owner}/${c.repo}#${c.pr}@${c.sha}`;
+    const key = `${c.owner}/${c.repo}#${c.pr}@${c.baseSha}...${c.sha}`;
     const group = groups.get(key) ?? [];
     group.push(c);
     groups.set(key, group);
@@ -485,7 +498,10 @@ async function main() {
 
 // Preserve process.exitCode — `process.exit(0)` overrode the INVALID guard, so a
 // run where every case failed to execute still exited green.
-main().then(() => process.exit(process.exitCode ?? 0)).catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+const entrypoint = process.argv[1];
+if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
+  main().then(() => process.exit(process.exitCode ?? 0)).catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}

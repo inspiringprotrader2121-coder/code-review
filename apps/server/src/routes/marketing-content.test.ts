@@ -57,7 +57,9 @@ test('public marketing explains every plan and does not disclose review provider
   for (const legalPath of ['/terms', '/privacy', '/refunds']) {
     assert.match(home, new RegExp(`href="${escapeRegExp(legalPath)}"`));
   }
-  assert.match(llms, /Every plan receives the same three-pass depth, deterministic checks, strict verification, and autofix/);
+  assert.match(llms, /Every plan receives deterministic checks, source verification, and autofix/);
+  assert.match(llms, /Plans otherwise differ by review track, pass count, allowance, hourly capacity/);
+  assert.doesNotMatch(llms, /same three-pass depth/i);
   assert.match(privacy, /contracted third-party AI inference providers/);
   assert.match(privacy, /transient, in-memory snapshot/);
   assert.match(privacy, /only selected excerpts are included in review\s+requests/);

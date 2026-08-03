@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canRunAgentic, effectiveReviewConfig, modelForPass, modelForPlanWithTier, type WorkerConfig } from './pipeline.js';
+import {
+  canRunAgentic,
+  effectiveReviewConfig,
+  failedRequiredLensIds,
+  modelForPass,
+  modelForPlanWithTier,
+  type WorkerConfig,
+} from './pipeline.js';
 import { isHedgedRejection, isTransientLlmError } from '@orvex-review/review';
 
 function modelRoutingConfig(): WorkerConfig {
@@ -163,6 +170,21 @@ test('a rate-limited required pass REQUEUES; a genuine failure does not', () => 
     false,
     'a genuine model failure must NOT loop forever',
   );
+});
+
+test('a successful deep extra cannot satisfy a failed required lens', () => {
+  const failed = failedRequiredLensIds(
+    [0, 1],
+    [
+      { modelPassIndex: 0, ok: false },
+      { modelPassIndex: 1, ok: true },
+      // The optional deep-extra intentionally shares core lens 0's model index.
+      { modelPassIndex: 0, ok: true, bestEffort: true },
+    ],
+    1,
+  );
+
+  assert.deepEqual(failed, [0]);
 });
 
 test('the 4th lens is tier-scoped and breadth stays LAST on every tier', () => {

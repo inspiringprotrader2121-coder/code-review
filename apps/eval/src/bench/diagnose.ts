@@ -132,12 +132,11 @@ async function main() {
     const denoised = dropSelfNegatingFindings(raw).kept;
 
     const ctxFiles = context ? [...context.changedContents, ...context.related, ...context.dependents] : [];
-    const prIntent = [pr.title, pr.body].filter(Boolean).join('\n\n');
     let recall: ReviewFinding[] | null = null;
     let strict: ReviewFinding[] | null = null;
     if (ctxFiles.length && denoised.length) {
-      recall = (await verifyFindings(denoised, ctxFiles, { ...llm, prIntent, strict: false })).kept;
-      strict = (await verifyFindings(denoised, ctxFiles, { ...llm, prIntent, strict: true })).kept;
+      recall = (await verifyFindings(denoised, ctxFiles, { ...llm, strict: false })).kept;
+      strict = (await verifyFindings(denoised, ctxFiles, { ...llm, strict: true })).kept;
     }
 
     for (const target of targets) {

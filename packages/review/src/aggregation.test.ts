@@ -76,6 +76,39 @@ test('LLM-merged findings require recurrence while one-off candidates remain vis
   assert.match(result.reviewOnly[0].reason, /1 of the required 2/);
 });
 
+test('a merger-selected weak anchor cannot inherit another finding\'s severity', async () => {
+  const entries: RepeatedFinding[] = [
+    {
+      sample: 0,
+      finding: finding({
+        line: 4,
+        severity: 'P3',
+        confidence: 0.2,
+        message: 'A vague observation at a weak anchor.',
+      }),
+    },
+    {
+      sample: 1,
+      finding: finding({
+        line: 28,
+        severity: 'P1',
+        confidence: 0.95,
+        message: 'The retry can exhaust every account reservation after a concrete failure.',
+      }),
+    },
+  ];
+  const result = await aggregateRepeatedFindings(entries, {
+    minOccurrences: 2,
+    maxCandidates: 20,
+    mergeWithLlm: async () => JSON.stringify({ clusters: [{ representative: 0, members: [0, 1] }] }),
+  });
+
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].line, 28);
+  assert.equal(result.findings[0].severity, 'P1');
+  assert.match(result.findings[0].message, /exhaust every account reservation/);
+});
+
 test('a malformed or cross-file LLM merge cannot erase candidates', async () => {
   const entries: RepeatedFinding[] = [
     { sample: 0, finding: finding({ file: 'src/a.ts' }) },

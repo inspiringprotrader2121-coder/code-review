@@ -2,44 +2,28 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { planFeatures, PLANS, isPlanId, defaultPlanId } from './plans.js';
 
-test('model tiers: Free/Panel/Panel Unlimited/Enterprise on the MiniMax+DeepSeek dual ensemble; Verify on the 3-model multi ensemble', () => {
-  // Free/Panel/Panel Unlimited/Enterprise run the two-model ensemble (MiniMax +
-  // DeepSeek). Verify runs THREE different models: Luna (OpenAI API) general
-  // pass + DeepSeek deep-dive + MiniMax perf/completeness + MiniMax verify.
-  // Pure API billing on every tier now — no OAuth/account-pool dependency.
+test('model tiers: volume plans use the dual-model track; Verify plans and Enterprise use multi-model', () => {
   assert.equal(planFeatures('free').modelTier, 'dual-model');
   assert.equal(planFeatures('review').modelTier, 'dual-model');
-  // Enterprise was 'dual-model' — MiniMax + DeepSeek and NEVER Luna — so the
-  // most expensive plan ran a weaker stack than Verify. It is now the full
-  // four-model ensemble.
+  assert.equal(planFeatures('review-plus').modelTier, 'dual-model');
+  assert.equal(planFeatures('verify-lite').modelTier, 'multi-model');
+  assert.equal(planFeatures('verify').modelTier, 'multi-model');
   assert.equal(planFeatures('enterprise').modelTier, 'multi-model');
-  assert.equal(
-    planFeatures('verify').modelTier,
-    'multi-model',
-    'Verify: Luna + DeepSeek v4 Pro + DeepSeek v4 Flash + MiniMax',
-  );
 });
 
-test('IDENTICAL pipeline on every plan: 3 passes, same retrieval depth, strict verify — plans differ by MODEL + limits only', () => {
-  // Product rule (user decision 2026-07-09): review depth/quality/runtime is
-  // NEVER the tier differentiator. Every plan runs 3 passes + strict verify;
-  // Verify differs by using 3 distinct models instead of the 2-model ensemble.
-  for (const p of ['free', 'review', 'review-plus', 'verify', 'enterprise'] as const) {
-    // Volume track (dual-model) stays at 3; the quality track runs a 4th
-    // reasoner (DeepSeek v4 Flash) on the removed-behaviour/caller lens.
+test('each plan uses its configured pass count with shared retrieval and strict verification', () => {
+  for (const p of ['free', 'review', 'review-plus', 'verify-lite', 'verify', 'enterprise'] as const) {
     const expected = planFeatures(p).modelTier === 'multi-model' ? 4 : 3;
     assert.equal(planFeatures(p).reviewPasses, expected, `${p} runs its full pipeline`);
     assert.equal(planFeatures(p).retrievalTopK, 28, `${p} gets the same retrieval depth`);
     assert.equal(planFeatures(p).deepVerify, true, `${p} gets the strict verification`);
   }
-  assert.equal(planFeatures('verify').modelTier, 'multi-model', 'Verify: the four-model ensemble');
-  assert.equal(planFeatures('review').modelTier, 'dual-model', 'Panel: MiniMax + DeepSeek ensemble');
+  assert.equal(planFeatures('verify').modelTier, 'multi-model');
+  assert.equal(planFeatures('review').modelTier, 'dual-model');
 });
 
-test('every plan matches Verify on capability/thoroughness (autofix, execution, passes, retrieval, verify) — model + cost are the only levers', () => {
-  // Product rule (user decision 2026-07-09): "all plans should run the same
-  // settings and thoroughness as Verify — only cost / which model changes."
-  for (const p of ['free', 'review', 'review-plus', 'verify', 'enterprise'] as const) {
+test('every plan shares autofix and runtime-verification capability', () => {
+  for (const p of ['free', 'review', 'review-plus', 'verify-lite', 'verify', 'enterprise'] as const) {
     assert.equal(planFeatures(p).autofix, true, `${p} gets autofix`);
     assert.equal(planFeatures(p).codeExecution, true, `${p} gets sandbox code execution`);
   }
@@ -49,6 +33,7 @@ test('@orvex deep is paid-only (2x review cost — unbounded on a free account)'
   assert.equal(planFeatures('free').deepReviews, false);
   assert.equal(planFeatures('review').deepReviews, true);
   assert.equal(planFeatures('review-plus').deepReviews, true);
+  assert.equal(planFeatures('verify-lite').deepReviews, true);
   assert.equal(planFeatures('verify').deepReviews, true);
   assert.equal(planFeatures('enterprise').deepReviews, true);
 });
@@ -60,6 +45,7 @@ test('nightly scans are the ONE deliberate exception: paid tiers only, never the
   assert.equal(planFeatures('free').nightlyScans, false, 'free trial excluded — unbounded-cost risk');
   assert.equal(planFeatures('review').nightlyScans, true);
   assert.equal(planFeatures('review-plus').nightlyScans, true);
+  assert.equal(planFeatures('verify-lite').nightlyScans, true);
   assert.equal(planFeatures('verify').nightlyScans, true);
   assert.equal(planFeatures('enterprise').nightlyScans, true);
 });
@@ -67,6 +53,8 @@ test('nightly scans are the ONE deliberate exception: paid tiers only, never the
 test('the expensive whole-repo sweep is OFF on every tier (it cost more and reviewed worse)', () => {
   assert.equal(planFeatures('free').repoSweep, false);
   assert.equal(planFeatures('review').repoSweep, false);
+  assert.equal(planFeatures('review-plus').repoSweep, false);
+  assert.equal(planFeatures('verify-lite').repoSweep, false);
   assert.equal(planFeatures('verify').repoSweep, false);
   assert.equal(planFeatures('enterprise').repoSweep, false);
 });
@@ -79,10 +67,7 @@ test('free tier is a lifetime trial; paid tiers have no lifetime cap', () => {
 
 test('pricing structure: Starter $29 (100/mo @ 5/hr, $0.50 overage) < Pro Unlimited $69 (∞ @ 10/hr); Verify Lite $49 (50/mo) < Verify $99 (120/mo), both $0.75 overage', () => {
   // Two tracks: volume (dual-model) — Free < Starter < Pro Unlimited; and
-  // quality (multi-model w/ Luna) — Verify Lite < Verify. Overage covers COGS
-  // with margin: Starter $0.50 vs ~$0.15 COGS; Verify tiers $0.75 vs ~$0.27.
-  // Verify tiers are NEVER unlimited — Luna's per-review cost means a quota +
-  // overage is the cost defense.
+  // quality (multi-model) — Verify Lite < Verify. Verify tiers are quota-capped.
   assert.equal(planFeatures('review').reviewsPerHour, 5);
   assert.equal(planFeatures('review').reviewsPerMonth, 100);
   assert.equal(planFeatures('review').includedReviewsPerMonth, 100);
@@ -91,8 +76,8 @@ test('pricing structure: Starter $29 (100/mo @ 5/hr, $0.50 overage) < Pro Unlimi
   assert.equal(planFeatures('review-plus').reviewsPerMonth, null, 'unlimited — the hourly cap is the abuse defense');
   assert.equal(planFeatures('review-plus').includedReviewsPerMonth, null);
   assert.equal(planFeatures('review-plus').overageCentsPerReview, null);
-  // Verify Lite: budget entry to the premium (multi-model) track.
-  assert.equal(planFeatures('verify-lite').modelTier, 'multi-model', 'same four-model quality as Verify');
+  // Verify Lite: budget entry to the multi-model track.
+  assert.equal(planFeatures('verify-lite').modelTier, 'multi-model', 'same review track as Verify');
   assert.equal(planFeatures('verify-lite').reviewsPerHour, 5);
   assert.equal(planFeatures('verify-lite').reviewsPerMonth, 50);
   assert.equal(planFeatures('verify-lite').includedReviewsPerMonth, 50);
@@ -111,7 +96,7 @@ test('pricing structure: Starter $29 (100/mo @ 5/hr, $0.50 overage) < Pro Unlimi
 test('Verify Lite is the SAME product as Verify — same models/thoroughness, smaller quota only', () => {
   const lite = planFeatures('verify-lite');
   const verify = planFeatures('verify');
-  assert.equal(lite.modelTier, verify.modelTier, 'identical 3-model stack');
+  assert.equal(lite.modelTier, verify.modelTier, 'identical multi-model review track');
   assert.equal(lite.reviewPasses, verify.reviewPasses);
   assert.equal(lite.deepVerify, verify.deepVerify);
   assert.equal(lite.deepReviews, verify.deepReviews);

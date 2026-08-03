@@ -119,13 +119,13 @@ const LLMS_TXT = `# Orvex
 
 ## What it does
 - Reviews enabled GitHub repositories automatically on pull-request open and new pushes by default; each trigger can be changed per repository. \`@orvex review\` starts an on-demand review.
-- Runs deterministic rules first, then three focused AI review passes, then a strict verifier that re-checks candidate findings against source context before posting.
+- Runs deterministic rules first, then three or four focused AI review passes depending on the review track, then a strict verifier that re-checks candidate findings against source context before posting.
 - Reads the changed files plus selected imports, dependents, and relevant repository files. It reports when GitHub or configured file limits make coverage partial.
 - Tracks findings across pushes, suppresses already-reported issues, and marks findings fixed when their source anchor changes.
 - One-command auto-fix (\`@orvex fix\` / \`@orvex fix all\`) that re-verifies each finding before writing a fix.
 - Gives a copy-paste prompt per finding for use with a coding agent.
 - Paid plans can request additional analysis with \`@orvex deep\`; a deep review uses two review units.
-- Repositories can tune ignores, confidence thresholds, comment limits, and deterministic checks with \`.orvex-review.yml\`.
+- Repositories can tune ignores, comment limits, and deterministic checks with \`.orvex-review.yml\`. Finding confidence is recorded as telemetry, not a suppression threshold.
 
 ## Pricing (USD)
 - Free: 10 lifetime reviews at up to 2/hour, no card required.
@@ -137,7 +137,7 @@ const LLMS_TXT = `# Orvex
 
 A completed standard review uses one unit. An \`@orvex deep\` review uses two.
 Failed or skipped reviews and fix or explanation commands do not consume units.
-Every plan receives the same three-pass depth, deterministic checks, strict verification, and autofix. Paid plans add on-demand deep review. Plans otherwise differ by review track, allowance, hourly capacity, queue priority, and support.
+Every plan receives deterministic checks, source verification, and autofix. Paid plans add on-demand deep review. Plans otherwise differ by review track, pass count, allowance, hourly capacity, queue priority, and support.
 
 ## Billing
 - Pricing is per workspace, not per developer seat.

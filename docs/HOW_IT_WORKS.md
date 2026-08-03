@@ -123,21 +123,20 @@ off by default.
 
 ## 5. Plans
 
-PRODUCT RULE (2026-07-09): **every plan runs the IDENTICAL pipeline** — 3
-passes (general / deep-dive / perf+completeness), top-28 retrieval, strict
-verification, autofix, code execution. Plans differ ONLY by (a) which MODELS
-run and (b) volume/rate/price. Depth is never the tier differentiator.
+Every plan includes deterministic checks, source-grounded verification, autofix,
+and optional runtime verification behind the relevant operations flag. The review
+tracks differ in pass count, model mix, included volume, rate limits, and billing.
 
-| Capability | Free trial | Panel (`review`) | Panel Unlimited | Verify | Enterprise |
-|---|---|---|---|---|---|
-| Review passes | 3 | 3 | 3 | 3 | 3 |
-| Index retrieval (top-K files) | 28 | 28 | 28 | 28 | 28 |
-| Models | MiniMax + DeepSeek | MiniMax + DeepSeek | MiniMax + DeepSeek | OpenAI (codex CLI, agentic repo explore) + DeepSeek + MiniMax | MiniMax + DeepSeek |
-| Strict verification | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Commit fixes / `@orvex` commands | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Code execution (runtime verify) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
-| Nightly whole-repo scans | — (uncapped-cost risk on unpaid) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
-| Reviews | 10 lifetime, 2/hr | 5/hr, 75/mo (+$0.50 overage) | ∞ @ 10/hr | 10/hr, 150/mo (+$1.50 overage) | custom |
+| Capability | Free trial | Starter (`review`) | Pro Unlimited (`review-plus`) | Verify Lite | Verify | Enterprise |
+|---|---|---|---|---|---|---|
+| Review passes | 3 | 3 | 3 | 4 | 4 | 4 |
+| Index retrieval (top-K files) | 28 | 28 | 28 | 28 | 28 | 28 |
+| Review track | dual-model | dual-model | dual-model | multi-model | multi-model | multi-model |
+| Strict verification | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Commit fixes / `@orvex` commands | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Code execution (runtime verify) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
+| Nightly whole-repo scans | — | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
+| Included reviews and rate | 10 lifetime, 2/hr | 100/mo, 5/hr; +$0.50/review | no monthly quota, 10/hr | 50/mo, 5/hr; +$0.75/review | 120/mo, 10/hr; +$0.75/review | custom contract |
 
 The hourly/monthly numbers are **safety ceilings, not usage targets** — sized as
 tail-risk insurance (see `packages/tenants/src/plans.ts` for the cost math) so a
@@ -147,11 +146,10 @@ they're a backstop, not a constraint. Command/manual re-review of an unchanged
 commit also has a 2-minute cooldown for the same reason — a fresh push is never
 affected.
 
-The tiers differ by **model mix and volume**, never depth: dual-model plans
-run MiniMax (passes 1+3) + DeepSeek v4 Pro at max reasoning (pass 2); Verify
-swaps pass 1 to the OpenAI frontier model via the codex CLI (API-key auth),
-which agentically explores a full repo checkout. Code execution and nightly
-scans sit behind ops flags (`ORVEX_CODE_EXECUTION`, `ORVEX_NIGHTLY_SCANS`).
+Dual-model and multi-model tracks use different review mixes; Verify Lite,
+Verify, and Enterprise run the four-pass multi-model track. Paid plans can
+request the two-unit `@orvex deep` review. Code execution and nightly scans sit
+behind ops flags (`ORVEX_CODE_EXECUTION`, `ORVEX_NIGHTLY_SCANS`).
 
 Free is a **lifetime trial (10 reviews, 2/hour) anchored to the GitHub account** —
 a second workspace or a reinstall can't reset it. Defined in
