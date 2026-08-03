@@ -118,7 +118,17 @@ test('P3-8: a below-confidence re-detection still counts as "seen" and prevents 
     priorReviewSha: 'sha1',
   });
   assert.equal(res.newlyFixed.length, 0, 're-detected below threshold must still block false fixed');
-  assert.equal(res.toPost.length, 0, 'below threshold is not posted');
+  assert.equal(res.toPost.length, 0, 'an already-open finding is not posted again');
+  assert.equal(res.reviewOnly.length, 0, 'an already-open finding is not duplicated in manual review');
+});
+
+test('a new below-confidence finding is retained on the manual-review surface', () => {
+  const lowConfidence = { ...finding('a.ts', 'uncertain bug'), confidence: 0.3 };
+  const res = mergeFindings([lowConfidence], [], 'sha2', { minConfidence: 0.6 });
+  assert.equal(res.toPost.length, 0, 'below threshold stays out of confirmed findings');
+  assert.equal(res.reviewOnly.length, 1, 'below threshold must remain visible, not be deleted');
+  assert.equal(res.reviewOnly[0].finding.message, 'uncertain bug');
+  assert.match(res.reviewOnly[0].reason, /0\.30.*0\.60/);
 });
 
 test('P2-9: incoming duplicates are deduped by fingerprint before posting', () => {

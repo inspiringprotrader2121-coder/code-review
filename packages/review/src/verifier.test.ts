@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyVerdicts, isProtectedSourceTier } from './verifier.js';
+import { applyVerdicts, isProtectedSourceTier, partitionVerifiedFindings } from './verifier.js';
 import type { ReviewFinding } from './finding.js';
 
 const finding = (over: Partial<ReviewFinding>): ReviewFinding => ({
@@ -91,4 +91,42 @@ test('DeepSeek Flash receives the same hedged-veto protection as the other stron
   for (const tier of [undefined, 'standard', 'premium', 'unknown']) {
     assert.equal(isProtectedSourceTier(tier), false, `${tier ?? 'undefined'} must use the normal verifier gate`);
   }
+});
+
+test('verification demotes rejected candidates instead of deleting them after the pass union', () => {
+  const confirmed = finding({ message: 'confirmed finding', sourceTier: 'standard' });
+  const normal = finding({ message: 'normal rejection', sourceTier: 'standard' });
+  const flash = finding({ message: 'flash hedge', sourceTier: 'deepseek-flash' });
+  const factual = finding({ message: 'flash factual refutation', sourceTier: 'deepseek-flash' });
+  const low = finding({ message: 'low confidence candidate', confidence: 0.3 });
+  const out = partitionVerifiedFindings(
+    [confirmed, normal, flash, factual],
+    [{ finding: low, reason: 'Model confidence 0.30 is below the configured confirmation floor (0.60).' }],
+    {
+      kept: [confirmed, low],
+      dropped: [
+        { finding: normal, reason: 'the finding is not supported by the source' },
+        { finding: flash, reason: 'cannot independently verify this from the code shown' },
+        { finding: factual, reason: 'the function returns early when user is null; the described failure is impossible' },
+      ],
+      duplicates: [],
+    },
+  );
+
+  assert.deepEqual(
+    out.toPost.map((f) => f.message).sort(),
+    ['confirmed finding', 'flash hedge'].sort(),
+    'confirmed findings and hedged protected rejections stay on the normal surface',
+  );
+  assert.equal(out.rescued.length, 1);
+  assert.equal(out.refuted.length, 1, 'factual protected refutations are not restored as confirmed');
+  assert.deepEqual(
+    out.reviewOnly.map((item) => item.finding.message).sort(),
+    ['flash factual refutation', 'low confidence candidate', 'normal rejection'].sort(),
+    'ordinary and factual verifier rejections remain visible for manual review',
+  );
+  assert.match(
+    out.reviewOnly.find((item) => item.finding.message === 'flash factual refutation')!.reason,
+    /Verifier did not confirm/,
+  );
 });

@@ -13,6 +13,7 @@ export {
 export { runCodexCliReview, closeCodexSession, isCodexRepoAllowed, killAllCodexChildren, type CodexCliReviewOptions, type CodexCliReviewResult } from './codex-cli.js';
 export {
   type ReviewFinding,
+  type ReviewSurfaceFinding,
   fingerprintFinding,
   normalizeMessage,
   findingId,
@@ -63,6 +64,7 @@ export {
   verifyFindings,
   verifyFixes,
   isProtectedSourceTier,
+  partitionVerifiedFindings,
   type VerifierOptions,
   type VerifiedFindings,
   type FixCandidate,

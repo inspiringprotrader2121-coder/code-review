@@ -22,6 +22,13 @@ export interface ReviewFinding {
   sourceTier?: string;
 }
 
+/** A candidate that is visible in the review summary but intentionally excluded
+ * from inline comments, auto-fix, and the persisted open-finding state. */
+export interface ReviewSurfaceFinding {
+  finding: ReviewFinding;
+  reason: string;
+}
+
 export function normalizeMessage(message: string): string {
   return message
     .toLowerCase()

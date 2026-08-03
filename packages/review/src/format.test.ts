@@ -90,3 +90,21 @@ test('a fully-completed clean review still reads as clean', () => {
   assert.match(body, /it looks good to merge/);
   assert.doesNotMatch(body, /did not complete/);
 });
+
+test('manual-review candidates remain visible without becoming inline findings or auto-fix work', () => {
+  const body = formatReviewBody([], [], {
+    ...meta,
+    trigger: '@orvex',
+    canAutofix: true,
+    reviewOnly: [{
+      finding: finding({ severity: 'P2', message: 'Possible auth bypass' }),
+      reason: 'Verifier did not confirm it: not enough evidence in the diff',
+    }],
+  });
+  assert.match(body, /No confirmed issues to post inline/);
+  assert.match(body, /finding for manual review/);
+  assert.match(body, /Possible auth bypass/);
+  assert.match(body, /not enough evidence in the diff/);
+  assert.doesNotMatch(body, /Fix all of these with Orvex/);
+  assert.doesNotMatch(body, /it looks good to merge/);
+});

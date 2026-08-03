@@ -1,4 +1,4 @@
-import type { ReviewFinding } from './finding.js';
+import type { ReviewFinding, ReviewSurfaceFinding } from './finding.js';
 
 export interface ReviewCommentMeta {
   owner: string;
@@ -27,6 +27,9 @@ export interface ReviewCommentMeta {
    *  reads "no issues found" while one of its promised reviewers never ran is a
    *  false assurance the customer paid for.) */
   skippedLenses?: string[];
+  /** Candidate findings that are intentionally shown for manual review instead
+   * of posted inline or treated as confirmed open findings. */
+  reviewOnly?: ReviewSurfaceFinding[];
 }
 
 const MAX_FILES_LISTED = 25;
@@ -106,7 +109,8 @@ export function formatReviewBody(
 
   const tableFindings = [...inline, ...summaryOnly];
   const hasStillOpen = (meta.stillOpen?.length ?? 0) > 0;
-  if (tableFindings.length === 0 && nitpicks.length === 0 && !hasStillOpen) {
+  const manualReview = meta.reviewOnly ?? [];
+  if (tableFindings.length === 0 && nitpicks.length === 0 && !hasStillOpen && manualReview.length === 0) {
     lines.push(
       '',
       meta.coverage
@@ -118,8 +122,10 @@ export function formatReviewBody(
             '✅ **No issues found by the passes that completed.** One or more review passes did not finish (see the warning above), so this is NOT a full sign-off — re-run to cover the missing lens.'
           : '✅ **No issues found.** Nothing in this change looked unsafe or incorrect on this pass — it looks good to merge.',
     );
-  } else if (tableFindings.length === 0 && nitpicks.length > 0 && !hasStillOpen) {
+  } else if (tableFindings.length === 0 && nitpicks.length > 0 && !hasStillOpen && manualReview.length === 0) {
     lines.push('', `✅ **No blocking issues.** Just ${nitpicks.length} low-severity ${nitpicks.length === 1 ? 'note' : 'notes'}, folded below.`);
+  } else if (tableFindings.length === 0 && !hasStillOpen && manualReview.length > 0) {
+    lines.push('', `🔎 **No confirmed issues to post inline.** ${manualReview.length} candidate${manualReview.length === 1 ? '' : 's'} needs manual review below.`);
   } else if (tableFindings.length === 0) {
     lines.push('', '**No new issues on this pass** — the previously reported findings below are still open.');
   } else {
@@ -179,6 +185,25 @@ export function formatReviewBody(
       const file = f.line ? `\`${sanitizeFileCell(f.file)}:${f.line}\`` : `\`${sanitizeFileCell(f.file)}\``;
       const msg = sanitizeFindingText(f.message).replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 300);
       lines.push(`| ${f.severity} | ${file} | ${msg} |`);
+    }
+    lines.push('', '</details>');
+  }
+
+  if (manualReview.length > 0) {
+    lines.push(
+      '',
+      `<details><summary>🔎 ${manualReview.length} finding${manualReview.length === 1 ? '' : 's'} for manual review</summary>`,
+      '',
+      'These candidates were not confirmed strongly enough for an inline comment or auto-fix. They are included so the evidence remains visible.',
+      '',
+      '| Severity | File | Candidate | Why manual review |',
+      '| --- | --- | --- | --- |',
+    );
+    for (const { finding, reason } of manualReview) {
+      const file = finding.line ? `\`${sanitizeFileCell(finding.file)}:${finding.line}\`` : `\`${sanitizeFileCell(finding.file)}\``;
+      const message = sanitizeFindingText(finding.message).replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 300);
+      const why = sanitizeFindingText(reason).replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 220);
+      lines.push(`| ${finding.severity} | ${file} | ${message} | ${why} |`);
     }
     lines.push('', '</details>');
   }

@@ -1,6 +1,6 @@
 import type { StoredFinding } from '@orvex-review/store';
 import { auditDocIssuesOpenOnHead } from '@orvex-review/rules';
-import type { ReviewFinding } from './finding.js';
+import type { ReviewFinding, ReviewSurfaceFinding } from './finding.js';
 import { fingerprintFinding, findingId } from './finding.js';
 
 export interface FileReader {
@@ -81,13 +81,11 @@ function fixLanded(originalCode: string | undefined, fixedCode: string | undefin
 
 export interface MergeResult {
   toPost: ReviewFinding[];
+  /** Findings below the configured confirmation floor. They remain visible in
+   *  the review's manual-review section instead of being deleted. */
+  reviewOnly: ReviewSurfaceFinding[];
   stillOpen: StoredFinding[];
   newlyFixed: StoredFinding[];
-  /** findings a model reported but whose confidence fell below minConfidence —
-   *  returned so the caller can LOG them. A real DeepSeek finding vanished here
-   *  silently (PR91, 2026-07-09: "1 unique finding" → "0 posted", no trace).
-   *  Nothing in the pipeline may drop a finding without a visible log line. */
-  lowConfidence: ReviewFinding[];
   stats: { newCount: number; fixedCount: number; openCount: number };
 }
 
@@ -122,22 +120,35 @@ export function mergeFindings(
   headSha: string,
   opts: MergeOptions,
 ): MergeResult {
-  const incomingFp = new Set<string>();
-  const toPost: ReviewFinding[] = [];
-  const lowConfidence: ReviewFinding[] = [];
-
+  // Multiple passes can describe the same fingerprint at different confidence
+  // levels. Keep its strongest copy before deciding which surface it belongs
+  // on, otherwise a low-confidence first copy could create a duplicate manual
+  // row beside a later confirmed copy.
+  const incomingByFingerprint = new Map<string, ReviewFinding>();
   for (const f of incoming) {
     const fp = fingerprintFinding(f);
-    incomingFp.add(fp); // register as seen even if confidence is below the post threshold (P3-8)
+    const existing = incomingByFingerprint.get(fp);
+    if (!existing || f.confidence > existing.confidence) incomingByFingerprint.set(fp, f);
+  }
+  const incomingFp = new Set(incomingByFingerprint.keys());
+  const toPost: ReviewFinding[] = [];
+  const reviewOnly: ReviewSurfaceFinding[] = [];
+
+  for (const f of incomingByFingerprint.values()) {
+    const fp = fingerprintFinding(f);
+    const priorOpen = prior.find((p) => p.fingerprint === fp && p.status === 'open');
+    // A low-confidence re-detection is still enough to keep an existing
+    // finding open, but it should not repeat a manual-review row that has
+    // already been posted as a normal finding.
+    if (priorOpen) continue;
 
     if (f.confidence < opts.minConfidence) {
-      lowConfidence.push(f);
+      reviewOnly.push({
+        finding: f,
+        reason: `Model confidence ${f.confidence.toFixed(2)} is below the configured confirmation floor (${opts.minConfidence.toFixed(2)}).`,
+      });
       continue;
     }
-
-    const priorOpen = prior.find((p) => p.fingerprint === fp && p.status === 'open');
-    if (priorOpen) continue;
-    if (incomingFp.has(fp) && toPost.some((x) => fingerprintFinding(x) === fp)) continue; // dedup incoming (P2-9)
 
     toPost.push(f);
   }
@@ -173,9 +184,9 @@ export function mergeFindings(
 
   return {
     toPost,
+    reviewOnly,
     stillOpen,
     newlyFixed,
-    lowConfidence,
     stats: {
       newCount: toPost.length,
       fixedCount: newlyFixed.length,

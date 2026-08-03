@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { llmChat, extractJsonLoose } from './llm-client.js';
 import { isTransientLlmError } from './llm.js';
 import { redactSecrets } from './redact.js';
-import type { ReviewFinding } from './finding.js';
+import { fingerprintFinding, type ReviewFinding, type ReviewSurfaceFinding } from './finding.js';
 
 const MANIFEST_NAMES = new Set([
   'package.json',
@@ -78,6 +78,95 @@ export function isProtectedSourceTier(sourceTier: string | undefined): boolean {
     || sourceTier === 'deepseek'
     || sourceTier === 'deepseek-flash'
     || sourceTier === 'deterministic';
+}
+
+export interface VerificationDisposition {
+  /** Confirmed candidates that can be posted as normal findings. */
+  toPost: ReviewFinding[];
+  /** Candidates that remain visible but require a human to decide. */
+  reviewOnly: ReviewSurfaceFinding[];
+  /** Protected findings restored after a hedged verifier rejection. */
+  rescued: Array<{ finding: ReviewFinding; reason: string }>;
+  /** Protected findings with a concrete verifier refutation. They are still
+   *  visible in reviewOnly, rather than silently deleted. */
+  refuted: Array<{ finding: ReviewFinding; reason: string }>;
+}
+
+/**
+ * Apply verification AFTER every review pass has been unioned. Verification can
+ * control presentation, but it is not allowed to make a candidate disappear:
+ * ordinary rejections are routed to the manual-review surface, while a hedged
+ * rejection of a protected source remains a normal finding.
+ */
+export function partitionVerifiedFindings(
+  toPost: ReviewFinding[],
+  reviewOnly: ReviewSurfaceFinding[],
+  verified: VerifiedFindings,
+): VerificationDisposition {
+  const confirmedFingerprints = new Set(toPost.map((finding) => fingerprintFinding(finding)));
+  const manualByFingerprint = new Map(
+    reviewOnly.map((item) => [fingerprintFinding(item.finding), item]),
+  );
+  const surfaced = new Map<string, ReviewSurfaceFinding>();
+  const seenManual = new Set<string>();
+  const result: VerificationDisposition = { toPost: [], reviewOnly: [], rescued: [], refuted: [] };
+
+  const addToReviewSurface = (item: ReviewSurfaceFinding) => {
+    const fp = fingerprintFinding(item.finding);
+    const existing = surfaced.get(fp);
+    if (!existing || item.finding.confidence > existing.finding.confidence) {
+      surfaced.set(fp, item);
+      return;
+    }
+    if (!existing.reason.includes(item.reason)) {
+      surfaced.set(fp, { ...existing, reason: `${existing.reason} ${item.reason}` });
+    }
+  };
+
+  for (const finding of verified.kept) {
+    const fp = fingerprintFinding(finding);
+    const manual = manualByFingerprint.get(fp);
+    if (manual) {
+      seenManual.add(fp);
+      addToReviewSurface({ ...manual, finding });
+    } else if (confirmedFingerprints.has(fp)) {
+      result.toPost.push(finding);
+    } else {
+      addToReviewSurface({
+        finding,
+        reason: 'Verification returned this candidate outside the confirmed review set.',
+      });
+    }
+  }
+
+  for (const dropped of verified.dropped) {
+    const fp = fingerprintFinding(dropped.finding);
+    const manual = manualByFingerprint.get(fp);
+    if (manual) seenManual.add(fp);
+    const protectedHedge = isProtectedSourceTier(dropped.finding.sourceTier) && isHedgedRejection(dropped.reason);
+    if (protectedHedge && !manual) {
+      result.toPost.push(dropped.finding);
+      result.rescued.push(dropped);
+      continue;
+    }
+
+    const reason = manual
+      ? `${manual.reason} Verifier did not confirm it: ${dropped.reason}`
+      : `Verifier did not confirm it: ${dropped.reason}`;
+    addToReviewSurface({ finding: dropped.finding, reason });
+    if (isProtectedSourceTier(dropped.finding.sourceTier) && !isHedgedRejection(dropped.reason)) {
+      result.refuted.push(dropped);
+    }
+  }
+
+  // A verifier may merge a manual-review candidate into another root cause.
+  // Preserve it as a visible candidate rather than losing it due to that merge.
+  for (const [fp, item] of manualByFingerprint) {
+    if (!seenManual.has(fp)) addToReviewSurface(item);
+  }
+
+  result.reviewOnly = [...surfaced.values()];
+  return result;
 }
 
 // Sized for GLM-5.2's 1M-token window — the verifier must see the FULL file to

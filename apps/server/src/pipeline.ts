@@ -28,8 +28,6 @@ import {
 } from '@orvex-review/rules';
 import {
   applyCheckboxLine,
-  isHedgedRejection,
-  isProtectedSourceTier,
   checkImportBindings,
   commandTrigger,
   dedupeByFileLine,
@@ -45,6 +43,7 @@ import {
   isTransientLlmError,
   REVIEW_INCOMPLETE_SUMMARY,
   mergeFindings,
+  partitionVerifiedFindings,
   reconcileFixedOnHead,
   dropSelfNegatingFindings,
   runLlmReview,
@@ -1398,12 +1397,12 @@ async function executeReview(
     protectedFingerprints: new Set(readErrorFps),
   });
 
-  // A model reported these but below min_confidence — the drop must be VISIBLE
-  // (a real DeepSeek finding vanished here with zero trace on PR91).
-  if (merged.lowConfidence.length > 0) {
+  // A model reported these below min_confidence. They remain visible in the
+  // manual-review section; never delete a candidate solely for uncertainty.
+  if (merged.reviewOnly.length > 0) {
     console.log(
-      `[worker] confidence filter dropped ${merged.lowConfidence.length} (min ${reviewConfig.min_confidence}): ` +
-        merged.lowConfidence.map((f) => `${f.severity} ${f.file}:${f.line ?? '?'} conf=${f.confidence}`).join(' | '),
+      `[worker] confidence filter routed ${merged.reviewOnly.length} to manual review (min ${reviewConfig.min_confidence}): ` +
+        merged.reviewOnly.map(({ finding }) => `${finding.severity} ${finding.file}:${finding.line ?? '?'} conf=${finding.confidence}`).join(' | '),
     );
   }
 
@@ -1411,6 +1410,7 @@ async function executeReview(
   const suppressed = config.store.getSuppressedFingerprints(installationId, owner, repo);
   if (suppressed.size > 0) {
     merged.toPost = merged.toPost.filter((f) => !suppressed.has(fingerprintFinding(f)));
+    merged.reviewOnly = merged.reviewOnly.filter(({ finding }) => !suppressed.has(fingerprintFinding(finding)));
   }
 
   // drop self-negating findings ("impact is nil", "harmless", "nitpick") — the
@@ -1423,6 +1423,15 @@ async function executeReview(
     );
   }
   merged.toPost = denoised.kept;
+  const manualDenoised = dropSelfNegatingFindings(merged.reviewOnly.map(({ finding }) => finding));
+  if (manualDenoised.dropped.length > 0) {
+    console.log(
+      `[worker] noise filter removed ${manualDenoised.dropped.length} manual-review candidate(s): ` +
+        manualDenoised.dropped.map((f) => `${f.severity} ${f.file}`).join(', '),
+    );
+  }
+  const manualKept = new Set(manualDenoised.kept.map((f) => fingerprintFinding(f)));
+  merged.reviewOnly = merged.reviewOnly.filter(({ finding }) => manualKept.has(fingerprintFinding(finding)));
 
   // adversarial verification pass: a skeptical second model call tries to
   // refute each finding against the source. Give it the changed code for EVERY
@@ -1468,14 +1477,18 @@ async function executeReview(
       }
     }
   }
-  if (merged.toPost.length > 0 && process.env.ORVEX_VERIFY !== '0' && verifyFiles.length > 0) {
+  const verificationCandidates = [
+    ...merged.toPost,
+    ...merged.reviewOnly.map(({ finding }) => finding),
+  ];
+  if (verificationCandidates.length > 0 && process.env.ORVEX_VERIFY !== '0' && verifyFiles.length > 0) {
     // ONE verification pass at the end of the review (NOT a second full review) —
     // strict/premise-checking on deepVerify tiers (rejects false positives incl.
     // wrong-library-version claims, using the manifests fetched above), recall-
     // biased otherwise. Always the standard model (MiniMax), even when the review
     // ran on codex — verification is a cheap filter, not the reviewer.
     const mode = plan.deepVerify ? 'strict' : 'recall';
-    const verified = await verifyFindings(merged.toPost, verifyFiles, {
+    const verified = await verifyFindings(verificationCandidates, verifyFiles, {
       apiKey: llm.apiKey,
       model: llm.model,
       baseUrl: llm.baseUrl,
@@ -1488,7 +1501,7 @@ async function executeReview(
     });
     if (verified.dropped.length > 0) {
       console.log(
-        `[worker] verification (${mode}) dropped ${verified.dropped.length}/${merged.toPost.length}: ` +
+        `[worker] verification (${mode}) routed ${verified.dropped.length}/${verificationCandidates.length} to manual review: ` +
           verified.dropped.map((d) => `${d.finding.file} (${d.reason.slice(0, 60)})`).join(' | '),
       );
     }
@@ -1504,42 +1517,21 @@ async function executeReview(
             .join(', '),
       );
     }
-    // PROTECT stronger-reasoner findings: the verifier runs on the CHEAPER model
-    // (MiniMax), and we watched it veto a real codex P2 with the "validated
-    // elsewhere" excuse the rules explicitly forbid. The weaker model must not
-    // overrule a stronger reviewer — that principle applies to BOTH heavy
-    // reasoners: 'openai' (codex/Luna, Verify pass 1) and 'deepseek' (v4-pro at
-    // max effort, the deep-dive pass on every dual-model plan; without this its
-    // findings were vetoable by the same MiniMax that missed them). MiniMax's
-    // own findings still get the full strict gate, so precision on the noisy
-    // majority is unchanged.
-    // 'deterministic' = mechanical rule findings (import/export mismatch): they
-    // carry their own in-message evidence and must never be vetoable by an LLM.
-    //
-    // REASON-BASED, not blanket-restore: a veto backed by a FACTUAL refutation
-    // (the verifier quotes the code and shows the claim is wrong) stands even
-    // against a protected tier — otherwise real hallucinations from the strong
-    // model could never be filtered. Only HEDGED / low-information rejections
-    // ("cannot verify", "validated elsewhere", "unclear") get rescued.
-    const rescued = verified.dropped.filter(
-      (d) => isProtectedSourceTier(d.finding.sourceTier) && isHedgedRejection(d.reason),
-    );
-    const refuted = verified.dropped.filter(
-      (d) => isProtectedSourceTier(d.finding.sourceTier) && !isHedgedRejection(d.reason),
-    );
-    if (rescued.length > 0) {
+    const disposition = partitionVerifiedFindings(merged.toPost, merged.reviewOnly, verified);
+    if (disposition.rescued.length > 0) {
       console.log(
-        `[worker] verification: rescued ${rescued.length} strong-reasoner finding(s) dropped on hedged grounds: ` +
-          rescued.map((d) => `${d.finding.sourceTier} ${d.finding.file}:${d.finding.line}`).join(', '),
+        `[worker] verification: rescued ${disposition.rescued.length} strong-reasoner finding(s) dropped on hedged grounds: ` +
+          disposition.rescued.map((d) => `${d.finding.sourceTier} ${d.finding.file}:${d.finding.line}`).join(', '),
       );
     }
-    if (refuted.length > 0) {
+    if (disposition.refuted.length > 0) {
       console.log(
-        `[worker] verification: ${refuted.length} strong-reasoner finding(s) FACTUALLY refuted (drop stands): ` +
-          refuted.map((d) => `${d.finding.sourceTier} ${d.finding.file}:${d.finding.line} (${d.reason.slice(0, 60)})`).join(', '),
+        `[worker] verification: ${disposition.refuted.length} strong-reasoner finding(s) factually refuted and routed to manual review: ` +
+          disposition.refuted.map((d) => `${d.finding.sourceTier} ${d.finding.file}:${d.finding.line} (${d.reason.slice(0, 60)})`).join(', '),
       );
     }
-    merged.toPost = [...verified.kept, ...rescued.map((d) => d.finding)];
+    merged.toPost = disposition.toPost;
+    merged.reviewOnly = disposition.reviewOnly;
   }
 
   // snap finding lines to lines actually added in the diff — GitHub rejects
@@ -1550,6 +1542,10 @@ async function executeReview(
   // report the same defect and only collide on line once snapped to the nearest
   // added line — this collapses those into the highest-severity single comment.
   merged.toPost = dedupeByFileLine(merged.toPost);
+  merged.reviewOnly = merged.reviewOnly.map((item) => ({
+    ...item,
+    finding: normalizeFindingLine(item.finding, addedLinesByFile),
+  }));
 
   const allFixed = dedupeByFingerprint([...verifiedFixed, ...merged.newlyFixed]);
   let { inline, summaryOnly, nitpicks } = filterAndCapFindings(merged.toPost, reviewConfig);
@@ -1609,6 +1605,7 @@ async function executeReview(
       })),
       trigger: commandTrigger(),
       canAutofix: plan.autofix,
+      reviewOnly: merged.reviewOnly,
     }, nitpicks);
 
     const inlineComments: InlineReviewComment[] = inline
