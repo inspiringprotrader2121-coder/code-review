@@ -12,6 +12,7 @@ import {
   dropSelfNegatingFindings,
   fingerprintFinding,
   isHedgedRejection,
+  isProtectedSourceTier,
   llmFindingsToReviewFindings,
   REVIEW_INCOMPLETE_SUMMARY,
   runLlmReview,
@@ -232,9 +233,8 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
     // without replicating this left the eval applying production's STRICT filter
     // WITHOUT its counterweight, systematically under-reporting recall on
     // exactly the frontier-model findings bench170 exists to track.
-    const PROTECTED_TIERS = new Set(['openai', 'deepseek', 'deterministic']);
     const rescued = verified.dropped.filter(
-      (d) => d.finding.sourceTier && PROTECTED_TIERS.has(d.finding.sourceTier) && isHedgedRejection(d.reason),
+      (d) => isProtectedSourceTier(d.finding.sourceTier) && isHedgedRejection(d.reason),
     );
     if (rescued.length > 0) {
       console.log(`    ↺ rescued ${rescued.length} strong-reasoner finding(s) dropped on hedged grounds`);

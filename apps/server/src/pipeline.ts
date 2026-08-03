@@ -29,6 +29,7 @@ import {
 import {
   applyCheckboxLine,
   isHedgedRejection,
+  isProtectedSourceTier,
   checkImportBindings,
   commandTrigger,
   dedupeByFileLine,
@@ -1520,12 +1521,11 @@ async function executeReview(
     // against a protected tier — otherwise real hallucinations from the strong
     // model could never be filtered. Only HEDGED / low-information rejections
     // ("cannot verify", "validated elsewhere", "unclear") get rescued.
-    const PROTECTED_TIERS = new Set(['openai', 'deepseek', 'deterministic']);
     const rescued = verified.dropped.filter(
-      (d) => d.finding.sourceTier && PROTECTED_TIERS.has(d.finding.sourceTier) && isHedgedRejection(d.reason),
+      (d) => isProtectedSourceTier(d.finding.sourceTier) && isHedgedRejection(d.reason),
     );
     const refuted = verified.dropped.filter(
-      (d) => d.finding.sourceTier && PROTECTED_TIERS.has(d.finding.sourceTier) && !isHedgedRejection(d.reason),
+      (d) => isProtectedSourceTier(d.finding.sourceTier) && !isHedgedRejection(d.reason),
     );
     if (rescued.length > 0) {
       console.log(

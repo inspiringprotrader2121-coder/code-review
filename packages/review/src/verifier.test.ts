@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyVerdicts } from './verifier.js';
+import { applyVerdicts, isProtectedSourceTier } from './verifier.js';
 import type { ReviewFinding } from './finding.js';
 
 const finding = (over: Partial<ReviewFinding>): ReviewFinding => ({
@@ -82,4 +82,13 @@ test('self-referencing and missing verdicts stay kept; severity never downgrades
   });
   assert.equal(out.kept.length, 2, 'no verdict = fail open; self-dup ignored');
   assert.equal(out.kept[0].severity, 'P1', 'verifier may not LOWER severity');
+});
+
+test('DeepSeek Flash receives the same hedged-veto protection as the other strong sources', () => {
+  for (const tier of ['openai', 'deepseek', 'deepseek-flash', 'deterministic']) {
+    assert.equal(isProtectedSourceTier(tier), true, `${tier} must be protected`);
+  }
+  for (const tier of [undefined, 'standard', 'premium', 'unknown']) {
+    assert.equal(isProtectedSourceTier(tier), false, `${tier ?? 'undefined'} must use the normal verifier gate`);
+  }
 });

@@ -65,6 +65,21 @@ export interface VerifiedFindings {
   duplicates: Array<{ finding: ReviewFinding; of: ReviewFinding }>;
 }
 
+/**
+ * A cheaper verifier may reject a stronger reviewer's finding only when it
+ * supplies concrete contrary evidence. Hedged rejections are not enough to
+ * suppress findings from these independently stronger sources.
+ *
+ * Keep this policy in the review package because production and the offline
+ * evaluator must make the same rescue decision.
+ */
+export function isProtectedSourceTier(sourceTier: string | undefined): boolean {
+  return sourceTier === 'openai'
+    || sourceTier === 'deepseek'
+    || sourceTier === 'deepseek-flash'
+    || sourceTier === 'deterministic';
+}
+
 // Sized for GLM-5.2's 1M-token window — the verifier must see the FULL file to
 // correctly confirm/refute a finding (truncation made it reject real findings it
 // "couldn't see the source" for).

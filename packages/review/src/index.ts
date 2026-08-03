@@ -62,6 +62,7 @@ export { runAgent, type AgentFile, type AgentOptions, type AgentResponse } from 
 export {
   verifyFindings,
   verifyFixes,
+  isProtectedSourceTier,
   type VerifierOptions,
   type VerifiedFindings,
   type FixCandidate,
