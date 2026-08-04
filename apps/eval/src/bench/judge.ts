@@ -32,9 +32,30 @@ const sevOf = severityOf;
 interface Finding { pr: number; bot: string; path: string | null; line: number | null; sev: string | null; text: string; }
 
 function llmEnv() {
-  const k = process.env.MINIMAX_API_KEY;
-  if (!k) throw new Error('MINIMAX_API_KEY required');
-  return { apiKey: k, baseUrl: process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1', model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3' };
+  // BENCH_JUDGE=deepseek reroutes the judge to DeepSeek — needed when the
+  // MiniMax token plan is exhausted (a hard 429 no amount of retrying fixes).
+  if (process.env.BENCH_JUDGE === 'deepseek') {
+    const dk = process.env.ORVEX_DEEPSEEK_API_KEY;
+    if (!dk) throw new Error('BENCH_JUDGE=deepseek needs ORVEX_DEEPSEEK_API_KEY');
+    return {
+      apiKey: dk,
+      baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+      model: process.env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
+      api: undefined,
+    };
+  }
+  // Prefer the pipeline's own standard-model config (ORVEX_STANDARD_*) — that
+  // key/endpoint pair is what production actually calls, so it is known-good.
+  // The bare MINIMAX_* names predate it and can hold a stale key.
+  const k = process.env.ORVEX_STANDARD_API_KEY ?? process.env.MINIMAX_API_KEY;
+  if (!k) throw new Error('ORVEX_STANDARD_API_KEY (or MINIMAX_API_KEY) required');
+  const baseUrl =
+    process.env.ORVEX_STANDARD_BASE_URL ?? process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1';
+  // Production configures MiniMax through its Anthropic-shaped endpoint
+  // (…/anthropic). Calling that with the default /chat/completions shape 404s.
+  const api = /\/anthropic\b/.test(baseUrl) ? ('anthropic' as const) : undefined;
+  const model = process.env.ORVEX_STANDARD_MODEL ?? process.env.MINIMAX_MODEL ?? 'MiniMax-M3';
+  return { apiKey: k, baseUrl, model, api };
 }
 
 async function main() {
