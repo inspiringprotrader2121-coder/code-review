@@ -67,8 +67,13 @@ function llmEnv(env: NodeJS.ProcessEnv = process.env): PassTarget {
   const stdKey = env.ORVEX_STANDARD_API_KEY;
   const minimax = env.MINIMAX_API_KEY;
   const anthropic = env.ANTHROPIC_API_KEY;
+  // When the API is declared anthropic-shaped but no base URL is given, the
+  // default must be the /anthropic endpoint (mirrors production loadWorkerConfig)
+  // — an Anthropic client pointed at /v1 fails on every call.
+  const defaultBase = (apiVar: string | undefined): string =>
+    apiVar === 'anthropic' ? 'https://api.minimax.io/anthropic' : 'https://api.minimax.io/v1';
   if (stdKey) {
-    const baseUrl = env.ORVEX_STANDARD_BASE_URL ?? 'https://api.minimax.io/v1';
+    const baseUrl = env.ORVEX_STANDARD_BASE_URL ?? defaultBase(env.ORVEX_STANDARD_API);
     return {
       apiKey: stdKey,
       baseUrl,
@@ -77,7 +82,7 @@ function llmEnv(env: NodeJS.ProcessEnv = process.env): PassTarget {
     };
   }
   if (minimax) {
-    const baseUrl = env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1';
+    const baseUrl = env.MINIMAX_BASE_URL ?? defaultBase(env.MINIMAX_API);
     return {
       apiKey: minimax,
       baseUrl,

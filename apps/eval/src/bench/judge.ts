@@ -133,7 +133,9 @@ async function main() {
     const user = `Finding (Orvex, ${c.sev}) at ${c.path}:${c.line ?? '?'}:\n${c.orvexText.slice(0, 500)}\n\nCode around that location:\n\`\`\`\n${code}\n\`\`\``;
     let verdict = 'uncertain', reason = '';
     try {
-      const raw = await llmChat(system, user, { ...llm, thinking: false, maxTokens: 200 });
+      // maxTokens must leave room for models that reason by default (deepseek):
+      // 200 was exhausted mid-reasoning, surfacing every call as an error.
+      const raw = await llmChat(system, user, { ...llm, thinking: false, maxTokens: 4000 });
       const m = raw.match(/\{[\s\S]*\}/);
       const p = m ? JSON.parse(m[0]) : null;
       verdict = p?.verdict ?? 'uncertain'; reason = p?.reason ?? '';
@@ -145,12 +147,19 @@ async function main() {
   }
 
   const judged = real + falsePos; // exclude uncertain from the ratio
-  const precision = judged ? Math.round((real / judged) * 100) : 0;
   console.log('\n── precision on Orvex-only P1/P2 findings ──');
   console.log(`real: ${real} · false: ${falsePos} · uncertain: ${uncertain}`);
+  if (judged === 0 && toJudge.length > 0) {
+    // A judge whose every call failed must read as an INVALID RUN, not as 0%
+    // precision — the exact misread this tool produced when the judge model
+    // was misconfigured/out of credits.
+    console.log('RUN INVALID: every candidate came back uncertain (judge errors?) — no precision measured.');
+    process.exit(1);
+  }
+  const precision = judged ? Math.round((real / judged) * 100) : 0;
   console.log(`precision (real / (real+false)) = ${precision}%`);
   if (falses.length) { console.log('\nfalse positives:'); console.log(falses.join('\n')); }
-  console.log('\nNote: judge = MiniMax (same family as the verifier), so this is a sanity check, not a fully independent oracle. Corroborated findings (a competitor agreed) are assumed real and not re-judged.');
+  console.log('\nNote: the judge model shares a family with pipeline models, so this is a sanity check, not a fully independent oracle. Corroborated findings (a competitor agreed) are assumed real and not re-judged.');
 }
 
 main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });

@@ -59,10 +59,12 @@ so a deep review finishes in a few minutes, not tens of minutes:
   error, after retries). Fix verification fails closed (never commits an unverified
   change).
 
-The first-pass review sees code and diff context, not the PR author's explanation.
-Author intent is an untrusted claim reserved for the independent verifier when it
-can concretely establish that a reported behavior change was deliberate. Confidence
-is recorded as telemetry; it is not a normal-surface deletion or inline-comment gate.
+Neither the review passes nor the verifier read the PR author's explanation —
+title and body are a prompt-injection channel and carry no evidentiary weight.
+A deliberate feature removal is instead recognized from the diff itself: a
+coherent removal (code, tests, and config deleted together) with no surviving
+dependent is rejectable on that evidence alone. Confidence is recorded as
+telemetry; it is not a normal-surface deletion or inline-comment gate.
 The verifier can instead demote a refuted candidate to the visible manual-review
 surface with its reason.
 

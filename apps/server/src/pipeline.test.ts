@@ -74,6 +74,29 @@ test('factual refutations stand (drop is NOT rescued)', () => {
   }
 });
 
+test('the explicit-behavior rejection bullet produces reasons that survive as factual', () => {
+  // The strict prompt's "explicitly surfaces it" bullet only works if the
+  // rejection wording it elicits is NOT then classified as a hedge and rescued.
+  // The canonical phrasings must stay factual; the known collisions must stay
+  // hedged (they lean on "elsewhere"/"intentional" vocabulary, which IS hedging
+  // when the evidence is not quoted inline).
+  const factual = [
+    'the function explicitly returns a skipped reason at line 371, so the omission is not silent',
+    'not silent: consumePlatformToken() returns { skipped: "legacy" } to its caller at token.js:176',
+    'the error is propagated to the caller via reject() at line 88, contradicting the swallowed claim',
+  ];
+  for (const reason of factual) {
+    assert.equal(isHedgedRejection(reason), false, `expected factual: ${reason}`);
+  }
+  const stillHedged = [
+    'not silent: the condition is logged and handled elsewhere by reportSkip() at util.ts:20',
+    'the fallback appears intentional; line 42 says fall back to HTTP by design',
+  ];
+  for (const reason of stillHedged) {
+    assert.equal(isHedgedRejection(reason), true, `expected hedged: ${reason}`);
+  }
+});
+
 test('Verify routes its first pass to the direct OpenAI Luna target', () => {
   const config = modelRoutingConfig();
 

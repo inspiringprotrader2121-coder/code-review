@@ -140,3 +140,41 @@ test('an exact match beyond the bounded merger input still counts toward recurre
   assert.equal(result.reviewOnly.length, 0);
   assert.equal(result.clusterCount, 1);
 });
+
+test('an over-merging LLM cannot absorb a distant same-file defect — far members split into singletons', async () => {
+  // Two DISTINCT defects in one file, far apart, one per sample. A steered or
+  // sloppy merger clusters them; the line-spread guard must split them so the
+  // second defect is neither deleted nor counted as recurrence.
+  const entries: RepeatedFinding[] = [
+    { sample: 0, finding: finding({ line: 12, message: 'Bug A: reservation leak on retry.' }) },
+    { sample: 1, finding: finding({ line: 480, severity: 'P1', message: 'Bug B: auth check missing on delete.' }) },
+  ];
+  const merged = await aggregateRepeatedFindings(entries, {
+    minOccurrences: 2,
+    maxCandidates: 120,
+    mergeWithLlm: async () =>
+      JSON.stringify({ clusters: [{ representative: 0, members: [0, 1] }] }),
+  });
+  // Neither defect recurs on its own, so both must survive on the manual
+  // surface — nothing posted as fake recurrence, nothing silently deleted.
+  assert.equal(merged.findings.length, 0);
+  assert.equal(merged.reviewOnly.length, 2);
+  const kept = merged.reviewOnly.map((r) => r.finding.message).sort();
+  assert.match(kept[0], /Bug A/);
+  assert.match(kept[1], /Bug B/);
+});
+
+test('nearby same-defect anchors from different samples still merge into one recurring finding', async () => {
+  const entries: RepeatedFinding[] = [
+    { sample: 0, finding: finding({ line: 12 }) },
+    { sample: 1, finding: finding({ line: 16, message: 'Reservation is leaked when the retry request fails.' }) },
+  ];
+  const merged = await aggregateRepeatedFindings(entries, {
+    minOccurrences: 2,
+    maxCandidates: 120,
+    mergeWithLlm: async () =>
+      JSON.stringify({ clusters: [{ representative: 0, members: [0, 1] }] }),
+  });
+  assert.equal(merged.findings.length, 1);
+  assert.equal(merged.reviewOnly.length, 0);
+});

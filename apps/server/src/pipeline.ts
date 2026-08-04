@@ -995,8 +995,8 @@ async function executeReview(
     // how long one model call decides to think. Higher tiers get more passes and
     // (Verify only) an exhaustive whole-repo sweep. Findings accumulate and
     // dedupe by fingerprint; a hard call-count cap prevents runaway.
-    // First-pass reviewers receive diff and code context only. PR author intent
-    // remains available to the separate verifier as an untrusted claim.
+    // Reviewers and verifier receive diff and code context only — PR title/body
+    // are a prompt-injection channel and reach no model prompt anywhere.
     const baseCtx: ReviewPromptContext = { ...(reviewContext ?? {}) };
     const runReview = (ctx: typeof baseCtx, target: LlmTarget, tier: PassTier, temperature?: number) =>
       runLlmReview(filesForLlm, {
@@ -1214,9 +1214,17 @@ async function executeReview(
     if (aggregation.enabled) {
       const repeatedCalls: ReviewCall[] = Array.from({ length: aggregation.effectiveRuns }, (_, sample) =>
         passCalls.map((call): ReviewCall => {
+          // Sample 0 keeps the ORIGINAL call untouched — including agentic CLI
+          // mode with its repo-exploration shell access. Aggregation must never
+          // silently downgrade pass 0 to a single-shot API call: the CLI is a
+          // capability (rg/cat/git over the checkout), not just a model choice.
+          if (sample === 0) {
+            return { ...call, label: `${call.label} sample 1/${aggregation.effectiveRuns}`, sample };
+          }
           // Agentic Codex sessions are deliberately sequential and stateful.
-          // Repeated samples must be independent, so select the equivalent
-          // direct API target rather than resuming a shared CLI conversation.
+          // Repeated samples must be independent, so samples 1+ select the
+          // equivalent direct API target rather than resuming a shared CLI
+          // conversation.
           const routed = modelForPass(config, plan, call.modelPassIndex ?? 0, false);
           return {
             ...call,
@@ -1233,10 +1241,13 @@ async function executeReview(
     } else {
       toRun = reviewCalls.slice(0, maxCalls);
     }
-    console.log(
-      `[worker] deep review: ${toRun.length} calls (${passes} passes + ${toRun.length - passes} sweep), ` +
-        `concurrency=${concurrency}${aggregation.enabled ? `, aggregation=${aggregation.effectiveRuns}x/${aggregation.minOccurrences}` : ''}`,
-    );
+    {
+      const sweepCount = toRun.filter((call) => call.kind === 'sweep').length;
+      console.log(
+        `[worker] deep review: ${toRun.length} calls (${toRun.length - sweepCount} pass calls + ${sweepCount} sweep), ` +
+          `concurrency=${concurrency}${aggregation.enabled ? `, aggregation=${aggregation.effectiveRuns}x/${aggregation.minOccurrences}` : ''}`,
+      );
+    }
 
     // Mid-run abort: a Verify review can run ~10 minutes across many calls — if
     // the PR closes/merges partway through (the real incident this fixes: a
@@ -1440,7 +1451,16 @@ async function executeReview(
     // lenses remain best-effort and cannot discard the completed core review.
     const requiredCalls = toRun.filter((call) => call.kind === 'pass' && !call.bestEffort);
     const requiredLensIds = [...new Set(requiredCalls.map((call) => call.modelPassIndex ?? -1))];
-    const requiredSuccesses = aggregation.enabled ? aggregation.minOccurrences : 1;
+    // A required lens aborts the review only when it has ZERO successful
+    // samples — the pre-aggregation semantics. Requiring minOccurrences
+    // successes here aborted whole reviews (discarding every OTHER lens's
+    // completed sample set and the sweep) whenever one model was flaky for
+    // 4 of 5 samples, and a correlated TPM squeeze made the requeued retry
+    // re-fire the identical burst into the same window. A lens with 1..min-1
+    // successes instead DEGRADES below (posted with a disclosure): its
+    // findings can still recur via other samples' lenses, and losing solo
+    // findings to manual review beats losing the entire review.
+    const requiredSuccesses = 1;
     const failedRequiredLenses = failedRequiredLensIds(requiredLensIds, outcomes, requiredSuccesses);
     if (failedRequiredLenses.length > 0) {
       // PRESERVE TRANSIENCE. queue-runner decides whether to requeue by pattern-
@@ -1461,13 +1481,48 @@ async function executeReview(
     }
     // `deep:` labels come from DEEP_EXTRA_ANGLES — the lenses the 2x charge buys.
     deepLensesRan = outcomes.some((o) => o.ok && (o.label ?? '').includes('deep:'));
-    const skippedBestEffort = outcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort);
+    // Under aggregation a best-effort LENS is only "skipped" when EVERY sample
+    // of it failed — one failed sample out of five must not brand a satisfied
+    // review "(incomplete)" or list five duplicate per-sample labels.
+    const sampleBase = (label: string | undefined): string =>
+      (label ?? 'unnamed pass').replace(/ sample \d+\/\d+$/, '');
+    const failedBestEffort = outcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort);
+    const okBestEffortBases = new Set(
+      outcomes.filter((o) => o.kind === 'pass' && o.ok && o.bestEffort).map((o) => sampleBase(o.label)),
+    );
+    const skippedBestEffort = aggregation.enabled
+      ? [...new Set(failedBestEffort.map((o) => sampleBase(o.label)))].filter((b) => !okBestEffortBases.has(b))
+      : failedBestEffort.map((o) => o.label ?? 'unnamed pass');
     if (skippedBestEffort.length > 0) {
-      skippedLenses = skippedBestEffort.map((o) => o.label ?? 'unnamed pass');
+      skippedLenses = skippedBestEffort;
       console.warn(
         `[worker] ${skippedBestEffort.length} best-effort pass(es) failed (${skippedLenses.join(', ')}) — ` +
           `posting the review from the core passes that completed, WITH a disclosure banner`,
       );
+    }
+    if (aggregation.enabled) {
+      // Aggregation degradation (see requiredSuccesses above): a required lens
+      // with some but < minOccurrences successes can't reach the recurrence
+      // gate on its own samples — disclose it rather than abort.
+      const underSampled = requiredLensIds.filter((id) => {
+        const okCount = outcomes.filter(
+          (o) => (o.modelPassIndex ?? -1) === id && o.kind === 'pass' && !o.bestEffort && o.ok,
+        ).length;
+        return okCount >= 1 && okCount < aggregation.minOccurrences;
+      });
+      if (underSampled.length > 0) {
+        const labels = underSampled.map((id) => {
+          const ok = outcomes.filter(
+            (o) => (o.modelPassIndex ?? -1) === id && o.kind === 'pass' && !o.bestEffort && o.ok,
+          ).length;
+          return `lens ${id + 1} (${ok}/${aggregation.effectiveRuns} samples)`;
+        });
+        skippedLenses = [...skippedLenses, ...labels];
+        console.warn(
+          `[worker] aggregation degraded — required lens(es) under-sampled: ${labels.join(', ')}; ` +
+            'posting with a disclosure instead of aborting',
+        );
+      }
     }
 
     // Summary comes from the first successful pass; findings accumulate.

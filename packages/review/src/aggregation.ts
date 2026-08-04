@@ -103,6 +103,12 @@ export interface RepeatedFinding {
   finding: ReviewFinding;
 }
 
+/** Max line distance between an LLM-proposed cluster member and the cluster's
+ *  anchor before the member is split back out as a singleton. Same-defect
+ *  anchors from independent samples differ by a few lines (statement vs
+ *  enclosing call), not by whole file regions. */
+const MAX_CLUSTER_LINE_SPREAD = 60;
+
 const MergeSchema = z.object({
   clusters: z.array(
     z.object({
@@ -224,9 +230,23 @@ function boundedLlmClusters(entries: RepeatedFinding[], raw: unknown): Cluster[]
     // Root-cause matching across files is too risky for inline review comments;
     // retain those as separate candidates rather than flattening distinct defects.
     if (members.some((id) => entries[id].finding.file !== file)) continue;
-    const representative = members.includes(proposed.representative) ? proposed.representative : members[0];
-    members.forEach((id) => claimed.add(id));
-    clusters.push({ representative, members });
+    // Same-file is necessary but not sufficient: an over-merging (or steered —
+    // finding text quotes PR-author-controlled code) merger could cluster
+    // DISTINCT same-file defects, which both fabricates recurrence and deletes
+    // every non-representative defect from all surfaces. Same-defect anchors
+    // from different samples land close together, so members far from the
+    // cluster's anchor line are split back out as singletons instead of
+    // silently absorbed.
+    const anchorId = members.includes(proposed.representative) ? proposed.representative : members[0];
+    const anchorLine = entries[anchorId].finding.line;
+    const near = members.filter((id) => {
+      const line = entries[id].finding.line;
+      if (anchorLine === undefined || line === undefined) return true;
+      return Math.abs(line - anchorLine) <= MAX_CLUSTER_LINE_SPREAD;
+    });
+    const representative = near.includes(proposed.representative) ? proposed.representative : near[0];
+    near.forEach((id) => claimed.add(id));
+    clusters.push({ representative, members: near });
   }
 
   for (let id = 0; id < entries.length; id++) {
