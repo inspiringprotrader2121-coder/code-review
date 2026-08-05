@@ -15,8 +15,16 @@ grep -Fq 'bash -s -- "$REMOTE_DIR" "$STAGE_DIR" "${SOURCES[@]}"' scripts/deploy-
   echo "deploy does not pass selected sources to isolated stage preparation" >&2
   exit 1
 }
+grep -Fq 'corepack pnpm@11.7.0 --pm-on-fail=ignore test' scripts/deploy-safe.sh || {
+  echo "deploy does not run the full staged test gate" >&2
+  exit 1
+}
 grep -Fq 'rm -rf -- "$stage/$source"' scripts/deploy-safe.sh || {
   echo "deploy stage does not remove stale copies of selected local sources" >&2
+  exit 1
+}
+grep -Fq 'install_backup_schedule' scripts/deploy-safe.sh || {
+  echo "deploy does not install the database backup schedule" >&2
   exit 1
 }
 
@@ -66,6 +74,7 @@ printf '%s\n' \
   '    if [[ "$SCRIPT" == *rmdir* ]]; then rm -f "$DEPLOY_TEST_STATE/lock" "$DEPLOY_TEST_STATE/lock-stale"; elif [[ -e "$DEPLOY_TEST_STATE/lock" && ! -e "$DEPLOY_TEST_STATE/lock-stale" ]]; then exit 75; else : >"$DEPLOY_TEST_STATE/lock"; rm -f "$DEPLOY_TEST_STATE/lock-stale"; fi' \
   '  fi' \
   '  if [[ "$SCRIPT" == *"pnpm@11.7.0"* && "${DEPLOY_TEST_STAGE_FAIL:-0}" == 1 ]]; then exit 23; fi' \
+  '  if [[ "$SCRIPT" == *"startOrRestart"* || "$SCRIPT" == *"pm2 restart"* || "$SCRIPT" == *"pm2 start /usr/bin/bash"* ]]; then : >"$DEPLOY_TEST_STATE/restarted"; fi' \
   '  if [[ "$SCRIPT" == *"touch --"* ]]; then : >"$DEPLOY_TEST_STATE/draining"; fi' \
   '  if [[ "$SCRIPT" == *"rm -f --"* ]]; then : >"$DEPLOY_TEST_STATE/drain-cleared"; fi' \
   '  : >"$DEPLOY_TEST_STATE/installed"' \

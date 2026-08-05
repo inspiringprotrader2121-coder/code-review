@@ -103,7 +103,7 @@ Also: better-sqlite3 bumped to v12 (Node 24 prebuilds). Postgres migration still
 
 ### E. Billing & plan limits (1–2 weeks)
 
-- Stripe subscriptions per workspace: Solo $0 (1 repo, 50 reviews/mo) · Team $49 (unlimited repos, 500 reviews/mo then metered) · Enterprise (BYOK, self-host, SSO)
+- Stripe subscriptions per workspace: Free trial, Starter, Pro Unlimited, Verify Lite, and Verify; custom plans are handled privately
 - `tenants.plan` + limits enforced **at enqueue time**; over-limit surfaces as neutral check run + dashboard banner, never a silent drop
 - Meter from `review_runs`; webhook-driven subscription state sync
 

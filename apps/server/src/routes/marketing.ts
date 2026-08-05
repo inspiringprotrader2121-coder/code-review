@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
+import { formatCommandsHtmlRows } from '@orvex-review/review';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -41,7 +42,17 @@ function staticPage(file: string, fallbackTitle: string): string {
 
 export function marketingRoutes() {
   const app = new Hono();
-  app.get('/', (c) => c.html(staticPage('marketing.html', 'Orvex Review')));
+  app.get('/', (c) => {
+    // Inject the live command catalog so marketing never drifts from the parser.
+    const html = staticPage('marketing.html', 'Orvex Review').replace(
+      '<!--ORVEX_COMMANDS_ROWS-->',
+      formatCommandsHtmlRows('@orvex'),
+    );
+    return c.html(html);
+  });
+  // Keep older upgrade links working while the pricing section remains an
+  // anchor on the single-page marketing site.
+  app.get('/pricing', (c) => c.redirect('/#pricing', 301));
   // Social-share card for og:image / twitter:image on the marketing page.
   app.get('/og-image.png', (c) => {
     const png = ogImage();
@@ -119,12 +130,13 @@ const LLMS_TXT = `# Orvex
 
 ## What it does
 - Reviews enabled GitHub repositories automatically on pull-request open and new pushes by default; each trigger can be changed per repository. \`@orvex review\` starts an on-demand review.
-- Runs deterministic rules first, then three or four focused AI review passes depending on the review track, then a strict verifier that re-checks candidate findings against source context before posting.
+- Runs deterministic rules first, then two or four focused AI review passes depending on the review track, then a strict verifier that re-checks candidate findings against source context before posting.
 - Reads the changed files plus selected imports, dependents, and relevant repository files. It reports when GitHub or configured file limits make coverage partial.
 - Tracks findings across pushes, suppresses already-reported issues, and marks findings fixed when their source anchor changes.
 - One-command auto-fix (\`@orvex fix\` / \`@orvex fix all\`) that re-verifies each finding before writing a fix.
 - Gives a copy-paste prompt per finding for use with a coding agent.
 - Paid plans can request additional analysis with \`@orvex deep\`; a deep review uses two review units.
+- Comment \`@orvex help\` on any PR for the full command list, or \`@orvex rate limit\` to check remaining quota without starting a review.
 - Repositories can tune ignores, comment limits, and deterministic checks with \`.orvex-review.yml\`. Finding confidence is recorded as telemetry, not a suppression threshold.
 
 ## Pricing (USD)
@@ -133,10 +145,8 @@ const LLMS_TXT = `# Orvex
 - Pro Unlimited: $69/month — no monthly quota or overage, up to 10/hour.
 - Verify Lite: $49/month — 50 reviews at up to 5/hour, then $0.75/review on the advanced review track.
 - Verify: $99/month — 120 reviews at up to 10/hour, then $0.75/review on the advanced review track.
-- Enterprise: custom volume, rate limits, onboarding, and support.
-
 A completed standard review uses one unit. An \`@orvex deep\` review uses two.
-Failed or skipped reviews and fix or explanation commands do not consume units.
+Skipped reviews and fix or explanation commands do not consume units. Failed reviews still count toward free-trial and hourly caps.
 Every plan receives deterministic checks, source verification, and autofix. Paid plans add on-demand deep review. Plans otherwise differ by review track, pass count, allowance, hourly capacity, queue priority, and support.
 
 ## Billing

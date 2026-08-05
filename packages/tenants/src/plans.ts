@@ -33,11 +33,10 @@ export interface PlanFeatures {
   /** Tier 2: scheduled whole-repo bug scans that open fix PRs */
   nightlyScans: boolean;
   /**
-   * Makes the single end-of-review verification STRICT/premise-checking (with
-   * package.json / manifest context) instead of recall-biased. Rejects false
-   * positives — findings wrong about the code, or whose premise depends on a
-   * library version this repo doesn't use. It is still ONE verification pass, not
-   * a second review.
+   * When true, run the end-of-review LLM verification (strict premise check with
+   * package.json / manifest context). When false, skip that LLM call entirely —
+   * used on the dual-model (free/Starter/Pro) track to keep cost at two discovery
+   * passes. Deterministic filters / noise drops still run either way.
    */
   deepVerify: boolean;
   /**
@@ -72,12 +71,13 @@ export interface PlanFeatures {
   overageCentsPerReview: number | null;
   /**
    * Which LLM(s) run the review:
-   * - 'standard' — the cheaper model (MiniMax-M3) for every pass. Beginner tier.
-   * - 'premium'  — the flagship model (GLM-5.2) for every pass.
-   * - 'hybrid'   — a TWO-MODEL ENSEMBLE (higher tiers): pass 1 (general) on
-   *   MiniMax-M3, pass 2 (deep-dive) on GLM-5.2. Two different models catch
-   *   different bugs, so the merged result is the most thorough review — the
-   *   premium differentiator.
+   * - 'dual-model' — MiniMax (general) + DeepSeek v4 Flash (deep-dive); Flash verify.
+   *   Free / Starter / Pro. Two discovery passes.
+   * - 'multi-model' — Luna/Codex + Flash + Flash/Pro lens + MiniMax; Flash verify.
+   *   Verify Lite / Verify / Enterprise. Four discovery passes.
+   * - 'codex-hybrid' — Codex/Luna general, MiniMax thereafter (legacy hybrid).
+   * - 'standard' — MiniMax on every pass. 'premium' — GLM on every pass.
+   * - 'hybrid' / 'openai' — legacy single-provider ensembles.
    */
   modelTier: 'premium' | 'standard' | 'hybrid' | 'openai' | 'codex-hybrid' | 'multi-model' | 'dual-model';
   /** queue priority when workers are saturated (higher = sooner) */
@@ -98,13 +98,15 @@ export interface PlanFeatures {
  * spend tracking.
  */
 export const PLANS: Record<PlanId, PlanFeatures> = {
-  // PRODUCT RULE (user decision 2026-07-09): every plan runs the SAME settings
-  // and thoroughness as Verify — 3 passes, same retrieval depth, strict
-  // verification, autofix, and code execution. The ONLY differentiators across
-  // tiers are (a) which MODELS run (multi-model w/ Luna on Verify; dual-model
-  // MiniMax+DeepSeek elsewhere) and (b) cost/volume levers (rate limits,
-  // monthly caps, overage price, queue priority). Review quality, depth, and
-  // capability are never the tier differentiator — only price and model mix.
+  // PRODUCT RULE (user decision 2026-08-05): review thoroughness (retrieval,
+  // autofix, execution) stays consistent; what changes by tier is HOW MANY
+  // models/passes run:
+  //   dual-model (free / Starter / Pro) → TWO discovery passes + Flash verify:
+  //     MiniMax (general) + DeepSeek v4 Flash (deep-dive) + Flash verify.
+  //     No investigate — cost-bounded trial/entry track.
+  //   multi-model (Verify Lite / Verify / Enterprise) → four discovery passes
+  //     (Luna + Flash + Flash/Pro lens + MiniMax) + Flash verify (+ Codex /
+  //     investigate when enabled) — the full precision track.
   //
   // ONE deliberate exception: nightlyScans. Unlike every other feature here,
   // scheduled whole-repo scans are NOT counted against trialReviewLimit or any
@@ -114,7 +116,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   free: {
     id: 'free',
     label: 'Free trial',
-    reviewPasses: 3,
+    reviewPasses: 2,
     retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,
@@ -122,27 +124,24 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepReviews: false, // paid-only: ~2x review cost, bounded nowhere on a free account
     codeExecution: true,
     nightlyScans: false, // see the unbounded-cost note above — free stays excluded
-    deepVerify: true,
+    deepVerify: true, // Flash verify — cheap precision gate on the 2-model track
     trialReviewLimit: 10, // 10 free reviews for the account, ever — bounds autofix/execution cost too
     reviewsPerHour: 2,
     reviewsPerMonth: null, // the lifetime cap already bounds free-tier cost; no separate monthly needed
     includedReviewsPerMonth: null,
     overageCentsPerReview: null,
-    modelTier: 'dual-model', // trial shows the real product: MiniMax + DeepSeek ensemble
+    modelTier: 'dual-model', // MiniMax + DeepSeek v4 Flash + Flash verify
     priority: 0,
   },
   review: {
     id: 'review',
-    label: 'Starter', // the MiniMax + DeepSeek ensemble — the entry paid tier
+    label: 'Starter', // MiniMax + DeepSeek v4 Flash — the entry paid tier
     // $29/mo — 100 reviews/month included, 5/hour (matches CodeRabbit's rate),
-    // then $0.50/review overage (re-reviews count as reviews). Full 3-pass
-    // pipeline, TWO-MODEL ensemble: MiniMax (general + perf lenses) + DeepSeek
-    // v4 Pro at max reasoning effort (deep-dive lens) — different training data
-    // catches different bugs, the single biggest lever we found for recall.
-    // Same thoroughness/capability set as Verify (autofix, execution, scans) —
-    // only the model mix and volume caps differ. COGS ~$0.15/review, so the
-    // $0.50 overage is ~3x margin and 100 included worst-cases to $15 COGS.
-    reviewPasses: 3,
+    // then $0.50/review overage (re-reviews count as reviews). TWO discovery
+    // passes (MiniMax + Flash) + Flash verify — volume and paid features
+    // (deep, nightly) are the upsell, not Luna. Flash verify keeps FPs down
+    // without Pro/Luna cost.
+    reviewPasses: 2,
     retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,
@@ -162,13 +161,10 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   'review-plus': {
     id: 'review-plus',
     label: 'Pro Unlimited',
-    // $69/mo — UNLIMITED reviews at 10/hour (double CodeRabbit's limit, flat for
-    // the whole workspace vs their per-seat $24-30). Priced with buffer above the
-    // realistic heavy-usage cost curve so a MiniMax price change can't flip it
-    // underwater. The 10/hr cap + fair-use bounds the tail; the hourly limit IS
-    // the abuse defense, so no monthly ceiling. Same MiniMax + DeepSeek ensemble
-    // and same thoroughness/capability set as Verify — more volume, not more depth.
-    reviewPasses: 3,
+    // $69/mo — UNLIMITED reviews at 10/hour. Same MiniMax + Flash two-pass
+    // discovery + Flash verify as Starter; more volume, not more models.
+    // The 10/hr cap is the abuse defense, so no monthly ceiling.
+    reviewPasses: 2,
     retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,
@@ -189,12 +185,9 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     id: 'verify-lite',
     label: 'Verify Lite',
     // $49/mo — the budget entry to the PREMIUM quality track: the SAME
-    // three-model stack as Verify (Luna + DeepSeek + MiniMax), just a smaller
-    // quota for lower-volume or price-sensitive teams who still want the
-    // frontier-model catch rate. 50 reviews/month included at 5/hour, then
-    // $0.75/review overage. COGS ~$0.27/review → 50 × $0.27 = ~$14 worst-case
-    // COGS under $49; overage is ~2.8x margin. Everything Verify has, just
-    // capped lower — appeals to solo devs and small teams, not just funded ones.
+    // multi-model stack as Verify (Luna + Flash lenses + MiniMax + Flash
+    // verify), just a smaller quota for lower-volume or price-sensitive teams.
+    // 50 reviews/month included at 5/hour, then $0.75/review overage.
     reviewPasses: 4,
     retrievalTopK: 28,
     repoSweep: false,
@@ -215,20 +208,15 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   verify: {
     id: 'verify',
     label: 'Verify',
-    // multi-model: THREE DIFFERENT MODELS, one per pass — max blind-spot
-    // diversity, zero OAuth dependency (pure API billing, no ChatGPT-account
-    // fragility to scale across customers):
-    //   pass 1 — the frontier OpenAI model (Luna, once its API model ID is
-    //            confirmed — currently ORVEX_OPENAI_MODEL, whatever's set);
-    //   pass 2 — DeepSeek v4 Pro at max reasoning effort (deep-dive lens);
-    //   pass 3 — MiniMax (perf / completeness / API-contract lens);
-    // then ONE strict verification on MiniMax (pass-1/openai findings are
-    // protected there — the weaker verifier can't override the frontier model).
-    // Replaces the earlier codex-CLI design: model diversity across 3 real
-    // providers beats a single OAuth-fragile "sharp" pass + 2 MiniMax lenses,
-    // and retires the account-pool/proxy/watchdog complexity entirely.
+    // multi-model full track (~5 model calls):
+    //   pass 1 — Luna / Codex CLI (general)
+    //   pass 2 — DeepSeek v4 Flash (deep-dive)
+    //   pass 3 — DeepSeek v4 Flash (removed-behavior/callers; Pro via env)
+    //   pass 4 — MiniMax (perf / completeness / API-contract)
+    //   then ONE strict verification on DeepSeek v4 Flash
+    // (+ sandboxed investigate when Codex isn't already agentic)
     reviewPasses: 4,
-    retrievalTopK: 28, // slightly deeper cross-file context than Panel (+12%)
+    retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,
     autofix: true,
@@ -237,12 +225,6 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     nightlyScans: true,
     deepVerify: true,
     trialReviewLimit: null,
-    // $99/mo tier — 120 reviews/month included at 10/hour, then $0.75/review
-    // overage. Real cost ~$0.27/review normal (~$0.50 deep) at Luna's $1/$6 per
-    // 1M + DeepSeek + MiniMax, so 120 × $0.50 = $60 worst-case COGS under $99;
-    // the $0.75 overage keeps heavy users profitable (~2.8x on a normal review).
-    // NOT unlimited by design: Luna's per-review cost means one power user could
-    // run the tier negative, so the quota + overage is the cost defense.
     reviewsPerHour: 10,
     reviewsPerMonth: 120,
     includedReviewsPerMonth: 120,
@@ -267,9 +249,6 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     reviewsPerMonth: null, // custom-contract tier — negotiated limits, not a code default
     includedReviewsPerMonth: null,
     overageCentsPerReview: null,
-    // Enterprise was 'dual-model' — MiniMax + DeepSeek, and NEVER Luna — so the
-    // most expensive plan ran a weaker stack than Verify. Now the full
-    // four-model ensemble.
     modelTier: 'multi-model',
     priority: 4,
   },
@@ -288,6 +267,11 @@ export function defaultPlanId(): PlanId {
 export function planFeatures(plan: string | null | undefined): PlanFeatures {
   if (plan && Object.hasOwn(PLANS, plan)) return PLANS[plan as PlanId];
   return PLANS[defaultPlanId()];
+}
+
+/** Label safe for customer-facing dashboard and quota messages. */
+export function publicPlanLabel(plan: PlanFeatures): string {
+  return plan.id === 'enterprise' ? 'Custom plan' : plan.label;
 }
 
 export function isPlanId(v: string): v is PlanId {

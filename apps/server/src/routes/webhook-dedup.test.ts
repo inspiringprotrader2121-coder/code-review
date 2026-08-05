@@ -60,6 +60,20 @@ test('a failed GitHub delivery is retryable while a successful delivery is dedup
   const duplicate = await request(valid, 'successful-delivery');
   assert.equal(duplicate.status, 200);
   assert.deepEqual(await duplicate.json(), { ok: true, deduped: true });
+
+  const restarted = webhookRoutes(queue);
+  const afterRestart = await restarted.request('/webhooks/github', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-github-event': 'ping',
+      'x-github-delivery': 'successful-delivery',
+      'x-hub-signature-256': sign(valid),
+    },
+    body: valid,
+  });
+  assert.equal(afterRestart.status, 200);
+  assert.deepEqual(await afterRestart.json(), { ok: true, deduped: true });
 });
 
 function sign(body: string): string {

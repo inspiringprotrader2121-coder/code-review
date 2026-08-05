@@ -16,6 +16,7 @@ export type OrvexCommand =
   | { kind: 'explain' } // thread reply: deep-dive explanation of the finding
   | { kind: 'resolve_conflicts' } // attempt to resolve merge conflicts
   | { kind: 'auto_apply'; enabled: boolean }
+  | { kind: 'rate_limit' } // show remaining hourly/monthly quota without starting a review
   | { kind: 'help' }
   | { kind: 'prompt'; instruction: string }; // free-form AI instruction (ask / change)
 
@@ -50,12 +51,23 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
     .trim();
   const normalized = rest
     .toLowerCase()
-    .replace(/[.!]+$/, '')
+    .replace(/[.!?]+$/, '')
     .replace(/\s+/g, ' ')
     .replace(/ (please|pls|thanks|thank you)$/, '')
     .trim();
 
   if (normalized === '' || normalized === 'help') return { kind: 'help' };
+  if (
+    normalized === 'rate limit' ||
+    normalized === 'rate-limit' ||
+    normalized === 'ratelimit' ||
+    normalized === 'quota' ||
+    normalized === 'usage' ||
+    normalized === 'reviews remaining' ||
+    normalized === 'remaining'
+  ) {
+    return { kind: 'rate_limit' };
+  }
   if (normalized === 'review' || normalized === 're-review' || normalized === 'rereview') {
     return { kind: 'review' };
   }
@@ -102,6 +114,12 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
     return { kind: 'auto_apply', enabled: false };
   }
 
+  // Near-miss quota asks ("check rate limit", "what is my usage") must NOT fall
+  // through to `prompt` via verbs like check/how — that burns paid LLM quota.
+  // Runs AFTER known commands so "fix … usage …" / "review the quota …" stay
+  // fix/review/prompt, not a silent rate_limit hijack.
+  if (looksLikeRateLimitAsk(normalized)) return { kind: 'rate_limit' };
+
   // Only dispatch a free-form agent (LLM cost + a commit surface) when the text
   // is a REAL instruction — it must contain a recognized imperative verb. A bare
   // question ("@orvex thoughts?") or casual chatter ("@orvex looks great here")
@@ -114,4 +132,45 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
     );
   if (!rest.trim() || !looksActionable) return { kind: 'help' };
   return { kind: 'prompt', instruction: rest };
+}
+
+/** Quota-status phrasing that is not an exact alias — keep narrow to avoid hijacking real prompts. */
+function looksLikeRateLimitAsk(normalized: string): boolean {
+  // Never steal a command that already starts as a known imperative.
+  if (
+    /^(fix|review|re-review|rereview|deep|ignore|dismiss|explain|why|resolve|auto[- ]?apply)\b/.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  // "how/check … rate limit/quota …" is often an IMPLEMENTATION prompt
+  // ("how to add rate limits", "check if the rate limit middleware handles X").
+  // Only treat how/check as quota-status when the ask is clearly ABOUT the
+  // account's remaining allowance — not building/inspecting product code.
+  if (/^(how|check)\b/.test(normalized)) {
+    if (
+      /\b(to |should |implement|add|handle|middleware|endpoint|module|enforce|for this|in this|whether|if the)\b/.test(
+        normalized,
+      )
+    ) {
+      return false;
+    }
+  }
+  // Require ask framing — bare "quota"/"usage" inside a code instruction is a prompt.
+  if (
+    /^(check|show|get|what|how|am i)\b/.test(normalized) &&
+    /\b(rate[- ]?limits?|quota)\b/.test(normalized)
+  ) {
+    return true;
+  }
+  // Catalog lists `usage` as a rate-limit alias; ask-framed "check/show usage"
+  // must not fall through to paid prompt via the actionable-verb gate.
+  // Keep narrow ("check the usage of this cache" stays a prompt).
+  if (/^(check|show|get)\s+(my\s+|our\s+)?usage\b/.test(normalized)) return true;
+  if (/^(my|our)\s+(rate[- ]?limits?|quota|usage)\b/.test(normalized)) return true;
+  if (/\b(my|our)\s+usage\b/.test(normalized)) return true;
+  if (/\breviews?\s+(remaining|left)\b/.test(normalized)) return true;
+  if (/\bremaining\s+reviews?\b/.test(normalized)) return true;
+  return false;
 }

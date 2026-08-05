@@ -31,8 +31,11 @@ import { TenantService, isPlanId, planFeatures } from '@orvex-review/tenants';
 import { createAppDatabase, type GitHubInstallation } from '@orvex-review/store';
 import { enqueueManualReview } from '../queue-runner.js';
 import { authorizedAdmin } from './admin-auth.js';
+import { formatQuotaStatusComment, loadAccountQuotaStatus } from '../quota-status.js';
 
-const REVIEW_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
+// ready_for_review: draft→ready must enqueue (drafts are skipped in the worker,
+// so opened-as-draft never reviews until this event or a later push).
+const REVIEW_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
 
 interface WebhookInstallation {
   id: number;
@@ -117,23 +120,6 @@ export function webhookRoutes(queue: ReviewQueue) {
   // tests can build the routes without GitHub env set.
   let githubConfig: GitHubAppConfig | null = null;
   const getGithubConfig = (): GitHubAppConfig => (githubConfig ??= loadGitHubConfigFromEnv());
-
-  // Dedup GitHub REDELIVERIES (X-GitHub-Delivery): GitHub re-sends a delivery
-  // on timeout/5xx, and re-processing a fix_all command or apply-checkbox edit
-  // double-enqueues jobs and double-posts reply comments. Bounded FIFO set.
-  const seenDeliveries = new Set<string>();
-  const markDelivery = (id: string | undefined): boolean => {
-    if (!id) return true; // no header (non-Github caller) — process normally
-    if (seenDeliveries.has(id)) return false;
-    seenDeliveries.add(id);
-    if (seenDeliveries.size > 10_000) {
-      for (const old of seenDeliveries) {
-        seenDeliveries.delete(old);
-        if (seenDeliveries.size <= 8_000) break;
-      }
-    }
-    return true;
-  };
 
   /** Upsert the repos an installation can access into the dashboard repo list. */
   function syncReposFromPayload(installationId: number, repos: RepositoryLite[]): void {
@@ -267,11 +253,11 @@ export function webhookRoutes(queue: ReviewQueue) {
 
     const octokit = createInstallationOctokit(githubConfig, installation.installationId);
 
-    // These commands can commit code to the PR branch, so gate on the commenter's
-    // ACTUAL write access — NOT author_association, which counts read-only org
-    // members (MEMBER) and read/triage collaborators (COLLABORATOR) as "write".
-    // (Same live-permission check the apply-fix checkbox path uses.)
-    if (!(await userCanWrite(octokit, owner, repo, data.sender.login))) {
+    // help / rate_limit are read-only (quota + command list) — allow without write.
+    // Everything else can commit or burn LLM quota, so gate on real write access
+    // (not author_association, which counts read-only org members as "write").
+    const readOnlyCmd = command.kind === 'help' || command.kind === 'rate_limit';
+    if (!readOnlyCmd && !(await userCanWrite(octokit, owner, repo, data.sender.login))) {
       return 'insufficient_permissions';
     }
 
@@ -398,6 +384,12 @@ export function webhookRoutes(queue: ReviewQueue) {
           ),
         );
         return 'needs_thread_context';
+      case 'rate_limit': {
+        const plan = planFeatures(db.getTenantPlan(installation.tenantId));
+        const status = loadAccountQuotaStatus(db, owner, installation.tenantId, plan);
+        await replyToIssueComment(octokit, ref, formatQuotaStatusComment(status, commandTrigger()));
+        return 'rate_limit_posted';
+      }
       case 'help':
       default:
         await replyToIssueComment(octokit, ref, formatHelpComment(commandTrigger()));
@@ -484,9 +476,9 @@ export function webhookRoutes(queue: ReviewQueue) {
 
     const octokit = createInstallationOctokit(githubConfig, installation.installationId);
 
-    // Gate on the commenter's ACTUAL write access (see handleIssueComment) —
-    // author_association is not repo write permission.
-    if (!(await userCanWrite(octokit, owner, repo, data.sender.login))) {
+    // help / rate_limit are read-only; other thread commands can commit or spend LLM.
+    const readOnlyCmd = command.kind === 'help' || command.kind === 'rate_limit';
+    if (!readOnlyCmd && !(await userCanWrite(octokit, owner, repo, data.sender.login))) {
       return 'insufficient_permissions';
     }
 
@@ -609,6 +601,19 @@ export function webhookRoutes(queue: ReviewQueue) {
           requestedBy,
         });
         return 'resolve_enqueued';
+      case 'rate_limit': {
+        const plan = planFeatures(db.getTenantPlan(installation.tenantId));
+        const status = loadAccountQuotaStatus(db, owner, installation.tenantId, plan);
+        await replyToReviewComment(
+          octokit,
+          owner,
+          repo,
+          pr,
+          threadRootId,
+          formatQuotaStatusComment(status, commandTrigger()),
+        );
+        return 'rate_limit_posted';
+      }
       case 'help':
       default:
         await replyToReviewComment(octokit, owner, repo, pr, threadRootId, formatHelpComment(commandTrigger()));
@@ -632,14 +637,14 @@ export function webhookRoutes(queue: ReviewQueue) {
       return c.json({ error: 'invalid signature' }, 401);
     }
 
-    // AFTER signature verification, so a forged request can't poison the set.
-    // A claimed id is released if parsing/processing throws: GitHub must be able
-    // to redeliver a transiently failed event instead of receiving a false dedup.
     const deliveryId = c.req.header('x-github-delivery');
-    if (!markDelivery(deliveryId)) {
+    // AFTER signature verification, so a forged request can't poison the durable
+    // claim. Failed processing releases the claim so GitHub can retry it.
+    if (deliveryId && !db.claimWebhookEvent('github', deliveryId)) {
       return c.json({ ok: true, deduped: true });
     }
 
+    let processingFailed = false;
     try {
       const payload = JSON.parse(rawBody) as Record<string, unknown>;
 
@@ -649,6 +654,7 @@ export function webhookRoutes(queue: ReviewQueue) {
       if (!inst?.id) return c.json({ ok: true });
 
       if (data.action === 'deleted') {
+        db.disableReposForInstallation(inst.id);
         db.upsertInstallation({
           installationId: inst.id,
           tenantId: db.getInstallation(inst.id)?.tenantId ?? db.createTenant(`deleted-${inst.id}`).id,
@@ -681,6 +687,9 @@ export function webhookRoutes(queue: ReviewQueue) {
       const data = payload as unknown as InstallationRepositoriesWebhook;
       const inst = data.installation;
       if (inst?.id) {
+        for (const removed of data.repositories_removed ?? []) {
+          db.disableRepoByGitHubId(inst.id, removed.id);
+        }
         syncReposFromPayload(inst.id, [
           ...(data.repositories_added ?? []),
           ...(data.repositories ?? []),
@@ -712,7 +721,7 @@ export function webhookRoutes(queue: ReviewQueue) {
     const action = prPayload.action;
 
     // record lifecycle for open/close/merge/reopen/edit even when we don't re-review
-    const LIFECYCLE_ACTIONS = new Set([...REVIEW_ACTIONS, 'closed', 'edited', 'ready_for_review']);
+    const LIFECYCLE_ACTIONS = new Set([...REVIEW_ACTIONS, 'closed', 'edited']);
     if (!LIFECYCLE_ACTIONS.has(action)) {
       return c.json({ ok: true, ignored: action });
     }
@@ -831,8 +840,13 @@ export function webhookRoutes(queue: ReviewQueue) {
 
       return c.json({ ok: true, jobId: result.jobId, reason: result.reason });
     } catch (err) {
-      if (deliveryId) seenDeliveries.delete(deliveryId);
+      processingFailed = true;
       throw err;
+    } finally {
+      if (deliveryId) {
+        if (processingFailed) db.releaseWebhookEvent('github', deliveryId);
+        else db.completeWebhookEvent('github', deliveryId);
+      }
     }
   });
 
@@ -887,7 +901,7 @@ export function webhookRoutes(queue: ReviewQueue) {
     if (!authorizedAdmin(c, db)) return c.json({ error: 'unauthorized' }, 401);
     const { plan } = await c.req.json<{ plan?: string }>().catch(() => ({ plan: undefined }));
     if (!plan || !isPlanId(plan)) {
-      return c.json({ error: 'plan must be one of: free, review, verify, enterprise' }, 400);
+      return c.json({ error: 'plan is not a supported Orvex plan' }, 400);
     }
     const tenant = db.getTenantBySlug(c.req.param('slug'));
     if (!tenant) return c.json({ error: 'workspace not found' }, 404);

@@ -168,6 +168,19 @@ CREATE TABLE IF NOT EXISTS abuse_signals (
 
 CREATE INDEX IF NOT EXISTS idx_abuse_ip_time ON abuse_signals(ip, created_at);
 
+-- Durable webhook claims prevent duplicate Stripe state transitions and
+-- duplicate GitHub command jobs across process restarts and workers. Unfinished
+-- claims can be reclaimed after the caller's stale window.
+CREATE TABLE IF NOT EXISTS webhook_events (
+  provider TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  claimed_at TEXT NOT NULL,
+  processed_at TEXT,
+  PRIMARY KEY (provider, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_events_processed ON webhook_events(processed_at);
+
 CREATE TABLE IF NOT EXISTS pr_settings (
   installation_id INTEGER NOT NULL,
   owner TEXT NOT NULL,
@@ -287,6 +300,9 @@ export class AppDatabase {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    // Multi-process writers (docs allow scaling workers on one SQLite file) wait
+    // briefly on SQLITE_BUSY instead of failing the quota/lock update.
+    this.db.pragma('busy_timeout = 5000');
     this.db.exec(SCHEMA_V2);
     this.migrateLegacyPrReviews();
     this.migrateUserAuthColumns();
@@ -464,18 +480,18 @@ export class AppDatabase {
    * GitHub account, matched case-insensitively) rather than the tenant, so a
    * second workspace or a reinstall can't reset the trial.
    *
-   * Counts 'running' AND 'completed' so that concurrently in-flight reviews see
-   * each other — this is what makes a check paired with startReviewRun reserve
-   * the slot atomically and stops a concurrent-PR burst slipping past the cap. A
-   * 'failed'/'skipped' run is NOT counted, so a failed or blocked attempt never
-   * burns a credit. `fix:*` runs are excluded; only reviews count.
+   * Counts 'running', 'completed', AND 'failed' so that concurrently in-flight
+   * reviews see each other AND a post-spend failure cannot refund a trial/hourly
+   * credit (farmers used to induce failures after LLM burn to reset the cap).
+   * A 'skipped' run is NOT counted (blocked before work / no LLM). `fix:*` /
+   * `cmd:%` runs are excluded; only reviews count.
    */
   countAccountReviews(owner: string, opts: { sinceMs?: number } = {}): number {
     const params: unknown[] = [owner];
     // Exclude fix commits ('fix:%') AND interactive commands ('cmd:%') — only
     // actual reviews count toward the trial/hourly/monthly review caps.
     let where =
-      "lower(owner) = lower(?) AND status IN ('running', 'completed') AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'";
+      "lower(owner) = lower(?) AND (status IN ('running', 'completed', 'failed') OR (status = 'skipped' AND skip_reason LIKE 'interrupted by restart%')) AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'";
     if (opts.sinceMs !== undefined) {
       where += ' AND created_at >= ?';
       params.push(new Date(Date.now() - opts.sinceMs).toISOString());
@@ -484,6 +500,25 @@ export class AppDatabase {
       .prepare(`SELECT COUNT(*) AS n FROM review_runs WHERE ${where}`)
       .get(...params) as { n: number };
     return row.n;
+  }
+
+  /**
+   * Oldest `created_at` among account reviews in the rolling window — used to
+   * tell users when the next hourly slot frees (that review ages out of the
+   * window). Same filter as `countAccountReviews`.
+   */
+  oldestAccountReviewCreatedAt(owner: string, sinceMs: number): string | null {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT created_at FROM review_runs
+         WHERE lower(owner) = lower(?) AND (status IN ('running', 'completed', 'failed') OR (status = 'skipped' AND skip_reason LIKE 'interrupted by restart%'))
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'
+           AND created_at >= ?
+         ORDER BY created_at ASC LIMIT 1`,
+      )
+      .get(owner, since) as { created_at: string } | undefined;
+    return row?.created_at ?? null;
   }
 
   countTenantCompletedReviewsSince(tenantId: string, sinceIso: string): number {
@@ -607,6 +642,50 @@ export class AppDatabase {
     return row.n;
   }
 
+  /**
+   * Claim a webhook delivery atomically across workers. A processed delivery is
+   * permanent until retention; an unfinished claim may be reclaimed after the
+   * stale window when a process died mid-handler.
+   */
+  claimWebhookEvent(provider: string, eventId: string, staleMs = 15 * 60_000): boolean {
+    const claimedAt = new Date().toISOString();
+    const inserted = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO webhook_events (provider, event_id, claimed_at, processed_at)
+         VALUES (?, ?, ?, NULL)`,
+      )
+      .run(provider, eventId, claimedAt);
+    if (inserted.changes > 0) return true;
+
+    const existing = this.db
+      .prepare(`SELECT claimed_at, processed_at FROM webhook_events WHERE provider = ? AND event_id = ?`)
+      .get(provider, eventId) as { claimed_at: string; processed_at: string | null } | undefined;
+    if (!existing || existing.processed_at) return false;
+    const claimedTime = Date.parse(existing.claimed_at);
+    if (Number.isFinite(claimedTime) && Date.now() - claimedTime < staleMs) return false;
+
+    const reclaimed = this.db
+      .prepare(
+        `UPDATE webhook_events
+         SET claimed_at = ?
+         WHERE provider = ? AND event_id = ? AND processed_at IS NULL AND claimed_at = ?`,
+      )
+      .run(claimedAt, provider, eventId, existing.claimed_at);
+    return reclaimed.changes > 0;
+  }
+
+  completeWebhookEvent(provider: string, eventId: string): void {
+    this.db
+      .prepare(`UPDATE webhook_events SET processed_at = ? WHERE provider = ? AND event_id = ?`)
+      .run(new Date().toISOString(), provider, eventId);
+  }
+
+  releaseWebhookEvent(provider: string, eventId: string): void {
+    this.db
+      .prepare(`DELETE FROM webhook_events WHERE provider = ? AND event_id = ? AND processed_at IS NULL`)
+      .run(provider, eventId);
+  }
+
   /** Cheap liveness probe for /ready — throws if the DB is unreachable/locked. */
   pingDb(): void {
     this.db.prepare('SELECT 1').get();
@@ -626,11 +705,11 @@ export class AppDatabase {
   }
 
   /**
-   * Bounded retention. Deletes only EPHEMERAL rows — never 'completed' reviews,
-   * which the lifetime trial cap counts forever (pruning those would let a
-   * farmer reset their trial by waiting). Targets the fastest-growing junk: the
-   * 'skipped'/'failed' rows that every cooldown/limit/misfire inserts, expired
-   * sessions, and old abuse signals. Safe to run on a schedule.
+   * Bounded retention. Deletes only EPHEMERAL rows — never 'completed' or
+   * 'failed' reviews. Lifetime trial counts running+completed+failed forever
+   * (anti-farm); pruning `failed` after 30d refunded the trial. Only `skipped`
+   * cooldown/limit/misfire rows are ephemeral. Also clears expired sessions and
+   * old abuse signals. Safe to run on a schedule.
    */
   pruneEphemeralData(opts: { runRetentionMs?: number; abuseRetentionMs?: number } = {}): number {
     const runCutoff = new Date(Date.now() - (opts.runRetentionMs ?? 30 * 24 * 3_600_000)).toISOString();
@@ -638,12 +717,15 @@ export class AppDatabase {
     const now = new Date().toISOString();
     let n = 0;
     n += this.db
-      .prepare(`DELETE FROM review_runs WHERE status IN ('skipped', 'failed') AND created_at < ?`)
+      .prepare(`DELETE FROM review_runs WHERE status = 'skipped' AND created_at < ?`)
       .run(runCutoff).changes;
     n += this.db.prepare(`DELETE FROM sessions WHERE expires_at < ?`).run(now).changes;
     n += this.db.prepare(`DELETE FROM mfa_challenges WHERE expires_at < ?`).run(now).changes;
     n += this.db.prepare(`DELETE FROM auth_rate_limits WHERE reset_at < ?`).run(now).changes;
     n += this.db.prepare(`DELETE FROM abuse_signals WHERE created_at < ?`).run(abuseCutoff).changes;
+    n += this.db
+      .prepare(`DELETE FROM webhook_events WHERE processed_at IS NOT NULL AND processed_at < ?`)
+      .run(runCutoff).changes;
     return n;
   }
 
@@ -1845,6 +1927,32 @@ export class AppDatabase {
     return row.n;
   }
 
+  /** Skipped runs for this PR with a given reason in the last `sinceMs` (nudge dedupe). */
+  countRecentSkippedRuns(key: PrKey, skipReason: string, sinceMs: number): number {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM review_runs
+         WHERE installation_id = ? AND owner = ? AND repo = ? AND pr = ?
+           AND status = 'skipped' AND skip_reason = ? AND created_at >= ?`,
+      )
+      .get(key.installationId, key.owner, key.repo, key.pr, skipReason, since) as { n: number };
+    return row.n;
+  }
+
+  /** Failed review attempts for this PR in the last `sinceMs` (failure notice dedupe). */
+  countRecentFailedRuns(key: PrKey, sinceMs = 30 * 60_000): number {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM review_runs
+         WHERE installation_id = ? AND owner = ? AND repo = ? AND pr = ?
+           AND status = 'failed' AND created_at >= ?`,
+      )
+      .get(key.installationId, key.owner, key.repo, key.pr, since) as { n: number };
+    return row.n;
+  }
+
   // ——— Review runs (usage metrics) ———
 
   recordReviewRun(input: {
@@ -1965,6 +2073,42 @@ export class AppDatabase {
     return id;
   }
 
+  /**
+   * Check account limits and reserve a `running` row in one BEGIN IMMEDIATE
+   * transaction so multi-worker processes sharing this SQLite file cannot both
+   * read under-limit and both insert.
+   */
+  tryReserveReviewRun(
+    input: {
+      tenantId: string;
+      installationId: number;
+      owner: string;
+      repo: string;
+      pr: number;
+      headSha: string;
+      action: string;
+      deep?: boolean;
+      freeTier?: boolean;
+    },
+    limitReason: () => string | null,
+  ): { ok: true; runId: string } | { ok: false; reason: string } {
+    return this.db
+      .transaction(() => {
+        const reason = limitReason();
+        if (reason) {
+          this.recordReviewRun({
+            ...input,
+            status: 'skipped',
+            skipReason: reason,
+            durationMs: 0,
+          });
+          return { ok: false as const, reason };
+        }
+        return { ok: true as const, runId: this.startReviewRun(input) };
+      })
+      .immediate();
+  }
+
   /** Global count of free-tier reviews started across ALL accounts in the last
    *  `sinceMs` — the anchor for the free-tier daily spend circuit-breaker. Counts
    *  running + completed (a farm's in-flight reviews cost money too). */
@@ -1973,7 +2117,7 @@ export class AppDatabase {
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM review_runs
-         WHERE free_tier = 1 AND status IN ('running', 'completed')
+         WHERE free_tier = 1 AND (status IN ('running', 'completed', 'failed') OR (status = 'skipped' AND skip_reason LIKE 'interrupted by restart%'))
            AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND created_at >= ?`,
       )
       .get(since) as { n: number };
@@ -1987,6 +2131,58 @@ export class AppDatabase {
    *  key on head_sha). */
   setReviewRunHeadSha(id: string, headSha: string): void {
     this.db.prepare(`UPDATE review_runs SET head_sha = ? WHERE id = ?`).run(headSha, id);
+  }
+
+  /**
+   * Reopen the single run row reserved before a graceful restart. Reusing the
+   * row keeps an interrupted attempt from consuming a second trial/hourly slot.
+   * A completed row is reported separately so a late shutdown requeue cannot
+   * run the same review twice.
+   */
+  resumeReviewRun(
+    id: string,
+    input: Pick<Parameters<AppDatabase['startReviewRun']>[0], 'tenantId' | 'installationId' | 'owner' | 'repo' | 'pr' | 'action'>,
+  ): 'resumed' | 'completed' | 'unavailable' {
+    const row = this.db
+      .prepare(
+        `SELECT status, skip_reason, tenant_id, installation_id, owner, repo, pr, action
+         FROM review_runs WHERE id = ?`,
+      )
+      .get(id) as
+      | {
+          status: ReviewRunStatus;
+          skip_reason: string | null;
+          tenant_id: string;
+          installation_id: number;
+          owner: string;
+          repo: string;
+          pr: number;
+          action: string;
+        }
+      | undefined;
+    if (
+      !row ||
+      row.tenant_id !== input.tenantId ||
+      row.installation_id !== input.installationId ||
+      row.owner !== input.owner ||
+      row.repo !== input.repo ||
+      row.pr !== input.pr ||
+      row.action !== input.action
+    ) {
+      return 'unavailable';
+    }
+    if (row.status === 'completed') return 'completed';
+    if (row.status !== 'skipped' || !row.skip_reason?.startsWith('interrupted by restart')) {
+      return 'unavailable';
+    }
+    const updated = this.db
+      .prepare(
+        `UPDATE review_runs
+         SET status = 'running', skip_reason = NULL, error = NULL, duration_ms = 0
+         WHERE id = ? AND status = 'skipped' AND skip_reason LIKE 'interrupted by restart%'`,
+      )
+      .run(id);
+    return updated.changes > 0 ? 'resumed' : 'unavailable';
   }
 
   /** Finalize a row created by startReviewRun with its terminal status + counts. */
@@ -2246,6 +2442,21 @@ export class AppDatabase {
       .run(enabled ? 1 : 0, new Date().toISOString(), repoId);
   }
 
+  /** Disable a repository when GitHub removes it from the installation. */
+  disableRepoByGitHubId(installationId: number, githubRepoId: number): boolean {
+    const result = this.db
+      .prepare(`UPDATE repos SET enabled = 0, updated_at = ? WHERE installation_id = ? AND github_repo_id = ?`)
+      .run(new Date().toISOString(), installationId, githubRepoId);
+    return result.changes > 0;
+  }
+
+  /** Disable all repository automations when an installation is deleted. */
+  disableReposForInstallation(installationId: number): number {
+    return this.db
+      .prepare(`UPDATE repos SET enabled = 0, updated_at = ? WHERE installation_id = ? AND enabled = 1`)
+      .run(new Date().toISOString(), installationId).changes;
+  }
+
   updateRepoSettings(
     repoId: string,
     patch: {
@@ -2291,16 +2502,16 @@ export class AppDatabase {
 
   /**
    * Whether Orvex should auto-review THIS specific trigger — the dashboard
-   * settings-section toggles. `opened`/`reopened` are gated by reviewOnOpen;
-   * `synchronize` (a new push to an open PR) by reviewOnPush. An unknown repo
-   * defaults to true for both (same "on before the dashboard is visited"
-   * reasoning as isRepoEnabled) so a fresh install isn't silently inert.
+   * settings-section toggles. `opened`/`reopened`/`ready_for_review` are gated
+   * by reviewOnOpen; `synchronize` (a new push to an open PR) by reviewOnPush.
+   * An unknown repo defaults to true for both (same "on before the dashboard is
+   * visited" reasoning as isRepoEnabled) so a fresh install isn't silently inert.
    */
   isRepoActionEnabled(installationId: number, fullName: string, action: string): boolean {
     const repo = this.getRepoByFullName(installationId, fullName);
     if (!repo) return true;
     if (action === 'synchronize') return repo.reviewOnPush;
-    return repo.reviewOnOpen; // opened, reopened
+    return repo.reviewOnOpen; // opened, reopened, ready_for_review
   }
 
   // ——— Pull request lifecycle ———
@@ -2744,7 +2955,7 @@ function mapUser(row: UserRow): User {
 
 /** Stable 31-bit int hash of a string (for synthetic github ids). */
 /** Stripe subscription statuses that revoke paid access (dunning / failed / ended). */
-const DOWNGRADED_SUB_STATUSES = new Set(['past_due', 'unpaid', 'canceled', 'incomplete_expired']);
+const DOWNGRADED_SUB_STATUSES = new Set(['past_due', 'unpaid', 'canceled', 'incomplete', 'incomplete_expired']);
 
 interface ReviewRunRow {
   id: string;

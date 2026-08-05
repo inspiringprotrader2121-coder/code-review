@@ -4,6 +4,7 @@ import {
   createInstallationOctokit,
   fetchInstallationMeta,
   loadGitHubConfigFromEnv,
+  listInstallationRepos,
 } from '@orvex-review/github';
 import type { AppDatabase, GitHubInstallation, Tenant } from '@orvex-review/store';
 import { createAppDatabase } from '@orvex-review/store';
@@ -115,12 +116,16 @@ export class TenantService {
     const tenant = this.db.getOrCreateTenant(tenantSlug);
 
     // SECURITY: never rebind an installation that already belongs to a DIFFERENT
-    // tenant with members. installation_id comes from the callback URL and isn't
-    // bound to the signed state, so without this guard any signed-in user could
-    // claim another org's installation (and all its repos/findings) by pointing
-    // the callback at that org's id. First-time installs (no existing row) and
-    // reinstalls to the same tenant, and reclaiming an orphan tenant with no
-    // members, all remain allowed.
+    // tenant WITH members. installation_id comes from the callback URL and isn't
+    // bound into signed state, so without this guard any signed-in user could
+    // claim another org's installation by pointing the callback at that id.
+    //
+    // Memberless owners are the webhook race path: `syncInstallationFromWebhook`
+    // auto-creates `org-<login>` and binds the install before the signed
+    // callback lands. Rebinding that orphan onto the connect-flow workspace is
+    // the intended "prove org control" path (see tenantIsClaimable). Slug-claim
+    // of those org-* workspaces stays blocked in startConnect.
+    // First-time installs (no row) and same-tenant reinstalls remain allowed.
     const existing = this.db.getInstallation(installationId);
     if (existing && existing.tenantId !== tenant.id && this.db.tenantHasMembers(existing.tenantId)) {
       throw new WorkspaceAccessError(
@@ -138,6 +143,30 @@ export class TenantService {
       repositorySelection: meta.repositorySelection,
       suspendedAt: meta.suspendedAt ?? null,
     });
+    // GitHub can deliver installation.created before the browser callback, or
+    // deliver the callback before the repository event. Fetch the authoritative
+    // repository list here so the first dashboard render is not empty or raced.
+    try {
+      const repos = await listInstallationRepos(cfg, installationId);
+      const settings = this.db.getWorkspaceSettings(tenant.id);
+      for (const repo of repos) {
+        this.db.upsertRepo({
+          installationId,
+          tenantId: tenant.id,
+          githubRepoId: repo.githubRepoId,
+          owner: repo.owner,
+          name: repo.name,
+          fullName: repo.fullName,
+          private: repo.private,
+          defaultBranch: repo.defaultBranch,
+          enabled: settings.autoEnableNewRepos,
+        });
+      }
+    } catch (err) {
+      // The installation is still valid; the webhook or the dashboard sync
+      // endpoint can repair a transient GitHub listing failure.
+      console.warn(`[tenants] repository sync failed for installation ${installationId}:`, (err as Error).message);
+    }
     return { tenant, installation };
   }
 

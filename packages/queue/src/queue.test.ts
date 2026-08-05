@@ -62,6 +62,42 @@ test('different PRs are unaffected — each still runs concurrently', async () =
   assert.notEqual(a!.pr, b!.pr);
 });
 
+test('ready_for_review is not deduped against a prior draft opened skip on the same SHA', async () => {
+  const q = new MemoryReviewQueue();
+  const opened = job({ headSha: 'shaDraft', action: 'opened' });
+  await q.enqueue(opened);
+  const run = await q.dequeue();
+  // Draft skip must NOT mark the bare SHA DONE — only :draft_skipped.
+  await q.markCompleted(run!, { draftSkipped: true });
+
+  const ready = await q.enqueue(job({ headSha: 'shaDraft', action: 'ready_for_review' }));
+  assert.equal(ready.accepted, true, 'ready_for_review must not collide with draft skip');
+  const next = await q.dequeue();
+  assert.equal(next?.action, 'ready_for_review');
+});
+
+test('ready_for_review is deduped when opened already successfully reviewed the same SHA', async () => {
+  const q = new MemoryReviewQueue();
+  await q.enqueue(job({ headSha: 'shaReady', action: 'opened' }));
+  const run = await q.dequeue();
+  await q.markCompleted(run!); // full review, bare SHA DONE
+
+  const ready = await q.enqueue(job({ headSha: 'shaReady', action: 'ready_for_review' }));
+  assert.equal(ready.accepted, false, 'ready_for_review must not double-review after opened');
+  assert.equal(ready.reason, 'duplicate');
+});
+
+test('opened is deduped when ready_for_review already successfully reviewed the same SHA', async () => {
+  const q = new MemoryReviewQueue();
+  await q.enqueue(job({ headSha: 'shaReady2', action: 'ready_for_review' }));
+  const run = await q.dequeue();
+  await q.markCompleted(run!); // also marks bare SHA DONE
+
+  const opened = await q.enqueue(job({ headSha: 'shaReady2', action: 'opened' }));
+  assert.equal(opened.accepted, false, 'opened must not double-review after ready_for_review');
+  assert.equal(opened.reason, 'duplicate');
+});
+
 test('a queue without leases is safe to heartbeat (optional-method contract)', async () => {
   // queue-runner heartbeats via `queue.renewLease?.(job)`. MemoryReviewQueue is
   // single-process and has no lease, so the method is absent — the optional call

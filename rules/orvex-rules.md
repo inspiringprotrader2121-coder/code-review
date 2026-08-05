@@ -171,6 +171,23 @@ P2 — not P3/info.**
   report it at its true severity. (A pre-existing bad pattern the PR touches,
   moves, or copies is a reason to ALSO flag the others, never to lower this one.)
 
+**P1 is rare.** Default real user-visible / logic / UX / operational bugs to **P2**.
+
+P1 ONLY if you can name a concrete trigger AND one of:
+  (a) security/authz bypass or injection with attacker-controlled input
+  (b) durable data loss/corruption or silently wrong access/money/recovery/signing/shipping decision
+  (c) process/service outage (worker/server crash loop), not a single UI panel throw
+
+NOT P1 (usually P2): missing import that breaks one view; spinner stuck; request-id race;
+archive backlog; Redis latency; fieldset disabling unrelated tabs — unless (a)–(c) also hold.
+
+Do not raise severity to "sound urgent." Never delete a real bug to fix severity —
+report the defect and rate impact honestly.
+
+Before claiming a constructor "omits required config," search the same scope for
+`.init(` / `configure(` / subsequent option assignment on that instance.
+Constructor-only reads are a known false-positive class.
+
 ## Output
 
 - List findings **most severe first**. When you can propose an exact fix, include

@@ -31,11 +31,13 @@ export interface ReviewJobPayload {
   repo: string;
   pr: number;
   headSha: string;
-  action: 'opened' | 'synchronize' | 'reopened' | 'manual' | 'command';
+  action: 'opened' | 'synchronize' | 'reopened' | 'ready_for_review' | 'manual' | 'command';
   fix?: FixRequest;
   enqueuedAt: string;
   /** `@orvex deep`: run extra diverse lens passes and union the results (paid plans) */
   deep?: boolean;
+  /** SQLite review-run id to resume after a graceful restart interrupted work. */
+  runId?: string;
   /** set when this job was re-queued after a restart interrupted it — a job may
    *  be resumed at most ONCE, so a crash/restart loop can't re-run it forever */
   resumedAfterRestart?: boolean;
@@ -50,10 +52,17 @@ export interface EnqueueResult {
   reason?: 'duplicate' | 'coalesced' | 'enqueued';
 }
 
+export interface MarkCompletedOptions {
+  /** Draft auto-triggers skip without reviewing — must NOT mark the bare SHA
+   *  DONE, or `ready_for_review` / a later real review of the same head is
+   *  blocked. Marks `${shaKey}:draft_skipped` instead. */
+  draftSkipped?: boolean;
+}
+
 export interface ReviewQueue {
   enqueue(job: ReviewJobPayload): Promise<EnqueueResult>;
   dequeue(): Promise<ReviewJobPayload | null>;
-  markCompleted(job: ReviewJobPayload): Promise<void>;
+  markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<void>;
   /** Extend this job's in-flight lease while it is still running.
    *  The Redis lease is a fixed TTL taken at claim time; a long review can
    *  outlive it, at which point another worker's SET NX succeeds and the SAME
@@ -69,14 +78,31 @@ export interface ReviewQueue {
   close(): Promise<void>;
 }
 
+/** Bare SHA key shared by automatic reviews of the same head (opened / ready / …). */
+export function reviewShaIdempotencyKey(
+  job: Pick<ReviewJobPayload, 'installationId' | 'owner' | 'repo' | 'pr' | 'headSha'>,
+): string {
+  return `${job.installationId}/${job.owner}/${job.repo}#${job.pr}@${job.headSha}`;
+}
+
+export function draftSkipIdempotencyKey(job: ReviewJobPayload): string {
+  return `${reviewShaIdempotencyKey(job)}:draft_skipped`;
+}
+
 export function jobIdempotencyKey(job: ReviewJobPayload): string {
   const kind = job.kind ?? 'review';
-  const base = `${job.installationId}/${job.owner}/${job.repo}#${job.pr}@${job.headSha}`;
+  const base = reviewShaIdempotencyKey(job);
   // Explicit human triggers (`@orvex review` command, CLI manual) must ALWAYS
   // run — never dedup them against an earlier automatic review of the same sha.
   // Only automatic webhook events (opened/synchronize/reopened) dedup.
   if (job.action === 'command' || job.action === 'manual') {
     return `${base}:${kind}:${job.enqueuedAt}`;
+  }
+  // Distinct SEEN/DONE key so draft `opened` (which used to mark bare SHA DONE)
+  // cannot block `ready_for_review`. Successful completion ALSO marks the bare
+  // SHA DONE (see markCompleted) so opened↔ready cannot double-review.
+  if (job.action === 'ready_for_review' && kind === 'review') {
+    return `${base}:ready_for_review`;
   }
   if (kind === 'review') return base;
   const fix = job.fix;
@@ -84,6 +110,24 @@ export function jobIdempotencyKey(job: ReviewJobPayload): string {
   // same thread aren't collapsed into one and silently deduped.
   const instr = fix?.instruction ? `:${hashShort(fix.instruction)}` : '';
   return `${base}:${kind}:${fix?.scope ?? 'ready'}:${fix?.fingerprint ?? ''}:${fix?.replyToCommentId ?? ''}${instr}`;
+}
+
+/** True when this automatic review should be rejected because the same SHA
+ *  already completed successfully (bare key DONE). */
+export function automaticReviewAlreadyDone(
+  job: ReviewJobPayload,
+  isDone: (key: string) => boolean,
+): boolean {
+  const kind = job.kind ?? 'review';
+  if (kind !== 'review') return false;
+  if (job.action === 'command' || job.action === 'manual') return false;
+  const bare = reviewShaIdempotencyKey(job);
+  const idKey = jobIdempotencyKey(job);
+  if (isDone(idKey)) return true;
+  // ready_for_review uses a distinct key — still suppress if opened (or a prior
+  // ready) already successfully reviewed this SHA.
+  if (idKey !== bare && isDone(bare)) return true;
+  return false;
 }
 
 function hashShort(s: string): string {

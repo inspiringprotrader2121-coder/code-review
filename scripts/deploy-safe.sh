@@ -29,6 +29,8 @@ DEFAULT_SOURCES=(
   docs
   scripts/deploy-safe.sh
   scripts/deploy-safe.test.sh
+  scripts/backup-db.mjs
+  scripts/orvex-backup.cron
   README.md
   PLAN.md
   ROADMAP.md
@@ -38,6 +40,7 @@ DEFAULT_SOURCES=(
   pnpm-lock.yaml
   pnpm-workspace.yaml
   tsconfig.base.json
+  ecosystem.config.cjs
   .env.example
   .rsync-filter
 )
@@ -243,6 +246,7 @@ set -euo pipefail
 cd "$1"
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore install --frozen-lockfile
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore typecheck
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore test
 REMOTE_CHECK
 
   parse_ready() {
@@ -373,6 +377,37 @@ mv "$stage/node_modules" "$live/node_modules"
 REMOTE_APPLY
   }
 
+  restart_release() {
+    "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_RESTART'
+set -euo pipefail
+live=$1
+if [[ -f "$live/ecosystem.config.cjs" ]]; then
+  pm2 startOrRestart "$live/ecosystem.config.cjs" --only velatrix-review --update-env >/dev/null
+else
+  # The first release may predate the ecosystem file. Recreate the legacy
+  # process explicitly so a failed ecosystem rollout cannot leave PM2 using
+  # stale args or the .env port during rollback.
+  pm2 delete velatrix-review >/dev/null 2>&1 || true
+  pm2 start /usr/bin/bash --name velatrix-review --interpreter none -- \
+    -lc 'cd /home/orvex/code-review && set -a && . ./.env && set +a && PORT=8788 HOST=0.0.0.0 pnpm start' >/dev/null
+fi
+REMOTE_RESTART
+  }
+
+  install_backup_schedule() {
+    "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_BACKUP_SCHEDULE'
+set -euo pipefail
+live=$1
+schedule=$live/scripts/orvex-backup.cron
+[[ -f "$schedule" ]]
+tmp=$(mktemp)
+trap 'rm -f -- "$tmp"' EXIT
+{ crontab -l 2>/dev/null || true; } | awk '$0 !~ /# orvex-db-backup$/ { print }' >"$tmp"
+cat "$schedule" >>"$tmp"
+crontab "$tmp"
+REMOTE_BACKUP_SCHEDULE
+  }
+
   rollback_release() {
     echo "[deploy] rolling back staged release" >&2
     local failed=0
@@ -397,7 +432,7 @@ REMOTE_ROLLBACK
       echo "[deploy] CRITICAL: rollback file restoration failed" >&2
       failed=1
     fi
-    if ! "${SSH[@]}" 'pm2 restart velatrix-review --update-env >/dev/null'; then
+    if ! restart_release; then
       echo "[deploy] CRITICAL: rollback PM2 restart failed" >&2
       failed=1
     elif ! ready_json "${DEPLOY_READY_ATTEMPTS:-30}" "${DEPLOY_READY_SLEEP_S:-2}" 0 1 >/dev/null; then
@@ -411,7 +446,7 @@ REMOTE_ROLLBACK
     if ! rollback_release; then exit 20; fi
     exit 6
   fi
-  if ! "${SSH[@]}" 'pm2 restart velatrix-review --update-env >/dev/null'; then
+  if ! restart_release; then
     if ! rollback_release; then exit 20; fi
     exit 7
   fi
@@ -441,6 +476,9 @@ REMOTE_RE-DRAIN
     fi
     if ! rollback_release; then exit 20; fi
     exit 9
+  fi
+  if ! install_backup_schedule; then
+    echo "[deploy] WARNING: could not install the local database backup schedule" >&2
   fi
   "${SSH[@]}" bash -s -- "$STAGE_DIR" "$BACKUP_DIR" <<'REMOTE_CLEAN'
 set -euo pipefail

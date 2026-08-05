@@ -129,6 +129,9 @@ export function sessionRoutes() {
       setLoginCsrfCookie(c, csrf);
       return c.html(registerPage(next, 'csrf', csrf, oauthOptions()), 403);
     }
+    if (body.acceptedTerms !== '1') {
+      return c.html(registerPage(next, 'terms', getCookie(c, LOGIN_CSRF_COOKIE) ?? '', oauthOptions()), 400);
+    }
     if (!isValidEmail(email)) return c.html(registerPage(next, 'email', getCookie(c, LOGIN_CSRF_COOKIE) ?? '', oauthOptions()), 400);
     if (password.length < 12 || password.length > 1_024) {
       return c.html(registerPage(next, 'password', getCookie(c, LOGIN_CSRF_COOKIE) ?? '', oauthOptions()), 400);
@@ -243,18 +246,18 @@ export function sessionRoutes() {
   app.get('/auth/oauth/callback', async (c) => {
     const code = c.req.query('code');
     const state = c.req.query('state');
-    if (!code || !state) return c.json({ error: 'missing code or state' }, 400);
+    if (!code || !state) return oauthFailureRedirect(c, 'github');
 
     const payload = verifyOAuthState(state, platformSecret());
-    if (!payload || payload.provider !== 'github') return c.json({ error: 'invalid or expired state' }, 400);
+    if (!payload || payload.provider !== 'github') return oauthFailureRedirect(c, 'github');
     const loginCsrf = getCookie(c, LOGIN_CSRF_COOKIE);
     if (!loginCsrf || !safeEqual(loginCsrf, payload.nonce)) {
-      return c.json({ error: 'invalid or expired browser login state' }, 400);
+      return oauthFailureRedirect(c, 'github', payload.next);
     }
     deleteCookie(c, LOGIN_CSRF_COOKIE, { path: '/auth' });
 
     const oauth = loadOAuthConfigFromEnv();
-    if (!oauth) return c.json({ error: 'user login is not configured' }, 501);
+    if (!oauth) return oauthFailureRedirect(c, 'github', payload.next);
 
     try {
       const ghUser = await exchangeCodeForUser(oauth, code, oauthCallbackUrl());
@@ -263,24 +266,24 @@ export function sessionRoutes() {
       if (normalizedEmail) db.setUserNormalizedEmailIfMissing(user.id, normalizedEmail);
       return beginAuthenticatedSession(c, db, user, safeNext(payload.next));
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 500);
+      console.warn('[auth] GitHub OAuth callback failed:', err instanceof Error ? err.message : String(err));
+      return oauthFailureRedirect(c, 'github', payload.next);
     }
   });
 
   app.get('/auth/google/callback', async (c) => {
     const code = c.req.query('code');
     const state = c.req.query('state');
-    if (!code || !state) return c.json({ error: 'missing code or state' }, 400);
+    if (!code || !state) return oauthFailureRedirect(c, 'google');
     const payload = verifyOAuthState(state, platformSecret());
-    if (!payload || payload.provider !== 'google') return c.json({ error: 'invalid or expired state' }, 400);
+    if (!payload || payload.provider !== 'google') return oauthFailureRedirect(c, 'google');
     const loginCsrf = getCookie(c, LOGIN_CSRF_COOKIE);
     if (!loginCsrf || !safeEqual(loginCsrf, payload.nonce)) {
-      return c.json({ error: 'invalid or expired browser login state' }, 400);
+      return oauthFailureRedirect(c, 'google', payload.next);
     }
     deleteCookie(c, LOGIN_CSRF_COOKIE, { path: '/auth' });
     const oauth = loadGoogleOAuthConfigFromEnv();
-    if (!oauth) return c.json({ error: 'Google login is not configured' }, 501);
+    if (!oauth) return oauthFailureRedirect(c, 'google', payload.next);
     try {
       const googleUser = await exchangeGoogleCodeForUser(oauth, code, googleOAuthCallbackUrl());
       const normalizedEmail = normalizeEmail(googleUser.email);
@@ -288,8 +291,8 @@ export function sessionRoutes() {
       db.setUserNormalizedEmailIfMissing(user.id, normalizedEmail);
       return beginAuthenticatedSession(c, db, user, safeNext(payload.next));
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: message }, 500);
+      console.warn('[auth] Google OAuth callback failed:', err instanceof Error ? err.message : String(err));
+      return oauthFailureRedirect(c, 'google', payload.next);
     }
   });
 
@@ -460,6 +463,10 @@ function safeNext(next: string | undefined): string {
   return next;
 }
 
+function oauthFailureRedirect(c: Context, provider: 'github' | 'google', next?: string): Response {
+  return c.redirect(`/auth/login?error=${provider}&next=${encodeURIComponent(safeNext(next))}`);
+}
+
 /** Existing workspace members should not be sent back into the onboarding flow. */
 function postAuthDestination(db: AppDatabase, user: User, next: string | undefined): string {
   const destination = safeNext(next);
@@ -484,6 +491,10 @@ function loginPage(
       ? '<div class="banner error">Too many sign-in attempts. Try again in a few minutes.</div>'
       : error === 'csrf'
         ? '<div class="banner error">Your sign-in form expired. Please try again.</div>'
+        : error === 'github'
+          ? '<div class="banner error">GitHub sign-in was cancelled or could not be completed. Try again.</div>'
+          : error === 'google'
+            ? '<div class="banner error">Google sign-in was cancelled or could not be completed. Try again.</div>'
         : error
         ? '<div class="banner error">Incorrect email or password.</div>'
         : '';
@@ -527,6 +538,8 @@ function registerPage(
                 ? '<div class="banner error">An account already exists for that email. Please sign in.</div>'
                 : error === 'disposable'
                   ? '<div class="banner error">Please use a permanent email address — disposable/temporary inboxes aren\'t accepted.</div>'
+                  : error === 'terms'
+                    ? '<div class="banner error">Please accept the Terms of Service and Privacy Policy to create an account.</div>'
                   : '';
   return pageShell(
     'Create your account',
@@ -544,6 +557,11 @@ function registerPage(
        <p class="hint">At least 12 characters.</p>
        <label for="confirm-password">Confirm password</label>
        <input id="confirm-password" name="confirmPassword" type="password" required minlength="12" autocomplete="new-password" />
+       <label style="display:flex;align-items:flex-start;gap:8px;margin-top:14px;font-size:13px;line-height:1.45">
+         <input id="accepted-terms" name="acceptedTerms" value="1" type="checkbox" required style="margin-top:3px" />
+         <span>I agree to the <a href="/terms" target="_blank" rel="noreferrer">Terms of Service</a>
+         and acknowledge the <a href="/privacy" target="_blank" rel="noreferrer">Privacy Policy</a>.</span>
+       </label>
        <button type="submit">Create free account →</button>
      </form>
      <p class="muted" style="margin-top:16px">Already have an account? <a href="/auth/login?next=${encodeURIComponent(next)}">Sign in</a></p>`,

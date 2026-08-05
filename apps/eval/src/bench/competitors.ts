@@ -38,7 +38,7 @@
  */
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Octokit } from '@octokit/rest';
 import { createBenchmarkOctokit } from './github-auth.js';
 import { parseOrvexFindingTables } from './orvex-table.js';
@@ -74,13 +74,33 @@ function botOf(login: string): string | null {
 function isOrvexStatus(body: string): boolean {
   return isOrvexStatusComment(body);
 }
-/** CodeRabbit review state: it often can't/doesn't post a real review. A
- *  walkthrough is only "reviewed" when it isn't one of the known no-review
- *  notices — expanded after under-counting real skips as reviews. */
-function coderabbitState(body: string): 'reviewed' | 'limit' | 'skipped' {
-  if (/limit reached|couldn.t start this review|rate.?limit|usage limit/i.test(body)) return 'limit';
+/** CodeRabbit review availability, kept separate from "not observed". */
+export type CodeRabbitState = 'reviewed' | 'rate_limited' | 'skipped';
+
+/** CodeRabbit often posts a billing/limit notice instead of a review. Keep this
+ * deliberately specific: a normal finding that discusses rate limiting must not
+ * turn a genuine review into an unavailable run. */
+export function coderabbitState(body: string): CodeRabbitState {
+  if (
+    /(?:review|pr|usage)\s+limits?\s+(?:reached|applied|exceeded)|next review available|rate[\s-]+limited\s+by\s+coderabbit|couldn['’]?t start this review|adaptive limits? (?:are|is) (?:currently )?applied|fair usage limits? policy/i.test(
+      body,
+    )
+  ) {
+    return 'rate_limited';
+  }
   if (/review skipped|no new commits to review|no review (needed|required)|skipped due to|nothing to review|review was skipped/i.test(body)) return 'skipped';
   return 'reviewed';
+}
+
+/** A rate-limit notice wins over historical review evidence for this snapshot:
+ * the tool was unavailable for the benchmarked attempt, not a clean review. */
+export function mergeCoderabbitState(
+  current: CodeRabbitState | undefined,
+  next: CodeRabbitState,
+): CodeRabbitState {
+  if (current === 'rate_limited' || next === 'rate_limited') return 'rate_limited';
+  if (current === 'reviewed' || next === 'reviewed') return 'reviewed';
+  return 'skipped';
 }
 
 interface Finding {
@@ -133,8 +153,12 @@ async function collect(octokit: Octokit) {
 
   const findings: Finding[] = [];
   const reviewedPrs: Record<string, Set<number>> = {};
+  const rateLimitedPrs: Record<string, Set<number>> = {};
+  const skippedPrs: Record<string, Set<number>> = {};
   const orvexReviewedAt: Record<number, string> = {};
   const mark = (bot: string, pr: number) => (reviewedPrs[bot] ??= new Set()).add(pr);
+  const markStatus = (bucket: Record<string, Set<number>>, bot: string, pr: number) =>
+    (bucket[bot] ??= new Set()).add(pr);
   const seenLogins = new Set<string>();
 
   for (const pr of prNums) {
@@ -150,6 +174,7 @@ async function collect(octokit: Octokit) {
     const appeared = new Set<string>();
 
     // inline comments — anchored findings for every tool that posts them
+    let crState: CodeRabbitState | undefined;
     for (const c of rc) {
       const login = c.user?.login ?? '';
       seenLogins.add(login);
@@ -157,6 +182,7 @@ async function collect(octokit: Octokit) {
       if (!bot) continue;
       appeared.add(bot);
       const body = c.body ?? '';
+      if (bot === 'coderabbit') crState = mergeCoderabbitState(crState, coderabbitState(body));
       if (bot === 'orvex' && isOrvexStatus(body)) continue;
       findings.push({ pr, bot, path: c.path ?? null, line: c.line ?? c.original_line ?? null, sev: severityOf(body), excerpt: body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 140), anchored: true });
     }
@@ -166,6 +192,10 @@ async function collect(octokit: Octokit) {
       const bot = botOf(r.user?.login ?? '');
       if (!bot) continue;
       appeared.add(bot);
+      if (bot === 'coderabbit') {
+        crState = mergeCoderabbitState(crState, coderabbitState(r.body ?? ''));
+        continue;
+      }
       if (bot === 'orvex') {
         const body = r.body ?? '';
         // Provenance: record the LATEST Orvex review time per PR so a combined
@@ -186,12 +216,17 @@ async function collect(octokit: Octokit) {
       seenLogins.add(login);
       const bot = botOf(login);
       if (!bot) continue;
-      if (bot === 'coderabbit') { if (coderabbitState(c.body ?? '') === 'reviewed') crReviewed = true; }
+      if (bot === 'coderabbit') {
+        crState = mergeCoderabbitState(crState, coderabbitState(c.body ?? ''));
+        if (crState === 'reviewed') crReviewed = true;
+      }
       else appeared.add(bot);
     }
 
     for (const bot of appeared) if (bot !== 'coderabbit') mark(bot, pr);
-    if (crReviewed) mark('coderabbit', pr);
+    if (crState === 'rate_limited') markStatus(rateLimitedPrs, 'coderabbit', pr);
+    else if (crState === 'skipped') markStatus(skippedPrs, 'coderabbit', pr);
+    else if (crReviewed || crState === 'reviewed') mark('coderabbit', pr);
   }
 
   const deduped = dedupeRepeats(findings);
@@ -201,7 +236,7 @@ async function collect(octokit: Octokit) {
         `(same bot re-emitting one finding across multiple reviews on a PR)`,
     );
   }
-  return { prNums, findings: deduped, reviewedPrs, seenLogins, orvexReviewedAt };
+  return { prNums, findings: deduped, reviewedPrs, rateLimitedPrs, skippedPrs, seenLogins, orvexReviewedAt };
 }
 
 interface Cluster {
@@ -268,7 +303,23 @@ function pairwise(bot: string, prs: number[], clusters: Cluster[]): Pairwise {
   return { competitor: bot, prs, all, actionable, ...all };
 }
 
-interface Snapshot { batch: string; range: string; prLo: number; prHi: number; prNums: number[]; runAt: string; pairwise: Pairwise[]; }
+interface Snapshot {
+  batch: string;
+  range: string;
+  prLo: number;
+  prHi: number;
+  prNums: number[];
+  runAt: string;
+  /** Legacy: Pairwise[]. New: { all, anchored }. */
+  pairwise: Pairwise[] | { all: Pairwise[]; anchored: Pairwise[] };
+  availability?: Record<string, { reviewed: number[]; rateLimited: number[]; skipped: number[] }>;
+}
+
+function snapshotPairwiseRows(s: Snapshot, prefer: 'anchored' | 'all' = 'anchored'): Pairwise[] {
+  if (Array.isArray(s.pairwise)) return s.pairwise;
+  if (prefer === 'anchored' && s.pairwise.anchored?.length) return s.pairwise.anchored;
+  return s.pairwise.all ?? [];
+}
 
 function combine() {
   let files: string[] = [];
@@ -310,14 +361,14 @@ function combine() {
   const totals: Record<string, { all: Split; actionable: Split }> = {};
   const prsByComp: Record<string, Set<number>> = {};
   for (const s of chosen) {
-    for (const p of s.pairwise) {
+    for (const p of snapshotPairwiseRows(s, 'anchored')) {
       const t = (totals[p.competitor] ??= { all: zero(), actionable: zero() });
       add(t.all, p.all); add(t.actionable, p.actionable);
       (prsByComp[p.competitor] ??= new Set());
       for (const pr of p.prs) prsByComp[p.competitor].add(pr);
     }
   }
-  console.log(`\nCOMBINED across ${chosen.length} range(s): ${chosen.map((s) => `${s.range} (run ${s.runAt?.slice(0, 16)})`).join(', ')}\n`);
+  console.log(`\nCOMBINED across ${chosen.length} range(s) [ANCHORED]: ${chosen.map((s) => `${s.range} (run ${s.runAt?.slice(0, 16)})`).join(', ')}\n`);
   for (const c of COMPETITORS) {
     const t = totals[c]; if (!t) continue;
     console.log(`Orvex vs ${c.padEnd(11)} — ${prsByComp[c].size} PRs`);
@@ -332,7 +383,7 @@ async function main() {
 
   const octokit = await createBenchmarkOctokit(OWNER, REPO);
 
-  const { prNums, findings, reviewedPrs, seenLogins, orvexReviewedAt } = await collect(octokit);
+  const { prNums, findings, reviewedPrs, rateLimitedPrs, skippedPrs, seenLogins, orvexReviewedAt } = await collect(octokit);
   const clusters = clusterize(findings);
 
   console.log(`\nCompetitor benchmark — ${OWNER}/${REPO} PRs #${PR_LO}–#${PR_HI}\n`);
@@ -347,6 +398,14 @@ async function main() {
   for (const b of ['orvex', ...COMPETITORS]) {
     const rp = [...(reviewedPrs[b] ?? [])].sort((a, z) => a - z);
     console.log(`  ${b.padEnd(11)} ${rp.length}/${prNums.length}  [${rp.join(', ') || 'none'}]`);
+  }
+  const crLimited = [...(rateLimitedPrs.coderabbit ?? [])].sort((a, z) => a - z);
+  const crSkipped = [...(skippedPrs.coderabbit ?? [])].sort((a, z) => a - z);
+  if (crLimited.length > 0) {
+    console.log(`  coderabbit rate-limited ${crLimited.length}/${prNums.length}  [${crLimited.join(', ')}]`);
+  }
+  if (crSkipped.length > 0) {
+    console.log(`  coderabbit skipped     ${crSkipped.length}/${prNums.length}  [${crSkipped.join(', ')}]`);
   }
 
   // Compare each competitor ONLY on the PRs it demonstrably reviewed — comparing
@@ -413,7 +472,36 @@ async function main() {
     const fname = `${OWNER}_${REPO}_${range}__${stamp}.json`;
     writeFileSync(
       path.join(RESULTS_DIR, fname),
-      JSON.stringify({ batch: `${OWNER}_${REPO}_${range}`, range, prLo: PR_LO, prHi: PR_HI, prNums, runAt, orvexReviewedAt, pairwise: results }, null, 2),
+      JSON.stringify(
+        {
+          batch: `${OWNER}_${REPO}_${range}`,
+          range,
+          prLo: PR_LO,
+          prHi: PR_HI,
+          prNums,
+          runAt,
+          orvexReviewedAt,
+          availability: {
+            coderabbit: {
+              reviewed: [...(reviewedPrs.coderabbit ?? [])].sort((a, z) => a - z),
+              rateLimited: crLimited,
+              skipped: crSkipped,
+            },
+          },
+          // Persist BOTH splits. ANCHORED is the honest head-to-head; ALL is
+          // Orvex-favourable (includes summary-table-only rows). Tune quality
+          // only against anchored.
+          pairwise: {
+            all: results,
+            anchored: COMPETITORS.map((c) => {
+              const prs = [...(reviewedPrs[c] ?? [])].sort((a, z) => a - z);
+              return pairwise(c, prs, anchoredClusters);
+            }),
+          },
+        },
+        null,
+        2,
+      ),
     );
     console.log(`\nSaved immutable snapshot → results/${fname}  (run with --combine to sum latest-per-range)`);
   } catch (e) { console.warn('could not save batch:', (e as Error).message); }
@@ -423,4 +511,7 @@ async function main() {
   console.log('line-level comments) on these PRs, so its anchored count is ~0 by design.\n');
 }
 
-main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+const entrypoint = process.argv[1];
+if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
+  main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+}

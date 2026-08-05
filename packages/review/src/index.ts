@@ -45,6 +45,11 @@ export {
   formatFixSummaryComment,
   formatAutoApplyReply,
   formatHelpComment,
+  formatReviewCommandsFooter,
+  formatCommandsMarkdownTable,
+  formatUsageNotesMarkdown,
+  formatCommandsHtmlRows,
+  orvexCommandCatalog,
   applyMarker,
   parseApplyMarker,
   applyCheckboxChecked,
@@ -58,6 +63,8 @@ export {
   type FixSummaryInput,
 } from './format.js';
 export { parseOrvexCommand, commandTrigger, type OrvexCommand } from './commands.js';
+export type { OrvexCommandDoc, CommandWhere } from './commands-catalog.js';
+
 export { applyFixToContent, type CodeFix, type ApplyResult } from './apply.js';
 export {
   generateFixWithLlm,
@@ -70,15 +77,34 @@ export {
 } from './llm-fix.js';
 export { runAgent, type AgentFile, type AgentOptions, type AgentResponse } from './agent.js';
 export {
+  runInvestigateReview,
+  resolveUnderRoot,
+  isSafeGrepPattern,
+  extractDeletedSymbols,
+  type InvestigateOptions,
+} from './investigate.js';
+export {
   verifyFindings,
   verifyFixes,
   isProtectedSourceTier,
+  isWeakVerifierTier,
+  shouldRescueHedgedRejection,
   partitionVerifiedFindings,
+  parsePositiveIntEnv,
+  applyVerdicts,
   type VerifierOptions,
   type VerifiedFindings,
+  type VerificationStatus,
+  type VerificationDisposition,
   type FixCandidate,
 } from './verifier.js';
 export { dropSelfNegatingFindings } from './noise.js';
+export {
+  summarizeModelContribution,
+  formatModelContribution,
+  type ModelContributionReport,
+  type ModelContributionRow,
+} from './contribution.js';
 export { checkImportBindings, enumerateExports, extractNamedImports } from './import-check.js';
 export { isRateLimitOrQuotaError, llmChat, type LlmClientOptions } from './llm-client.js';
 export {

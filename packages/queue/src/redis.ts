@@ -1,8 +1,11 @@
 import { Redis } from 'ioredis';
 import {
+  draftSkipIdempotencyKey,
   jobIdempotencyKey,
   prKey,
+  reviewShaIdempotencyKey,
   type EnqueueResult,
+  type MarkCompletedOptions,
   type ReviewJobPayload,
   type ReviewQueue,
 } from './types.js';
@@ -108,8 +111,19 @@ export class RedisReviewQueue implements ReviewQueue {
     const idKey = jobIdempotencyKey(job);
     const pk = prKey(job);
 
-    // Already completed this exact job? reject.
+    // Already completed this exact job — or the same SHA already reviewed via
+    // another automatic action (opened ↔ ready_for_review)?
     if (await this.redis.exists(`${DONE_PREFIX}${idKey}`)) {
+      return { accepted: false, jobId: idKey, reason: 'duplicate' };
+    }
+    const bare = reviewShaIdempotencyKey(job);
+    if (
+      idKey !== bare &&
+      (job.kind ?? 'review') === 'review' &&
+      job.action !== 'command' &&
+      job.action !== 'manual' &&
+      (await this.redis.exists(`${DONE_PREFIX}${bare}`))
+    ) {
       return { accepted: false, jobId: idKey, reason: 'duplicate' };
     }
 
@@ -148,7 +162,20 @@ export class RedisReviewQueue implements ReviewQueue {
       const pk = prKey(job);
 
       // Already completed this exact review (same SHA/action)? never re-review it.
-      if (await this.redis.exists(`${DONE_PREFIX}${jobIdempotencyKey(job)}`)) continue;
+      // Also skip ready_for_review when the bare SHA was already successfully reviewed.
+      const doneHere = await this.redis.exists(`${DONE_PREFIX}${jobIdempotencyKey(job)}`);
+      if (doneHere) continue;
+      const bare = reviewShaIdempotencyKey(job);
+      const idKey = jobIdempotencyKey(job);
+      if (
+        idKey !== bare &&
+        (job.kind ?? 'review') === 'review' &&
+        job.action !== 'command' &&
+        job.action !== 'manual' &&
+        (await this.redis.exists(`${DONE_PREFIX}${bare}`))
+      ) {
+        continue;
+      }
 
       // Claim the PR atomically. If a review for this PR is ALREADY running, do
       // NOT start a second one concurrently — stash this as the pending "latest"
@@ -174,9 +201,20 @@ export class RedisReviewQueue implements ReviewQueue {
     return null;
   }
 
-  async markCompleted(job: ReviewJobPayload): Promise<void> {
+  async markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<void> {
+    if (opts?.draftSkipped) {
+      await this.redis.set(`${DONE_PREFIX}${draftSkipIdempotencyKey(job)}`, '1', 'EX', 604800);
+      await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, JSON.stringify(job));
+      return;
+    }
     const idKey = jobIdempotencyKey(job);
     await this.redis.set(`${DONE_PREFIX}${idKey}`, '1', 'EX', 604800);
+    // ready_for_review success also marks bare SHA so a queued opened cannot
+    // double-review the same head after ready already ran.
+    const bare = reviewShaIdempotencyKey(job);
+    if (idKey !== bare && (job.kind ?? 'review') === 'review') {
+      await this.redis.set(`${DONE_PREFIX}${bare}`, '1', 'EX', 604800);
+    }
     // Compare-and-delete: only release the lock if it is STILL ours. If this
     // review outran its TTL and another run re-claimed the PR, an unconditional
     // DEL would delete the new run's lock and let a third run start concurrently.

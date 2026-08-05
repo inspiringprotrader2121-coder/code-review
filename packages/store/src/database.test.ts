@@ -48,6 +48,58 @@ test('membership: owners, member listing, member-less tenants are claimable', ()
   assert.equal(workspaces[0].role, 'owner');
 });
 
+test('paid access downgrades on explicit dunning status and durable webhook claims dedupe across workers', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('billing');
+  db.setTenantPlan(tenant.id, 'review');
+  db.setTenantBilling(tenant.id, { stripeSubscriptionStatus: 'past_due' });
+  assert.equal(db.getTenantPlan(tenant.id), 'free');
+
+  db.setTenantBilling(tenant.id, { stripeSubscriptionStatus: 'active' });
+  assert.equal(db.getTenantPlan(tenant.id), 'review');
+
+  assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), true);
+  assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), false);
+  db.completeWebhookEvent('stripe', 'evt_1');
+  assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), false);
+  assert.equal(db.claimWebhookEvent('github', 'evt_1'), true, 'providers use independent delivery namespaces');
+
+  const runId = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 7,
+    owner: 'billing',
+    repo: 'api',
+    pr: 1,
+    headSha: 'abc',
+    action: 'synchronize',
+  });
+  assert.equal(db.failStaleRunningRuns(), 1);
+  assert.equal(db.countAccountReviews('billing'), 1, 'an interrupted attempt remains quota-consuming');
+  assert.equal(
+    db.resumeReviewRun(runId, {
+      tenantId: tenant.id,
+      installationId: 7,
+      owner: 'billing',
+      repo: 'api',
+      pr: 1,
+      action: 'synchronize',
+    }),
+    'resumed',
+  );
+  db.completeReviewRun(runId, { status: 'completed', durationMs: 1 });
+  assert.equal(
+    db.resumeReviewRun(runId, {
+      tenantId: tenant.id,
+      installationId: 7,
+      owner: 'billing',
+      repo: 'api',
+      pr: 1,
+      action: 'synchronize',
+    }),
+    'completed',
+  );
+});
+
 test('review runs: recorded and aggregated into workspace stats', () => {
   const db = freshDb();
   const tenant = db.createTenant('acme');
@@ -138,6 +190,10 @@ test('repos: upsert refreshes tenant_id when an installation is re-linked', () =
   assert.equal(db.getRepoByGitHubId(7, 99)?.tenantId, t2.id);
   assert.equal(db.listRepos(t1.id).length, 0);
   assert.equal(db.listRepos(t2.id).length, 1);
+
+  assert.equal(db.disableRepoByGitHubId(7, 99), true);
+  assert.equal(db.getRepoByGitHubId(7, 99)?.enabled, false);
+  assert.equal(db.disableReposForInstallation(7), 0, 'already-disabled repos are not counted twice');
 });
 
 test('manual-review candidates round-trip separately from findings', () => {

@@ -84,6 +84,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
 
     try {
       const config = loadWorkerConfig();
+      let draftSkipped = false;
       if (kind === 'fix') {
         await processFixJob(job, config);
       } else if (kind === 'explain') {
@@ -96,6 +97,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         await processScanJob(job, config);
       } else {
         const result = await processReviewJob(job, config);
+        draftSkipped = result.skipReason === 'draft PR';
         // auto-apply mode: commit Orvex's ready fixes right after each review
         if (!result.skipReason && result.newCount > 0) {
           const settings = config.store.getPrSettings(job);
@@ -111,7 +113,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
           }
         }
       }
-      await queue.markCompleted(job);
+      await queue.markCompleted(job, { draftSkipped });
       backoff = nextBackoffState(backoff, 'success', Date.now(), {
         threshold: BACKOFF_THRESHOLD,
         backoffMs: BACKOFF_MS,

@@ -27,6 +27,7 @@ export {
 export {
   PLANS,
   planFeatures,
+  publicPlanLabel,
   defaultPlanId,
   isPlanId,
   type PlanId,

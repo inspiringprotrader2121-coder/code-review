@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Hono } from 'hono';
-import { productionSecurityHeaders } from './app.js';
+import { canonicalHostRedirect, productionSecurityHeaders } from './app.js';
 
 test('sets browser security headers and keeps authenticated surfaces out of caches', async (t) => {
   const previousAppUrl = process.env.APP_URL;
@@ -27,4 +27,23 @@ test('sets browser security headers and keeps authenticated surfaces out of cach
 
   const loginResponse = await app.request('/auth/login');
   assert.equal(loginResponse.headers.get('cache-control'), 'no-store');
+});
+
+test('redirects the www host to the canonical public host', async (t) => {
+  const previousAppUrl = process.env.APP_URL;
+  process.env.APP_URL = 'https://useorvex.com';
+  t.after(() => {
+    if (previousAppUrl === undefined) delete process.env.APP_URL;
+    else process.env.APP_URL = previousAppUrl;
+  });
+
+  const app = new Hono();
+  app.use('*', productionSecurityHeaders);
+  app.use('*', canonicalHostRedirect);
+  app.get('/connect', (c) => c.text('connect'));
+
+  const response = await app.request('/connect?next=1', { headers: { host: 'www.useorvex.com' } });
+  assert.equal(response.status, 308);
+  assert.equal(response.headers.get('location'), 'https://useorvex.com/connect?next=1');
+  assert.equal(response.headers.get('x-frame-options'), 'DENY');
 });

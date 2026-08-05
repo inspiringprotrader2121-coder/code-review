@@ -4,8 +4,9 @@ import { marketingRoutes } from './marketing.js';
 
 test('public marketing explains every plan and does not disclose review providers or model counts', async () => {
   const app = marketingRoutes();
-  const [homeResponse, privacyResponse, termsResponse, refundsResponse, llmsResponse, robotsResponse] = await Promise.all([
+  const [homeResponse, pricingResponse, privacyResponse, termsResponse, refundsResponse, llmsResponse, robotsResponse] = await Promise.all([
     app.request('/'),
+    app.request('/pricing'),
     app.request('/privacy'),
     app.request('/terms'),
     app.request('/refunds'),
@@ -13,6 +14,8 @@ test('public marketing explains every plan and does not disclose review provider
     app.request('/robots.txt'),
   ]);
   assert.equal(homeResponse.status, 200);
+  assert.equal(pricingResponse.status, 301);
+  assert.equal(pricingResponse.headers.get('location'), '/#pricing');
   assert.equal(privacyResponse.status, 200);
   assert.equal(termsResponse.status, 200);
   assert.equal(refundsResponse.status, 200);
@@ -35,6 +38,7 @@ test('public marketing explains every plan and does not disclose review provider
     publicContent,
     /sandbox execution|runs your code|runtime evidence|131 (?:issues|bugs)|43%|widest coverage|other bots missed|benchmarked on 80/i,
   );
+  assert.doesNotMatch(publicContent, /enterprise/i);
 
   for (const expected of [
     '10 lifetime reviews · 2/hour',
@@ -42,7 +46,6 @@ test('public marketing explains every plan and does not disclose review provider
     'unlimited monthly · 10/hour',
     '50/month · 5/hour',
     '120/month · 10/hour',
-    'contract-defined capacity',
     'Then $0.50 per review',
     'Then $0.75 per review',
     'An <span class="mono">@orvex deep</span> review uses two units',
@@ -51,9 +54,15 @@ test('public marketing explains every plan and does not disclose review provider
     assert.match(home, new RegExp(escapeRegExp(expected)));
   }
   assert.match(home, /id="faq"/);
-  assert.equal((home.match(/class="faq-item"/g) ?? []).length, 10);
-  assert.match(home, /Every plan includes deterministic checks, three focused review passes, strict verification, finding memory, and autofix/);
+  assert.equal((home.match(/class="faq-item"/g) ?? []).length, 11);
+  assert.match(home, /id="commands"/);
+  assert.match(home, /@orvex rate limit/);
+  assert.match(home, /@orvex ignore &lt;file&gt;:&lt;line&gt;/);
+  assert.match(home, /What commands can I run on a pull request/);
+  assert.match(home, /Every plan includes deterministic checks, two or four focused review passes by track, strict verification, finding memory, and autofix/);
   assert.match(home, /Paid plans also include on-demand deep review/);
+  assert.doesNotMatch(home, /Every plan keeps the same review depth/i);
+  assert.doesNotMatch(home, /Every plan gets three focused review passes/i);
   for (const legalPath of ['/terms', '/privacy', '/refunds']) {
     assert.match(home, new RegExp(`href="${escapeRegExp(legalPath)}"`));
   }
@@ -61,7 +70,7 @@ test('public marketing explains every plan and does not disclose review provider
   assert.match(llms, /Plans otherwise differ by review track, pass count, allowance, hourly capacity/);
   assert.doesNotMatch(llms, /same three-pass depth/i);
   assert.match(privacy, /contracted third-party AI inference providers/);
-  assert.match(privacy, /transient, in-memory snapshot/);
+  assert.match(privacy, /temporary filesystem snapshot/);
   assert.match(privacy, /only selected excerpts are included in review\s+requests/);
   assert.match(terms, /support@useorvex\.com/);
   assert.match(refunds, /support@useorvex\.com/);

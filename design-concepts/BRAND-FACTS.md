@@ -28,7 +28,7 @@
 - Pro Unlimited — $69/mo · unlimited reviews · 2 AI models
 - Verify Lite — $49/mo · 50 reviews · then $0.75 · 3 AI models (premium track, budget entry)
 - Verify — $99/mo · 120 reviews · then $0.75 · 3 AI models + runs your code
-- Enterprise — custom · SSO/SAML, bring-your-own-LLM key, SLA
+- Custom plan details are handled privately and are not part of the public launch offer.
 - Every account starts with 10 free reviews — no card required.
 - Priced per workspace, not per seat.
 

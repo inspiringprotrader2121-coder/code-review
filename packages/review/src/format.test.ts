@@ -108,3 +108,10 @@ test('manual-review candidates remain visible without becoming inline findings o
   assert.doesNotMatch(body, /Fix all of these with Orvex/);
   assert.doesNotMatch(body, /it looks good to merge/);
 });
+
+test('summary body ends with a compact commands footer', () => {
+  const body = formatReviewBody([], [], { ...meta, trigger: '@orvex' });
+  assert.match(body, /@orvex help/);
+  assert.match(body, /@orvex rate limit/);
+  assert.match(body, /@orvex review/);
+});

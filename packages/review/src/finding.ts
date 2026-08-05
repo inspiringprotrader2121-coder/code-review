@@ -17,9 +17,15 @@ export interface ReviewFinding {
   lineRelocated?: boolean;
   /** internal: the anchor is on a context line in a deletion-only hunk */
   anchorContext?: boolean;
-  /** internal: model tier that produced this finding ('openai' = codex, 'standard' =
-   *  MiniMax, 'premium' = GLM). Codex findings are PROTECTED in verification. */
+  /** internal: model tier that produced this finding ('openai' / 'deepseek' /
+   *  'deepseek-flash' / 'deterministic' are PROTECTED in verification; 'standard'
+   *  / others use the normal gate). */
   sourceTier?: string;
+  /** internal: lens / pass tag (e.g. deep-dive, removed-behavior/callers). Used for
+   *  contribution reporting when the same tier runs two different lenses. */
+  sourcePass?: string;
+  /** Present when verification evidence-gated a P1→P2 severity correction. */
+  severityReason?: string;
 }
 
 /** A candidate that is visible in the review summary but intentionally excluded

@@ -2,13 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canRunAgentic,
+  canRunInvestigate,
   effectiveReviewConfig,
   failedRequiredLensIds,
+  modelForInvestigate,
   modelForPass,
   modelForPlanWithTier,
+  providerConfigurationIssue,
   type WorkerConfig,
 } from './pipeline.js';
 import { isHedgedRejection, isTransientLlmError } from '@orvex-review/review';
+import { planFeatures } from '@orvex-review/tenants';
 
 function modelRoutingConfig(): WorkerConfig {
   return {
@@ -25,8 +29,39 @@ function modelRoutingConfig(): WorkerConfig {
       api: 'responses',
       reasoningEffort: 'xhigh',
     },
+    deepseekModel: {
+      apiKey: 'deepseek-key',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-pro',
+      api: 'chat',
+    },
+    deepseekFlashModel: {
+      apiKey: 'deepseek-flash-key',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      api: 'chat',
+    },
   } as WorkerConfig;
 }
+
+test('required paid model stacks fail closed when a provider is missing', () => {
+  const config = modelRoutingConfig();
+  assert.equal(providerConfigurationIssue(planFeatures('verify'), config), null);
+  const missingFrontier = providerConfigurationIssue(planFeatures('verify'), {
+    ...config,
+    openaiModel: null,
+    codexCliModel: null,
+  });
+  assert.ok(missingFrontier);
+  assert.match(missingFrontier, /frontier review provider/);
+  const missingIndependent = providerConfigurationIssue(planFeatures('review'), {
+    ...config,
+    deepseekModel: null,
+    deepseekFlashModel: null,
+  });
+  assert.ok(missingIndependent);
+  assert.match(missingIndependent, /independent review provider/);
+});
 
 test('workspace review defaults apply unless config-as-code overrides them', () => {
   const workspace = { defaultReviewMode: 'strict' as const, maxComments: 8 };
@@ -105,27 +140,101 @@ test('Verify routes its first pass to the direct OpenAI Luna target', () => {
   assert.equal(firstPass.target.model, 'gpt-5.6-luna');
   assert.equal(firstPass.target.api, 'responses');
 
+  const secondPass = modelForPass(config, { modelTier: 'multi-model' }, 1);
+  assert.equal(secondPass.tier, 'deepseek-flash');
+  assert.equal(secondPass.target.model, 'deepseek-v4-flash');
+
   const thirdPass = modelForPass(config, { modelTier: 'multi-model' }, 2);
-  assert.equal(thirdPass.tier, 'standard');
-  assert.equal(thirdPass.target.model, 'MiniMax-M3');
-  assert.equal(thirdPass.target.api, 'anthropic');
+  assert.equal(thirdPass.tier, 'deepseek-flash');
+  assert.equal(thirdPass.target.model, 'deepseek-v4-flash');
+
+  const fourthPass = modelForPass(config, { modelTier: 'multi-model' }, 3);
+  assert.equal(fourthPass.tier, 'standard');
+  assert.equal(fourthPass.target.model, 'MiniMax-M3');
+  assert.equal(fourthPass.target.api, 'anthropic');
 });
 
-test('verification usage is charged to the target that actually verifies', (t) => {
-  const previous = process.env.ORVEX_VERIFY_ON_STANDARD;
-  delete process.env.ORVEX_VERIFY_ON_STANDARD;
+test('pass 3 can restore DeepSeek Pro via ORVEX_PASS3_ON_DEEPSEEK_PRO', (t) => {
+  const previous = process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO;
+  process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO = '1';
   t.after(() => {
-    if (previous === undefined) delete process.env.ORVEX_VERIFY_ON_STANDARD;
-    else process.env.ORVEX_VERIFY_ON_STANDARD = previous;
+    if (previous === undefined) delete process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO;
+    else process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO = previous;
+  });
+  const config = modelRoutingConfig();
+  const thirdPass = modelForPass(config, { modelTier: 'multi-model' }, 2);
+  assert.equal(thirdPass.tier, 'deepseek');
+  assert.equal(thirdPass.target.model, 'deepseek-v4-pro');
+});
+
+test('verification usage is charged to DeepSeek v4 Flash by default', (t) => {
+  const previousStandard = process.env.ORVEX_VERIFY_ON_STANDARD;
+  const previousOpenAi = process.env.ORVEX_VERIFY_ON_OPENAI;
+  const previousPro = process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO;
+  delete process.env.ORVEX_VERIFY_ON_STANDARD;
+  delete process.env.ORVEX_VERIFY_ON_OPENAI;
+  delete process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO;
+  t.after(() => {
+    if (previousStandard === undefined) delete process.env.ORVEX_VERIFY_ON_STANDARD;
+    else process.env.ORVEX_VERIFY_ON_STANDARD = previousStandard;
+    if (previousOpenAi === undefined) delete process.env.ORVEX_VERIFY_ON_OPENAI;
+    else process.env.ORVEX_VERIFY_ON_OPENAI = previousOpenAi;
+    if (previousPro === undefined) delete process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO;
+    else process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO = previousPro;
   });
 
   const config = modelRoutingConfig();
-  const premium = modelForPlanWithTier(config, { modelTier: 'multi-model' });
-  assert.equal(premium.tier, 'openai');
-  assert.equal(premium.target.model, 'gpt-5.6-luna');
+  const flash = modelForPlanWithTier(config, { modelTier: 'multi-model' });
+  assert.equal(flash.tier, 'deepseek-flash');
+  assert.equal(flash.target.model, 'deepseek-v4-flash');
 
+  const dual = modelForPlanWithTier(config, { modelTier: 'dual-model' });
+  assert.equal(dual.tier, 'deepseek-flash');
+  assert.equal(dual.target.model, 'deepseek-v4-flash');
+
+  process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO = '1';
+  const pro = modelForPlanWithTier(config, { modelTier: 'multi-model' });
+  assert.equal(pro.tier, 'deepseek');
+  assert.equal(pro.target.model, 'deepseek-v4-pro');
+
+  delete process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO;
   process.env.ORVEX_VERIFY_ON_STANDARD = '1';
   const standard = modelForPlanWithTier(config, { modelTier: 'multi-model' });
+  assert.equal(standard.tier, 'standard');
+  assert.equal(standard.target.model, 'MiniMax-M3');
+
+  delete process.env.ORVEX_VERIFY_ON_STANDARD;
+  process.env.ORVEX_VERIFY_ON_OPENAI = '1';
+  const openai = modelForPlanWithTier(config, { modelTier: 'multi-model' });
+  assert.equal(openai.tier, 'openai');
+  assert.equal(openai.target.model, 'gpt-5.6-luna');
+});
+
+test('dual-model discovery is MiniMax general + Flash deep-dive', () => {
+  const config = modelRoutingConfig();
+  const general = modelForPass(config, { modelTier: 'dual-model' }, 0);
+  assert.equal(general.tier, 'standard');
+  assert.equal(general.target.model, 'MiniMax-M3');
+  const deepDive = modelForPass(config, { modelTier: 'dual-model' }, 1);
+  assert.equal(deepDive.tier, 'deepseek-flash');
+  assert.equal(deepDive.target.model, 'deepseek-v4-flash');
+});
+
+test('dual-model deep-dive falls back Flash → Pro → MiniMax', () => {
+  const withProOnly = {
+    ...modelRoutingConfig(),
+    deepseekFlashModel: null,
+  };
+  const pro = modelForPass(withProOnly, { modelTier: 'dual-model' }, 1);
+  assert.equal(pro.tier, 'deepseek');
+  assert.equal(pro.target.model, 'deepseek-v4-pro');
+
+  const minimaxOnly = {
+    ...modelRoutingConfig(),
+    deepseekFlashModel: null,
+    deepseekModel: null,
+  };
+  const standard = modelForPass(minimaxOnly, { modelTier: 'dual-model' }, 1);
   assert.equal(standard.tier, 'standard');
   assert.equal(standard.target.model, 'MiniMax-M3');
 });
@@ -156,6 +265,51 @@ test('canRunAgentic: all three conditions are load-bearing', (t) => {
   process.env.ORVEX_CODEX_CLI = '1';
   delete process.env.ORVEX_CODEX_CLI_REPOS;
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), false, 'unset allowlist = never');
+});
+
+test('canRunInvestigate: multi-model only, not dual-model, not when Codex agentic', (t) => {
+  const prev = process.env.ORVEX_INVESTIGATE;
+  t.after(() => {
+    if (prev === undefined) delete process.env.ORVEX_INVESTIGATE;
+    else process.env.ORVEX_INVESTIGATE = prev;
+  });
+  delete process.env.ORVEX_INVESTIGATE;
+
+  // Dual-model stays MiniMax + Flash discovery + Flash verify — no investigate.
+  assert.equal(canRunInvestigate({ id: 'review', modelTier: 'dual-model' }, { useCodexCli: false }), false);
+  assert.equal(canRunInvestigate({ id: 'review-plus', modelTier: 'dual-model' }, { useCodexCli: false }), false);
+  assert.equal(canRunInvestigate({ id: 'free', modelTier: 'dual-model' }, { useCodexCli: false }), false);
+  assert.equal(canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: false }), true);
+  assert.equal(canRunInvestigate({ id: 'verify-lite', modelTier: 'multi-model' }, { useCodexCli: false }), true);
+  assert.equal(canRunInvestigate({ id: 'enterprise', modelTier: 'multi-model' }, { useCodexCli: false }), true);
+  assert.equal(canRunInvestigate({ id: 'enterprise', modelTier: 'codex-hybrid' }, { useCodexCli: false }), true);
+  assert.equal(canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: true }), false);
+
+  process.env.ORVEX_INVESTIGATE = '0';
+  assert.equal(canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: false }), false);
+});
+
+test('modelForInvestigate prefers DeepSeek v4 Flash', () => {
+  const config = {
+    deepseekFlashModel: {
+      apiKey: 'k',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'max',
+    },
+    deepseekModel: {
+      apiKey: 'k',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-pro',
+      reasoningEffort: 'max',
+    },
+    openaiModel: { apiKey: 'o', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-luna' },
+    standardModel: { apiKey: 's', baseUrl: 'https://x/v1', model: 'MiniMax-M3' },
+  } as WorkerConfig;
+
+  const picked = modelForInvestigate(config);
+  assert.equal(picked?.tier, 'deepseek-flash');
+  assert.equal(picked?.target.model, 'deepseek-v4-flash');
 });
 
 test('modelForPass never hands back the CLI stub when codex cannot run', () => {
@@ -221,7 +375,10 @@ test('the 4th lens is tier-scoped and breadth stays LAST on every tier', () => {
     const list = ['general', 'deep-dive', ...(fourth ? ['removed-behavior/callers'] : []), 'perf/completeness/api'];
     return Array.from({ length: passes }, (_, p) => list[Math.min(p, list.length - 1)]);
   };
-  // 3-pass volume tier: breadth must survive as the final lens.
+  // 2-pass volume tier: general + deep-dive (breadth exists in the list but
+  // is not scheduled when reviewPasses=2).
+  assert.deepEqual(anglesFor('dual-model', 2), ['general', 'deep-dive']);
+  // Legacy 3-pass clamp still keeps breadth last if someone raises passes.
   assert.deepEqual(anglesFor('dual-model', 3), ['general', 'deep-dive', 'perf/completeness/api']);
   // 4-pass quality tier: the new lens sits between deep-dive and breadth.
   assert.deepEqual(anglesFor('multi-model', 4), [

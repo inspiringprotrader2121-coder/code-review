@@ -50,6 +50,16 @@ test('the hourly ceiling is checked FIRST — when a burst crosses BOTH threshol
   assert.equal(accountLimitReason(d, 'acme', plan), 'rate_limited');
 });
 
+test('free trial exhausted wins over hourly when lifetime reviews are spent', () => {
+  const d = db();
+  const plan = planFeatures('free');
+  assert.ok(plan.trialReviewLimit !== null);
+  assert.ok(plan.reviewsPerHour !== null);
+  // Lifetime spent AND current hour full — should upgrade-nudge, not "wait ~Xh".
+  complete(d, 'acme', plan.trialReviewLimit!);
+  assert.equal(accountLimitReason(d, 'acme', plan), 'trial_exhausted');
+});
+
 test('free tier has no separate monthly ceiling — the lifetime trial cap already bounds it', () => {
   const plan = planFeatures('free');
   assert.equal(plan.reviewsPerMonth, null);

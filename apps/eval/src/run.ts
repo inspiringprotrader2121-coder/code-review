@@ -4,6 +4,10 @@
  * where the GitHub + LLM keys live:  pnpm --filter @orvex-review/eval eval
  */
 import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
   buildRepoContext,
   fetchPrDiff,
@@ -14,13 +18,16 @@ import {
   dropSelfNegatingFindings,
   fitReviewAggregationToBudget,
   fingerprintFinding,
+  formatModelContribution,
   llmChat,
   llmFindingsToReviewFindings,
   partitionVerifiedFindings,
   readReviewAggregationConfig,
   REVIEW_INCOMPLETE_SUMMARY,
+  runInvestigateReview,
   runLlmReview,
   REMOVED_BEHAVIOR_FOCUS,
+  summarizeModelContribution,
   THIRD_ANGLE_FOCUS,
   verifyFindings,
   type ReviewFinding,
@@ -107,17 +114,49 @@ function openAiTarget(env: NodeJS.ProcessEnv = process.env): PassTarget | null {
     : null;
 }
 
-/** Mirrors pipeline.ts modelForPlan for the production multi-model tier. */
-function verifierTarget(env: NodeJS.ProcessEnv = process.env): PassTarget {
-  const openai = openAiTarget(env);
-  return openai && env.ORVEX_VERIFY_ON_STANDARD !== '1' ? openai : llmEnv(env);
+/** Mirrors pipeline.ts modelForPlanWithTier for the production multi-model tier. */
+export function evaluationVerifier(
+  env: NodeJS.ProcessEnv = process.env,
+): { target: PassTarget; tier: ReviewFinding['sourceTier'] } {
+  if (env.ORVEX_VERIFY_ON_STANDARD === '1') {
+    return { target: llmEnv(env), tier: 'standard' };
+  }
+  if (env.ORVEX_VERIFY_ON_OPENAI === '1') {
+    const openai = openAiTarget(env);
+    if (openai) return { target: openai, tier: 'openai' };
+  }
+  const deepseekKey = env.ORVEX_DEEPSEEK_API_KEY;
+  if (deepseekKey) {
+    if (env.ORVEX_VERIFY_ON_DEEPSEEK_PRO === '1') {
+      return {
+        target: {
+          apiKey: deepseekKey,
+          baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+          model: env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
+          reasoningEffort: env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+        },
+        tier: 'deepseek',
+      };
+    }
+    return {
+      target: {
+        apiKey: deepseekKey,
+        baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
+        reasoningEffort: env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
+      },
+      tier: 'deepseek-flash',
+    };
+  }
+  return { target: llmEnv(env), tier: 'standard' };
 }
 
 /** Mirror production's multi-model tier (modelForPass + PASS_ANGLES), pass for
  *  pass: 1 the frontier OpenAI model, 2 DeepSeek v4 FLASH with the deep-dive
- *  lens, 3 DeepSeek v4 PRO with the removed-behavior/caller lens, 4 the
- *  standard model with the perf/completeness lens. A missing key falls back to
- *  the standard target for that pass, exactly like modelForPass does.
+ *  lens, 3 DeepSeek v4 FLASH with the removed-behavior/caller lens (Pro via
+ *  ORVEX_PASS3_ON_DEEPSEEK_PRO=1), 4 the standard model with the
+ *  perf/completeness lens. A missing key falls back to the standard target for
+ *  that pass, exactly like modelForPass does.
  *
  *  This drifted twice and both times silently invalidated the benchmark: the
  *  eval ran three passes while the multi-model tier ran four (so bench170 was
@@ -161,12 +200,117 @@ export function evaluationPassTargets(env: NodeJS.ProcessEnv = process.env): Arr
     // pass 2 → FLASH, matching modelForPass: it currently outperforms v4 Pro, so
     // it gets the highest-value lens.
     { tag: 'deep-dive', target: deepseekFlash ?? standard, focus: DEEP_DIVE_FOCUS, tier: deepseekFlash ? 'deepseek-flash' : 'standard' },
-    // pass 3 → PRO on the removed-behavior/caller lens. A second INDEPENDENT
-    // reasoner, not a re-run; this is the lens the 161-180 misses motivated.
-    { tag: 'removed-behavior/callers', target: deepseek ?? standard, focus: REMOVED_BEHAVIOR_FOCUS, tier: deepseek ? 'deepseek' : 'standard' },
+    // pass 3 → FLASH on the removed-behavior/caller lens by default (cheap second
+    // angle). Set ORVEX_PASS3_ON_DEEPSEEK_PRO=1 to restore Pro for ablation.
+    {
+      tag: 'removed-behavior/callers',
+      target:
+        env.ORVEX_PASS3_ON_DEEPSEEK_PRO === '1'
+          ? (deepseek ?? deepseekFlash ?? standard)
+          : (deepseekFlash ?? deepseek ?? standard),
+      focus: REMOVED_BEHAVIOR_FOCUS,
+      tier:
+        env.ORVEX_PASS3_ON_DEEPSEEK_PRO === '1'
+          ? (deepseek ? 'deepseek' : deepseekFlash ? 'deepseek-flash' : 'standard')
+          : (deepseekFlash ? 'deepseek-flash' : deepseek ? 'deepseek' : 'standard'),
+    },
     // mirrors the pipeline's BREADTH_ANGLE bestEffort — the only optional pass
     { tag: 'perf/completeness/api', target: standard, focus: THIRD_ANGLE_FOCUS, tier: 'standard', bestEffort: true },
   ];
+}
+
+/**
+ * Whether offline eval should run the sandboxed investigate pass.
+ * Eval measures the multi-model (Verify*) track; investigate is on for that
+ * track when a target resolves (mirrors production canRunInvestigate for
+ * multi-model with Codex off). Kill-switch: ORVEX_INVESTIGATE=0.
+ */
+export function evaluationInvestigateEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.ORVEX_INVESTIGATE === '0') return false;
+  return evaluationInvestigateTarget(env) !== null;
+}
+
+/** DeepSeek Flash target used by production investigate (modelForInvestigate).
+ *  Honors ORVEX_INVESTIGATE_TIER the same way production does. */
+export function evaluationInvestigateTarget(env: NodeJS.ProcessEnv = process.env): {
+  target: PassTarget;
+  tier: ReviewFinding['sourceTier'];
+} | null {
+  const override = (env.ORVEX_INVESTIGATE_TIER ?? 'deepseek-flash').trim().toLowerCase();
+  const openai = openAiTarget(env);
+  const deepseekKey = env.ORVEX_DEEPSEEK_API_KEY;
+  const deepseek: PassTarget | null = deepseekKey
+    ? {
+        apiKey: deepseekKey,
+        baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
+        reasoningEffort: env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+      }
+    : null;
+  const deepseekFlash: PassTarget | null = deepseekKey
+    ? {
+        apiKey: deepseekKey,
+        baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
+        model: env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
+        reasoningEffort: env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
+      }
+    : null;
+  const standard = (() => {
+    try {
+      return llmEnv(env);
+    } catch {
+      return null;
+    }
+  })();
+
+  if (override === 'openai' && openai) return { target: openai, tier: 'openai' };
+  if (override === 'deepseek' && deepseek) return { target: deepseek, tier: 'deepseek' };
+  if (override === 'standard' && standard) return { target: standard, tier: 'standard' };
+  if (deepseekFlash) return { target: deepseekFlash, tier: 'deepseek-flash' };
+  if (deepseek) return { target: deepseek, tier: 'deepseek' };
+  if (openai) return { target: openai, tier: 'openai' };
+  if (standard) return { target: standard, tier: 'standard' };
+  return null;
+}
+
+const INVESTIGATE_PASS_FOCUS =
+  'INVESTIGATE PASS — P1-FIRST multi-hop search with tools. Prioritize only ' +
+  'Critical/High defects this PR introduces or exposes: auth/authz bypass, data ' +
+  'loss/corruption, resource leak on failure, asymmetric error paths (success records ' +
+  'X but failure skips it), dead checks after refactor, post-transform null/inconsistency, ' +
+  'and cross-tenant/identity scoping bugs. Procedure: (1) list symbols this diff deletes ' +
+  'or renames and grep their remaining callers; (2) for each changed function, read its ' +
+  'full body + immediate callers/callees; (3) compare success vs failure/cleanup paths; ' +
+  '(4) kill hypotheses that the code already handles. Report only concrete P1/P2 bugs ' +
+  'with file:line and a failure scenario — no style/nits.';
+
+/** Temp checkout at `sha` for the investigate tool loop (same idea as pipeline). */
+async function checkoutEvalRepo(
+  octokit: Awaited<ReturnType<typeof createBenchmarkOctokit>>,
+  owner: string,
+  repo: string,
+  sha: string,
+): Promise<string | null> {
+  let dir: string | null = null;
+  try {
+    const res = await octokit.rest.repos.downloadTarballArchive({ owner, repo, ref: sha });
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-eval-'));
+    const tarPath = path.join(dir, 'repo.tar.gz');
+    fs.writeFileSync(tarPath, Buffer.from(res.data as ArrayBuffer));
+    execFileSync('tar', ['-xzf', tarPath, '-C', dir, '--strip-components=1'], { stdio: 'ignore' });
+    fs.rmSync(tarPath, { force: true });
+    return dir;
+  } catch (err) {
+    if (dir) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+    console.log(`    investigate checkout failed: ${(err as Error).message.slice(0, 120)}`);
+    return null;
+  }
 }
 
 interface PrReviewResult {
@@ -207,27 +351,41 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
     headSha: sha,
   });
   const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
+  const investigateFiles = files
+    .filter((f) => f.patch)
+    .map((f) => ({ filename: f.filename, status: f.status, patch: f.patch }));
   const passes = evaluationPassTargets();
+  const wantInvestigate = evaluationInvestigateEnabled();
+  const investigate = wantInvestigate ? evaluationInvestigateTarget() : null;
+  const reservedInvestigate = wantInvestigate && investigate ? 1 : 0;
   const requestedAggregation = readReviewAggregationConfig();
   const configuredMaxCalls = Number(process.env.ORVEX_REVIEW_MAX_CALLS ?? 28);
   const maxCalls = Number.isFinite(configuredMaxCalls) ? Math.max(1, Math.floor(configuredMaxCalls)) : 28;
-  // The multi-model production tier has no whole-repo sweep today, so no calls
-  // are reserved here. Keep the same bounded policy as the worker nonetheless.
-  const aggregation = fitReviewAggregationToBudget(requestedAggregation, passes.length, maxCalls);
+  // Reserve one slot for investigate when enabled (mirrors pipeline reservedFixedCalls).
+  const aggregation = fitReviewAggregationToBudget(
+    requestedAggregation,
+    passes.length,
+    maxCalls,
+    reservedInvestigate,
+  );
   if (requestedAggregation.enabled && !aggregation.enabled) {
     console.log(`    aggregation disabled: ${aggregation.disabledReason}`);
   }
   const samples = aggregation.enabled ? aggregation.effectiveRuns : 1;
-  const requiredPerLens = aggregation.enabled ? aggregation.minOccurrences : 1;
-  // No reviewable files => nothing was measured. Reporting okPasses=all made
-  // every case on this PR score as a genuine model miss.
-  const requiredPasses = passes.filter((p) => !p.bestEffort).length * requiredPerLens;
+  // Production aborts only when a required lens has ZERO successes. Aggregation
+  // under-sampling (below minOccurrences) degrades and still posts — so INVALID
+  // here must match that (≥1 success per required lens), not require full
+  // minOccurrences or flaky samples discard cases production would score.
+  const requiredLensIndexes = passes
+    .map((p, index) => (p.bestEffort ? -1 : index))
+    .filter((index) => index >= 0);
+  const requiredPasses = requiredLensIndexes.length;
   if (reviewable.length === 0) {
     return {
       findings: [],
       manualReviewCount: 0,
       okPasses: 0,
-      totalPasses: passes.length * samples,
+      totalPasses: passes.length * samples + reservedInvestigate,
       requiredPasses,
       okRequired: 0,
     };
@@ -275,7 +433,10 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
         // strong-reasoner rescue keys off (a hedged veto of an openai/deepseek
         // finding is overridden). Without it that rescue never fires in eval and
         // real findings are recorded as misses.
-        for (const f of got) f.sourceTier = p.tier;
+        for (const f of got) {
+          f.sourceTier = p.tier;
+          f.sourcePass = p.tag;
+        }
         // The unparseable sentinel with zero findings is a DEGRADED pass, not a
         // clean empty review — do not count it as measured.
         const degraded = got.length === 0 && resp.summary === REVIEW_INCOMPLETE_SUMMARY;
@@ -298,10 +459,63 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
       }
     }
   }
-  const okRequired = [...successfulRequiredByLens.values()].reduce(
-    (total, successes) => total + Math.min(successes, requiredPerLens),
-    0,
-  );
+
+  // Sandboxed investigate pass — production differentiator for Greptile-class
+  // multi-hop P1s. Single-shot (not aggregated); findings unioned after merge.
+  const investigateFindings: ReviewFinding[] = [];
+  if (reservedInvestigate && investigate) {
+    const cwd = await checkoutEvalRepo(octokit, c.owner, c.repo, sha);
+    if (cwd) {
+      try {
+        const resp = await runInvestigateReview(investigateFiles, {
+          cwd,
+          apiKey: investigate.target.apiKey,
+          model: investigate.target.model,
+          baseUrl: investigate.target.baseUrl,
+          api: investigate.target.api,
+          reasoningEffort: investigate.target.reasoningEffort,
+          context: { ...baseCtx, extraFocus: INVESTIGATE_PASS_FOCUS },
+        });
+        const got = llmFindingsToReviewFindings(resp.findings);
+        for (const f of got) {
+          f.sourceTier = investigate.tier;
+          f.sourcePass = 'investigate';
+        }
+        const degraded = got.length === 0 && resp.summary === REVIEW_INCOMPLETE_SUMMARY;
+        if (!degraded) {
+          okPasses++;
+          investigateFindings.push(...got);
+        }
+        console.log(
+          `    pass(investigate) [${investigate.target.model}]: +${got.length}${degraded ? ' (degraded)' : ''}`,
+        );
+      } catch (err) {
+        console.log(`    pass(investigate) [${investigate.target.model}] FAILED: ${(err as Error).message.slice(0, 120)}`);
+      } finally {
+        try {
+          fs.rmSync(cwd, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      }
+    } else {
+      console.log('    pass(investigate) skipped: checkout unavailable');
+    }
+  }
+
+  const okRequired = requiredLensIndexes.filter(
+    (index) => (successfulRequiredByLens.get(index) ?? 0) >= 1,
+  ).length;
+  const underSampled =
+    aggregation.enabled
+    && requiredLensIndexes.some(
+      (index) => (successfulRequiredByLens.get(index) ?? 0) < aggregation.minOccurrences,
+    );
+  if (underSampled) {
+    console.log(
+      `    aggregation under-sampled (degraded, still scoring — mirrors production disclosure)`,
+    );
+  }
 
   // Same bug from multiple passes → one finding (mirrors the pipeline's dedupe).
   const seenFp = new Set<string>();
@@ -314,7 +528,7 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   let findings: ReviewFinding[];
   let manualCandidates: ReviewSurfaceFinding[] = [];
   if (aggregation.enabled) {
-    const target = verifierTarget();
+    const target = evaluationVerifier().target;
     const merged = await aggregateRepeatedFindings(repeated, {
       minOccurrences: aggregation.minOccurrences,
       maxCandidates: aggregation.maxCandidates,
@@ -325,15 +539,27 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
           json: true,
         }),
     });
-    findings = dedupe(merged.findings);
+    // Investigate is single-shot — union like production (do not demote via minOccurrences).
+    findings = dedupe([...merged.findings, ...investigateFindings]);
     manualCandidates = merged.reviewOnly;
     console.log(
       `    aggregation: ${merged.findings.length} recurring, ${merged.reviewOnly.length} manual, ` +
-        `${merged.usedLlmMerge ? 'LLM merge' : 'fingerprint fallback'}`,
+        `${merged.usedLlmMerge ? 'LLM merge' : 'fingerprint fallback'}` +
+        (investigateFindings.length ? `, ${investigateFindings.length} investigate` : ''),
     );
   } else {
-    findings = dedupe(accumulated);
+    findings = dedupe([...accumulated, ...investigateFindings]);
   }
+
+  const contributionSource = aggregation.enabled
+    ? [...repeated.map((r) => r.finding), ...investigateFindings]
+    : [...accumulated, ...investigateFindings];
+  console.log(
+    `    model contribution (pre-dedupe): ${formatModelContribution(summarizeModelContribution(contributionSource))}`,
+  );
+  console.log(
+    `    model contribution (unique): ${formatModelContribution(summarizeModelContribution(findings))}`,
+  );
 
   findings = dropSelfNegatingFindings(findings).kept;
   const keptManual = new Set(
@@ -353,25 +579,45 @@ async function reviewPr(c: EvalCase): Promise<PrReviewResult> {
   }
   let manualReviewCount = manualCandidates.length;
   const verificationCandidates = [...findings, ...manualCandidates.map(({ finding }) => finding)];
-  if (ctxFiles.length > 0 && verificationCandidates.length > 0) {
+  if (
+    process.env.ORVEX_VERIFY !== '0'
+    && ctxFiles.length > 0
+    && verificationCandidates.length > 0
+  ) {
     // strict: every plan sets deepVerify: true. Use the same OpenAI-vs-standard
     // target selection as production rather than measuring a cheaper verifier.
+    const verifier = evaluationVerifier();
     const verified = await verifyFindings(verificationCandidates, ctxFiles, {
-      ...verifierTarget(),
+      ...verifier.target,
       strict: true,
       confirmedCount: findings.length,
+      verifierTier: verifier.tier,
     });
     // Apply the exact post-verifier partition used by production. A candidate
     // that the verifier demotes stays visible for manual review, but it does not
     // inflate normal-surface precision/recall.
-    const disposition = partitionVerifiedFindings(findings, manualCandidates, verified);
+    const disposition = partitionVerifiedFindings(findings, manualCandidates, verified, {
+      verifierTier: verifier.tier,
+    });
     if (disposition.rescued.length > 0) {
       console.log(`    ↺ rescued ${disposition.rescued.length} strong-reasoner finding(s) dropped on hedged grounds`);
     }
     findings = disposition.toPost;
     manualReviewCount = disposition.reviewOnly.length;
+  } else if (process.env.ORVEX_VERIFY === '0' && verificationCandidates.length > 0) {
+    console.log('    verification skipped (ORVEX_VERIFY=0)');
   }
-  return { findings, manualReviewCount, okPasses, totalPasses: passes.length * samples, requiredPasses, okRequired };
+  console.log(
+    `    model contribution (posted): ${formatModelContribution(summarizeModelContribution(findings))}`,
+  );
+  return {
+    findings,
+    manualReviewCount,
+    okPasses,
+    totalPasses: passes.length * samples + reservedInvestigate,
+    requiredPasses,
+    okRequired,
+  };
 }
 
 const SEV_RANK: Record<string, number> = { P1: 3, P2: 2, P3: 1, info: 0 };

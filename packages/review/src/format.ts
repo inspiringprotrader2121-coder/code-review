@@ -1,4 +1,5 @@
 import type { ReviewFinding, ReviewSurfaceFinding } from './finding.js';
+import { formatReviewCommandsFooter } from './commands-catalog.js';
 
 export interface ReviewCommentMeta {
   owner: string;
@@ -30,6 +31,8 @@ export interface ReviewCommentMeta {
   /** Candidate findings that are intentionally shown for manual review instead
    * of posted inline or treated as confirmed open findings. */
   reviewOnly?: ReviewSurfaceFinding[];
+  /** Set when the precision verification gate did not complete successfully. */
+  verificationIncomplete?: string;
 }
 
 const MAX_FILES_LISTED = 25;
@@ -109,6 +112,15 @@ export function formatReviewBody(
     );
   }
 
+  if (meta.verificationIncomplete) {
+    lines.push(
+      '',
+      `> ⚠️ **Verification incomplete** — ${meta.verificationIncomplete} ` +
+        `Findings below were NOT precision-gated; this is NOT a fully verified sign-off. ` +
+        `Re-run \`${meta.trigger ?? '@orvex'} review\` to retry verification.`,
+    );
+  }
+
   // Files reviewed — so a clean review still shows exactly what was examined.
   if (meta.filesReviewed && meta.filesReviewed.length > 0) {
     const shown = meta.filesReviewed.slice(0, MAX_FILES_LISTED);
@@ -134,6 +146,8 @@ export function formatReviewBody(
             // this must NOT read as a clean bill of health. Previously the banner
             // above was immediately contradicted by "it looks good to merge".
             '✅ **No issues found by the passes that completed.** One or more review passes did not finish (see the warning above), so this is NOT a full sign-off — re-run to cover the missing lens.'
+          : meta.verificationIncomplete
+            ? '✅ **No issues found by the discovery passes.** Precision verification did not complete (see the warning above), so this is NOT a fully verified sign-off.'
           : '✅ **No issues found.** Nothing in this change looked unsafe or incorrect on this pass — it looks good to merge.',
     );
   } else if (tableFindings.length === 0 && nitpicks.length > 0 && !hasStillOpen && manualReview.length === 0) {
@@ -204,6 +218,18 @@ export function formatReviewBody(
   }
 
   if (manualReview.length > 0) {
+    const SEV_ORDER: Record<string, number> = { P1: 0, P2: 1, P3: 2, info: 3 };
+    const sortedManual = [...manualReview].sort(
+      (a, b) =>
+        (SEV_ORDER[a.finding.severity] ?? 9) - (SEV_ORDER[b.finding.severity] ?? 9),
+    );
+    // Always show every P1/P2 even if that exceeds MAX_MANUAL_ROWS — hiding a
+    // high-severity candidate behind "N more" is worse than a longer table.
+    const high = sortedManual.filter((m) => m.finding.severity === 'P1' || m.finding.severity === 'P2');
+    const rest = sortedManual.filter((m) => m.finding.severity !== 'P1' && m.finding.severity !== 'P2');
+    const restBudget = Math.max(0, MAX_MANUAL_ROWS - high.length);
+    const shown = [...high, ...rest.slice(0, restBudget)];
+    const hidden = sortedManual.length - shown.length;
     lines.push(
       '',
       `<details><summary>🔎 ${manualReview.length} finding${manualReview.length === 1 ? '' : 's'} for manual review</summary>`,
@@ -213,14 +239,14 @@ export function formatReviewBody(
       '| Severity | File | Candidate | Why manual review |',
       '| --- | --- | --- | --- |',
     );
-    for (const { finding, reason } of manualReview.slice(0, MAX_MANUAL_ROWS)) {
+    for (const { finding, reason } of shown) {
       const file = finding.line ? `\`${sanitizeFileCell(finding.file)}:${finding.line}\`` : `\`${sanitizeFileCell(finding.file)}\``;
       const message = sanitizeFindingText(finding.message).replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 300);
       const why = sanitizeFindingText(reason).replace(/\|/g, '\\|').replace(/\n/g, ' ').slice(0, 220);
       lines.push(`| ${finding.severity} | ${file} | ${message} | ${why} |`);
     }
-    if (manualReview.length > MAX_MANUAL_ROWS) {
-      lines.push(`| … | | **${manualReview.length - MAX_MANUAL_ROWS} more candidate(s) not shown** | body size limit |`);
+    if (hidden > 0) {
+      lines.push(`| … | | **${hidden} more candidate(s) not shown** | body size limit |`);
     }
     lines.push('', '</details>');
   }
@@ -251,6 +277,9 @@ export function formatReviewBody(
     ...CHECKLIST.map((c) => `- ${c}`),
     '</details>',
   );
+
+  const trigger = meta.trigger ?? '@orvex';
+  lines.push('', formatReviewCommandsFooter(trigger));
 
   return lines.join('\n');
 }
@@ -458,7 +487,7 @@ export function formatInlineFinding(r: InlineFindingRender): string {
     if (f.suggestion) parts.push('', f.suggestion);
     parts.push(
       '',
-      `<sub>Apply the suggested change above by hand, or [upgrade](https://useorvex.com/pricing) to let Orvex commit fixes · \`${r.trigger} ignore\` to dismiss.</sub>`,
+      `<sub>Apply the suggested change above by hand, or [upgrade](https://useorvex.com/#pricing) to let Orvex commit fixes · \`${r.trigger} ignore\` to dismiss.</sub>`,
     );
   }
 
@@ -548,24 +577,15 @@ export function formatAutoApplyReply(enabled: boolean, trigger: string): string 
     : `⏹ **Auto-apply is OFF** for this PR.`;
 }
 
-export function formatHelpComment(trigger: string): string {
-  return [
-    '## Orvex commands',
-    '',
-    `| Command | Effect |`,
-    `| --- | --- |`,
-    `| \`${trigger} review\` | Re-run the review on the current head |`,
-    `| \`${trigger} deep\` | Extra diverse analysis passes, unioned into this PR's findings (paid plans) |`,
-    `| \`${trigger} fix\` | Apply all of Orvex's ready fix suggestions |`,
-    `| \`${trigger} fix all\` | Apply ready fixes and AI-generate fixes for the remaining findings |`,
-    `| \`${trigger} fix this\` | (reply on a finding) apply just that finding's fix |`,
-    `| \`${trigger} <instructions>\` | (reply on a finding) AI fix following your instructions |`,
-    `| \`${trigger} explain\` | (reply on a finding) deep-dive explanation of the issue |`,
-    `| \`${trigger} ignore\` | (reply on a finding) never report this finding again on the repo |`,
-    `| \`${trigger} resolve conflicts\` | Merge the base branch in to clear conflicts git can auto-resolve |`,
-    `| \`${trigger} <anything>\` | Ask a question about the PR, or describe a change to make |`,
-    `| \`${trigger} auto-apply on/off\` | Auto-commit Orvex's ready fixes after each future review of this PR |`,
-    '',
-    '<sub>Fixes are committed to the PR branch. Before committing, Orvex verifies the branch head has not moved and the target code is unchanged; if someone is editing concurrently, the fix is aborted rather than applied blindly.</sub>',
-  ].join('\n');
-}
+// Help / command catalog lives in commands-catalog.ts (single source of truth).
+export {
+  formatHelpComment,
+  formatReviewCommandsFooter,
+  formatCommandsMarkdownTable,
+  formatUsageNotesMarkdown,
+  formatCommandsHtmlRows,
+  orvexCommandCatalog,
+  whereLabel,
+  type OrvexCommandDoc,
+  type CommandWhere,
+} from './commands-catalog.js';

@@ -2,7 +2,14 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { createAppDatabase, type AppDatabase, type Tenant } from '@orvex-review/store';
-import { isPlanId, legacyAuthMode, planFeatures, TenantService, WorkspaceAccessError } from '@orvex-review/tenants';
+import {
+  isPlanId,
+  legacyAuthMode,
+  planFeatures,
+  publicPlanLabel,
+  TenantService,
+  WorkspaceAccessError,
+} from '@orvex-review/tenants';
 import { checkRateLimit } from './rate-limit.js';
 import { sessionUser } from './session.js';
 import { escapeHtml, pageShell } from './pages.js';
@@ -67,7 +74,7 @@ export function billingRoutes() {
     }
 
     try {
-      const url = await createCheckoutUrl(db, ws.tenant, plan);
+      const url = await createCheckoutUrl(db, ws.tenant, plan, idempotencyKey(c));
       return c.json({ url });
     } catch (err) {
       const e = err as CheckoutError;
@@ -84,7 +91,17 @@ export function billingRoutes() {
     if (!plan || !isCheckoutPlan(plan)) return c.redirect('/#pricing');
 
     const limit = checkRateLimit(`buy:${clientIp(c)}`, { windowMs: CHECKOUT_WINDOW_MS, max: CHECKOUT_MAX });
-    if (!limit.allowed) return c.redirect('/#pricing');
+    if (!limit.allowed) {
+      return c.html(
+        pageShell(
+          'Checkout unavailable',
+          `<h1>Checkout is temporarily paused</h1>
+           <p class="lead">Please wait a few minutes and try again.</p>
+           <a class="btn" href="/#pricing">Back to plans</a>`,
+        ),
+        429,
+      );
+    }
 
     const user = sessionUser(c, db);
     const buyPath = `/buy/${encodeURIComponent(plan)}`;
@@ -98,7 +115,7 @@ export function billingRoutes() {
 
     const requestedSlug = c.req.query('workspace');
     if (!requestedSlug && owned.length > 1) {
-      const label = planFeatures(plan).label;
+      const label = publicPlanLabel(planFeatures(plan));
       const choices = owned
         .map(
           ({ tenant }) =>
@@ -123,11 +140,48 @@ export function billingRoutes() {
     if (!selected) return c.redirect(`${buyPath}`);
 
     try {
-      const url = await createCheckoutUrl(db, selected.tenant, plan);
+      const url = await createCheckoutUrl(db, selected.tenant, plan, idempotencyKey(c));
       return c.redirect(url);
     } catch (err) {
       console.warn('[billing] /buy checkout failed:', (err as Error).message);
-      return c.redirect('/#pricing');
+      return c.html(
+        pageShell(
+          'Checkout unavailable',
+          `<h1>Checkout could not be started</h1>
+           <p class="lead">Your workspace was not charged. Please try again or contact support if the problem continues.</p>
+           <a class="btn" href="/#pricing">Back to plans</a>
+           <a class="btn secondary" href="mailto:support@useorvex.com">Contact support</a>`,
+          user,
+        ),
+        502,
+      );
+    }
+  });
+
+  app.get('/billing/portal/:slug', async (c) => {
+    const ws = workspace(c);
+    if (ws instanceof Response) return ws;
+    if (ws.role !== 'owner') {
+      return c.html(
+        pageShell(
+          'Billing access',
+          `<h1>Only the workspace owner can manage billing</h1>
+           <p class="lead">Ask the workspace owner to update payment details or cancel the subscription.</p>
+           <a class="btn" href="/dashboard/${encodeURIComponent(ws.tenant.slug)}">Back to dashboard</a>`,
+        ),
+        403,
+      );
+    }
+    const billing = db.getTenantBilling(ws.tenant.id);
+    if (!billing?.stripeCustomerId) {
+      return c.redirect(`/dashboard/${encodeURIComponent(ws.tenant.slug)}?billing=unavailable`);
+    }
+    try {
+      const portal = await createBillingPortalUrl(ws.tenant, billing.stripeCustomerId);
+      return c.redirect(portal);
+    } catch (err) {
+      console.warn('[billing] portal session failed:', (err as Error).message);
+      return c.redirect(`/dashboard/${encodeURIComponent(ws.tenant.slug)}?billing=portal-error`);
     }
   });
 
@@ -153,20 +207,16 @@ export function billingRoutes() {
       type: string;
       data?: { object?: StripeWebhookObject };
     };
-    // Idempotency: drop an event id we've already processed, so a redelivery or a
-    // (within-tolerance) replay can't double-apply a state change.
-    if (event.id) {
-      if (seenStripeEvents.has(event.id)) return c.json({ received: true, deduped: true });
-      seenStripeEvents.add(event.id);
-      if (seenStripeEvents.size > 5000) {
-        for (const id of seenStripeEvents) { seenStripeEvents.delete(id); if (seenStripeEvents.size <= 4000) break; }
-      }
+    if (event.id && !db.claimWebhookEvent('stripe', event.id)) {
+      return c.json({ received: true, deduped: true });
     }
-    const object = event.data?.object;
-    const tenantId = object?.metadata?.tenant_id;
-    const plan = object?.metadata?.plan;
 
-    if (event.type === 'checkout.session.completed') {
+    try {
+      const object = event.data?.object;
+      const tenantId = object?.metadata?.tenant_id;
+      const plan = object?.metadata?.plan;
+
+      if (event.type === 'checkout.session.completed') {
       if (tenantId && plan && isPlanId(plan) && plan !== 'free') {
         const newSub = stripeId(object?.subscription);
         // Prevent DOUBLE-BILLING: if this tenant already had a DIFFERENT active
@@ -186,11 +236,13 @@ export function billingRoutes() {
         db.setTenantBilling(tenantId, {
           stripeCustomerId: stripeId(object?.customer),
           stripeSubscriptionId: newSub,
+          stripeSubscriptionStatus: 'active',
+          stripeCurrentPeriodStart: stripeTimestampToIso(object?.created) ?? new Date().toISOString(),
         });
       }
-    }
+      }
 
-    if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated') {
+      if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated') {
       // SUB-LIFECYCLE GUARD: `updated` events for a SUPERSEDED subscription (the
       // old sub canceled during an upgrade, or a duplicate Checkout) must never
       // repoint billing — only the tenant's CURRENT subscription may mutate state.
@@ -210,9 +262,9 @@ export function billingRoutes() {
           stripeCurrentPeriodEnd: stripeTimestampToIso(object?.current_period_end),
         });
       }
-    }
+      }
 
-    if (event.type === 'customer.subscription.deleted' && tenantId) {
+      if (event.type === 'customer.subscription.deleted' && tenantId) {
       // SUB-LIFECYCLE GUARD: a `deleted` event for the OLD subscription arrives
       // right after every upgrade (we cancel the superseded sub in
       // checkout.session.completed). Acting on it downgraded a just-upgraded
@@ -230,9 +282,14 @@ export function billingRoutes() {
           stripeCurrentPeriodEnd: stripeTimestampToIso(object?.current_period_end),
         });
       }
-    }
+      }
 
-    return c.json({ received: true });
+      if (event.id) db.completeWebhookEvent('stripe', event.id);
+      return c.json({ received: true });
+    } catch (err) {
+      if (event.id) db.releaseWebhookEvent('stripe', event.id);
+      throw err;
+    }
   };
 
   // Cap the (unauthenticated) webhook body before buffering — Stripe payloads are
@@ -243,9 +300,6 @@ export function billingRoutes() {
 
   return app;
 }
-
-/** Processed Stripe event ids (single-process, bounded) — webhook idempotency. */
-const seenStripeEvents = new Set<string>();
 
 function isCheckoutPlan(plan: string): plan is PaidPlan {
   return (CHECKOUT_PLANS as string[]).includes(plan);
@@ -291,7 +345,12 @@ class CheckoutError extends Error {
 
 /** Create a Stripe checkout session for a tenant+plan and return its URL.
  *  Shared by the dashboard API (POST) and the marketing /buy/:plan redirect. */
-async function createCheckoutUrl(db: AppDatabase, tenant: Tenant, plan: PaidPlan): Promise<string> {
+async function createCheckoutUrl(
+  db: AppDatabase,
+  tenant: Tenant,
+  plan: PaidPlan,
+  checkoutIdempotencyKey?: string,
+): Promise<string> {
   const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
   if (!stripeSecretKey) throw new CheckoutError('Stripe is not configured', 501);
 
@@ -322,9 +381,29 @@ async function createCheckoutUrl(db: AppDatabase, tenant: Tenant, plan: PaidPlan
   const billing = db.getTenantBilling(tenant.id);
   if (billing?.stripeCustomerId) params.customer = billing.stripeCustomerId;
 
-  const session = await stripeRequest<{ url?: string }>('/v1/checkout/sessions', stripeSecretKey, params);
+  const session = await stripeRequest<{ url?: string }>(
+    '/v1/checkout/sessions',
+    stripeSecretKey,
+    params,
+    checkoutIdempotencyKey,
+  );
   if (!session.url) throw new CheckoutError('Stripe did not return a checkout URL', 502);
   return session.url;
+}
+
+async function createBillingPortalUrl(tenant: Tenant, customerId: string): Promise<string> {
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeSecretKey) throw new CheckoutError('Stripe is not configured', 501);
+  const result = await stripeRequest<{ url?: string }>(
+    '/v1/billing_portal/sessions',
+    stripeSecretKey,
+    {
+      customer: customerId,
+      return_url: `${appBaseUrl()}/dashboard/${encodeURIComponent(tenant.slug)}`,
+    },
+  );
+  if (!result.url) throw new CheckoutError('Stripe did not return a billing portal URL', 502);
+  return result.url;
 }
 
 function stripePriceForPlan(plan: PaidPlan): string | undefined {
@@ -334,6 +413,11 @@ function stripePriceForPlan(plan: PaidPlan): string | undefined {
 
 function stripeOveragePriceForPlan(plan: PaidPlan): string | undefined {
   return process.env[`STRIPE_PRICE_${plan.toUpperCase().replace(/-/g, '_')}_OVERAGE`];
+}
+
+function idempotencyKey(c: Context): string | undefined {
+  const value = c.req.header('idempotency-key')?.trim();
+  return value ? value.slice(0, 255) : undefined;
 }
 
 function appBaseUrl(): string {
@@ -429,6 +513,7 @@ type StripeWebhookObject = {
   status?: string;
   current_period_start?: number;
   current_period_end?: number;
+  created?: number;
 };
 
 function stripeId(value: string | { id?: string } | undefined): string | undefined {

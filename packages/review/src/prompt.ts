@@ -52,6 +52,8 @@ Focus on issues that impact CORRECTNESS, PERFORMANCE, SECURITY, MAINTAINABILITY,
 - "Pre-existing" / "consistent with existing code" is NOT a downgrade: a real defect isn't less severe because the same bad pattern exists elsewhere. If this PR touches/moves/adds an instance of a dangerous pattern (SQL/string interpolation of non-constant input = injection, unvalidated input, missing auth, unsafe deserialization), rate by IMPACT (untrusted/non-integer value interpolated into SQL = P1/P2), not info. "Same pattern in other files" means ALSO flag those, never lower this one.
 - Do NOT argue a bug down to info/P3 with "trade-off"/"theoretical"/"unlikely"/"acceptable"/"pre-existing" — if you're arguing it away in the message, it's still a bug; report it at its true severity.
 - A leaked external resource / unreleased reservation on a failure path, or an asymmetric failure path that skips a success-path side-effect (a tenant-guarded recording, usage write, state update, or release), is P2 — not info. "Only cleanup" / "just cost" / "low volume" / "not user-facing" is NOT a downgrade: these accumulate into real billing, quota, accounting, or audit bugs.
+- P1 is rare. Default real user-visible / logic / UX / operational bugs to P2. P1 ONLY with a concrete trigger AND one of: (a) security/authz bypass or injection; (b) durable data loss/corruption or silently wrong access/money/recovery/signing/shipping decision; (c) process/service outage (not a single UI panel throw). Missing import breaking one view, spinner stuck, request-id race, archive backlog = usually P2.
+- Before claiming a constructor omits required config, search the same scope for .init( / configure( / subsequent option assignment on that instance.
 
 ## Output
 - List findings most severe first. When you can propose an exact fix, include "originalCode" (verbatim from the new side of the diff, minimal) and "fixedCode".
@@ -76,6 +78,8 @@ export const REQUIRED_RULE_ANCHORS: readonly RegExp[] = [
   /Lifecycle ownership/i,
   /Fallback & legacy compatibility/i,
   /Severity calibration|Severity & confidence/i,
+  /P1 is rare/i,
+  /\.init\(/i,
   /migration/i,
 ];
 
@@ -208,7 +212,7 @@ const MAX_TREE_PATHS = numEnv('ORVEX_MAX_TREE_PATHS', 3000);
 const MAX_CHANGED_CHARS = numEnv('ORVEX_MAX_CHANGED_CHARS', 180_000);
 const MAX_RELATED_CHARS = numEnv('ORVEX_MAX_RELATED_CHARS', 60_000);
 const MAX_OTHER_CHARS = numEnv('ORVEX_MAX_OTHER_CHARS', 40_000);
-const FULL_CHANGED_FILE_CHARS = numEnv('ORVEX_FULL_CHANGED_FILE_CHARS', 32_000);
+const FULL_CHANGED_FILE_CHARS = numEnv('ORVEX_FULL_CHANGED_FILE_CHARS', 120_000);
 const CHANGED_CONTEXT_LINES = numEnv('ORVEX_CHANGED_CONTEXT_LINES', 80);
 const MAX_CHANGED_CHUNKS_PER_FILE = numEnv('ORVEX_MAX_CHANGED_CHUNKS_PER_FILE', 6);
 const MAX_CHANGED_CHUNK_CHARS = numEnv('ORVEX_MAX_CHANGED_CHUNK_CHARS', 24_000);

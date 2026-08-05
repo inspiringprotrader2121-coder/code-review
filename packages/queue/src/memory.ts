@@ -1,7 +1,11 @@
 import {
+  automaticReviewAlreadyDone,
+  draftSkipIdempotencyKey,
   jobIdempotencyKey,
   prKey,
+  reviewShaIdempotencyKey,
   type EnqueueResult,
+  type MarkCompletedOptions,
   type ReviewJobPayload,
   type ReviewQueue,
 } from './types.js';
@@ -65,7 +69,10 @@ export class MemoryReviewQueue implements ReviewQueue {
     const idKey = jobIdempotencyKey(job);
     const pk = prKey(job);
 
-    if (this.state.completed.has(idKey) || this.state.seen.has(idKey)) {
+    if (
+      automaticReviewAlreadyDone(job, (k) => this.state.completed.has(k)) ||
+      this.state.seen.has(idKey)
+    ) {
       return { accepted: false, jobId: idKey, reason: 'duplicate' };
     }
 
@@ -92,7 +99,7 @@ export class MemoryReviewQueue implements ReviewQueue {
       if (!job) return null;
       const pk = prKey(job);
 
-      if (this.state.completed.has(jobIdempotencyKey(job))) continue;
+      if (automaticReviewAlreadyDone(job, (k) => this.state.completed.has(k))) continue;
 
       if (this.state.inFlight.has(pk)) {
         const list = this.state.pending.get(pk) ?? [];
@@ -107,9 +114,21 @@ export class MemoryReviewQueue implements ReviewQueue {
     return null;
   }
 
-  async markCompleted(job: ReviewJobPayload): Promise<void> {
+  async markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<void> {
+    if (opts?.draftSkipped) {
+      this.state.completed.add(draftSkipIdempotencyKey(job));
+      trimSet(this.state.completed);
+      this.state.inFlight.delete(prKey(job));
+      return;
+    }
     const idKey = jobIdempotencyKey(job);
     this.state.completed.add(idKey);
+    // ready_for_review uses a distinct SEEN key; also mark the bare SHA so a
+    // queued `opened` for the same head cannot double-review after ready ran.
+    const bare = reviewShaIdempotencyKey(job);
+    if (idKey !== bare && (job.kind ?? 'review') === 'review') {
+      this.state.completed.add(bare);
+    }
     trimSet(this.state.completed);
     this.state.inFlight.delete(prKey(job));
   }

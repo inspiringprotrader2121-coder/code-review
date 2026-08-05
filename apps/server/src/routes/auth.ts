@@ -172,6 +172,7 @@ export function authRoutes() {
              <p class="lead">Workspace <strong>${escapeHtml(tenant.name)}</strong> is linked to
              <strong>${escapeHtml(installation.accountLogin)}</strong>. Orvex reviews the next
              pull request automatically — comment <code>@orvex help</code> on any PR for commands.</p>
+             <a class="btn" href="/dashboard/${encodeURIComponent(tenant.slug)}">Open dashboard</a>
              ${LEGACY_BANNER}`,
           ),
         );
@@ -267,7 +268,8 @@ export function authRoutes() {
            <p class="muted">Open a pull request on a connected repo — Orvex posts its review
            within a couple of minutes. Comment <code>@orvex help</code> on any PR to see the
            fix commands.</p>
-           <a class="btn" href="/api/workspaces/${tenant.slug}/stats">View workspace stats (JSON)</a>
+           <a class="btn" href="/dashboard/${encodeURIComponent(tenant.slug)}">Open dashboard</a>
+           <a class="btn secondary" href="/api/workspaces/${encodeURIComponent(tenant.slug)}/stats">View workspace stats (JSON)</a>
            <a class="btn secondary" href="/connect">Add another workspace</a>`,
           user,
         ),

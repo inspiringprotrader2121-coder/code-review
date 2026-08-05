@@ -447,7 +447,9 @@ async function openAiResponsesStreamChat(system: string, user: string, opts: Llm
         model: opts.model,
         instructions: system,
         input: user,
-        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        // The responses endpoint is the gpt-5.x/codex reasoning shape, and those
+        // models reject `temperature` with a 400 instead of ignoring it. Sending
+        // it made every repeated aggregation sample fail and degrade to empty.
         ...(thinkingEnabled(opts) ? { reasoning: { effort } } : {}),
         max_output_tokens: maxOut,
         stream: true,

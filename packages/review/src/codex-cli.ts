@@ -301,6 +301,8 @@ function buildPrompt(files: ReviewableFile[], context?: ReviewPromptContext, has
         dependents: hasRepoCheckout ? undefined : redactAll(context.dependents),
         changedContents: redactAll(context.changedContents),
         others: hasRepoCheckout ? undefined : redactAll(context.others),
+        // Lens focus must reach buildUserPrompt (same bug llm.ts had).
+        extraFocus: context.extraFocus,
       }
     : undefined;
 

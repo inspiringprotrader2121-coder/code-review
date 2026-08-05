@@ -83,20 +83,23 @@ export async function runLlmReview(
         dependents: redactAll(opts.context.dependents),
         changedContents: redactAll(opts.context.changedContents),
         others: redactAll(opts.context.others),
+        // Must pass through — without this, deep-dive / breadth / investigate
+        // lens text never reaches buildUserPrompt.
+        extraFocus: opts.context.extraFocus,
       }
     : undefined;
 
   const system = loadOrvexRules();
   const user = buildUserPrompt(redactedFiles, context);
 
-  const call = (thinking: boolean) =>
+  const call = (thinking: boolean, temperature = opts.temperature) =>
     llmChat(system, user, {
       apiKey: opts.apiKey,
       model: opts.model,
       baseUrl: opts.baseUrl,
       api: opts.api,
       reasoningEffort: opts.reasoningEffort,
-      temperature: opts.temperature,
+      temperature,
       // no cap — pass through (undefined → client's high ceiling) so the review
       // has room for full reasoning + detailed findings with fix code
       maxTokens: opts.maxTokens,
@@ -138,12 +141,16 @@ export async function runLlmReview(
     const retryThinking = /terminated|fetch failed|econn|socket hang|network/i.test(firstMessage)
       ? reviewThinking
       : false;
+    // A provider that rejects `temperature` outright rejects it identically on
+    // the retry, so the sample is lost to a parameter the call does not need.
+    const rejectedTemperature = /temperature/i.test(firstMessage);
     console.warn(
-      `[llm] review call/parse failed, retrying with reasoning ${retryThinking ? 'on' : 'off'}:`,
+      `[llm] review call/parse failed, retrying with reasoning ${retryThinking ? 'on' : 'off'}` +
+        `${rejectedTemperature ? ' and temperature dropped' : ''}:`,
       firstMessage,
     );
     try {
-      parsed = parseReview(await call(retryThinking));
+      parsed = parseReview(await call(retryThinking, rejectedTemperature ? undefined : opts.temperature));
     } catch (err2) {
       const msg = (err2 as Error).message;
       // A rate-limit / transport failure is NOT a clean review — propagate it so

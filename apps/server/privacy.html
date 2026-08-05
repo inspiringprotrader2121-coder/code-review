@@ -32,11 +32,11 @@
   <h2>1. What we process</h2>
   <ul>
     <li><strong>Repository content.</strong> When a pull request is reviewed we
-    fetch the diff and may build a transient, in-memory snapshot of the
-    repository tree and text files under the permissions you granted the
-    GitHub App. Orvex uses that snapshot to identify imports, dependents, and
-    other relevant context; only selected excerpts are included in review
-    requests.</li>
+    fetch the diff and may build a temporary filesystem snapshot of the
+    repository tree and text files under the permissions you granted the GitHub
+    App. Orvex uses that snapshot to identify imports, dependents, and other
+    relevant context; only selected excerpts are included in review requests.
+    Temporary snapshots are removed when the review finishes.</li>
     <li><strong>AI inference providers.</strong> Excerpts of that content are sent to
     contracted third-party AI inference providers for transient processing.
     We apply automated secret redaction

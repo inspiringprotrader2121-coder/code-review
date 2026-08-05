@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planFeatures, PLANS, isPlanId, defaultPlanId } from './plans.js';
+import { planFeatures, publicPlanLabel, PLANS, isPlanId, defaultPlanId } from './plans.js';
 
 test('model tiers: volume plans use the dual-model track; Verify plans and Enterprise use multi-model', () => {
   assert.equal(planFeatures('free').modelTier, 'dual-model');
@@ -13,7 +13,7 @@ test('model tiers: volume plans use the dual-model track; Verify plans and Enter
 
 test('each plan uses its configured pass count with shared retrieval and strict verification', () => {
   for (const p of ['free', 'review', 'review-plus', 'verify-lite', 'verify', 'enterprise'] as const) {
-    const expected = planFeatures(p).modelTier === 'multi-model' ? 4 : 3;
+    const expected = planFeatures(p).modelTier === 'multi-model' ? 4 : 2;
     assert.equal(planFeatures(p).reviewPasses, expected, `${p} runs its full pipeline`);
     assert.equal(planFeatures(p).retrievalTopK, 28, `${p} gets the same retrieval depth`);
     assert.equal(planFeatures(p).deepVerify, true, `${p} gets the strict verification`);
@@ -138,6 +138,11 @@ test('priority increases with tier (queue fairness)', () => {
   assert.ok(PLANS.verify.priority > PLANS.review.priority);
   assert.ok(PLANS.enterprise.priority > PLANS.verify.priority);
   assert.ok(PLANS['verify-lite'].priority >= PLANS.review.priority, 'premium track prioritized over entry dual-model');
+});
+
+test('enterprise remains supported internally but is not exposed by customer-facing labels', () => {
+  assert.equal(publicPlanLabel(planFeatures('enterprise')), 'Custom plan');
+  assert.equal(publicPlanLabel(planFeatures('verify')), 'Verify');
 });
 
 test('prototype keys are NOT plans (Object.hasOwn, not `in`)', () => {

@@ -137,7 +137,11 @@ export async function processScanJob(
       model: config.llmModel,
       baseUrl: config.llmBaseUrl,
     });
-    findings = verified.kept;
+    if (verified.status === 'verified') {
+      findings = verified.kept;
+    } else {
+      console.warn(`[nightly] verification ${verified.status}; keeping discovery findings`);
+    }
   }
 
   if (findings.length === 0) {

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { createAppDatabase } from '@orvex-review/store';
-import { legacyAuthMode, planFeatures } from '@orvex-review/tenants';
+import { legacyAuthMode, planFeatures, publicPlanLabel, type PlanFeatures } from '@orvex-review/tenants';
+import { formatCommandsHtmlRows } from '@orvex-review/review';
 import { logoutCsrfToken, sessionUser } from './session.js';
 import { llmCostVisibleForTenant } from './cost-visibility.js';
 import { escapeHtml } from './pages.js';
@@ -38,11 +39,39 @@ export function dashboardRoutes() {
       isSuperAdmin = user.isSuperAdmin;
       canManageBilling = membership.role === 'owner';
     }
-    const planLabel = tenant ? planFeatures(db.getTenantPlan(tenant.id)).label : 'Free trial';
-    return c.html(dashboardHtml(slug, isSuperAdmin, logoutCsrfToken(c), showLlmCost, planLabel, canManageBilling));
+    const plan = tenant ? planFeatures(db.getTenantPlan(tenant.id)) : planFeatures('free');
+    const billingState = c.req.query('billing');
+    const billingBanner =
+      billingState === 'success'
+        ? '<div class="banner success" role="status">Payment received. Your plan is activating now; refresh in a moment if the new allowance is not visible yet.</div>'
+        : billingState === 'cancelled'
+          ? '<div class="banner" role="status">Checkout was cancelled. No plan change was made.</div>'
+          : billingState === 'portal-error'
+            ? '<div class="banner" role="alert">Billing management is temporarily unavailable. Please try again or email support@useorvex.com.</div>'
+            : billingState === 'unavailable'
+              ? '<div class="banner" role="status">No active billing profile is connected yet. Choose a plan below to start billing.</div>'
+          : '';
+    return c.html(
+      dashboardHtml(slug, isSuperAdmin, logoutCsrfToken(c), showLlmCost, plan, canManageBilling, billingBanner),
+    );
   });
 
   return app;
+}
+
+function planQuotaSummary(plan: PlanFeatures): string {
+  if (plan.id === 'enterprise') return 'custom plan capacity';
+  const bits: string[] = [];
+  if (plan.reviewsPerHour != null) bits.push(`${plan.reviewsPerHour}/hour`);
+  else bits.push('unlimited hourly');
+  if (plan.trialReviewLimit != null) bits.push(`${plan.trialReviewLimit} lifetime free reviews`);
+  else if (plan.includedReviewsPerMonth != null && plan.overageCentsPerReview != null) {
+    bits.push(
+      `${plan.includedReviewsPerMonth}/month included, then $${(plan.overageCentsPerReview / 100).toFixed(2)}/review`,
+    );
+  } else if (plan.reviewsPerMonth != null) bits.push(`${plan.reviewsPerMonth}/month hard cap`);
+  else bits.push('unlimited monthly');
+  return bits.join(' · ');
 }
 
 function dashboardHtml(
@@ -50,8 +79,9 @@ function dashboardHtml(
   isSuperAdmin: boolean,
   logoutCsrf: string | null,
   showLlmCost: boolean,
-  planLabel: string,
+  plan: PlanFeatures,
   canManageBilling: boolean,
+  billingBanner: string,
 ): string {
   // JSON.stringify alone leaves `</script>` intact — escape for an inline <script> sink
   const s = JSON.stringify(slug)
@@ -59,6 +89,9 @@ function dashboardHtml(
     .replace(/>/g, '\\u003e')
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029');
+  const planLabel = publicPlanLabel(plan);
+  const quotaLine = planQuotaSummary(plan);
+  const commandRows = formatCommandsHtmlRows('@orvex');
 
   // Icon set (inline SVG, stroke=currentColor so they inherit the nav colour).
   const ico = {
@@ -170,6 +203,7 @@ function dashboardHtml(
   .avatar{width:32px;height:32px;border-radius:50%;flex:none;background:linear-gradient(135deg,#ffb020,#e5484d);display:grid;place-items:center;color:#fff;font-weight:700;font-size:13px;box-shadow:0 0 0 2px var(--border)}
   .content{padding:22px 26px 44px;display:flex;flex-direction:column;gap:18px}
   .banner{background:var(--p2-soft);color:var(--p2);border-radius:10px;padding:10px 14px;font-size:13px}
+  .banner.success{background:var(--good-soft);color:var(--good)}
 
   .panel{background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow)}
   .panel-h{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border)}
@@ -196,7 +230,7 @@ function dashboardHtml(
   .sev-panel-body{padding:14px 16px 16px;display:flex;flex-direction:column;gap:13px}
   .sevbar-row{display:grid;grid-template-columns:96px 1fr auto;align-items:center;gap:12px}
   .sevbar-row .lbl{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600} .sevbar-row .lbl i{width:9px;height:9px;border-radius:3px;flex:none}
-  .sevbar-track{height:22px;background:var(--panel-2);border:1px solid var(--border);border-radius:7px;overflow:hidden} .sevbar-fill{height:100%;border-radius:6px 0 0 6px;transition:width .6s cubic-bezier(.22,1,.36,1)}
+  .sevbar-track{height:22px;background:var(--panel-2);border:1px solid var(--border);border-radius:7px;overflow:hidden} .sevbar-fill{height:100%;width:100%;transform-origin:left center;border-radius:6px 0 0 6px;transition:transform .6s cubic-bezier(.22,1,.36,1)}
   .sevbar-row .cnt{font-size:13px;font-weight:700;min-width:22px;text-align:right}
   .sev-foot{display:flex;align-items:center;gap:9px;margin-top:3px;padding:10px 12px;border-radius:10px;background:var(--good-soft);font-size:12.5px;color:var(--ink);font-weight:500}
   .sev-foot .chk{width:18px;height:18px;border-radius:50%;background:var(--good);color:#05130d;display:grid;place-items:center;flex:none}
@@ -239,9 +273,13 @@ function dashboardHtml(
   .ghost{border:1px solid var(--border);background:transparent;color:var(--ink-2);border-radius:8px;padding:5px 11px;font-size:12px;font-weight:600} .ghost:hover{border-color:var(--border-2)}
   .muted{color:var(--ink-3)} .empty,.loading{color:var(--ink-3);font-size:13px;padding:16px 2px}
   .view{display:none} .view.active{display:flex;flex-direction:column;gap:18px}
+  .mobile-nav{display:none;align-items:center;gap:6px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--panel);overflow-x:auto}
+  .mobile-nav button,.mobile-nav a{flex:none;border:1px solid var(--border);background:var(--panel);color:var(--ink-2);border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;white-space:nowrap}
+  .mobile-nav button.active{background:var(--accent-soft);border-color:var(--accent);color:var(--ink)}
+  .mobile-nav a{color:var(--ink);text-decoration:none}
 
   @media(max-width:1180px){.tiles{grid-template-columns:repeat(3,minmax(0,1fr))}.grid-2{grid-template-columns:1fr}}
-  @media(max-width:900px){.app{grid-template-columns:1fr}.sidebar{display:none}}
+  @media(max-width:900px){.app{grid-template-columns:1fr}.sidebar{display:none}.mobile-nav{display:flex}}
   @media(max-width:720px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.content{padding:16px}}
   @media(max-width:480px){.tiles{grid-template-columns:1fr}}
   @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -266,7 +304,7 @@ function dashboardHtml(
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
         <span id="themeLabel">Theme</span><span class="tt-track"><span class="tt-knob"></span></span>
       </button>
-      ${isSuperAdmin ? `<a class="nav-link nav" style="display:block"><a data-nav href="/superadmin" class="" style="display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:9px;color:var(--ink-2);font-size:13.5px;font-weight:500">${ico.settings}Super admin</a></a>` : ''}
+      ${isSuperAdmin ? `<a data-nav href="/superadmin" class="nav-link nav" style="display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:9px;color:var(--ink-2);font-size:13.5px;font-weight:500">${ico.settings}Super admin</a>` : ''}
       <a href="/settings/security" style="display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:9px;color:var(--ink-2);font-size:13px">Account security</a>
       <a href="/connect" style="display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:9px;color:var(--ink-2);font-size:13px">Add repositories</a>
       ${logoutCsrf ? `<form method="post" action="/auth/logout" style="margin:0"><input type="hidden" name="csrf" value="${logoutCsrf}" /><button type="submit" style="display:flex;align-items:center;gap:11px;width:100%;padding:8px 10px;border:0;border-radius:9px;background:transparent;color:var(--ink-2);font-size:13px;text-align:left">Sign out</button></form>` : ''}
@@ -278,9 +316,19 @@ function dashboardHtml(
       <div class="page-h"><span class="crumb"><b id="crumbWs">—</b> &nbsp;/&nbsp; <span id="crumbView">Overview</span></span><span class="t" id="viewTitle">Overview</span></div>
       <div class="top-right"><button class="btn" id="refresh">Refresh</button><div class="avatar" id="avatar" title="Your account">·</div></div>
     </header>
+    <nav class="mobile-nav" aria-label="Mobile workspace navigation">
+      <button class="active" data-view="overview">Overview</button>
+      <button data-view="pulls">Pull requests</button>
+      <button data-view="findings">Findings</button>
+      <button data-view="reviews">Runs</button>
+      <button data-view="settings">Settings</button>
+      <a href="/connect">Add repos</a>
+      <a href="/settings/security">Security</a>
+    </nav>
 
     <div class="content">
       <div class="banner" id="legacyBanner" style="display:none">Viewing without login — set <code>GITHUB_OAUTH_CLIENT_ID</code> to require sign-in.</div>
+      ${billingBanner}
 
       <!-- OVERVIEW -->
       <div class="view active" id="v-overview">
@@ -306,14 +354,20 @@ function dashboardHtml(
       <!-- PULLS --><div class="view" id="v-pulls"><div class="panel"><div class="panel-h"><div><h2>Pull requests</h2><span class="sub" id="pullSub">—</span></div></div><div class="table-scroll"><table class="runs"><thead><tr><th>Repo</th><th>PR</th><th>State</th><th class="r">Open bugs</th><th class="r">Reviewed</th></tr></thead><tbody id="pullBody"></tbody></table></div></div></div>
       <!-- FINDINGS --><div class="view" id="v-findings"><div class="panel"><div class="panel-h"><div><h2>Findings</h2><span class="sub">Bugs Orvex found, most severe first.</span></div></div><div class="table-scroll"><table class="runs"><thead><tr><th>Sev</th><th>Repo · PR</th><th>File</th><th>Finding</th><th>Status</th></tr></thead><tbody id="findBody"></tbody></table></div></div></div>
       <!-- REVIEWS --><div class="view" id="v-reviews"><div class="panel"><div class="panel-h"><div><h2>Review runs</h2><span class="sub">Every review &amp; fix run, newest first.</span></div></div><div class="table-scroll"><table class="runs"><thead><tr><th>Repo</th><th>PR</th><th>Trigger</th><th>Status</th>${showLlmCost ? '<th class="r">Cost</th>' : ''}<th class="r">Duration</th><th class="r">When</th></tr></thead><tbody id="reviewsBody"></tbody></table></div></div></div>
-      <!-- REPOS --><div class="view" id="v-repos"><div class="panel"><div class="panel-h"><div><h2>Repositories</h2><span class="sub">Toggle which repos Orvex reviews.</span></div></div><div class="panel-body" id="reposList"><div class="loading">Loading…</div></div></div></div>
+      <!-- REPOS --><div class="view" id="v-repos"><div class="panel"><div class="panel-h"><div><h2>Repositories</h2><span class="sub">Toggle which repos Orvex reviews.</span></div><div class="spacer"></div><button class="btn" id="syncRepos">Sync from GitHub</button></div><div class="panel-body" id="reposList"><div class="loading">Loading…</div></div></div></div>
       <!-- INSTALLS --><div class="view" id="v-installs"><div class="panel"><div class="panel-h"><div><h2>GitHub installations</h2><span class="sub">Orgs where the Orvex App is installed.</span></div></div><div class="panel-body" id="installs"><div class="loading">Loading…</div></div></div></div>
       <!-- SETTINGS --><div class="view" id="v-settings">
         <div class="panel"><div class="panel-h"><div><h2>Plan and billing</h2><span class="sub">Current plan: ${escapeHtml(planLabel)} · billed per workspace.</span></div></div><div class="panel-body">${canManageBilling
-          ? `<button class="btn" onclick="location.href='/#pricing'">View or change plan</button> <button class="btn" onclick="location.href='mailto:support@useorvex.com?subject=${encodeURIComponent(`Orvex billing help - ${slug}`)}'">Billing help or cancellation</button>`
-          : '<span class="muted">Only a workspace owner can change the plan or request cancellation.</span>'}</div></div>
+          ? `<button class="btn" onclick="location.href='/#pricing'">View plans</button> <button class="btn" onclick="location.href='/billing/portal/${encodeURIComponent(slug)}'">Manage billing</button> <button class="btn" onclick="location.href='mailto:support@useorvex.com?subject=${encodeURIComponent(`Orvex billing help - ${slug}`)}'">Billing help</button>`
+          : '<span class="muted">Only a workspace owner can change the plan or request cancellation.</span>'}<p class="muted" style="margin:12px 0 0;font-size:13px">Your allowance: <strong>${escapeHtml(quotaLine)}</strong>. Comment <code>@orvex rate limit</code> on any PR to see remaining capacity.</p></div></div>
         <div class="panel"><div class="panel-h"><div><h2>Account security</h2><span class="sub">Password and authenticator settings.</span></div></div><div class="panel-body"><button class="btn" onclick="location.href='/settings/security'">Manage account security</button></div></div>
+        <div class="panel"><div class="panel-h"><div><h2>Privacy and data</h2><span class="sub">Review the policy or request a copy or deletion of workspace data.</span></div></div><div class="panel-body"><button class="btn" onclick="location.href='/privacy'">Privacy policy</button> <button class="btn" onclick="location.href='mailto:support@useorvex.com?subject=${encodeURIComponent(`Orvex data request - ${slug}`)}'">Request data help</button></div></div>
         <div class="panel"><div class="panel-h"><div><h2>Automatic review triggers</h2><span class="sub">Per repo. <code>@orvex review</code> always works regardless.</span></div></div><div class="panel-body" id="settingsList"><div class="loading">Loading…</div></div></div>
+        <div class="panel"><div class="panel-h"><div><h2>GitHub commands</h2><span class="sub">Comment these on a pull request. Same list as <code>@orvex help</code>.</span></div></div><div class="panel-body">
+          <p class="muted" style="margin:0 0 12px;font-size:13px;line-height:1.55">Orvex reviews when a PR opens and (if enabled above) on each push. Manual commands always work. A standard review uses <strong>1</strong> unit; <code>@orvex deep</code> uses <strong>2</strong>. Skipped reviews and fix/explain commands do not consume units; failed reviews still count toward free-trial and hourly caps. Tick <strong>Apply this fix</strong> on an inline finding to commit that one fix.</p>
+          <div class="table-scroll"><table class="runs"><thead><tr><th>Command</th><th>Where</th><th>Effect</th></tr></thead><tbody>${commandRows}</tbody></table></div>
+          <p class="muted" style="margin:12px 0 0;font-size:12px;line-height:1.5">Need the list on a PR? Comment <code>@orvex help</code>. Check quota without starting a review: <code>@orvex rate limit</code>.</p>
+        </div></div>
       </div>
     </div>
   </div>
@@ -325,7 +379,8 @@ const api=(p)=>fetch('/api/workspaces/'+encodeURIComponent(SLUG)+p,{credentials:
 const esc=(x)=>String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const sevCls=(s)=>({P1:'p1',P2:'p2',P3:'p3'}[s]||'muted');
 const runCls=(s)=>s==='completed'?'done':s==='failed'?'fail':s==='running'?'run':'queued';
-const runChip=(s)=>'<span class="chip '+runCls(s)+'"><span class="cd"></span>'+esc(s[0].toUpperCase()+s.slice(1))+'</span>';
+const runReason=(r)=>r.status==='failed'?'No verdict — retry':r.skipReason==='provider_not_configured'?'Provider unavailable':r.skipReason==='pr_closed_mid_run'?'PR closed':r.skipReason?String(r.skipReason).replaceAll('_',' '):'';
+const runChip=(s,reason)=>'<span class="chip '+runCls(s)+'"'+(reason?' title="'+esc(reason)+'"':'')+'><span class="cd"></span>'+esc(s[0].toUpperCase()+s.slice(1))+(reason?' <small>'+esc(reason)+'</small>':'')+'</span>';
 const rel=(iso)=>{if(!iso)return'—';const d=(Date.now()-new Date(iso).getTime())/1000;if(d<60)return'just now';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago';};
 const dur=(ms)=>{if(!ms)return'—';const sec=Math.round(ms/1000);return sec<60?sec+'s':Math.floor(sec/60)+'m '+String(sec%60).padStart(2,'0')+'s';};
 const usd=(n)=>n==null?'—':'$'+Number(n).toFixed(2);
@@ -349,7 +404,7 @@ document.getElementById('refresh').onclick=loadAll;
 
 const titles={overview:'Overview',pulls:'Pull requests',findings:'Findings',reviews:'Review runs',repos:'Repositories',installs:'Installations',settings:'Settings'};
 function showView(v){
-  document.querySelectorAll('.nav a[data-view]').forEach(x=>x.classList.toggle('active',x.dataset.view===v));
+  document.querySelectorAll('.nav a[data-view],.mobile-nav button[data-view]').forEach(x=>x.classList.toggle('active',x.dataset.view===v));
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('active'));
   document.getElementById('v-'+v).classList.add('active');
   document.getElementById('viewTitle').textContent=titles[v];
@@ -428,13 +483,13 @@ function severity(f){
   const by=f.bySeverity||{},max=Math.max(1,by.P1||0,by.P2||0,by.P3||0,by.info||0);
   document.getElementById('sevSub').textContent=(f.open||0)+' open across all repos';
   const rows=[['P1 · Critical','var(--p1)',by.P1||0],['P2 · High','var(--p2)',by.P2||0],['P3 · Medium','var(--p3)',by.P3||0],['Low · info','var(--info)',by.info||0]];
-  let html=rows.map(([n,c,v])=>'<div class="sevbar-row"><span class="lbl"><i style="background:'+c+'"></i>'+n+'</span><span class="sevbar-track"><span class="sevbar-fill" style="width:'+Math.round(v/max*100)+'%;background:'+c+'"></span></span><span class="cnt num" style="color:'+c+'">'+v+'</span></div>').join('');
+  let html=rows.map(([n,c,v])=>'<div class="sevbar-row"><span class="lbl"><i style="background:'+c+'"></i>'+n+'</span><span class="sevbar-track"><span class="sevbar-fill" style="transform:scaleX('+((v/max)||0)+');background:'+c+'"></span></span><span class="cnt num" style="color:'+c+'">'+v+'</span></div>').join('');
   if((f.fixed||0)>0)html+='<div class="sev-foot"><span class="chk"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg></span><span><b>'+f.fixed+' fixed</b> — Orvex committed the fix and closed them.</span></div>';
   document.getElementById('sevBody').innerHTML=html;
 }
 async function loadRecent(skipChart){
   try{const {days,all}=await series();const b=document.getElementById('recentBody');const recent=all.slice().reverse().slice(0,7);
-    b.innerHTML=recent.length?recent.map(r=>{const[org,name]=repoShort(r.repo?r.owner+'/'+r.repo:'');return '<tr><td class="repo mono"><span class="org">'+esc((r.owner||'')+'/')+'</span>'+esc(r.repo||'')+'</td><td class="mono">#'+r.pr+'</td><td>'+trigCell(r)+'</td><td>'+runChip(r.status)+'</td><td class="r num">'+(r.findingsNew||0)+'</td><td class="r mono">'+(r.status==='running'?'…':dur(r.durationMs))+'</td><td class="r mono">'+rel(r.createdAt)+'</td></tr>';}).join(''):'<tr><td colspan="7" class="empty">No reviews yet.</td></tr>';
+    b.innerHTML=recent.length?recent.map(r=>{const[org,name]=repoShort(r.repo?r.owner+'/'+r.repo:'');return '<tr><td class="repo mono"><span class="org">'+esc((r.owner||'')+'/')+'</span>'+esc(r.repo||'')+'</td><td class="mono">#'+r.pr+'</td><td>'+trigCell(r)+'</td><td>'+runChip(r.status,runReason(r))+'</td><td class="r num">'+(r.findingsNew||0)+'</td><td class="r mono">'+(r.status==='running'?'…':dur(r.durationMs))+'</td><td class="r mono">'+rel(r.createdAt)+'</td></tr>';}).join(''):'<tr><td colspan="7" class="empty">No reviews yet.</td></tr>';
     if(!skipChart)drawChart(days);
   }catch{if(!skipChart)drawChart([]);}
 }
@@ -503,10 +558,11 @@ let reviewsLoaded=false;
 async function loadReviews(){if(reviewsLoaded)return;reviewsLoaded=true;
   try{const {reviews}=await api('/reviews?limit=100');const b=document.getElementById('reviewsBody');
     const cols=SHOW_LLM_COST?7:6;
-    b.innerHTML=reviews.length?reviews.slice().reverse().map(r=>'<tr><td class="repo mono"><span class="org">'+esc((r.owner||'')+'/')+'</span>'+esc(r.repo||'')+'</td><td class="mono">#'+r.pr+'</td><td>'+trigCell(r)+'</td><td>'+runChip(r.status)+'</td>'+(SHOW_LLM_COST?'<td class="r mono">'+usd(r.costUsd)+'</td>':'')+'<td class="r mono">'+(r.status==='running'?'…':dur(r.durationMs))+'</td><td class="r mono">'+rel(r.createdAt)+'</td></tr>').join(''):'<tr><td colspan="'+cols+'" class="empty">No review runs yet.</td></tr>';
+    b.innerHTML=reviews.length?reviews.slice().reverse().map(r=>'<tr><td class="repo mono"><span class="org">'+esc((r.owner||'')+'/')+'</span>'+esc(r.repo||'')+'</td><td class="mono">#'+r.pr+'</td><td>'+trigCell(r)+'</td><td>'+runChip(r.status,runReason(r))+'</td>'+(SHOW_LLM_COST?'<td class="r mono">'+usd(r.costUsd)+'</td>':'')+'<td class="r mono">'+(r.status==='running'?'…':dur(r.durationMs))+'</td><td class="r mono">'+rel(r.createdAt)+'</td></tr>').join(''):'<tr><td colspan="'+cols+'" class="empty">No review runs yet.</td></tr>';
   }catch(e){document.getElementById('reviewsBody').innerHTML='<tr><td colspan="'+(SHOW_LLM_COST?7:6)+'" class="empty">'+esc(e.error||'error')+'</td></tr>';}
 }
 let reposLoaded=false;
+document.getElementById('syncRepos').onclick=async()=>{const b=document.getElementById('syncRepos');b.disabled=true;b.textContent='Syncing…';try{const r=await fetch('/api/workspaces/'+encodeURIComponent(SLUG)+'/repos/sync',{method:'POST',credentials:'same-origin'});if(!r.ok)throw await r.json().catch(()=>({error:'sync failed'}));reposLoaded=false;await loadRepos();b.textContent='Synced';}catch(e){b.textContent=e.error||'Sync failed';}finally{setTimeout(()=>{b.disabled=false;b.textContent='Sync from GitHub';},1800);}};
 async function loadRepos(){if(reposLoaded)return;reposLoaded=true;const list=document.getElementById('reposList');
   try{const {repos}=await api('/repos');
     list.innerHTML=repos.length?repos.map(r=>'<div class="repo-row"><span class="rn">'+esc(r.fullName)+'</span><span class="rm"><span class="muted" style="font-size:12px">'+(r.private?'private':'public')+'</span><button class="toggle" role="switch" aria-checked="'+r.enabled+'" data-id="'+r.id+'"></button></span></div>').join(''):'<div class="empty">No repositories. Click “Add repositories”.</div>';

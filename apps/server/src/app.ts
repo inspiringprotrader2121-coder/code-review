@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { ReviewQueue } from '@orvex-review/queue';
 import { createAppDatabase } from '@orvex-review/store';
+import { appPublicUrl } from '@orvex-review/tenants';
 import { apiRoutes } from './routes/api.js';
 import { authRoutes } from './routes/auth.js';
 import { billingRoutes } from './routes/billing.js';
@@ -48,9 +49,31 @@ export const productionSecurityHeaders: MiddlewareHandler = async (c, next) => {
   }
 };
 
+/** Keep OAuth cookies and callbacks on one canonical host. */
+export const canonicalHostRedirect: MiddlewareHandler = async (c, next) => {
+  const configured = appPublicUrl();
+  let canonical: URL;
+  try {
+    canonical = new URL(configured);
+  } catch {
+    await next();
+    return;
+  }
+  const requestHost = c.req.header('host')?.split(':')[0]?.toLowerCase();
+  if (requestHost === `www.${canonical.hostname}`) {
+    const target = new URL(c.req.url);
+    target.protocol = canonical.protocol;
+    target.hostname = canonical.hostname;
+    target.port = canonical.port;
+    return c.redirect(target.toString(), 308);
+  }
+  await next();
+};
+
 export function createApp(queue: ReviewQueue) {
   const app = new Hono();
   app.use('*', productionSecurityHeaders);
+  app.use('*', canonicalHostRedirect);
 
   // Shallow liveness — the process is up (for a load balancer's basic check).
   app.get('/health', (c) => c.json({ ok: true, service: 'orvex-review', mode: 'multi-tenant', connect: '/connect' }));

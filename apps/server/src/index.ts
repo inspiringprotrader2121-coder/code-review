@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { createReviewQueue } from '@orvex-review/queue';
 import { createAppDatabase } from '@orvex-review/store';
-import { legacyAuthMode } from '@orvex-review/tenants';
+import { authDisabled, legacyAuthMode } from '@orvex-review/tenants';
 import { createApp } from './app.js';
 import { startWorkerLoop } from './queue-runner.js';
 import { startNightlyScheduler } from './nightly.js';
@@ -16,6 +16,15 @@ const host = process.env.HOST ?? '0.0.0.0';
 // can't silently expose every tenant's data. Override only for a deliberate
 // public demo with ORVEX_ALLOW_PUBLIC_NOLOGIN=1.
 const isLoopbackBind = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+// AUTH_DISABLED makes every request the shared `dev` user — never allow that on
+// a non-loopback bind (legacyAuthMode() is false when AUTH_DISABLED=1, so the
+// check below would otherwise miss it).
+if (!isLoopbackBind && authDisabled()) {
+  throw new Error(
+    `Refusing to bind ${host}:${port} with AUTH_DISABLED=1 (every request is auto-authed as "dev"). ` +
+      `Unset AUTH_DISABLED, or bind to 127.0.0.1 for local bypass.`,
+  );
+}
 if (!isLoopbackBind && legacyAuthMode() && process.env.ORVEX_ALLOW_PUBLIC_NOLOGIN !== '1') {
   throw new Error(
     `Refusing to bind ${host}:${port} with NO authentication (legacy no-login mode). ` +

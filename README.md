@@ -16,7 +16,7 @@ Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** with
 
 1. **GitHub App** `Orvex Review` on Velatrixcloud org
    - Permissions: `pull_requests` R/W, `contents` R/W (auto-fix commits), `metadata` R, `checks` W (optional)
-   - Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `installation`
+   - Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `installation`, `installation_repositories`
 2. **LLM API key** — MiniMax (OpenAI-compatible, default) or Anthropic
 3. Node 20+, pnpm 9+
 4. Optional: `semgrep` CLI on PATH for deterministic scans
@@ -41,18 +41,24 @@ pnpm review --pr 67 --sync
 ## PR commands & auto-fix
 
 Anyone with write access can drive Orvex from PR comments (trigger word
-configurable via `ORVEX_TRIGGER`, default `@orvex`):
+configurable via `ORVEX_TRIGGER`, default `@orvex`). `@orvex help` and
+`@orvex rate limit` also work without write:
 
 | Command | Where | Effect |
 |---------|-------|--------|
-| `@orvex review` | PR comment | Re-run the review on the current head |
-| `@orvex fix` | PR comment | Commit all of Orvex's ready fix suggestions |
-| `@orvex fix all` | PR comment | Ready fixes + AI-generate fixes for remaining findings |
+| `@orvex review` | PR or finding thread | Re-run the review on the current head |
+| `@orvex deep` | PR or finding thread | Extra analysis passes (paid; counts as 2 units) |
+| `@orvex fix` | PR comment | Commit all ready fix suggestions |
+| `@orvex fix` | finding thread | That finding only (same as `fix this`) |
+| `@orvex fix all` | PR or finding thread | Ready fixes + AI-generate fixes for remaining findings |
 | `@orvex fix this` | reply on a finding | Fix just that finding |
-| `@orvex <instructions>` | reply on a finding | AI fix following your instructions |
+| `@orvex <instructions>` | reply on a finding / PR | AI fix or free-form ask/change |
 | `@orvex explain` | reply on a finding | Deep-dive explanation of the issue |
 | `@orvex ignore` | reply on a finding | Suppress this finding permanently for the repo |
-| `@orvex auto-apply on/off` | PR comment | Auto-commit ready fixes after every future review of this PR (Orvex's findings only) |
+| `@orvex ignore <file>:<line>` | PR comment | Silence a manual-review candidate by location |
+| `@orvex resolve conflicts` | PR or finding thread | Merge base to clear auto-resolvable conflicts |
+| `@orvex auto-apply on/off` | PR or finding thread | Auto-commit ready fixes after each future review of this PR |
+| `@orvex rate limit` | anywhere | Show remaining hourly / monthly review quota |
 | `@orvex help` | anywhere | Show the command list |
 
 Each inline finding also carries:

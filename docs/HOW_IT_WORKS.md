@@ -1,9 +1,9 @@
 # How Orvex Review works
 
 Orvex Review is a multi-tenant GitHub App that reviews pull requests with an LLM,
-posts findings as inline comments with one-click fixes, and (on the top tier) runs
-the changed code in a sandbox. This document explains the end-to-end flow, the two
-plans, every trigger, and the configuration that controls it.
+posts findings as inline comments with one-click fixes, and (on Verify plans) runs
+the changed code in a sandbox. This document explains the end-to-end flow, the
+public plans, every trigger, and the configuration that controls it.
 
 ---
 
@@ -51,7 +51,7 @@ so a deep review finishes in a few minutes, not tens of minutes:
 
 - **Passes** — the review runs N times over the change + neighborhood + top-K
   index files; findings accumulate and dedupe by fingerprint.
-- **Whole-repo sweep** (Verify/Enterprise only) — the rest of the repo is examined
+- **Whole-repo sweep** (Verify plans only) — the rest of the repo is examined
   against the change in size-bounded batches (many files per batch) for exhaustive
   coverage, run concurrently with the passes.
 - **Adversarial verification** — a second skeptical model pass tries to *refute*
@@ -115,7 +115,7 @@ disk quota on the sandbox work dir.
 ### Nightly whole-repo scans (Verify)
 
 A scheduler (`apps/server/src/nightly.ts`) runs once a day (UTC hour
-`ORVEX_NIGHTLY_HOUR`) and, for every Verify+ tenant's enabled repos, reviews the
+`ORVEX_NIGHTLY_HOUR`) and, for every Verify tenant's enabled repos, reviews the
 last day's commits on the default branch — a diff the PR path never sees — and files
 the findings as a GitHub **issue**. It reuses the full review engine (deep context,
 passes, verification). Gated by `plan.nightlyScans` **and** `ORVEX_NIGHTLY_SCANS=1`;
@@ -129,16 +129,16 @@ Every plan includes deterministic checks, source-grounded verification, autofix,
 and optional runtime verification behind the relevant operations flag. The review
 tracks differ in pass count, model mix, included volume, rate limits, and billing.
 
-| Capability | Free trial | Starter (`review`) | Pro Unlimited (`review-plus`) | Verify Lite | Verify | Enterprise |
-|---|---|---|---|---|---|---|
-| Review passes | 3 | 3 | 3 | 4 | 4 | 4 |
-| Index retrieval (top-K files) | 28 | 28 | 28 | 28 | 28 | 28 |
-| Review track | dual-model | dual-model | dual-model | multi-model | multi-model | multi-model |
-| Strict verification | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Commit fixes / `@orvex` commands | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Code execution (runtime verify) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
-| Nightly whole-repo scans | — | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
-| Included reviews and rate | 10 lifetime, 2/hr | 100/mo, 5/hr; +$0.50/review | no monthly quota, 10/hr | 50/mo, 5/hr; +$0.75/review | 120/mo, 10/hr; +$0.75/review | custom contract |
+| Capability | Free trial | Starter (`review`) | Pro Unlimited (`review-plus`) | Verify Lite | Verify |
+|---|---|---|---|---|---|
+| Review passes | 2 | 2 | 2 | 4 | 4 |
+| Index retrieval (top-K files) | 28 | 28 | 28 | 28 | 28 |
+| Review track | dual-model (MiniMax + Flash) | dual-model (MiniMax + Flash) | dual-model (MiniMax + Flash) | multi-model | multi-model |
+| Strict verification | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) |
+| Commit fixes / `@orvex` commands | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Code execution (runtime verify) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
+| Nightly whole-repo scans | — | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
+| Included reviews and rate | 10 lifetime, 2/hr | 100/mo, 5/hr; +$0.50/review | no monthly quota, 10/hr | 50/mo, 5/hr; +$0.75/review | 120/mo, 10/hr; +$0.75/review |
 
 The hourly/monthly numbers are **safety ceilings, not usage targets** — sized as
 tail-risk insurance (see `packages/tenants/src/plans.ts` for the cost math) so a
@@ -148,10 +148,15 @@ they're a backstop, not a constraint. Command/manual re-review of an unchanged
 commit also has a 2-minute cooldown for the same reason — a fresh push is never
 affected.
 
-Dual-model and multi-model tracks use different review mixes; Verify Lite,
-Verify, and Enterprise run the four-pass multi-model track. Paid plans can
-request the two-unit `@orvex deep` review. Code execution and nightly scans sit
-behind ops flags (`ORVEX_CODE_EXECUTION`, `ORVEX_NIGHTLY_SCANS`).
+Dual-model and multi-model tracks use different review mixes; Verify Lite and
+Verify run the four-pass multi-model track. Free/Starter/Pro
+run two discovery passes (MiniMax + DeepSeek v4 Flash) plus Flash verify —
+no sandboxed investigate. Verify* plans also get a sandboxed **investigate**
+pass when Codex CLI is not already agentic: DeepSeek v4 Flash with read-only
+tools (`list_dir` / `read_file` / `grep`) over a temp checkout — skipped when
+`ORVEX_INVESTIGATE=0`. Paid plans can request the two-unit `@orvex deep`
+review. Code execution and nightly scans sit behind ops flags
+(`ORVEX_CODE_EXECUTION`, `ORVEX_NIGHTLY_SCANS`).
 
 Free is a **lifetime trial (10 reviews, 2/hour) anchored to the GitHub account** —
 a second workspace or a reinstall can't reset it. Defined in
@@ -167,8 +172,9 @@ execution runs. Over the free cap, Orvex nudges — it never silently drops.
 ## 6. Triggers
 
 All triggers work on every plan; what differs is the **models/limits** they invoke
-(table above). Comment commands require the commenter to have write access
-(OWNER/MEMBER/COLLABORATOR). The trigger word is `@orvex` (configurable via
+(table above). Commands that can commit or spend LLM quota require the commenter
+to have real repo write access. `@orvex help` and `@orvex rate limit` are
+read-only and work without write. The trigger word is `@orvex` (configurable via
 `ORVEX_TRIGGER`).
 
 **Automatic**
@@ -187,15 +193,19 @@ the same SHA is deduped — only `@orvex review` forces a re-run.
 | Command | Where | Effect |
 |---|---|---|
 | `@orvex review` / `re-review` | PR or inline reply | Fresh review, always runs (bypasses SHA dedupe) |
-| `@orvex fix` | PR or inline reply | Commit ready fixes (paid) |
+| `@orvex deep` | PR or inline reply | Extra analysis passes (paid; counts as 2 units) |
+| `@orvex fix` | PR comment | Commit all ready fixes (paid) |
+| `@orvex fix` | inline reply | That finding only (same as `fix this`) |
 | `@orvex fix all` | PR or inline reply | Generate + commit fixes for all findings (paid) |
 | `@orvex fix this` | inline reply | Fix that one finding (paid) |
 | `@orvex explain` / `why` | inline reply | Deeper explanation of the finding |
 | `@orvex ignore` / `dismiss` | inline reply | Suppress that finding's fingerprint for the repo |
+| `@orvex ignore <file>:<line>` | PR comment | Silence a manual-review candidate by location |
 | `@orvex resolve conflicts` | PR or inline reply | Resolve merge conflicts on the branch |
 | `@orvex auto-apply on` / `off` | PR or inline reply | Per-PR: auto-commit ready fixes after each review (paid) |
 | `@orvex <anything else>` | PR comment | Free-form instruction (answer or edit) |
 | `@orvex help` | either | Post the command list |
+| `@orvex rate limit` | either | Show remaining hourly / monthly quota (does not start a review) |
 
 **API / CLI**
 
@@ -236,6 +246,10 @@ callback refuses to rebind an installation already owned by another workspace
 | `ORVEX_REVIEW_AGGREGATION_MAX_CANDIDATES` | bounded candidates sent to the merge step (default 120) |
 | `ORVEX_OPENAI_MODEL` / `ORVEX_CODEX_CLI_MODEL` | explicit direct-API and agentic-review model ids |
 | `ORVEX_OPENAI_REASONING_EFFORT` / `ORVEX_CODEX_CLI_REASONING_EFFORT` | explicit reasoning effort for those targets |
+| `ORVEX_INVESTIGATE` | `0` disables the sandboxed investigate pass (on by default for multi-model / Verify* when Codex isn't agentic) |
+| `ORVEX_INVESTIGATE_TIER` | investigate model: `deepseek-flash` (default), `deepseek`, `openai`, or `standard` |
+| `ORVEX_INVESTIGATE_MAX_STEPS` | max tool-loop rounds (default 8) |
+| `ORVEX_DEEPSEEK_API_KEY` / `ORVEX_DEEPSEEK_FLASH_MODEL` | DeepSeek key + Flash model id (default `deepseek-v4-flash`) |
 | `ORVEX_REVIEW_THINKING` | `0` disables reasoning (on by default) |
 | `ORVEX_CODE_EXECUTION` | `1` enables Verify-tier runtime verification (off by default) |
 | `ORVEX_MAX_SANDBOXES` | global concurrent sandbox cap (default 2) |

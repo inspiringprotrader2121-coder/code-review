@@ -16,6 +16,50 @@ test('parseOrvexCommand', async (t) => {
     assert.deepEqual(parseOrvexCommand('@orvex fix this', '@orvex'), { kind: 'fix_this' });
     assert.deepEqual(parseOrvexCommand('@orvex help', '@orvex'), { kind: 'help' });
     assert.deepEqual(parseOrvexCommand('@orvex', '@orvex'), { kind: 'help' });
+    assert.deepEqual(parseOrvexCommand('@orvex rate limit', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex rate-limit', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex quota', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex reviews remaining', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex check rate limit', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex how many reviews remaining?', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex what is my usage', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex check usage', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex show usage', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex check my usage', '@orvex'), { kind: 'rate_limit' });
+    assert.deepEqual(parseOrvexCommand('@orvex how many reviews left', '@orvex'), { kind: 'rate_limit' });
+  });
+
+  await t.test('rate-limit near-miss does not hijack real commands that mention usage/quota', () => {
+    // Must NOT silently become rate_limit (batch-2 regression). Longer phrases that
+    // start with a known verb fall through to prompt/help — never quota status.
+    for (const body of [
+      '@orvex fix all CPU usage spikes',
+      '@orvex review the usage metrics',
+      '@orvex explain the rate limit middleware',
+      '@orvex ignore this quota warning',
+      '@orvex deep review of our quota module',
+    ]) {
+      assert.notEqual(parseOrvexCommand(body, '@orvex')?.kind, 'rate_limit', body);
+    }
+    assert.equal(parseOrvexCommand('@orvex fix all CPU usage spikes', '@orvex')?.kind, 'prompt');
+    assert.equal(parseOrvexCommand('@orvex review the usage metrics', '@orvex')?.kind, 'prompt');
+    assert.equal(parseOrvexCommand('@orvex explain the rate limit middleware', '@orvex')?.kind, 'prompt');
+    assert.equal(parseOrvexCommand('@orvex deep review of our quota module', '@orvex')?.kind, 'prompt');
+    assert.equal(parseOrvexCommand('@orvex update the quota module', '@orvex')?.kind, 'prompt');
+    assert.equal(parseOrvexCommand('@orvex investigate our rate limit middleware', '@orvex')?.kind, 'prompt');
+    assert.equal(parseOrvexCommand('@orvex check the usage of this cache', '@orvex')?.kind, 'prompt');
+    assert.equal(parseOrvexCommand('@orvex how to add rate limits to this endpoint', '@orvex')?.kind, 'prompt');
+    assert.equal(
+      parseOrvexCommand('@orvex check if the rate limit middleware handles bursts', '@orvex')?.kind,
+      'prompt',
+    );
+    assert.equal(parseOrvexCommand('@orvex how should we implement quota enforcement', '@orvex')?.kind, 'prompt');
+    // Short quota-status asks still map to rate_limit.
+    assert.equal(parseOrvexCommand('@orvex check my rate limit', '@orvex')?.kind, 'rate_limit');
+    assert.equal(parseOrvexCommand('@orvex what is my quota', '@orvex')?.kind, 'rate_limit');
+    // Bare exact commands still win.
+    assert.deepEqual(parseOrvexCommand('@orvex fix all', '@orvex'), { kind: 'fix_all' });
+    assert.deepEqual(parseOrvexCommand('@orvex ignore this', '@orvex'), { kind: 'ignore' });
   });
 
   await t.test('parses auto-apply variants', () => {

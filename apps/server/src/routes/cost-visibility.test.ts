@@ -75,6 +75,8 @@ test('only allowlisted tenants receive LLM cost data or dashboard controls', asy
   const customerHtml = await customerDashboard.text();
   assert.match(customerHtml, /const SHOW_LLM_COST=false/);
   assert.doesNotMatch(customerHtml, /<th class="r">Cost<\/th>/);
+  const billingSuccessDashboard = await dashboards.request('/dashboard/customer-workspace?billing=success');
+  assert.match(await billingSuccessDashboard.text(), /Payment received\. Your plan is activating now/);
   const internalDashboard = await dashboards.request('/dashboard/internal-testing');
   const internalHtml = await internalDashboard.text();
   assert.match(internalHtml, /const SHOW_LLM_COST=true/);

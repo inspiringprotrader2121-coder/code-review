@@ -47,7 +47,7 @@ chatgpt-codex-connector, Qodo, and CodeRabbit — a ready-made benchmark dataset
 here's the output" has a 0% false-positive rate and no competitor at this
 price point does it. The PR71 `__dirname` P1 is caught deterministically by
 execution — no reasoning required. `codeExecution` is already advertised on
-Verify/Enterprise; this makes it real.
+Verify plans; this makes it real.
 
 **Existing scaffolding:** `apps/server/src/runtime-verify.ts`
 (`runtimeVerify`, `formatRuntimeEvidence`), the per-review repo checkout
@@ -180,7 +180,7 @@ clicks each end in a visible ✅-or-❌-with-reason (zero silent ends).
    where anyone can open a PR and watch Orvex review it.
 5. ✅ **Pricing** (shipped 2026-07-11): Starter $29 (100 incl, $0.50 overage),
    Pro Unlimited $69, Verify Lite $49 (50 incl), Verify $99 (120 incl, $0.75
-   overage), Enterprise custom. Deep review = 2 quota units ($1 Starter / $1.50
+   overage), custom plans are handled privately. Deep review = 2 quota units ($1 Starter / $1.50
    Verify over quota). Free: 10 lifetime reviews. Stripe live prices + meters
    configured; old prices archived.
 6. **Distribution**: GitHub Marketplace listing, docs site, a launch post

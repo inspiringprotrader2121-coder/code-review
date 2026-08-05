@@ -21,7 +21,7 @@ One **GitHub App** powers all customers. Each customer **installs** it on their 
 | Permission | Access |
 |------------|--------|
 | Metadata | Read |
-| Contents | Read |
+| Contents | Read & write (auto-fix commits) |
 | Pull requests | Read & write |
 | Checks | Read & write (optional, for check runs) |
 | Issues | Read & write (PR comments) |
@@ -29,6 +29,8 @@ One **GitHub App** powers all customers. Each customer **installs** it on their 
 ### Events (subscribe)
 
 - [x] Pull request
+- [x] Issue comment
+- [x] Pull request review comment
 - [x] Installation
 - [x] Installation repositories
 
@@ -92,8 +94,28 @@ Customers never paste GitHub passwords — they **authorize the App** with scope
 
 ## 6. Production checklist
 
-- [ ] Postgres instead of SQLite (`STORE_PATH` → `DATABASE_URL` migration later)
-- [ ] Redis queue for multiple workers
-- [ ] User auth (email login) linked to `tenant_id`
-- [ ] Billing (Stripe) per workspace
-- [ ] Encrypt any BYOK API keys at rest
+- [x] Redis-backed queue and user auth linked to `tenant_id`
+- [x] Stripe billing per workspace with durable webhook deduplication
+- [x] CI typecheck, test, and build gate
+- [ ] Choose and test an off-site backup destination
+- [ ] Configure external uptime/error alerting for `/health` and `/ready`
+
+For the single production worker, keep the live database outside the checkout:
+
+```bash
+STORE_PATH=/home/orvex/orvex-data/velatrix-review.db
+REDIS_URL=redis://...          # required in production
+QUEUE_BACKEND=redis
+```
+
+Deploy only with `scripts/deploy-safe.sh --dry-run` followed by
+`scripts/deploy-safe.sh --restart`. The deployment drains active reviews,
+stages the release, runs install/typecheck/test on the staged tree, and uses
+`ecosystem.config.cjs` so PM2 waits longer than the configured drain window
+before killing the worker.
+
+The repository includes `scripts/backup-db.mjs`, which performs a consistent
+SQLite backup, verifies integrity, keeps a bounded local retention window, and
+optionally copies each backup to `ORVEX_BACKUP_REMOTE` with `rsync`. Schedule it
+at least daily and verify a restore before launch; an off-site destination and
+restore drill remain required operational inputs.

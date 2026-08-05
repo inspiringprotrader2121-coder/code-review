@@ -52,6 +52,7 @@ import {
   dropSelfNegatingFindings,
   runLlmReview,
   runCodexCliReview,
+  runInvestigateReview,
   isCodexRepoAllowed,
   DEFAULT_CODEX_CLI_MODEL,
   DEFAULT_CODEX_CLI_REASONING_EFFORT,
@@ -60,6 +61,8 @@ import {
   type ReviewFinding,
   type ReviewPromptContext,
   type ReviewSurfaceFinding,
+  summarizeModelContribution,
+  formatModelContribution,
 } from '@orvex-review/review';
 import {
   createAppDatabase,
@@ -70,25 +73,27 @@ import {
 import { planFeatures } from '@orvex-review/tenants';
 import { reportStripeReviewOverage } from './routes/billing.js';
 import { runtimeVerify, formatRuntimeEvidence } from './runtime-verify.js';
+import { formatLimitBlockedComment, loadAccountQuotaStatus } from './quota-status.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 /**
- * Download + extract the repo at `ref` into a temp dir so the Codex CLI can
- * AGENTICALLY sweep the whole codebase (read-only), not just the diff. Fail-safe:
- * returns null on any error and the review falls back to diff+context only.
+ * Download + extract the repo at `ref` into a temp dir for agentic exploration
+ * (Codex CLI or the sandboxed investigate tier). Fail-safe: returns null on any
+ * error and the review falls back to diff+context only.
  */
-async function checkoutRepoForCodex(
+async function checkoutRepoForAgent(
   octokit: ReturnType<typeof createInstallationOctokit>,
   owner: string,
   repo: string,
   ref: string,
 ): Promise<string | null> {
+  let dir: string | null = null;
   try {
     const res = await octokit.rest.repos.downloadTarballArchive({ owner, repo, ref });
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-repo-'));
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-repo-'));
     const tarPath = path.join(dir, 'repo.tar.gz');
     fs.writeFileSync(tarPath, Buffer.from(res.data as ArrayBuffer));
     // GitHub tarballs nest everything under a top-level `owner-repo-sha/` dir.
@@ -96,7 +101,14 @@ async function checkoutRepoForCodex(
     fs.rmSync(tarPath, { force: true });
     return dir;
   } catch (err) {
-    console.warn('[worker] codex repo checkout failed (diff-only fallback):', (err as Error).message);
+    if (dir) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+    console.warn('[worker] repo checkout failed (diff-only fallback):', (err as Error).message);
     return null;
   }
 }
@@ -178,11 +190,12 @@ function premiumTarget(config: WorkerConfig): LlmTarget {
 /** The model + cost-tier for a given review PASS.
  *  - 'codex-hybrid' → pass 1 (general) on CODEX (sharp), pass 2+ (deep-dive) on
  *    MiniMax (thorough breadth, and it reasons hard where codex's deep-dive skips).
- *  - 'multi-model'  → THREE DIFFERENT MODELS, one per pass, for max blind-spot
- *    diversity with zero OAuth dependency: pass 1 MiniMax, pass 2 DeepSeek
- *    (reasoning-heavy, cheap), pass 3 the OpenAI API model (e.g. Luna). Pure
- *    pay-as-you-go — no subscription/account-pool fragility, scales with
- *    customer volume like any other API cost.
+ *  - 'multi-model'  → FOUR discovery passes for max blind-spot diversity:
+ *    pass 1 Luna/Codex (general), pass 2 DeepSeek v4 Flash (deep-dive),
+ *    pass 3 Flash again on removed-behavior/callers (Pro via ORVEX_PASS3_ON_DEEPSEEK_PRO),
+ *    pass 4 MiniMax (perf/completeness). Pure API billing — no OAuth fragility.
+ *  - 'dual-model' → TWO discovery passes: MiniMax (general) + DeepSeek v4 Flash
+ *    (deep-dive). Flash also runs the end-of-review verify pass.
  *  - 'openai'   → the OpenAI reasoning model (gpt-5.x/Luna) on every pass.
  *  - 'hybrid'   → pass 1 (general) on MiniMax, pass 2+ (deep-dive) on GLM-5.2.
  *  - 'standard' → MiniMax on every pass.  'premium' → GLM on every pass. */
@@ -205,6 +218,49 @@ export function canRunAgentic(plan: { modelTier?: ModelTier }, repoId: string): 
     (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model') &&
     isCodexRepoAllowed(repoId)
   );
+}
+
+/**
+ * Sandboxed investigate tier (DeepSeek v4 Flash + read-only tools).
+ *
+ * On for multi-model (Verify*) plans when Codex CLI is NOT already providing an
+ * agentic pass. Dual-model (free/Starter/Pro) stays at MiniMax + Flash discovery
+ * + Flash verify only — no investigate, to keep the cheap two-model track.
+ * Kill-switch: ORVEX_INVESTIGATE=0.
+ */
+export function canRunInvestigate(
+  plan: { id?: string; modelTier?: ModelTier },
+  opts: { useCodexCli: boolean },
+): boolean {
+  if (process.env.ORVEX_INVESTIGATE === '0') return false;
+  if (opts.useCodexCli) return false; // Codex already explores the checkout
+  return plan.modelTier === 'multi-model' || plan.modelTier === 'codex-hybrid';
+}
+
+/**
+ * Investigate always prefers DeepSeek v4 Flash (cheap multi-hop reasoner).
+ * Falls back to DeepSeek Pro, then OpenAI, then standard if Flash isn't configured.
+ */
+export function modelForInvestigate(
+  config: WorkerConfig,
+): { target: LlmTarget; tier: PassTier } {
+  const override = (process.env.ORVEX_INVESTIGATE_TIER ?? 'deepseek-flash').trim().toLowerCase();
+  if (override === 'openai' && config.openaiModel) {
+    return { target: config.openaiModel, tier: 'openai' };
+  }
+  if (override === 'deepseek' && config.deepseekModel) {
+    return { target: config.deepseekModel, tier: 'deepseek' };
+  }
+  if (override === 'standard') {
+    return { target: config.standardModel, tier: 'standard' };
+  }
+  // Default + 'deepseek-flash': Flash first, then Pro, then OpenAI, then MiniMax.
+  if (config.deepseekFlashModel) {
+    return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
+  }
+  if (config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+  if (config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
+  return { target: config.standardModel, tier: 'standard' };
 }
 
 export function modelForPass(
@@ -238,32 +294,39 @@ export function modelForPass(
       return { target: config.codexCliModel, tier: 'openai' };
     }
     if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
-    // pass 2 (deep-dive) → DeepSeek's heavy reasoning, built for hunting the
-    // subtle defects a first read misses.
-    // pass 2 (deep-dive) → the STRONGER DeepSeek. v4 Flash currently
-    // outperforms v4 Pro, so it gets the highest-value lens (hunting the subtle
-    // defects a first read misses). Swap these two lines to A/B them — the
-    // lenses are independent of which model runs them.
+    // pass 2 (deep-dive) → DeepSeek v4 Flash (currently the stronger DeepSeek
+    // for hunting subtle defects a first read misses).
     if (passIndex === 1 && config.deepseekFlashModel) {
       return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
     }
     if (passIndex === 1 && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
-    // pass 3 (removed-behavior / caller audit) → v4 Pro. A SECOND, independent
-    // reasoner rather than a re-run: the 161-180 benchmarks showed our misses
-    // concentrated in multi-step state and data-flow bugs, which is exactly
-    // what this lens hunts, and ensemble diversity is where the unique-finding
-    // lead comes from.
-    if (passIndex === 2 && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+    // pass 3 (removed-behavior / caller audit) → Flash again by default (cheap
+    // second angle on a DIFFERENT lens). Model diversity used to prefer Pro
+    // here; set ORVEX_PASS3_ON_DEEPSEEK_PRO=1 to restore Pro as the independent
+    // reasoner if ablation shows Flash-twice loses unique caller/removal bugs.
+    if (passIndex === 2) {
+      if (process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO === '1' && config.deepseekModel) {
+        return { target: config.deepseekModel, tier: 'deepseek' };
+      }
+      if (config.deepseekFlashModel) {
+        return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
+      }
+      if (config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+    }
     // pass 4 (perf/completeness breadth) + any missing-key fallback → MiniMax.
     return { target: config.standardModel, tier: 'standard' };
   }
   if (plan.modelTier === 'dual-model') {
-    // TWO-MODEL ensemble for the base paid tiers: MiniMax handles breadth
-    // (general + perf/completeness lenses), DeepSeek's heavy reasoning takes
-    // the deep-dive lens (pass 2) — exactly the "hunt subtle defects a first
-    // read misses" job a strong reasoner is built for. Falls back to MiniMax
-    // if DeepSeek isn't configured, so nothing breaks with the key unset.
-    if (passIndex === 1 && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+    // TWO-MODEL entry track: MiniMax general + DeepSeek v4 Flash deep-dive.
+    // Flash (not Pro) keeps the paid/free entry stack cheap while still giving
+    // a second independent reasoner. Falls back to Pro, then MiniMax, if Flash
+    // isn't configured.
+    if (passIndex === 1) {
+      if (config.deepseekFlashModel) {
+        return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
+      }
+      if (config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+    }
     return { target: config.standardModel, tier: 'standard' };
   }
   if (plan.modelTier === 'openai') {
@@ -286,26 +349,33 @@ export function modelForPlanWithTier(
   plan: { modelTier?: ModelTier },
 ): { target: LlmTarget; tier: PassTier } {
   // VERIFICATION IS THE PRECISION GATE — it decides what the customer actually
-  // sees. On the multi-model tiers it now runs on the frontier OpenAI model
-  // rather than the cheap standard one: a weak verifier over-vetoes, which is
-  // why a strong-reasoner "rescue" had to be bolted on for hedged rejections.
-  // Luna's price cut (5x) made this affordable; the verify prompt is far
-  // smaller than a review prompt, so the marginal cost is small.
-  // Override with ORVEX_VERIFY_ON_STANDARD=1 to fall back to the cheap model.
+  // sees. Prefer DeepSeek v4 Flash as challenger on every modern tier: cheap,
+  // strong on premise checks, and independent of MiniMax discovery on dual-model
+  // / of Luna discovery on multi-model. Escape hatches:
+  //   ORVEX_VERIFY_ON_STANDARD=1 → MiniMax (legacy weak+rescue path)
+  //   ORVEX_VERIFY_ON_OPENAI=1   → Luna (explicit only; not the default)
+  //   ORVEX_VERIFY_ON_DEEPSEEK_PRO=1 → DeepSeek Pro instead of Flash
   if (
-    (plan.modelTier === 'multi-model' || plan.modelTier === 'codex-hybrid') &&
-    config.openaiModel &&
-    process.env.ORVEX_VERIFY_ON_STANDARD !== '1'
+    plan.modelTier === 'multi-model'
+    || plan.modelTier === 'codex-hybrid'
+    || plan.modelTier === 'dual-model'
   ) {
-    return { target: config.openaiModel, tier: 'openai' };
+    if (process.env.ORVEX_VERIFY_ON_STANDARD === '1') {
+      return { target: config.standardModel, tier: 'standard' };
+    }
+    if (process.env.ORVEX_VERIFY_ON_OPENAI === '1' && config.openaiModel) {
+      return { target: config.openaiModel, tier: 'openai' };
+    }
+    if (process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO === '1' && config.deepseekModel) {
+      return { target: config.deepseekModel, tier: 'deepseek' };
+    }
+    if (config.deepseekFlashModel) {
+      return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
+    }
+    if (config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+    return { target: config.standardModel, tier: 'standard' };
   }
-  if (
-    plan.modelTier === 'standard' ||
-    plan.modelTier === 'openai' ||
-    plan.modelTier === 'codex-hybrid' ||
-    plan.modelTier === 'multi-model' ||
-    plan.modelTier === 'dual-model'
-  ) {
+  if (plan.modelTier === 'standard' || plan.modelTier === 'openai') {
     return { target: config.standardModel, tier: 'standard' };
   }
   return { target: premiumTarget(config), tier: 'premium' };
@@ -562,12 +632,13 @@ async function mapLimit<T, R>(
 const MS_PER_30_DAYS = 30 * 24 * 3_600_000;
 
 /**
- * Which account limit (if any) this GitHub account has hit. SYNCHRONOUS on
- * purpose — better-sqlite3 counts run with no await, so the caller can pair this
- * with startReviewRun to reserve the slot atomically (no concurrent-burst leak).
- * Counts running + completed reviews so in-flight reviews see each other.
- * Checked cheapest/most-specific first: hourly burst, then monthly cost
- * exposure, then the free-trial lifetime cap.
+ * Which account limit (if any) this GitHub account has hit. Callers that reserve
+ * a slot must invoke this inside `store.tryReserveReviewRun` (BEGIN IMMEDIATE)
+ * so multi-worker processes cannot both pass the count and both insert.
+ * Counts running + completed + failed reviews so in-flight reviews see each
+ * other and post-spend failures cannot refund a credit.
+ * Checked cheapest/most-specific first: free-trial lifetime cap (when set),
+ * then hourly burst, then monthly hard cap. Metered plans skip the hard monthly.
  */
 const GLOBAL_FREE_TIER_DAILY_CAP = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
 
@@ -590,6 +661,11 @@ export function accountLimitReason(
       return 'free_tier_capped';
     }
   }
+  // Prefer trial_exhausted over hourly when the lifetime trial is spent — otherwise a
+  // free account at 10/10 with 2/2 hourly gets "wait ~Xh" instead of "upgrade".
+  if (plan.trialReviewLimit !== null && store.countAccountReviews(owner) >= plan.trialReviewLimit) {
+    return 'trial_exhausted';
+  }
   if (
     plan.reviewsPerHour !== null &&
     store.countAccountReviews(owner, { sinceMs: 3_600_000 }) >= plan.reviewsPerHour
@@ -603,36 +679,88 @@ export function accountLimitReason(
   ) {
     return 'monthly_limit';
   }
-  if (plan.trialReviewLimit !== null && store.countAccountReviews(owner) >= plan.trialReviewLimit) {
-    return 'trial_exhausted';
+  return null;
+}
+
+export function providerConfigurationIssue(
+  plan: ReturnType<typeof planFeatures>,
+  config: WorkerConfig,
+): string | null {
+  const needsIndependentReviewer = plan.modelTier === 'dual-model' || plan.modelTier === 'multi-model';
+  if (needsIndependentReviewer && !config.deepseekModel && !config.deepseekFlashModel) {
+    return 'The independent review provider is not configured. This review was not run; contact support to restore provider capacity.';
+  }
+  if (plan.modelTier === 'multi-model' && !config.openaiModel && !config.codexCliModel) {
+    return 'The frontier review provider is not configured for this plan. This review was not run; contact support to restore provider capacity.';
   }
   return null;
 }
 
 
-/** Post the upgrade nudge for a blocked free-tier review (best-effort). */
+const LIMIT_NUDGE_COOLDOWN_MS = 30 * 60_000;
+
+/** Post a clear quota nudge when a review is blocked (best-effort, deduped per PR). */
 async function postLimitNudge(
   config: WorkerConfig,
   job: ReviewJobPayload,
   plan: ReturnType<typeof planFeatures>,
   reason: 'rate_limited' | 'monthly_limit' | 'trial_exhausted',
 ): Promise<void> {
-  // Paid tiers have a generous SAFETY ceiling (not a trial), so the message
-  // differs from the free-trial upsell wording.
-  const body =
-    reason === 'rate_limited'
-      ? plan.id === 'free'
-        ? `⏳ **Orvex free trial** is limited to ${plan.reviewsPerHour} reviews per hour. This push wasn't reviewed — push again later, or [upgrade](https://useorvex.com/pricing) for unlimited reviews.`
-        : `⏳ **Orvex safety limit reached** — ${plan.reviewsPerHour} reviews/hour on the ${plan.label} plan (this protects against runaway usage, e.g. a restart loop or misfiring webhook). This push wasn't reviewed; it'll pick up on the next push once the hour rolls over. Contact support if you need a higher limit.`
-      : reason === 'monthly_limit'
-        ? `⚠️ **Orvex monthly safety limit reached** — ${plan.reviewsPerMonth} reviews in the last 30 days on the ${plan.label} plan. This is a very high threshold real usage shouldn't hit; if you're seeing this, [contact support](https://useorvex.com/pricing) — we'll raise it for genuine usage.`
-        : `⚠️ **Orvex free trial used up.** This GitHub account has used all ${plan.trialReviewLimit} free reviews. [Upgrade](https://useorvex.com/pricing) to keep Orvex reviewing your pull requests.`;
+  // Skip if we already recorded (and nudged for) this reason on this PR recently.
+  // Count includes the skip row just written by the caller — >1 means a prior skip.
+  const recent = config.store.countRecentSkippedRuns(
+    {
+      installationId: job.installationId,
+      owner: job.owner,
+      repo: job.repo,
+      pr: job.pr,
+    },
+    reason,
+    LIMIT_NUDGE_COOLDOWN_MS,
+  );
+  if (recent > 1) {
+    console.log(`[worker] ${reason} ${job.owner} (plan=${plan.id}) — nudge suppressed (cooldown)`);
+    return;
+  }
+  const status = loadAccountQuotaStatus(config.store, job.owner, job.tenantId, plan);
+  const body = formatLimitBlockedComment(status, reason, commandTrigger());
   try {
     const octokit = createInstallationOctokit(config.github, job.installationId);
     await octokit.rest.issues.createComment({ owner: job.owner, repo: job.repo, issue_number: job.pr, body });
     console.log(`[worker] ${reason} ${job.owner} (plan=${plan.id})`);
   } catch {
     /* nudge is best-effort */
+  }
+}
+
+/** Tell the PR owner when no trustworthy verdict was produced. */
+async function postReviewFailureNotice(
+  config: WorkerConfig,
+  job: ReviewJobPayload,
+  error: string,
+): Promise<void> {
+  const transient = isTransientLlmError(error);
+  const marker = `<!-- orvex-review-failure:${job.installationId}:${job.owner}/${job.repo}#${job.pr}@${job.headSha} -->`;
+  const body = [
+    marker,
+    '⚠️ **Orvex could not complete this review.**',
+    '',
+    transient
+      ? 'A review provider was temporarily unavailable or rate-limited. Orvex will retry automatically when possible.'
+      : 'No clean-review verdict was produced because the review pipeline failed before it could complete.',
+    '',
+    'Please push a new commit or comment `@orvex review` to try again. If this keeps happening, contact support@useorvex.com.',
+  ].join('\n');
+  try {
+    const octokit = createInstallationOctokit(config.github, job.installationId);
+    await octokit.rest.issues.createComment({
+      owner: job.owner,
+      repo: job.repo,
+      issue_number: job.pr,
+      body,
+    });
+  } catch (noticeError) {
+    console.warn('[worker] review failure notice could not be posted:', (noticeError as Error).message);
   }
 }
 
@@ -685,32 +813,72 @@ export async function processReviewJob(
     }
   }
 
-  // Free-tier limits, checked and RESERVED atomically: count in-flight + done
-  // reviews for the account, and — if allowed — create the 'running' row with NO
-  // await in between. Because better-sqlite3 is synchronous, two concurrent
-  // reviews on different PRs can't both read a stale count and slip past the cap.
+  // Free-tier / hourly limits: check + reserve `running` in one BEGIN IMMEDIATE
+  // transaction so multi-worker processes sharing SQLite cannot both slip past.
   const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
   const isFreeTier = plan.trialReviewLimit !== null;
-  if (isFreeTier || plan.reviewsPerHour !== null) {
-    const reason = accountLimitReason(config.store, job.owner, plan);
-    if (reason) {
-      config.store.recordReviewRun({ ...runBase, status: 'skipped', skipReason: reason, durationMs: 0 });
-      // The global cap is an anti-abuse pause, not a per-user limit — don't nudge
-      // the (possibly innocent) author to upgrade; just skip quietly.
-      if (reason !== 'free_tier_capped') await postLimitNudge(config, job, plan, reason);
-      return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: reason };
+  const providerIssue = providerConfigurationIssue(plan, config);
+  if (providerIssue) {
+    config.store.recordReviewRun({
+      ...runBase,
+      status: 'skipped',
+      skipReason: 'provider_not_configured',
+      durationMs: Date.now() - startedAt,
+    });
+    if (
+      config.store.countRecentSkippedRuns(
+        { installationId: job.installationId, owner: job.owner, repo: job.repo, pr: job.pr },
+        'provider_not_configured',
+        LIMIT_NUDGE_COOLDOWN_MS,
+      ) === 1
+    ) {
+      await postReviewFailureNotice(config, job, providerIssue);
     }
+    return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: 'provider_not_configured' };
+  }
+  const resumed = job.runId ? config.store.resumeReviewRun(job.runId, runBase) : 'unavailable';
+  if (resumed === 'completed') {
+    return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: 'already_completed_after_restart' };
   }
 
-  // Insert a 'running' row up front so the dashboard shows the run the instant
-  // it's triggered, then finalize the same row when it finishes.
-  const runId = config.store.startReviewRun({ ...runBase, deep: Boolean(job.deep), freeTier: isFreeTier });
+  let runId: string;
+  if (resumed === 'resumed') {
+    runId = job.runId!;
+  } else {
+    const reserved = config.store.tryReserveReviewRun(
+      { ...runBase, deep: Boolean(job.deep), freeTier: isFreeTier },
+      () =>
+        isFreeTier || plan.reviewsPerHour !== null
+          ? accountLimitReason(config.store, job.owner, plan)
+          : null,
+    );
+    if (!reserved.ok) {
+      // The global cap is an anti-abuse pause, not a per-user limit — don't nudge
+      // the (possibly innocent) author to upgrade; just skip quietly.
+      if (reserved.reason !== 'free_tier_capped') {
+        await postLimitNudge(
+          config,
+          job,
+          plan,
+          reserved.reason as 'rate_limited' | 'monthly_limit' | 'trial_exhausted',
+        );
+      }
+      return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: reserved.reason };
+    }
+    runId = reserved.runId;
+  }
+  // Preserve the row id if shutdown has to requeue this exact in-flight job.
+  job.runId = runId;
 
   try {
     const result = await executeReview(job, config, runId);
+    const consumedProviderBudget =
+      Boolean(result.skipReason) &&
+      Boolean((result.inputTokens ?? 0) > 0 || (result.outputTokens ?? 0) > 0 || (result.costUsd ?? 0) > 0);
     config.store.completeReviewRun(runId, {
-      status: result.skipReason ? 'skipped' : 'completed',
+      status: result.skipReason && !consumedProviderBudget ? 'skipped' : result.skipReason ? 'failed' : 'completed',
       skipReason: result.skipReason,
+      error: consumedProviderBudget ? `review did not complete: ${result.skipReason}` : undefined,
       durationMs: Date.now() - startedAt,
       findingsNew: result.newCount,
       findingsFixed: result.fixedCount,
@@ -741,11 +909,22 @@ export async function processReviewJob(
     }
     return result;
   } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
     config.store.completeReviewRun(runId, {
       status: 'failed',
-      error: err instanceof Error ? err.message : String(err),
+      error: message,
       durationMs: Date.now() - startedAt,
     });
+    if (
+      config.store.countRecentFailedRuns({
+        installationId: job.installationId,
+        owner: job.owner,
+        repo: job.repo,
+        pr: job.pr,
+      }) === 1
+    ) {
+      await postReviewFailureNotice(config, job, message);
+    }
     throw err;
   }
 }
@@ -913,6 +1092,8 @@ async function executeReview(
     // findings are additive, not a replacement for the model's review.)
     return Boolean(f.patch) && f.status !== 'removed';
   });
+  // Investigate also needs fully-deleted file patches (dangling-caller seeds).
+  const filesForInvestigate = files.filter((f) => Boolean(f.patch));
 
   let llmSummary: string | undefined;
   // Best-effort passes that failed — surfaced in the posted review so a partial
@@ -1059,9 +1240,8 @@ async function executeReview(
     const PASS_ANGLES: Array<{ tag: string; focus?: string; bestEffort?: boolean }> = [
       { tag: 'general' },
       { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS },
-      // Only the tiers that actually have a SECOND independent reasoner to run
-      // it on (DeepSeek v4 Flash + v4 Pro). On a 2-model tier this lens would
-      // just re-run the model that already did pass 1.
+      // Only multi-model/codex-hybrid get a second independent DeepSeek reasoner
+      // for this lens. Dual-model is intentionally two passes (MiniMax + Flash).
       ...(FOURTH_LENS_TIERS.has(plan.modelTier as ModelTier)
         ? [{ tag: 'removed-behavior/callers', focus: REMOVED_BEHAVIOR_FOCUS }]
         : []),
@@ -1074,14 +1254,15 @@ async function executeReview(
        *  cares about; 'sweep' = a breadth batch over extra repo files. */
       kind: 'pass' | 'sweep';
       /** HOW it executes — orthogonal to `kind`. 'agentic' runs the codex CLI
-       *  with a real repo checkout and shell tools; 'api' is a single-shot
-       *  HTTPS call. These were previously conflated into one `kind` field
-       *  ('codex-cli'), which forced a coercion back to 'pass' at every return
-       *  site and made a failed agentic SWEEP count as a failed required PASS. */
-      mode: 'agentic' | 'api';
+       *  with a real repo checkout and shell tools; 'investigate' is the
+       *  sandboxed DeepSeek Flash tool loop (list/read/grep only); 'api' is a
+       *  single-shot HTTPS call. */
+      mode: 'agentic' | 'investigate' | 'api';
       ctx: typeof baseCtx;
       target: LlmTarget;
       tier: PassTier;
+      /** Lens tag for contribution reporting (general / deep-dive / …). */
+      passTag?: string;
       /** Zero-based repeated-review sample. Sweeps are always sample zero. */
       sample: number;
       /** Original model pass index, used to reselect an API target for repeated samples. */
@@ -1094,15 +1275,38 @@ async function executeReview(
       // completed. The core general + deep-dive reasoners remain required.
       bestEffort?: boolean;
     };
+    const tagFindings = (got: ReviewFinding[], tier: PassTier, passTag?: string) => {
+      for (const f of got) {
+        f.sourceTier = tier;
+        if (passTag) f.sourcePass = passTag;
+      }
+    };
     // ONE answer to "does this review run agentically?", used by every site
     // below. Previously this decision was re-derived in five places with subtly
     // different conditions, which is how the pass-1 routing bug got in.
     const useCodexCli = canRunAgentic(plan, `${owner}/${repo}`);
-    // Read-only checkout so codex can explore the whole repo, not just the diff.
-    const codexRepoDir = useCodexCli
-      ? await checkoutRepoForCodex(octokit, owner, repo, effectiveSha)
-      : null;
-    if (codexRepoDir) console.log(`[worker] codex repo sweep: checked out ${owner}/${repo}@${effectiveSha.slice(0, 7)}`);
+    const wantInvestigate = canRunInvestigate(plan, { useCodexCli });
+    const investigateModel = wantInvestigate ? modelForInvestigate(config) : null;
+    // Read-only checkout for Codex and/or the sandboxed investigate tier.
+    // Cleanup is guaranteed via the outer finally below — even if call-list
+    // construction throws before the LLM run loop.
+    const agentRepoDir =
+      useCodexCli || wantInvestigate
+        ? await checkoutRepoForAgent(octokit, owner, repo, effectiveSha)
+        : null;
+    try {
+    const codexRepoDir = useCodexCli ? agentRepoDir : null;
+    if (codexRepoDir) {
+      console.log(`[worker] codex repo sweep: checked out ${owner}/${repo}@${effectiveSha.slice(0, 7)}`);
+    } else if (wantInvestigate && agentRepoDir) {
+      console.log(`[worker] investigate checkout: ${owner}/${repo}@${effectiveSha.slice(0, 7)}`);
+    } else if (wantInvestigate && !agentRepoDir) {
+      console.warn('[worker] investigate skipped: repo checkout unavailable');
+      skippedLenses.push('investigate (repository checkout unavailable)');
+    }
+    if (wantInvestigate && !investigateModel) {
+      skippedLenses.push('investigate (provider unavailable)');
+    }
     // `@orvex deep` (paid plans): two EXTRA lenses beyond the standard three,
     // unioned into the same review — deliberately different angles, not reruns.
     const DEEP_EXTRA_ANGLES: Array<{ tag: string; focus: string; modelIdx: number }> = job.deep
@@ -1135,6 +1339,7 @@ async function executeReview(
         ctx: angle.focus ? { ...passCtx, extraFocus: angle.focus } : passCtx,
         target,
         tier,
+        passTag: angle.tag,
         sample: 0,
         modelPassIndex: p,
         bestEffort: angle.bestEffort === true,
@@ -1150,10 +1355,40 @@ async function executeReview(
         ctx: { ...passCtx, extraFocus: extra.focus },
         target,
         tier,
+        passTag: extra.tag,
         sample: 0,
         modelPassIndex: extra.modelIdx,
         bestEffort: true, // `deep` extras are bonus lenses — never abort the review
       });
+    }
+
+    // Sandboxed investigate: one best-effort DeepSeek Flash tool-loop pass when
+    // a checkout is available and Codex isn't already exploring the repo.
+    if (wantInvestigate && agentRepoDir && investigateModel) {
+      const invFocus =
+        'INVESTIGATE PASS — P1-FIRST multi-hop search with tools. Prioritize only ' +
+        'Critical/High defects this PR introduces or exposes: auth/authz bypass, data ' +
+        'loss/corruption, resource leak on failure, asymmetric error paths (success records ' +
+        'X but failure skips it), dead checks after refactor, post-transform null/inconsistency, ' +
+        'and cross-tenant/identity scoping bugs. Procedure: (1) list symbols this diff deletes ' +
+        'or renames and grep their remaining callers; (2) for each changed function, read its ' +
+        'full body + immediate callers/callees; (3) compare success vs failure/cleanup paths; ' +
+        '(4) kill hypotheses that the code already handles. Report only concrete P1/P2 bugs ' +
+        'with file:line and a failure scenario — no style/nits.';
+      reviewCalls.push({
+        label: `pass investigate (${investigateModel.target.model})`,
+        kind: 'pass',
+        mode: 'investigate',
+        ctx: { ...passCtx, extraFocus: invFocus },
+        target: investigateModel.target,
+        tier: investigateModel.tier,
+        passTag: 'investigate',
+        sample: 0,
+        // Distinct index so required-lens accounting never treats this as a core pass.
+        modelPassIndex: 100,
+        bestEffort: true,
+      });
+      console.log(`[worker] investigate pass enabled on ${investigateModel.target.model}`);
     }
 
     // Sweep batches: pack MANY files per call (each clipped smaller — the sweep is
@@ -1194,17 +1429,20 @@ async function executeReview(
     }
 
     const requestedAggregation = readReviewAggregationConfig();
-    const passCalls = reviewCalls.filter((call) => call.kind === 'pass');
+    // Investigate is a single stateful tool-loop — never multiply via aggregation.
+    const investigateCalls = reviewCalls.filter((call) => call.mode === 'investigate');
+    const passCalls = reviewCalls.filter((call) => call.kind === 'pass' && call.mode !== 'investigate');
     const sweepCalls = reviewCalls.filter((call) => call.kind === 'sweep');
-    // Reserve the sweep before expanding repeated samples. The recurrence policy
-    // must never silently squeeze out the Verify tier's documented whole-repo
-    // coverage just to fit more copies of the main pass into the call cap.
-    const reservedSweepCalls = Math.min(sweepCalls.length, Math.max(0, maxCalls - passCalls.length));
+    // Reserve the sweep + investigate before expanding repeated samples.
+    const reservedFixedCalls = Math.min(
+      sweepCalls.length + investigateCalls.length,
+      Math.max(0, maxCalls - passCalls.length),
+    );
     const aggregation = fitReviewAggregationToBudget(
       requestedAggregation,
       passCalls.length,
       maxCalls,
-      reservedSweepCalls,
+      reservedFixedCalls,
     );
     if (requestedAggregation.enabled && !aggregation.enabled) {
       console.warn(`[worker] repeated-review aggregation disabled: ${aggregation.disabledReason}`);
@@ -1237,9 +1475,29 @@ async function executeReview(
           };
         }),
       ).flat();
-      toRun = [...repeatedCalls, ...sweepCalls].slice(0, maxCalls);
+      // Pin investigate under the call budget the same way the non-aggregation
+      // branch does — a full repeated sample grid must not silently truncate it.
+      const invRoom = Math.max(0, maxCalls - investigateCalls.length);
+      toRun = [
+        ...repeatedCalls.slice(0, invRoom),
+        ...investigateCalls,
+        ...sweepCalls,
+      ].slice(0, maxCalls);
+      if (investigateCalls.length > 0 && !toRun.some((call) => call.mode === 'investigate')) {
+        console.warn('[worker] investigate skipped: maxCalls budget exhausted before investigate');
+        skippedLenses.push('investigate (call budget exhausted)');
+      }
     } else {
-      toRun = reviewCalls.slice(0, maxCalls);
+      // Keep investigate even under a tight maxCalls budget — it is appended last
+      // but is the whole point of the sandboxed tier when enabled.
+      const inv = reviewCalls.filter((call) => call.mode === 'investigate');
+      const rest = reviewCalls.filter((call) => call.mode !== 'investigate');
+      const room = Math.max(0, maxCalls - inv.length);
+      toRun = [...rest.slice(0, room), ...inv].slice(0, maxCalls);
+      if (inv.length > 0 && !toRun.some((call) => call.mode === 'investigate')) {
+        console.warn('[worker] investigate skipped: maxCalls budget exhausted before investigate');
+        skippedLenses.push('investigate (call budget exhausted)');
+      }
     }
     {
       const sweepCount = toRun.filter((call) => call.kind === 'sweep').length;
@@ -1313,7 +1571,7 @@ async function executeReview(
             });
             codexThreadId = threadId;
             const got = llmFindingsToReviewFindings(response.findings);
-            for (const f of got) f.sourceTier = call.tier; // codex findings → protected in verification
+            tagFindings(got, call.tier, call.passTag); // codex findings → protected in verification
             const degraded = got.length === 0 && response.summary === REVIEW_INCOMPLETE_SUMMARY;
             console.log(`[worker] ${call.label}: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
             return { ok: !degraded, transient: false, degraded, summary: response.summary, findings: got };
@@ -1331,7 +1589,7 @@ async function executeReview(
                 );
                 const llm = await runReview(call.ctx, config.openaiModel, 'openai');
                 const got = llmFindingsToReviewFindings(llm.findings);
-                for (const f of got) f.sourceTier = 'openai';
+                tagFindings(got, 'openai', call.passTag);
                 const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
                 console.log(`[worker] ${call.label} [api-fallback]: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
                 return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got };
@@ -1347,16 +1605,37 @@ async function executeReview(
             console.error(`[worker] ${call.label} falling back to DeepSeek (${config.deepseekModel.model})`);
             const llm = await runReview(call.ctx, config.deepseekModel, 'deepseek');
             const got = llmFindingsToReviewFindings(llm.findings);
-            for (const f of got) f.sourceTier = 'deepseek';
+            tagFindings(got, 'deepseek', call.passTag);
             const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
             console.log(`[worker] ${call.label} [deepseek-fallback]: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
             return { ok: !degraded, transient: false, degraded, summary: llm.summary, findings: got };
           }
         }
 
+        if (call.mode === 'investigate') {
+          if (!agentRepoDir) {
+            return { ok: false, transient: false, degraded: false, summary: undefined, findings: [] };
+          }
+          const response = await runInvestigateReview(filesForInvestigate, {
+            cwd: agentRepoDir,
+            apiKey: call.target.apiKey,
+            model: call.target.model,
+            baseUrl: call.target.baseUrl,
+            api: call.target.api,
+            reasoningEffort: call.target.reasoningEffort,
+            context: call.ctx,
+            onUsage: onUsageFor(call.tier),
+          });
+          const got = llmFindingsToReviewFindings(response.findings);
+          tagFindings(got, call.tier, call.passTag ?? 'investigate');
+          const degraded = got.length === 0 && response.summary === REVIEW_INCOMPLETE_SUMMARY;
+          console.log(`[worker] ${call.label}: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
+          return { ok: !degraded, transient: false, degraded, summary: response.summary, findings: got };
+        }
+
         const llm = await runReview(call.ctx, call.target, call.tier, call.temperature);
         const got = llmFindingsToReviewFindings(llm.findings);
-        for (const f of got) f.sourceTier = call.tier;
+        tagFindings(got, call.tier, call.passTag);
         // A call that returned the "unparseable" sentinel with no findings
         // didn't really succeed — it degraded. Mark it NOT-ok so an all-degraded
         // review fails/retries instead of posting a contradictory clean pass.
@@ -1378,9 +1657,11 @@ async function executeReview(
 
     let outcomes: Outcome[];
     try {
-      // Agentic calls share one codex session per PR, so they must run
-      // sequentially (each resumes the previous thread). API calls parallelize.
+      // Agentic Codex calls share one session per PR, so they must run
+      // sequentially. Investigate is stateful but independent of API passes
+      // and runs in parallel with them below. API calls parallelize.
       const cliCalls = toRun.filter((c) => c.mode === 'agentic');
+      const investigateCalls = toRun.filter((c) => c.mode === 'investigate');
       const apiCalls = toRun.filter((c) => c.mode === 'api');
       // Describe the outcome from the CALL, in exactly one place. Previously
       // `kind` was recomputed at every return site inside runSingleCall and
@@ -1398,17 +1679,16 @@ async function executeReview(
       for (const call of cliCalls) {
         cliOutcomes.push(await runOne(call));
       }
-      const apiOutcomes = await mapLimit(apiCalls, concurrency, runOne);
-      outcomes = [...cliOutcomes, ...apiOutcomes];
+      // Investigate is stateful but independent of API passes — run it in
+      // parallel with them so the tool loop does not serialize the whole review.
+      const [investigateOutcomes, apiOutcomes] = await Promise.all([
+        mapLimit(investigateCalls, 1, runOne),
+        mapLimit(apiCalls, concurrency, runOne),
+      ]);
+      // Core API outcomes first so any fallback summary walk still prefers them.
+      outcomes = [...cliOutcomes, ...apiOutcomes, ...investigateOutcomes];
     } finally {
       clearInterval(abortPoll);
-      if (codexRepoDir) {
-        try {
-          fs.rmSync(codexRepoDir, { recursive: true, force: true });
-        } catch {
-          /* best-effort temp cleanup */
-        }
-      }
     }
 
     if (prClosedMidRun) {
@@ -1494,7 +1774,7 @@ async function executeReview(
       ? [...new Set(failedBestEffort.map((o) => sampleBase(o.label)))].filter((b) => !okBestEffortBases.has(b))
       : failedBestEffort.map((o) => o.label ?? 'unnamed pass');
     if (skippedBestEffort.length > 0) {
-      skippedLenses = skippedBestEffort;
+      skippedLenses = [...new Set([...skippedLenses, ...skippedBestEffort])];
       console.warn(
         `[worker] ${skippedBestEffort.length} best-effort pass(es) failed (${skippedLenses.join(', ')}) — ` +
           `posting the review from the core passes that completed, WITH a disclosure banner`,
@@ -1525,8 +1805,12 @@ async function executeReview(
       }
     }
 
-    // Summary comes from the first successful pass; findings accumulate.
-    llmSummary = outcomes.find((o) => o.kind === 'pass' && o.ok)?.summary ?? llmSummary;
+    // Summary from the first successful REQUIRED pass — best-effort lenses
+    // (investigate, deep extras, breadth) must not steal the PR headline.
+    llmSummary =
+      outcomes.find((o) => o.kind === 'pass' && o.ok && !o.bestEffort)?.summary ??
+      outcomes.find((o) => o.kind === 'pass' && o.ok)?.summary ??
+      llmSummary;
     for (const o of outcomes) accumulated.push(...o.findings);
 
     const dedupeFindings = (findings: ReviewFinding[]): ReviewFinding[] => {
@@ -1540,7 +1824,7 @@ async function executeReview(
     };
     if (aggregation.enabled) {
       const repeated = outcomes
-        .filter((outcome) => outcome.kind === 'pass' && outcome.ok)
+        .filter((outcome) => outcome.kind === 'pass' && outcome.ok && outcome.modelPassIndex !== 100)
         .flatMap((outcome) => outcome.findings.map((finding) => ({ sample: outcome.sample, finding })));
       const mergedRepeated = await aggregateRepeatedFindings(repeated, {
         minOccurrences: aggregation.minOccurrences,
@@ -1558,14 +1842,20 @@ async function executeReview(
           }),
       });
       aggregationManualCandidates = mergedRepeated.reviewOnly;
+      // Sweep + investigate are single-shot (not repeated) — union them like sweep,
+      // otherwise unique tool-loop findings die at the recurrence threshold.
       const sweepFindings = outcomes
         .filter((outcome) => outcome.kind === 'sweep' && outcome.ok)
         .flatMap((outcome) => outcome.findings);
-      llmFindings = dedupeFindings([...mergedRepeated.findings, ...sweepFindings]);
+      const investigateFindings = outcomes
+        .filter((outcome) => outcome.ok && outcome.modelPassIndex === 100)
+        .flatMap((outcome) => outcome.findings);
+      llmFindings = dedupeFindings([...mergedRepeated.findings, ...sweepFindings, ...investigateFindings]);
       console.log(
         `[worker] repeated aggregation ${mergedRepeated.usedLlmMerge ? 'LLM-merged' : 'fingerprint-fallback'}: ` +
           `${mergedRepeated.findings.length} recurring, ${mergedRepeated.reviewOnly.length} manual, ` +
-          `${mergedRepeated.clusterCount} clusters`,
+          `${mergedRepeated.clusterCount} clusters` +
+          (investigateFindings.length ? `, ${investigateFindings.length} investigate` : ''),
       );
     } else {
       // Normal reviews union independently focused passes by stable fingerprint.
@@ -1577,6 +1867,25 @@ async function executeReview(
       llmSummary = undefined;
     }
     console.log(`[worker] deep review done: ${toRun.length} model calls, ${llmFindings.length} unique findings`);
+    // Pre-dedupe accumulation preserves multi-tier/lens overlap; unique merge
+    // keeps only one survivor per fingerprint.
+    const preVerifyContribution = summarizeModelContribution(accumulated);
+    console.log(
+      `[worker] model contribution (pre-dedupe): ${formatModelContribution(preVerifyContribution)}`,
+    );
+    const uniqueContribution = summarizeModelContribution(llmFindings);
+    console.log(
+      `[worker] model contribution (unique): ${formatModelContribution(uniqueContribution)}`,
+    );
+    } finally {
+      if (agentRepoDir) {
+        try {
+          fs.rmSync(agentRepoDir, { recursive: true, force: true });
+        } catch {
+          /* best-effort temp cleanup */
+        }
+      }
+    }
   }
 
   // `mergeFindings` receives normal candidates separately from explicitly
@@ -1667,16 +1976,15 @@ async function executeReview(
       }
     }
   }
+  let verificationIncomplete = false;
+  let verificationUnavailableReason: string | undefined;
   const verificationCandidates = [
     ...merged.toPost,
     ...merged.reviewOnly.map(({ finding }) => finding),
   ];
   if (verificationCandidates.length > 0 && process.env.ORVEX_VERIFY !== '0' && verifyFiles.length > 0) {
-    // ONE verification pass at the end of the review (NOT a second full review) —
-    // strict/premise-checking on deepVerify tiers (rejects false positives incl.
-    // wrong-library-version claims, using the manifests fetched above), recall-
-    // biased otherwise. It uses the plan-selected verifier target, which can be
-    // the stronger OpenAI model on multi-model tiers.
+    // Independent challenger (DeepSeek v4 Flash on multi-model), batched and
+    // TPM-aware — NOT a second Luna discovery pass.
     const mode = plan.deepVerify ? 'strict' : 'recall';
     const verified = await verifyFindings(verificationCandidates, verifyFiles, {
       apiKey: llm.apiKey,
@@ -1685,12 +1993,33 @@ async function executeReview(
       api: llm.api,
       reasoningEffort: llm.reasoningEffort,
       strict: plan.deepVerify,
+      verifierTier: verificationTier,
       // The batch is [...toPost, ...reviewOnly]. Manual candidates must not be
       // able to promote a normal finding's severity through `duplicateOf`.
       confirmedCount: merged.toPost.length,
       // P2-2: count verification tokens in the review's cost total.
       onUsage: onUsageFor(verificationTier),
     });
+    if (verified.status === 'unavailable') {
+      verificationIncomplete = true;
+      verificationUnavailableReason = verified.unavailableReason;
+      console.warn(
+        `[worker] verification (${mode}) UNAVAILABLE — findings preserved without precision gate: ` +
+          (verified.unavailableReason ?? 'unknown').slice(0, 160),
+      );
+    } else if (verified.status === 'partial') {
+      console.warn(
+        `[worker] verification (${mode}) PARTIAL — kept ${verified.kept.length}/${verificationCandidates.length}, ` +
+          `${verified.unverified.length} unverified after batch failure` +
+          (verified.unavailableReason ? `: ${verified.unavailableReason.slice(0, 120)}` : ''),
+      );
+    } else {
+      console.log(
+        `[worker] verification (${mode}) kept ${verified.kept.length}/${verificationCandidates.length}` +
+          (verified.dropped.length ? `, routed ${verified.dropped.length} to manual` : '') +
+          (verified.unverified.length ? `, ${verified.unverified.length} unverified` : ''),
+      );
+    }
     if (verified.dropped.length > 0) {
       console.log(
         `[worker] verification (${mode}) routed ${verified.dropped.length}/${verificationCandidates.length} to manual review: ` +
@@ -1709,7 +2038,13 @@ async function executeReview(
             .join(', '),
       );
     }
-    const disposition = partitionVerifiedFindings(merged.toPost, merged.reviewOnly, verified);
+    const disposition = partitionVerifiedFindings(merged.toPost, merged.reviewOnly, verified, {
+      verifierTier: verificationTier,
+    });
+    if (disposition.verificationIncomplete) {
+      verificationIncomplete = true;
+      verificationUnavailableReason = disposition.unavailableReason ?? verificationUnavailableReason;
+    }
     if (disposition.rescued.length > 0) {
       console.log(
         `[worker] verification: rescued ${disposition.rescued.length} strong-reasoner finding(s) dropped on hedged grounds: ` +
@@ -1724,7 +2059,14 @@ async function executeReview(
     }
     merged.toPost = disposition.toPost;
     merged.reviewOnly = disposition.reviewOnly;
+  } else if (verificationCandidates.length > 0 && process.env.ORVEX_VERIFY !== '0' && verifyFiles.length === 0) {
+    verificationIncomplete = true;
+    verificationUnavailableReason = 'Verification skipped: no source files available for the precision gate.';
+    console.warn(`[worker] ${verificationUnavailableReason}`);
   }
+  console.log(
+    `[worker] model contribution (posted): ${formatModelContribution(summarizeModelContribution(merged.toPost))}`,
+  );
 
   // snap finding lines to lines actually added in the diff — GitHub rejects
   // inline comments on unchanged lines; far-off guesses become summary-only
@@ -1798,6 +2140,9 @@ async function executeReview(
       trigger: commandTrigger(),
       canAutofix: plan.autofix,
       reviewOnly: merged.reviewOnly,
+      verificationIncomplete: verificationIncomplete
+        ? (verificationUnavailableReason ?? 'Verification did not complete for this review.')
+        : undefined,
     }, nitpicks);
 
     const inlineComments: InlineReviewComment[] = inline
@@ -1934,7 +2279,7 @@ async function executeReview(
     // must never say "success" when one of the promised passes never ran — that
     // directly contradicts the "did not complete" banner in the review body and
     // is exactly the false assurance the banner exists to prevent.
-    const incomplete = skippedLenses.length > 0;
+    const incomplete = skippedLenses.length > 0 || verificationIncomplete;
     const conclusion =
       openP1 && process.env.ORVEX_FAIL_CHECK_ON_P1 === '1'
         ? 'failure'
@@ -1947,12 +2292,17 @@ async function executeReview(
     const manualNote = manualAny
       ? ` · ${merged.reviewOnly.length} candidate(s) need manual review${manualP1 ? ' (incl. P1)' : ''}`
       : '';
-    const summary = `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open${manualNote}`;
+    const verifyNote = verificationIncomplete
+      ? ' · verification incomplete (NOT a full precision sign-off)'
+      : '';
+    const summary = `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open${manualNote}${verifyNote}`;
     await createCheckRun(octokit, ref, effectiveSha, {
       conclusion,
       title: incomplete ? 'Orvex Review (incomplete)' : 'Orvex Review',
       summary: incomplete
-        ? `${summary} — ${skippedLenses.length} review pass(es) did not complete; NOT a full sign-off`
+        ? skippedLenses.length > 0
+          ? `${summary} — ${skippedLenses.length} review pass(es) did not complete; NOT a full sign-off`
+          : `${summary} — precision verification did not complete; NOT a full sign-off`
         : summary,
     });
   }

@@ -154,6 +154,79 @@ test('isCurrentSubscription guards deleted/updated events against superseded sub
   assert.equal(isCurrentSubscription(db, tenant.id, undefined), false);
 });
 
+test('checkout completion restores paid access, seeds the billing period, and dedupes durable delivery', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-billing-webhook-'));
+  const previous = snapshotEnv([
+    'STORE_PATH',
+    'PLATFORM_SECRET',
+    'STRIPE_WEBHOOK_SECRET',
+    'STRIPE_SECRET_KEY',
+    'APP_URL',
+  ]);
+  t.after(() => {
+    restoreEnv(previous);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  process.env.STORE_PATH = path.join(dir, 'app.db');
+  process.env.PLATFORM_SECRET = 'test-platform-secret';
+  process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test';
+  process.env.STRIPE_SECRET_KEY = 'sk_test';
+  process.env.APP_URL = 'https://example.test';
+
+  const db = createAppDatabase();
+  const tenant = db.createTenant('dunning-workspace');
+  db.setTenantPlan(tenant.id, 'review');
+  db.setTenantBilling(tenant.id, {
+    stripeSubscriptionId: 'sub_old',
+    stripeSubscriptionStatus: 'past_due',
+  });
+  const created = Math.floor(Date.now() / 1000);
+  const body = JSON.stringify({
+    id: 'evt_checkout_recovery',
+    type: 'checkout.session.completed',
+    data: {
+      object: {
+        metadata: { tenant_id: tenant.id, plan: 'review' },
+        customer: 'cus_new',
+        subscription: 'sub_new',
+        created,
+      },
+    },
+  });
+  const signature = stripeSignature(body, 'whsec_test');
+  const originalFetch = globalThis.fetch;
+  let cancelCalls = 0;
+  globalThis.fetch = async () => {
+    cancelCalls += 1;
+    return Response.json({ ok: true });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const app = billingRoutes();
+  const request = () =>
+    app.request('/webhooks/stripe', {
+      method: 'POST',
+      headers: { 'stripe-signature': signature },
+      body,
+    });
+
+  const first = await request();
+  assert.equal(first.status, 200);
+  assert.equal(db.getTenantPlan(tenant.id), 'review');
+  const billing = db.getTenantBilling(tenant.id)!;
+  assert.equal(billing.stripeSubscriptionStatus, 'active');
+  assert.equal(billing.stripeSubscriptionId, 'sub_new');
+  assert.equal(billing.stripeCurrentPeriodStart, new Date(created * 1000).toISOString());
+  assert.equal(cancelCalls, 1);
+
+  const duplicate = await request();
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), { received: true, deduped: true });
+  assert.equal(cancelCalls, 1, 'durable dedupe prevents a second subscription cancellation');
+});
+
 test('quota exhaustion meters each metered plan but never the unlimited plan', async (t) => {
   const db = new AppDatabase(':memory:');
   const originalFetch = globalThis.fetch;
@@ -356,6 +429,12 @@ function recordReview(db: AppDatabase, tenantId: string, n: number, status: 'com
 
 function snapshotEnv(keys: string[]): Map<string, string | undefined> {
   return new Map(keys.map((key) => [key, process.env[key]]));
+}
+
+function stripeSignature(body: string, secret: string): string {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const digest = createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
+  return `t=${timestamp},v1=${digest}`;
 }
 
 function restoreEnv(snapshot: Map<string, string | undefined>): void {

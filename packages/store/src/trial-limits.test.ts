@@ -28,17 +28,31 @@ function addReview(
   });
 }
 
-test('countAccountReviews counts running + completed, excludes failed/skipped/fix, per account', () => {
+test('countAccountReviews counts running + completed + failed, excludes skipped/fix, per account', () => {
   const d = db();
   addReview(d, { owner: 'alice', status: 'completed' });
   addReview(d, { owner: 'alice', status: 'completed' });
   addReview(d, { owner: 'alice', status: 'running' }); // in-flight reserves a credit (anti-race)
   addReview(d, { owner: 'alice', status: 'skipped' }); // rate-limited/blocked don't burn a credit
-  addReview(d, { owner: 'alice', status: 'failed' }); // failures don't burn a credit
+  addReview(d, { owner: 'alice', status: 'failed' }); // post-spend failures still burn a credit
   addReview(d, { owner: 'alice', status: 'completed', action: 'fix:ready' }); // fixes aren't reviews
   addReview(d, { owner: 'bob', status: 'completed' }); // different account
-  assert.equal(d.countAccountReviews('alice'), 3);
+  assert.equal(d.countAccountReviews('alice'), 4);
   assert.equal(d.countAccountReviews('bob'), 1);
+});
+
+test('pruneEphemeralData never deletes failed rows (lifetime trial anti-farm)', () => {
+  const d = db();
+  addReview(d, { owner: 'alice', status: 'failed' });
+  addReview(d, { owner: 'alice', status: 'skipped' });
+  assert.equal(d.countAccountReviews('alice'), 1);
+  // Age both rows past the default 30d retention window.
+  const old = new Date(Date.now() - 40 * 24 * 3_600_000).toISOString();
+  (d as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } } }).db
+    .prepare(`UPDATE review_runs SET created_at = ?`)
+    .run(old);
+  d.pruneEphemeralData({ runRetentionMs: 30 * 24 * 3_600_000 });
+  assert.equal(d.countAccountReviews('alice'), 1, 'failed lifetime rows survive prune');
 });
 
 test('countAccountReviews matches the account case-insensitively', () => {
@@ -66,7 +80,8 @@ test('countGlobalFreeTierReviewsSince counts only free-tier reviews across all a
   // a free-tier FIX / skipped run must NOT count
   d.recordReviewRun({ tenantId: 't4', installationId: 4, owner: 'farm4', repo: 'r', pr: 1, headSha: 's', action: 'fix:ready', status: 'completed', durationMs: 100, freeTier: true });
   d.recordReviewRun({ tenantId: 't5', installationId: 5, owner: 'farm5', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'skipped', durationMs: 0, freeTier: true });
-  assert.equal(d.countGlobalFreeTierReviewsSince(24 * 3600_000), 3, 'counts running+completed free-tier reviews only');
+  d.recordReviewRun({ tenantId: 't6', installationId: 6, owner: 'farm6', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'failed', durationMs: 100, freeTier: true });
+  assert.equal(d.countGlobalFreeTierReviewsSince(24 * 3600_000), 4, 'counts running+completed+failed free-tier reviews');
 });
 
 test('countDistinctAccountsFromIp counts unique accounts and ignores unknown IPs', () => {

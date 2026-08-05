@@ -135,7 +135,7 @@ export async function processFixJob(
   const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
   if (!plan.autofix) {
     return skip(
-      `committing fixes is available on paid plans. You can still apply the suggested change from the inline comment, or [upgrade](https://useorvex.com/pricing) to let Orvex commit fixes for you.`,
+      `committing fixes is available on paid plans. You can still apply the suggested change from the inline comment, or [upgrade](https://useorvex.com/#pricing) to let Orvex commit fixes for you.`,
       'paid plan required',
     );
   }
@@ -587,7 +587,7 @@ export async function processExplainJob(
   if (!plan.autofix) {
     return void (await reply(
       formatFixSkippedReply(
-        'explanations are available on paid plans — your free trial includes automated reviews. [Upgrade](https://useorvex.com/pricing).',
+        'explanations are available on paid plans — your free trial includes automated reviews. [Upgrade](https://useorvex.com/#pricing).',
       ),
     ));
   }
@@ -649,7 +649,7 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
   if (!plan.autofix) {
     return void (await reply(
       formatFixSkippedReply(
-        'interactive `@orvex` commands are available on paid plans — your free trial includes automated reviews. [Upgrade](https://useorvex.com/pricing).',
+        'interactive `@orvex` commands are available on paid plans — your free trial includes automated reviews. [Upgrade](https://useorvex.com/#pricing).',
       ),
     ));
   }
@@ -820,7 +820,7 @@ export async function processResolveJob(job: ReviewJobPayload, config: WorkerCon
   const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
   if (!plan.autofix) {
     return void (await reply(
-      formatFixSkippedReply('conflict resolution is a paid feature — [upgrade](https://useorvex.com/pricing).'),
+      formatFixSkippedReply('conflict resolution is a paid feature — [upgrade](https://useorvex.com/#pricing).'),
     ));
   }
   if (commandOverRateLimit(config.store, owner, plan.id)) {

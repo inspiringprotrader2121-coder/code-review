@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Orvex — AI Code Review That Catches Bugs Before Production</title>
-<meta name="description" content="Orvex reviews GitHub pull requests with deterministic checks, three focused AI passes, strict finding verification, finding memory, and autofix. Start with 10 free reviews, no card." />
+<meta name="description" content="Orvex reviews GitHub pull requests with deterministic checks, two or four focused AI passes by review track, strict finding verification, finding memory, and autofix. Start with 10 free reviews, no card." />
 <meta name="keywords" content="AI code review, automated pull request review, GitHub PR reviewer, pull request analysis, catch bugs before production" />
 <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
 <meta name="author" content="Orvex" />
@@ -15,7 +15,7 @@
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="Orvex" />
 <meta property="og:title" content="Orvex — AI Code Review That Catches Bugs Before Production" />
-<meta property="og:description" content="Three focused review passes, strict finding verification, and autofix for GitHub pull requests. 10 free reviews, no card." />
+<meta property="og:description" content="Two or four focused review passes by track, strict finding verification, and autofix for GitHub pull requests. 10 free reviews, no card." />
 <meta property="og:url" content="https://useorvex.com/" />
 <meta property="og:image" content="https://useorvex.com/og-image.png" />
 <meta property="og:image:width" content="1200" />
@@ -24,7 +24,7 @@
 <meta property="og:locale" content="en_US" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="Orvex — AI Code Review That Catches Bugs Before Production" />
-<meta name="twitter:description" content="Three focused review passes with strict finding verification. 10 free reviews, no card." />
+<meta name="twitter:description" content="Two or four focused review passes by track with strict finding verification. 10 free reviews, no card." />
 <meta name="twitter:image" content="https://useorvex.com/og-image.png" />
 <meta name="twitter:image:alt" content="Orvex catches bugs before production." />
 <script type="application/ld+json">
@@ -57,9 +57,9 @@
       "operatingSystem": "Web-based, GitHub App",
       "url": "https://useorvex.com/",
       "image": "https://useorvex.com/og-image.png",
-      "description": "Orvex reviews enabled GitHub pull requests with deterministic checks, three focused AI review passes, strict finding verification, finding memory, and autofix.",
+      "description": "Orvex reviews enabled GitHub pull requests with deterministic checks, two or four focused AI review passes depending on the review track, strict finding verification, finding memory, and autofix.",
       "featureList": [
-        "Three focused AI review passes on every completed review",
+        "Two or four focused AI review passes depending on the review track",
         "Deterministic rules before AI analysis",
         "Verifies each finding before posting to cut false positives",
         "Tracks and suppresses already-reported findings across pushes",
@@ -73,14 +73,13 @@
         "priceCurrency": "USD",
         "lowPrice": "0",
         "highPrice": "99",
-        "offerCount": "6",
+        "offerCount": "5",
         "offers": [
           { "@type": "Offer", "name": "Free", "price": "0", "priceCurrency": "USD", "description": "10 lifetime reviews, up to 2 per hour, no card required." },
           { "@type": "Offer", "name": "Starter", "price": "29", "priceCurrency": "USD", "description": "100 reviews per month at up to 5 per hour, then $0.50 per review." },
           { "@type": "Offer", "name": "Pro Unlimited", "price": "69", "priceCurrency": "USD", "description": "Unlimited monthly reviews at up to 10 per hour, with no per-review overage." },
           { "@type": "Offer", "name": "Verify Lite", "price": "49", "priceCurrency": "USD", "description": "50 reviews per month at up to 5 per hour, then $0.75 per review on the advanced review track." },
-          { "@type": "Offer", "name": "Verify", "price": "99", "priceCurrency": "USD", "description": "120 reviews per month at up to 10 per hour, then $0.75 per review on the advanced review track." },
-          { "@type": "Offer", "name": "Enterprise", "price": "0", "priceCurrency": "USD", "description": "Custom volume, rate limits, onboarding, and support under contract." }
+          { "@type": "Offer", "name": "Verify", "price": "99", "priceCurrency": "USD", "description": "120 reviews per month at up to 10 per hour, then $0.75 per review on the advanced review track." }
         ]
       }
     },
@@ -91,22 +90,22 @@
         {
           "@type": "Question",
           "name": "What is Orvex?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Orvex is an AI code reviewer for GitHub. Deterministic checks run first, three focused AI review passes examine the change and relevant repository context, and candidate findings are merged, deduplicated, and strictly verified before posting." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Orvex is an AI code reviewer for GitHub. Deterministic checks run first, two or four focused AI review passes (by review track) examine the change and relevant repository context, and candidate findings are merged, deduplicated, and strictly verified before posting." }
         },
         {
           "@type": "Question",
           "name": "How much does Orvex cost?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Free includes 10 lifetime reviews at up to 2 per hour. Starter is $29/month for 100 reviews at up to 5 per hour, then $0.50 per review. Pro Unlimited is $69/month with no monthly quota or overage and a 10-per-hour limit. Verify Lite is $49/month for 50 reviews at up to 5 per hour, then $0.75 per review. Verify is $99/month for 120 reviews at up to 10 per hour, then $0.75 per review. Enterprise is custom." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Free includes 10 lifetime reviews at up to 2 per hour. Starter is $29/month for 100 reviews at up to 5 per hour, then $0.50 per review. Pro Unlimited is $69/month with no monthly quota or overage and a 10-per-hour limit. Verify Lite is $49/month for 50 reviews at up to 5 per hour, then $0.75 per review. Verify is $99/month for 120 reviews at up to 10 per hour, then $0.75 per review." }
         },
         {
           "@type": "Question",
           "name": "What counts as a review?",
-          "acceptedAnswer": { "@type": "Answer", "text": "A completed standard pull-request review uses one review unit. An on-demand deep review uses two units. Failed or skipped reviews and fix or explanation commands do not consume review units." }
+          "acceptedAnswer": { "@type": "Answer", "text": "A completed standard pull-request review uses one review unit. An on-demand deep review uses two units. Skipped reviews and fix or explanation commands do not consume review units. Failed reviews still count toward free-trial and hourly caps." }
         },
         {
           "@type": "Question",
           "name": "What happens after I use my included reviews?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Starter, Verify Lite, and Verify continue reviewing and bill only completed overage units at the published per-review rate. Pro Unlimited has no monthly quota or overage. The Free plan stops after its 10 lifetime reviews. Hourly rate limits still apply to every non-Enterprise plan." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Starter, Verify Lite, and Verify continue reviewing and bill only completed overage units at the published per-review rate. Pro Unlimited has no monthly quota or overage. The Free plan stops after its 10 lifetime reviews. Hourly capacity is enforced according to each plan." }
         },
         {
           "@type": "Question",
@@ -116,7 +115,7 @@
         {
           "@type": "Question",
           "name": "Do lower-priced plans get a weaker review pipeline?",
-          "acceptedAnswer": { "@type": "Answer", "text": "No. Every plan receives three focused review passes, deterministic checks, strict finding verification, and autofix. Paid plans also include on-demand deep review. Plans otherwise differ by review track, usage allowance, hourly rate limit, queue priority, and support." }
+          "acceptedAnswer": { "@type": "Answer", "text": "No. Every plan receives the full pipeline for its review track: deterministic checks, two or four focused review passes, strict finding verification, and autofix. Verify-track plans also include a sandboxed investigate pass; paid plans include on-demand deep review. Plans otherwise differ by review track, usage allowance, hourly rate limit, queue priority, and support." }
         },
         {
           "@type": "Question",
@@ -242,11 +241,6 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     overflow-x: hidden;
-    /* faint scanline / grid texture */
-    background-image:
-      linear-gradient(var(--grid) 1px, transparent 1px),
-      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-    background-size: 100% 3px, 64px 100%;
   }
 
   .num { font-variant-numeric: tabular-nums; }
@@ -331,9 +325,9 @@
   }
   .btn-primary {
     background: var(--accent); color: var(--accent-ink);
-    box-shadow: 0 0 0 1px var(--accent-line), 0 8px 24px -10px var(--accent);
+    box-shadow: 0 1px 0 rgba(255,255,255,.12) inset, 0 8px 20px -12px rgba(10,12,16,.35);
   }
-  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 0 0 1px var(--accent-line), 0 14px 30px -12px var(--accent); }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 1px 0 rgba(255,255,255,.12) inset, 0 12px 24px -12px rgba(10,12,16,.4); }
   .btn-ghost { background: transparent; border-color: var(--border-2); color: var(--ink); }
   .btn-ghost:hover { background: var(--raised); border-color: var(--ink-muted); }
   .btn-lg { padding: 13px 22px; font-size: 15px; }
@@ -353,13 +347,13 @@
   }
   .badge .live {
     width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
-    box-shadow: 0 0 0 0 var(--accent-line);
+    outline: 2px solid transparent;
     animation: pulse 2.4s ease-out infinite;
   }
   @keyframes pulse {
-    0% { box-shadow: 0 0 0 0 var(--accent-line); }
-    70% { box-shadow: 0 0 0 7px transparent; }
-    100% { box-shadow: 0 0 0 0 transparent; }
+    0% { outline-color: color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 0; }
+    70% { outline-color: transparent; outline-offset: 6px; }
+    100% { outline-color: transparent; outline-offset: 0; }
   }
 
   h1.slogan {
@@ -553,7 +547,7 @@
   }
   .plan .pbtn:hover { background: var(--ground-2); border-color: var(--ink-muted); }
   .plan.feat .pbtn { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
-  .plan.feat .pbtn:hover { transform: translateY(-1px); box-shadow: 0 10px 22px -12px var(--accent); }
+  .plan.feat .pbtn:hover { transform: translateY(-1px); box-shadow: 0 10px 22px -12px rgba(10,12,16,.35); }
   .price-note { text-align: center; font-family: var(--mono); font-size: 12.5px; color: var(--ink-muted); margin-top: 22px; }
 
   /* ---------- FAQ ---------- */
@@ -568,6 +562,19 @@
   .faq-item summary::after { content: "+"; color: var(--accent); font-size: 20px; font-weight: 500; flex: none; }
   .faq-item[open] summary::after { content: "−"; }
   .faq-item p { max-width: 820px; margin: -4px 0 20px; color: var(--ink-2); font-size: 15px; line-height: 1.7; }
+
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* Command reference — reuses existing tokens only */
+  .cmd-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .cmd-table th, .cmd-table td {
+    text-align: left; vertical-align: top;
+    padding: 12px 10px; border-bottom: 1px solid var(--border);
+  }
+  .cmd-table th { color: var(--ink-2); font-weight: 600; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .cmd-table td { color: var(--ink); line-height: 1.5; }
+  .cmd-table code { font-family: var(--mono); font-size: 13px; color: var(--accent); }
+  .cmd-help { max-width: 820px; margin: 28px 0 0; color: var(--ink-2); font-size: 15px; line-height: 1.7; }
+  .cmd-help p { margin: 0 0 12px; }
 
   /* ---------- FINAL CTA ---------- */
   .cta-band { border-top: 1px solid var(--border); }
@@ -637,6 +644,7 @@
     </a>
     <div class="nav-links">
       <a href="#how">How it works</a>
+      <a href="#commands">Commands</a>
       <a href="#proof">Safeguards</a>
       <a href="#memory">Memory</a>
       <a href="#pricing">Pricing</a>
@@ -660,7 +668,7 @@
       <h1 class="slogan"><span class="product-name">Orvex</span><span class="slogan-copy"> catches bugs before production.</span><span class="cursor" aria-hidden="true"></span></h1>
       <p class="lede">
         Orvex reviews enabled pull requests when they open and when new commits arrive.
-        <b>Deterministic rules run first</b>, three focused <b>AI review passes</b> examine
+        <b>Deterministic rules run first</b>, two or four focused <b>AI review passes</b> (by track) examine
         different failure modes, and a strict verifier checks the evidence before anything is posted.
       </p>
       <div class="cta-row">
@@ -671,13 +679,13 @@
 
       <div class="trust">
         <div class="trust-item"><span class="n num">10</span><span class="l">lifetime reviews free</span></div>
-        <div class="trust-item"><span class="n num">3</span><span class="l">focused review passes per PR</span></div>
+        <div class="trust-item"><span class="n num">2–4</span><span class="l">focused review passes by track</span></div>
         <div class="trust-item"><span class="n num">8</span><span class="l">inline comments by default</span></div>
       </div>
     </div>
 
     <!-- REVIEW LOG -->
-    <div class="term" role="img" aria-label="Animated review log: a pull request arrives, deterministic rules and three focused review passes run, a P1 null-dereference bug is verified, and it is caught before merge.">
+    <div class="term" role="img" aria-label="Animated review log: a pull request arrives, deterministic rules and focused review passes run, a P1 null-dereference bug is verified, and it is caught before merge.">
       <div class="term-bar">
         <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
         <span class="term-title">orvex review · <span class="pr">PR #842</span> retry-queue</span>
@@ -686,7 +694,7 @@
       <div class="log stream" id="stream">
         <div class="line"><span class="gutter">➜</span><span class="body"><span class="k">PR #842</span> opened — <span class="k">retry-queue: backoff + jitter</span> · +214 −38</span></div>
         <div class="line"><span class="gutter num">01</span><span class="body">deterministic rules <span class="ok">✓ pass</span> <span class="tag">0 tokens spent</span></span></div>
-        <div class="line"><span class="gutter num">02</span><span class="body"><span class="tag layer">passes A/B/C</span> reviewing… correctness, security, contracts</span></div>
+        <div class="line"><span class="gutter num">02</span><span class="body"><span class="tag layer">passes A/B</span> reviewing… correctness, security, contracts</span></div>
         <div class="line"><span class="gutter num">03</span><span class="body"><span class="tag layer">merge</span> combining evidence and removing duplicates…</span></div>
         <div class="line"><span class="gutter num">04</span><span class="body"><span class="tag layer">verify</span> checking each finding against source context…</span></div>
         <div class="line"><span class="gutter">!</span><span class="body"><span class="tag p1">P1</span> <span class="bad">null deref reaches prod on retry path</span> <span class="k">queue.js:118</span></span></div>
@@ -702,7 +710,7 @@
   <div class="wrap">
     <div class="sec-head">
       <p class="eyebrow"><span class="dot">//</span> THE PIPELINE</p>
-      <h2>Three passes. One verdict.</h2>
+      <h2>Two or four passes. One verdict.</h2>
       <p>Every completed review follows the same route: deterministic checks, focused analysis, then verification. Different layers catch different classes of defect.</p>
     </div>
     <div class="pipe">
@@ -714,7 +722,7 @@
       </div>
       <div class="step">
         <span class="idx">02 · THEN</span>
-        <h3>Three focused passes</h3>
+        <h3>Focused AI passes</h3>
         <p>Separate passes inspect correctness, security, reliability, performance, and contract edges. Results are merged and deduplicated.</p>
         <span class="chip">general · risk · reliability → merged</span>
       </div>
@@ -724,6 +732,31 @@
         <p>A strict verifier re-checks candidate findings against changed source and relevant context before Orvex posts them.</p>
         <span class="chip"><span class="ok">✓</span> premise and source checked</span>
       </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ============================== COMMANDS ============================== -->
+<section id="commands">
+  <div class="wrap">
+    <div class="sec-head">
+      <p class="eyebrow"><span class="dot">//</span> ON GITHUB</p>
+      <h2>Commands you can run on a PR.</h2>
+      <p>Comment these on any pull request. The same list is in your dashboard after install, and via <span class="mono">@orvex help</span>.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="cmd-table">
+        <thead><tr><th>Command</th><th>Where</th><th>Effect</th></tr></thead>
+        <tbody>
+<!--ORVEX_COMMANDS_ROWS-->
+        </tbody>
+      </table>
+    </div>
+    <div class="cmd-help">
+      <p><strong>How reviews start.</strong> Orvex reviews when a PR opens and, if enabled, on each new push. Turn <span class="mono">Run on each commit</span> on or off per repo in the dashboard. <span class="mono">@orvex review</span> always works.</p>
+      <p><strong>What uses quota.</strong> A standard review uses one unit. <span class="mono">@orvex deep</span> uses two. Skipped reviews, fix commands, and explanations do not consume units; failed reviews still count toward free-trial and hourly caps. Check remaining capacity with <span class="mono">@orvex rate limit</span> without starting a review.</p>
+      <p><strong>One-click fixes.</strong> Tick <span class="mono">Apply this fix</span> on an Orvex finding, or comment <span class="mono">@orvex fix</span> / <span class="mono">@orvex fix all</span> on the PR.</p>
     </div>
   </div>
 </section>
@@ -799,7 +832,7 @@
     <div class="sec-head">
       <p class="eyebrow"><span class="dot">//</span> PRICING</p>
       <h2>Priced per workspace, not per seat.</h2>
-      <p>Start with 10 lifetime reviews and no card. Every plan keeps the same review depth; choose by review track, volume, and hourly capacity.</p>
+      <p>Start with 10 lifetime reviews and no card. Review and Verify tracks set pass count (two or four); choose by track, volume, and hourly capacity.</p>
     </div>
     <div class="price-grid">
 
@@ -858,25 +891,14 @@
         <ul>
           <li><span class="tick">✓</span>Then $0.75 per review</li>
           <li><span class="tick">✓</span><b style="color:var(--ink)">Advanced review track</b></li>
+          <li><span class="tick">✓</span>Deep review on demand</li>
           <li><span class="tick">✓</span>Higher monthly capacity</li>
         </ul>
         <a class="pbtn" href="/buy/verify">Choose Verify</a>
       </div>
 
-      <div class="plan">
-        <span class="pname">Enterprise</span>
-        <div class="price"><span class="amt num">Custom</span></div>
-        <div class="reviews num">contract-defined capacity</div>
-        <ul>
-          <li><span class="tick">✓</span>Custom volume and rate limits</li>
-          <li><span class="tick">✓</span>Guided security onboarding</li>
-          <li><span class="tick">✓</span>Priority support and SLA options</li>
-        </ul>
-        <a class="pbtn" href="mailto:support@useorvex.com?subject=Orvex%20Enterprise">Talk to us</a>
-      </div>
-
     </div>
-    <p class="price-note">All prices USD. Every plan includes deterministic checks, three focused review passes, strict verification, finding memory, and autofix. Paid plans also include on-demand deep review.</p>
+    <p class="price-note">All prices USD. Every plan includes deterministic checks, two or four focused review passes by track, strict verification, finding memory, and autofix. Paid plans also include on-demand deep review.</p>
   </div>
 </section>
 
@@ -891,11 +913,15 @@
     <div class="faq-list">
       <details class="faq-item" open>
         <summary>How does an Orvex review work?</summary>
-        <p>When a pull request opens or receives a new push, deterministic checks run first. Three focused AI passes then inspect correctness, security, reliability, performance, and contract edges. Orvex merges duplicate findings and strictly verifies the evidence before posting.</p>
+        <p>When a pull request opens or receives a new push, deterministic checks run first. Two or four focused AI passes (by review track) then inspect correctness, security, reliability, performance, and contract edges. Orvex merges duplicate findings and strictly verifies the evidence before posting.</p>
+      </details>
+      <details class="faq-item">
+        <summary>What commands can I run on a pull request?</summary>
+        <p>Comment <span class="mono">@orvex help</span> for the full list, or see <a href="#commands">Commands</a>. Common ones: <span class="mono">@orvex review</span>, <span class="mono">@orvex deep</span>, <span class="mono">@orvex fix</span>, <span class="mono">@orvex fix all</span>, <span class="mono">@orvex rate limit</span>, and thread replies like <span class="mono">@orvex explain</span> / <span class="mono">@orvex ignore</span>. After install, the dashboard Settings page lists every command for your workspace.</p>
       </details>
       <details class="faq-item">
         <summary>What counts as one review?</summary>
-        <p>A completed standard pull-request review uses one review unit. An <span class="mono">@orvex deep</span> review uses two units because it performs additional analysis. Failed or skipped reviews, fix commands, and explanation commands do not consume review units. A fresh review after a new push counts as a new review.</p>
+        <p>A completed standard pull-request review uses one review unit. An <span class="mono">@orvex deep</span> review uses two units because it performs additional analysis. Skipped reviews, fix commands, and explanation commands do not consume review units; failed reviews still count toward free-trial and hourly caps. A fresh review after a new push counts as a new review.</p>
       </details>
       <details class="faq-item">
         <summary>What happens when I use my included reviews?</summary>
@@ -903,7 +929,7 @@
       </details>
       <details class="faq-item">
         <summary>Why does an unlimited plan have an hourly limit?</summary>
-        <p>Unlimited means Pro has no monthly review quota and no per-review overage. Its 10-per-hour limit prevents accidental review loops and keeps processing reliable across every workspace. Enterprise limits are defined by contract.</p>
+        <p>Unlimited means Pro has no monthly review quota and no per-review overage. Its 10-per-hour limit prevents accidental review loops and keeps processing reliable across every workspace.</p>
       </details>
       <details class="faq-item">
         <summary>Does the Free allowance reset?</summary>
@@ -911,7 +937,7 @@
       </details>
       <details class="faq-item">
         <summary>Do lower-priced plans get a weaker pipeline?</summary>
-        <p>No. Every plan gets three focused review passes, deterministic checks, strict finding verification, finding memory, and autofix. Paid plans also include on-demand deep review. Plans otherwise differ by review track, monthly allowance, hourly rate limit, queue priority, and support.</p>
+        <p>No. Every plan gets the full pipeline for its review track: deterministic checks, two or four focused review passes, strict finding verification, finding memory, and autofix. Verify-track plans also include a sandboxed investigate pass; paid plans include on-demand deep review. Plans otherwise differ by review track, monthly allowance, hourly rate limit, queue priority, and support.</p>
       </details>
       <details class="faq-item">
         <summary>Is pricing per developer seat?</summary>
@@ -943,7 +969,7 @@
         <a class="btn btn-primary btn-lg" href="/auth/register">Start free — 10 reviews, no card</a>
         <a class="btn btn-ghost btn-lg" href="#pricing">Compare plans</a>
       </div>
-      <div class="subnote" style="margin-top:18px"><span class="ok">✓</span> Installs scoped: pull_requests read/write, contents read · no passwords pasted</div>
+      <div class="subnote" style="margin-top:18px"><span class="ok">✓</span> Installs scoped: pull_requests read/write, contents read/write · no passwords pasted</div>
     </div>
   </div>
 </section>
@@ -954,6 +980,7 @@
     <a class="brand" href="#top"><span class="mark" aria-hidden="true">±</span><span>Orvex</span></a>
     <div class="foot-links">
       <a href="#how">How it works</a>
+      <a href="#commands">Commands</a>
       <a href="#proof">Safeguards</a>
       <a href="#memory">Memory</a>
       <a href="#pricing">Pricing</a>
@@ -963,7 +990,7 @@
       <a href="/refunds">Refunds</a>
       <a href="/auth/register">Start free</a>
     </div>
-    <div class="foot-copy">Orvex Review — catch bugs before production. Deterministic checks, three focused review passes, finding memory, and strict finding verification.</div>
+    <div class="foot-copy">Orvex Review — catch bugs before production. Deterministic checks, two or four focused review passes by track, finding memory, and strict finding verification.</div>
   </div>
 </footer>
 

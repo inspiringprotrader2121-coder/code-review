@@ -24,13 +24,16 @@ test('refuses to rebind an installation owned by another tenant with members (ta
   );
 });
 
-test('does NOT block when the other tenant has no members (orphan reclaim allowed past the guard)', async () => {
-  // guard passes (tenantHasMembers=false) → proceeds to fetchInstallationMeta (network),
-  // which we force to surface as a NON-WorkspaceAccessError so we can tell the guard let it through.
+test('does NOT block when the other tenant has no members (webhook orphan reclaim)', async () => {
+  // Webhook may create memberless org-* and bind the install first; the signed
+  // callback must be allowed to move it onto the connect-flow workspace.
+  // Guard passes (tenantHasMembers=false) → proceeds to fetchInstallationMeta
+  // (network), which we force as a NON-WorkspaceAccessError so we can tell the
+  // guard let it through. Slug-claim of org-* stays blocked in startConnect.
   const svc = new TenantService(mockDb({ tenantHasMembers: () => false }));
   await assert.rejects(
     () => svc.completeInstallCallback(1, 'owner-slug', {} as never),
-    (e) => !(e instanceof WorkspaceAccessError), // failed later (network), not at the guard
+    (e) => !(e instanceof WorkspaceAccessError),
   );
 });
 

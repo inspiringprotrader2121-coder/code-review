@@ -36,6 +36,20 @@ test('registration creates a session-bound account and preserves existing passwo
   const csrfCookie = cookiePair(form.headers.get('set-cookie'), 'orvex_login_csrf');
   assert.ok(csrf && csrfCookie);
 
+  const withoutConsent = await app.request('/auth/register', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: csrfCookie, 'x-real-ip': '192.0.2.30' },
+    body: new URLSearchParams({
+      email: 'new@example.test',
+      password: 'Long-enough-password',
+      confirmPassword: 'Long-enough-password',
+      next: '/connect',
+      csrf,
+    }),
+  });
+  assert.equal(withoutConsent.status, 400);
+  assert.match(await withoutConsent.text(), /Terms of Service and Privacy Policy/);
+
   const registered = await app.request('/auth/register', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: csrfCookie, 'x-real-ip': '192.0.2.30' },
@@ -43,6 +57,7 @@ test('registration creates a session-bound account and preserves existing passwo
       email: 'new@example.test',
       password: 'Long-enough-password',
       confirmPassword: 'Long-enough-password',
+      acceptedTerms: '1',
       next: '/connect',
       csrf,
     }),
@@ -66,6 +81,7 @@ test('registration creates a session-bound account and preserves existing passwo
       email: 'new@example.test',
       password: 'Different-long-password',
       confirmPassword: 'Different-long-password',
+      acceptedTerms: '1',
       next: '/connect',
       csrf: duplicateCsrf,
     }),
@@ -85,6 +101,7 @@ test('registration creates a session-bound account and preserves existing passwo
       email: 'second@example.test',
       password: 'Long-enough-password',
       confirmPassword: 'Long-enough-password',
+      acceptedTerms: '1',
       next: '/connect',
       csrf: rateCsrf,
     }),
