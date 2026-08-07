@@ -237,8 +237,13 @@ now=$(date +%s)
 age=$((now - meta_epoch))
 if ((meta_epoch > 0 && age > stale_s)); then
   echo "[deploy] lock is STALE (age ${age}s > ${stale_s}s) — reclaiming: $(tr '\n' ' ' <"$lock/meta" 2>/dev/null || echo 'no metadata')" >&2
-  # Never rm -rf the lock path — a mis-set DEPLOY_LOCK_DIR must fail closed
-  # rather than wipe an unrelated directory that happens to contain meta.
+  # Fail closed: only reclaim a directory that contains our meta file alone.
+  # Never rm -rf, and never delete meta when other entries exist (mis-set LOCK_DIR).
+  other=$(find -- "$lock" -mindepth 1 -maxdepth 1 ! -name meta -print -quit 2>/dev/null || true)
+  if [[ -n "$other" ]]; then
+    echo "[deploy] refusing to reclaim non-empty lock dir: $lock" >&2
+    exit 4
+  fi
   rm -f -- "$lock/meta"
   if ! rmdir -- "$lock" 2>/dev/null; then
     echo "[deploy] refusing to reclaim non-empty lock dir: $lock" >&2
