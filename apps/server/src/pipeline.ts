@@ -1383,16 +1383,16 @@ async function executeReview(
   );
 
   const filesForLlm = files.filter((f) => {
-    // Every changed file with a patch gets the deep LLM review. (Previously a
-    // file was SKIPPED once semgrep flagged it — that silently dropped LLM
-    // review on exactly the files most likely to have deeper bugs. Semgrep
-    // findings are additive, not a replacement for the model's review.)
-    return Boolean(f.patch) && f.status !== 'removed';
+    // Include fully-deleted files (status === 'removed'): delete-only PRs still
+    // need discovery / removed-behavior. Excluding them emptied filesForLlm and
+    // skipped the entire LLM block, posting a false "clean" review.
+    return Boolean(f.patch);
   });
   // Investigate also needs fully-deleted file patches (dangling-caller seeds).
   const filesForInvestigate = files.filter((f) => Boolean(f.patch));
   // Risk gate for the additive Flash hunting pass + modest context boost.
   // Computed once up front so context caps and pass scheduling stay in sync.
+  // isHighRiskDiff now considers deletion hunks too (delete-only PRs).
   const highRiskDiff = isHighRiskDiff(filesForLlm);
 
   let llmSummary: string | undefined;
@@ -2807,7 +2807,7 @@ async function executeReview(
     // must never say "success" when one of the promised passes never ran — that
     // directly contradicts the "did not complete" banner in the review body and
     // is exactly the false assurance the banner exists to prevent.
-    const incomplete = skippedLenses.length > 0 || verificationIncomplete;
+    const incomplete = skippedLenses.length > 0 || verificationIncomplete || !coverage.complete;
     const conclusion =
       openP1 && process.env.ORVEX_FAIL_CHECK_ON_P1 === '1'
         ? 'failure'
@@ -2823,14 +2823,19 @@ async function executeReview(
     const verifyNote = verificationIncomplete
       ? ' · verification incomplete (NOT a full precision sign-off)'
       : '';
-    const summary = `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open${manualNote}${verifyNote}`;
+    const coverageNote = !coverage.complete
+      ? ` · partial diff coverage (${coverage.reviewed}/${coverage.candidates} files)`
+      : '';
+    const summary = `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open${manualNote}${verifyNote}${coverageNote}`;
     await createCheckRun(octokit, ref, effectiveSha, {
       conclusion,
       title: incomplete ? 'Orvex Review (incomplete)' : 'Orvex Review',
       summary: incomplete
         ? skippedLenses.length > 0
           ? `${summary} — ${skippedLenses.length} review pass(es) did not complete; NOT a full sign-off`
-          : `${summary} — precision verification did not complete; NOT a full sign-off`
+          : !coverage.complete
+            ? `${summary} — diff coverage incomplete; NOT a full sign-off`
+            : `${summary} — precision verification did not complete; NOT a full sign-off`
         : summary,
     });
   }

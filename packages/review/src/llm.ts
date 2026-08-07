@@ -65,7 +65,10 @@ export async function runLlmReview(
   files: ReviewableFile[],
   opts: LlmReviewOptions,
 ): Promise<LlmReviewResponse> {
-  const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
+  // Include fully-deleted files: delete-only PRs must still reach the model
+  // (removed-behavior / dangling callers). Filtering them out returned a
+  // successful empty "No reviewable text diff" and posted false cleans.
+  const reviewable = files.filter((f) => Boolean(f.patch));
   if (reviewable.length === 0) {
     return {
       findings: [],
