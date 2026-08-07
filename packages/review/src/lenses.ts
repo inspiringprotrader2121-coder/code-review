@@ -14,6 +14,7 @@ export const DEEP_DIVE_FOCUS =
   '- TRUST PRECEDENCE: signed/authenticated/session claims must outrank body, query, header, and User-Agent hints; request data may fill an absent claim but never override a present trusted one.\n' +
   '- LIFECYCLE OWNERSHIP: for every new lock, lease, refcount, pool, or shared tunnel, enumerate all acquire/open and release/close/destroy paths, including eviction, teardown, timeout, and overlapping-creation failure.\n' +
   '- ASYMMETRIC ERROR PATHS: when the SUCCESS path records state/metrics/usage or releases a reservation, verify EVERY failure/early-return path does the same — a coupon/lock created then abandoned on throw is a P1.\n' +
+  '- PARTIAL BATCH FAILURE: Promise.all / concurrent maps where one reject skips cleanup/expiry/recording that sibling successes already applied — name the incomplete side effect.\n' +
   '- DEAD CHECK AFTER REFACTOR: an authz/ownership/precondition check that no longer sits on the real execution path (moved behind an early return, left on a dead branch, or only wrapping a no-op) — the guard looks present but never protects the sensitive action.\n' +
   '- POST-TRANSFORM CONSISTENCY: after map/import/migrate/serialize, fields that should be populated must not stay null/stale/wrong-shape relative to the source; a transform that drops descriptions or IDs is a data bug.\n' +
   '- KEYING & SCOPING: cache keys, lock names, dedup keys, or map keys that omit part of the identity (tenant/user/resource) — two different entities colliding on one key is data-leak/data-corruption territory.\n' +
@@ -30,7 +31,7 @@ export const THIRD_ANGLE_FOCUS =
   'This is a THIRD review pass with a DIFFERENT LENS than the first two (which already covered correctness, security, data-integrity, and concurrency). Do NOT repeat those — hunt for the class of problem a bug-focused read SKIPS:\n' +
   '- PERFORMANCE: N+1 queries (especially a null/missing prefetch silently falling back to per-item queries), work inside a loop that belongs outside it, O(n^2)+ on data that grows, unbounded result sets / memory, blocking I/O on a hot path or at startup, missing pagination or an index, redundant re-computation or repeated network/DB calls.\n' +
   "- COMPLETENESS / WHAT'S MISSING: inputs never validated, error paths unhandled or swallowed, a changed function whose CALLERS or TESTS were not updated to match, a new branch with no test, missing null/empty handling, a multi-step operation with no rollback/idempotency.\n" +
-  '- API / CONTRACT COMPATIBILITY: a changed signature, return shape, HTTP status, error type, DB schema, or serialized format that breaks existing callers/clients or stored data.\n' +
+  '- API / CONTRACT COMPATIBILITY: a changed signature, return shape, HTTP status, error type, DB schema, or serialized format that breaks existing callers/clients or stored data. Include OpenAPI/UI advertising an endpoint or field the handler does not implement (or the reverse), and pagination links that continue past a hard ceiling.\n' +
   '- FALLBACK / LEGACY PARITY: normal and fallback branches must use the same real enum values, error classes, and output shape. Legacy protected/encrypted data that looks corrupted must fail closed, not pass through as plaintext.\n' +
   '- DESIGN (only when it will cause real bugs or heavy future cost): a bandaid special-case that should be a deeper fix, duplicated logic that will drift out of sync, an abstraction that invites misuse.\n' +
   'Every finding must name a concrete failure or measurable cost. Skip anything the correctness/security passes would already catch.\n' +
@@ -59,3 +60,25 @@ export const REMOVED_BEHAVIOR_FOCUS =
   '- OVER-STRICT NEW VALIDATION: a new validator must still accept every LEGITIMATE existing configuration and input. If a valid legacy setup, a documented feature, or a value the system itself generates now gets rejected, that is a functional regression, not safety. Never recommend loosening a control that was deliberately tightened for security — flag only genuine functional breakage.\n' +
   'GROUNDING: cite only files and lines that actually appear in the diff or the source context you were given. If the sibling flow, consumer, or legacy-data path you suspect is NOT visible in that context, do not invent a file:line or assert the bug exists — these checks earn findings only when the evidence is on screen.\n' +
   'Report only concrete breakages with file:line and the input or sequence that triggers them.';
+
+/**
+ * RISK HUNT — additive, best-effort Flash pass for high-risk diffs only.
+ *
+ * Does NOT replace existing lenses. Targets the miss classes from head-to-head
+ * benchmarks (auth/outage gates, Promise.all partial cleanup, username/tenant
+ * keying, pagination continuations, OpenAPI/contract drift, case-insensitive
+ * route matching). Every finding still needs a concrete failure scenario and
+ * still goes through the normal verifier — this is recall, not a severity
+ * promotion pass.
+ */
+export const RISK_HUNT_FOCUS =
+  'This is an EXTRA RISK-HUNT pass on a high-risk diff. Earlier passes already ran — do NOT repeat their findings. Hunt ONLY these historically missed P1/P2 classes, and only with a concrete failure scenario:\n' +
+  '- AUTH / OUTAGE GATES: error or outage state that bypasses auth redirects, MFA, or admin gates; unsigned request fields overriding signed/session claims; case-insensitive route/path matching the framework does but the allowlist does not.\n' +
+  '- PARTIAL ASYNC FAILURE: Promise.all / Promise.allSettled / batch loops where one failure skips cleanup, expiry, release, or recording that sibling successes already performed.\n' +
+  '- IDENTITY KEYING: username/tenant/panel caches or indexes keyed without tenant (or vice versa); positive caches never rebuilt after delete; locked tenants still counted as matches.\n' +
+  '- PAGINATION / CONTINUATION: offset+limit continuations that emit links past the hard ceiling, use unstable offsets on mutable data, or truncate without disclosing it.\n' +
+  '- CONTRACT / OPENAPI DRIFT: UI or docs advertising an endpoint/field/type the OpenAPI/schema/handler does not implement (or the reverse); rolling-deploy breakage from new required JWT/claim fields old tokens lack.\n' +
+  '- LIFECYCLE / STORAGE: delete-before-commit reclaim, drop-database-before-restore without a durable guarantee, artifact cleanup that deletes live files still referenced outside the ledger.\n' +
+  '- SCHEDULE / AVAILABILITY DIVERGENCE: an availability/schedule window applied on authorize/playback but not on every listing/export (M3U, XMLTV, catalog) that advertises the same records — or the reverse.\n' +
+  '- EVENT FANOUT: storage/message/BroadcastChannel listeners that invalidate or re-render on every event without filtering event.key/type, so unrelated writers trigger wasted work or races.\n' +
+  'RULES: report only P1/P2 with file:line and a named trigger (input/state → wrong outcome). If you cannot construct that scenario from the supplied diff/context, stay silent — do not invent style, docs, or speculative nits. Prefer one sharp bug over three weak ones.';

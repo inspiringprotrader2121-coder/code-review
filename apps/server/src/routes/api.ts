@@ -4,11 +4,13 @@ import { createAppDatabase, type Tenant } from '@orvex-review/store';
 import {
   TenantService,
   WorkspaceAccessError,
+  authDisabled,
   legacyAuthMode,
 } from '@orvex-review/tenants';
 import { sessionUser } from './session.js';
 import { checkRateLimit } from './rate-limit.js';
 import { llmCostVisibleForTenant, reviewRunsForTenant, workspaceStatsForTenant } from './cost-visibility.js';
+import { sameOriginRequest } from './request-security.js';
 
 
 export function apiRoutes() {
@@ -17,7 +19,7 @@ export function apiRoutes() {
   const tenants = new TenantService(db);
 
   /** Resolve the membership-checked tenant, or (in legacy no-login mode) any tenant by slug. */
-  function workspace(c: Context): { tenant: Tenant } | Response {
+  function workspace(c: Context): { tenant: Tenant; role: 'owner' | 'member' } | Response {
     const slug = c.req.param('slug');
     if (!slug) return c.json({ error: 'workspace slug required' }, 400);
 
@@ -26,20 +28,26 @@ export function apiRoutes() {
     if (legacyAuthMode(db.hasPasswordUsers())) {
       const tenant = db.getTenantBySlug(slug);
       if (!tenant) return c.json({ error: 'workspace not found' }, 404);
-      return { tenant };
+      return { tenant, role: 'owner' };
     }
 
     const user = sessionUser(c, db);
     if (!user) return c.json({ error: 'not signed in' }, 401);
     try {
       const { tenant } = tenants.getTenantStatusForUser(slug, user.id);
-      return { tenant };
+      const membership = db.getMembership(tenant.id, user.id);
+      if (!membership) return c.json({ error: 'not a member of this workspace' }, 403);
+      return { tenant, role: membership.role };
     } catch (err) {
       if (err instanceof WorkspaceAccessError) {
         return c.json({ error: err.message }, err.status);
       }
       throw err;
     }
+  }
+
+  function mutationRequestAllowed(c: Context): boolean {
+    return authDisabled() || legacyAuthMode(db.hasPasswordUsers()) || sameOriginRequest(c);
   }
 
   app.get('/api/workspaces/:slug/stats', (c) => {
@@ -93,6 +101,8 @@ export function apiRoutes() {
   app.post('/api/workspaces/:slug/repos/sync', async (c) => {
     const ws = workspace(c);
     if (ws instanceof Response) return ws;
+    if (!mutationRequestAllowed(c)) return c.json({ error: 'same-origin request required' }, 403);
+    if (ws.role !== 'owner') return c.json({ error: 'only a workspace owner can sync repositories' }, 403);
     // This is the one expensive endpoint here — it fans out a live GitHub API call
     // per installation. Throttle per tenant so it can't be hammered to exhaust the
     // App's REST rate limit / spike DB writes.
@@ -132,6 +142,8 @@ export function apiRoutes() {
   app.patch('/api/workspaces/:slug/repos/:repoId', async (c) => {
     const ws = workspace(c);
     if (ws instanceof Response) return ws;
+    if (!mutationRequestAllowed(c)) return c.json({ error: 'same-origin request required' }, 403);
+    if (ws.role !== 'owner') return c.json({ error: 'only a workspace owner can change repository settings' }, 403);
     const repoId = c.req.param('repoId');
     const repo = db.listRepos(ws.tenant.id).find((r) => r.id === repoId);
     if (!repo) return c.json({ error: 'repo not found in this workspace' }, 404);
@@ -213,6 +225,8 @@ export function apiRoutes() {
   app.put('/api/workspaces/:slug/settings', async (c) => {
     const ws = workspace(c);
     if (ws instanceof Response) return ws;
+    if (!mutationRequestAllowed(c)) return c.json({ error: 'same-origin request required' }, 403);
+    if (ws.role !== 'owner') return c.json({ error: 'only a workspace owner can change workspace settings' }, 403);
     const body: {
       defaultReviewMode?: 'normal' | 'strict';
       autoApplyDefault?: boolean;

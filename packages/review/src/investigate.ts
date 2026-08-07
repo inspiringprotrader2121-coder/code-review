@@ -8,6 +8,7 @@ import { redactPatch, redactSecrets } from './redact.js';
 import { extractJsonLoose, llmChat } from './llm-client.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 import { normalizeLlmResponse, REVIEW_INCOMPLETE_SUMMARY, isTransientLlmError } from './llm.js';
+import { safePromptData } from './prompt-safety.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -29,7 +30,13 @@ export interface InvestigateOptions {
   api?: 'chat' | 'responses' | 'anthropic';
   reasoningEffort?: string;
   context?: ReviewPromptContext;
-  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
+  onUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    tokenSource?: 'provider' | 'estimate';
+    provider?: string;
+    model?: string;
+  }) => void;
   /** Max tool rounds before forcing a done response. Default 8. */
   maxSteps?: number;
   /** Cap on a single tool result returned to the model. */
@@ -292,10 +299,15 @@ Your job is P1/P2 recall via multi-hop search — not breadth nits.
 Hunt these miss classes first (historically where single-shot reviews go blind):
 1. Resource created on the success path but not released on EVERY failure/abandon path
 2. Asymmetric error handling (success records/metrics/state; failure skips the same)
-3. State-machine / legacy edge (absent vs false, create vs update, retry vs first event)
-4. Dead authz/ownership check after refactor (guard no longer on the real path)
-5. Post-transform inconsistency (mapped/imported fields left null or wrong shape)
-6. Cross-tenant / identity keying (cache/lock/query missing tenant or user scope)
+3. Partial batch failure (Promise.all / concurrent maps where one reject skips cleanup siblings applied)
+4. State-machine / legacy edge (absent vs false, create vs update, retry vs first event)
+5. Dead authz/ownership check after refactor (guard no longer on the real path)
+6. Post-transform inconsistency (mapped/imported fields left null or wrong shape)
+7. Cross-tenant / identity keying (cache/lock/query missing tenant or user scope)
+8. Auth/outage gates and case-insensitive path allowlists that diverge from the framework matcher
+9. Pagination/continuation past a hard ceiling, or OpenAPI/UI contract drift vs the handler
+10. Schedule/availability window applied on authorize/playback but not on every listing/export of the same records
+11. Shared-channel event listeners (storage/message/BroadcastChannel) that do not filter on key/type before invalidating state
 
 Procedure: grep deleted/renamed symbols for remaining callers; read full changed
 functions + callers/callees; compare success vs failure paths; kill false hypotheses.
@@ -358,7 +370,7 @@ function stripOutputFormatInstructions(rules: string): string {
 
 function capFindings(response: LlmReviewResponse): LlmReviewResponse {
   const maxFindings = Number(process.env.ORVEX_MAX_FINDINGS ?? 25);
-  const cap = Number.isFinite(maxFindings) && maxFindings > 0 ? maxFindings : 25;
+  const cap = Number.isFinite(maxFindings) && maxFindings > 0 ? Math.min(Math.floor(maxFindings), 1_000) : 25;
   // Sort by severity BEFORE the cap — same policy as runLlmReview.
   const rank = (s: string): number => (s === 'P1' ? 0 : s === 'P2' ? 1 : s === 'P3' ? 2 : 3);
   const sorted = [...response.findings].sort((a, b) => rank(a.severity) - rank(b.severity));
@@ -482,7 +494,7 @@ export async function runInvestigateReview(
       transcript.push(
         '',
         `### Model reply (unparseable)`,
-        clip(text, 4_000),
+        safePromptData(clip(text, 4_000)),
         '',
         'Respond with valid JSON (action tool|done).',
       );
@@ -516,8 +528,8 @@ export async function runInvestigateReview(
       '',
       `### Tool ${parsed.tool.name} (${parsed.reason ?? 'investigate'})`,
       '```',
-      `input: ${JSON.stringify(parsed.tool)}`,
-      result,
+      `input: ${safePromptData(JSON.stringify(parsed.tool))}`,
+      safePromptData(result),
       '```',
     );
   }

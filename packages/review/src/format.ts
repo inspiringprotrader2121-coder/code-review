@@ -22,7 +22,14 @@ export interface ReviewCommentMeta {
   canAutofix?: boolean;
   /** set ONLY when the PR was NOT fully reviewed — Orvex must never claim a clean
    *  "looks good to merge" when part of the change never reached the model. */
-  coverage?: { reviewed: number; candidates: number; skippedByCap: number; truncatedFiles: number; omittedPatch?: number };
+  coverage?: {
+    reviewed: number;
+    candidates: number;
+    skippedByCap: number;
+    truncatedFiles: number;
+    omittedPatch?: number;
+    githubCapHit?: boolean;
+  };
   /** lens/pass names that did NOT complete (best-effort passes are allowed to fail
    *  without aborting the review — but the review must SAY SO. A Verify badge that
    *  reads "no issues found" while one of its promised reviewers never ran is a
@@ -84,15 +91,16 @@ export function formatReviewBody(
   }
 
   if (meta.summary) {
-    lines.push('', meta.summary);
+    lines.push('', sanitizeFindingText(meta.summary));
   }
 
   // Partial-coverage banner — Orvex must be HONEST that part of the PR never
   // reached the model, so "no issues" below can't be read as full assurance.
   if (meta.coverage) {
-    const { reviewed, candidates, skippedByCap, truncatedFiles, omittedPatch } = meta.coverage;
+    const { reviewed, candidates, skippedByCap, truncatedFiles, omittedPatch, githubCapHit } = meta.coverage;
     const bits: string[] = [];
     if (skippedByCap > 0) bits.push(`${skippedByCap} file${skippedByCap === 1 ? '' : 's'} not reviewed (over the ${candidates}-file limit)`);
+    if (githubCapHit) bits.push("GitHub's hard 3,000-file diff cap was reached; the exact remainder is unknown");
     if (truncatedFiles > 0) bits.push(`${truncatedFiles} large file${truncatedFiles === 1 ? '' : 's'} only partially reviewed`);
     if (omittedPatch) bits.push(`${omittedPatch} file${omittedPatch === 1 ? '' : 's'} not reviewed (diff too large for GitHub to return)`);
     lines.push(
@@ -327,7 +335,7 @@ export function appliedLine(fingerprint: string, shortSha: string): string {
 
 /** Failure state — re-offers the checkbox so the user can retry. */
 export function failedApplyLine(fingerprint: string, reason: string): string {
-  return `- [ ] ${applyMarker(fingerprint)} **Apply this fix** — last attempt failed (${reason}); tick to retry`;
+  return `- [ ] ${applyMarker(fingerprint)} **Apply this fix** — last attempt failed (${sanitizeFindingText(reason)}); tick to retry`;
 }
 
 /** Swap whichever apply-line the comment currently has for a new state line. */
@@ -348,7 +356,9 @@ export function parseApplyMarker(body: string): string | null {
 export function applyCheckboxChecked(bodyBefore: string | undefined, bodyAfter: string): boolean {
   const checkedNow = /- \[x\] <!--orvex:apply:/i.test(bodyAfter);
   if (!checkedNow) return false;
-  if (bodyBefore === undefined) return true;
+  // Fail closed when GitHub omits the prior body — treating "undefined" as a
+  // new check re-enqueues fixes on stripped/unusual edited payloads.
+  if (bodyBefore === undefined) return false;
   return /- \[ \] <!--orvex:apply:/.test(bodyBefore);
 }
 
@@ -407,7 +417,7 @@ export interface InlineFindingRender {
  *  table cell or code-span (git permits both in paths; unescaped they break the
  *  table row / span). */
 export function sanitizeFileCell(file: string): string {
-  return file.replace(/[|`]/g, '');
+  return file.replace(/[|`\r\n]/g, '');
 }
 
 export function sanitizeFindingText(s: string | undefined): string {
@@ -429,7 +439,9 @@ export function sanitizeFindingText(s: string | undefined): string {
     // BREAKS OUT of the collapsed section and renders at the top level of the
     // review comment; `<img>`/`<script>`/`<iframe>` render outright.
     .replace(/<\s*\/\s*(details|summary)\s*>/gi, '&lt;/$1&gt;')
-    .replace(/<\s*(script|iframe|img|a|style|form|object|embed)\b/gi, '&lt;$1');
+    .replace(/<\s*(details|summary)\b/gi, '&lt;$1')
+    .replace(/<\s*(script|iframe|img|a|style|form|object|embed)\b/gi, '&lt;$1')
+    .replace(/`{3,}/g, '``');
 }
 
 export function formatInlineFinding(r: InlineFindingRender): string {
@@ -476,6 +488,8 @@ export function formatInlineFinding(r: InlineFindingRender): string {
     // No safe native-suggestion possible (multi-line / cross-file / relocated /
     // no anchored line) → the Orvex apply-checkbox.
     if (f.suggestion) parts.push('', f.suggestion);
+    const openFences = (parts.join('\n').match(/```/g) ?? []).length;
+    if (openFences % 2 === 1) parts.push('```');
     parts.push('', applyCheckboxLine(f.fingerprint, fixedCode !== undefined));
     parts.push(
       '',
@@ -509,19 +523,20 @@ export function formatInlineFinding(r: InlineFindingRender): string {
 
 /** A copy-pasteable instruction for Cursor/Claude/Codex to fix ONE finding. */
 function buildAgentPrompt(f: InlineFindingRender['finding']): string {
+  const safeText = (value: string | undefined): string =>
+    sanitizeFindingText(value).replace(/`{4,}/g, '```');
+  const safeFile = (value: string | undefined): string =>
+    sanitizeFileCell(value ?? '').replace(/`{4,}/g, '```');
   const loc = f.file
     ? f.line
-      ? `\`${f.file}\` around line ${f.line}`
-      : `\`${f.file}\``
+      ? `\`${safeFile(f.file)}\` around line ${f.line}`
+      : `\`${safeFile(f.file)}\``
     : 'the code at the line this comment is on';
-  // Neutralize both an injected apply-marker/checkbox AND any 4+-backtick run that
-  // would close the outer quad-backtick fence early and surface content outside it.
-  const safeCode = (c: string) => sanitizeFindingText(c).replace(/`{4,}/g, '```');
-  const out: string[] = [`Fix this issue in ${loc}:`, '', f.message.trim()];
+  const out: string[] = [`Fix this issue in ${loc}:`, '', safeText(f.message).trim()];
   if (f.originalCode && f.fixedCode) {
-    out.push('', 'Suggested change:', '```', `- ${safeCode(f.originalCode)}`, `+ ${safeCode(f.fixedCode)}`, '```');
+    out.push('', 'Suggested change:', '```', `- ${safeText(f.originalCode)}`, `+ ${safeText(f.fixedCode)}`, '```');
   } else if (f.suggestion) {
-    out.push('', `Suggested approach: ${f.suggestion.trim()}`);
+    out.push('', `Suggested approach: ${safeText(f.suggestion).trim()}`);
   }
   out.push(
     '',
@@ -551,7 +566,9 @@ export function formatFixSummaryComment(input: FixSummaryInput): string {
   if (input.applied.length > 0) {
     lines.push('', `Applied **${input.applied.length}** fix${input.applied.length === 1 ? '' : 'es'}:`);
     for (const a of input.applied) {
-      lines.push(`- \`${a.file}\` — ${a.message} → \`${a.sha.slice(0, 7)}\``);
+      lines.push(
+        `- \`${sanitizeFileCell(a.file)}\` — ${sanitizeFindingText(a.message)} → \`${a.sha.slice(0, 7)}\``,
+      );
     }
   } else {
     lines.push('', 'No fixes were applied.');
@@ -559,7 +576,9 @@ export function formatFixSummaryComment(input: FixSummaryInput): string {
   if (input.skipped.length > 0) {
     lines.push('', `Skipped **${input.skipped.length}**:`);
     for (const s of input.skipped) {
-      lines.push(`- \`${s.file}\` — ${s.message}: ${s.reason}`);
+      lines.push(
+        `- \`${sanitizeFileCell(s.file)}\` — ${sanitizeFindingText(s.message)}: ${sanitizeFindingText(s.reason)}`,
+      );
     }
   }
   if (input.headMoved) {

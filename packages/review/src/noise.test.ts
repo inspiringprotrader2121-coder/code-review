@@ -61,12 +61,16 @@ test('keeps a hedging P1/P2 (likely mis-severitied, not noise)', () => {
 test('drops low-severity nitpick openers', () => {
   const findings = [
     f({ severity: 'info', message: 'Nit: consider renaming this variable.' }),
+    // P3 "Consider …" is intentionally kept — hedge openers only drop `info`.
     f({ severity: 'P3', message: 'Consider extracting this into a helper.' }),
+    f({ severity: 'info', message: 'Minor: whitespace only.' }),
     f({ severity: 'P2', message: 'Null deref when cache is cold.' }),
   ];
   const { kept, dropped } = dropSelfNegatingFindings(findings);
   assert.equal(dropped.length, 2);
-  assert.equal(kept[0].severity, 'P2');
+  assert.equal(kept.length, 2);
+  assert.ok(kept.some((x) => x.severity === 'P2'));
+  assert.ok(kept.some((x) => x.severity === 'P3'));
 });
 
 test('keeps genuine findings untouched', () => {

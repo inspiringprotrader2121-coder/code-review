@@ -15,6 +15,7 @@ test('verifies Stripe webhook signatures', () => {
   const digest = createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex');
 
   assert.equal(verifyStripeSignature(body, `t=${timestamp},v1=${digest}`, secret), true);
+  assert.equal(verifyStripeSignature(body, `t=${timestamp},v1=rotated,v1=${digest}`, secret), true);
   assert.equal(verifyStripeSignature(body, `t=${timestamp},v1=bad`, secret), false);
   assert.equal(verifyStripeSignature(`${body}\n`, `t=${timestamp},v1=${digest}`, secret), false);
   // a stale (validly-signed) timestamp is rejected — no replay
@@ -32,8 +33,9 @@ test('reports only completed reviews above the included quota as Stripe overage'
   });
   // Seed exactly the included quota (Starter = 100); the next completed review
   // is the first overage.
+  let includedRunId = '';
   for (let i = 0; i < 100; i += 1) {
-    db.recordReviewRun({
+    includedRunId = db.recordReviewRun({
       tenantId: tenant.id,
       installationId: 1,
       owner: 'acme',
@@ -44,7 +46,7 @@ test('reports only completed reviews above the included quota as Stripe overage'
       status: 'completed',
       durationMs: 1000,
       createdAt: '2026-07-02T00:00:00.000Z',
-    });
+    }).id;
   }
 
   const originalFetch = globalThis.fetch;
@@ -66,11 +68,11 @@ test('reports only completed reviews above the included quota as Stripe overage'
   });
 
   assert.equal(
-    await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: 'review', runId: 'included' }),
+    await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: 'review', runId: includedRunId }),
     'included',
   );
 
-  db.recordReviewRun({
+  const overageRun = db.recordReviewRun({
     tenantId: tenant.id,
     installationId: 1,
     owner: 'acme',
@@ -83,10 +85,57 @@ test('reports only completed reviews above the included quota as Stripe overage'
     createdAt: '2026-07-03T00:00:00.000Z',
   });
   assert.equal(
-    await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: 'review', runId: 'overage' }),
+    await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: 'review', runId: overageRun.id }),
     'reported',
   );
   assert.equal(calls, 1);
+});
+
+test('missing Stripe credentials still enqueue a durable overage outbox row', async (t) => {
+  const db = new AppDatabase(':memory:');
+  const tenant = db.createTenant('pending-meter');
+  db.setTenantBilling(tenant.id, {
+    stripeCustomerId: 'cus_pending',
+    stripeCurrentPeriodStart: '2026-07-01T00:00:00.000Z',
+  });
+  const previousSecret = process.env.STRIPE_SECRET_KEY;
+  delete process.env.STRIPE_SECRET_KEY;
+  t.after(() => {
+    if (previousSecret === undefined) delete process.env.STRIPE_SECRET_KEY;
+    else process.env.STRIPE_SECRET_KEY = previousSecret;
+  });
+  let lastRun = '';
+  for (let i = 0; i < 100; i += 1) {
+    lastRun = db.recordReviewRun({
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'pending-meter',
+      repo: 'api',
+      pr: i + 1,
+      headSha: `pending-${i}`,
+      action: 'synchronize',
+      status: 'completed',
+      durationMs: 1,
+      createdAt: '2026-07-02T00:00:00.000Z',
+    }).id;
+  }
+  lastRun = db.recordReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'pending-meter',
+    repo: 'api',
+    pr: 101,
+    headSha: 'pending-overage',
+    action: 'synchronize',
+    status: 'completed',
+    durationMs: 1,
+    createdAt: '2026-07-03T00:00:00.000Z',
+  }).id;
+  assert.equal(
+    await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: 'review', runId: lastRun }),
+    'pending',
+  );
+  assert.equal(db.getStripeMeterEvent(lastRun)?.status, 'pending');
 });
 
 test('a deep review bills as 2 units — and only the units above the included line', async (t) => {
@@ -123,13 +172,13 @@ test('a deep review bills as 2 units — and only the units above the included l
 
   // A DEEP review now runs: 49 + 2 = 51 units, included is 50 → exactly 1 unit
   // lands above the line (unit 50 was included, unit 51 is the only overage).
-  db.recordReviewRun({
+  const deepRun = db.recordReviewRun({
     tenantId: tenant.id, installationId: 1, owner: 'acme', repo: 'api', pr: 500,
     headSha: 'shaDeep', action: 'command', status: 'completed', durationMs: 1000,
     deep: true, createdAt: '2026-07-03T00:00:00.000Z',
   });
   const result = await reportStripeReviewOverage({
-    store: db, tenantId: tenant.id, plan: 'verify-lite', runId: 'deep1', deep: true,
+    store: db, tenantId: tenant.id, plan: 'verify-lite', runId: deepRun.id, deep: true,
   });
   assert.equal(result, 'reported');
   assert.equal(reportedValue, '1', 'deep review straddling the quota line bills only the 1 unit over it');
@@ -196,8 +245,16 @@ test('checkout completion restores paid access, seeds the billing period, and de
   const signature = stripeSignature(body, 'whsec_test');
   const originalFetch = globalThis.fetch;
   let cancelCalls = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (input: string | URL | Request) => {
     cancelCalls += 1;
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes('/v1/subscriptions/')) {
+      return Response.json({
+        status: 'active',
+        current_period_start: created,
+        current_period_end: created + 30 * 24 * 3600,
+      });
+    }
     return Response.json({ ok: true });
   };
   t.after(() => {
@@ -219,12 +276,104 @@ test('checkout completion restores paid access, seeds the billing period, and de
   assert.equal(billing.stripeSubscriptionStatus, 'active');
   assert.equal(billing.stripeSubscriptionId, 'sub_new');
   assert.equal(billing.stripeCurrentPeriodStart, new Date(created * 1000).toISOString());
-  assert.equal(cancelCalls, 1);
+  // Cancel superseded sub + retrieve new subscription status/period.
+  assert.equal(cancelCalls, 2);
 
   const duplicate = await request();
   assert.equal(duplicate.status, 200);
   assert.deepEqual(await duplicate.json(), { received: true, deduped: true });
-  assert.equal(cancelCalls, 1, 'durable dedupe prevents a second subscription cancellation');
+  assert.equal(cancelCalls, 2, 'durable dedupe prevents a second subscription cancellation');
+});
+
+test('subscription.created does not repoint an existing subscription before checkout completes', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-billing-sub-created-'));
+  const previous = snapshotEnv(['STORE_PATH', 'PLATFORM_SECRET', 'STRIPE_WEBHOOK_SECRET']);
+  t.after(() => {
+    restoreEnv(previous);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  process.env.STORE_PATH = path.join(dir, 'app.db');
+  process.env.PLATFORM_SECRET = 'test-platform-secret';
+  process.env.STRIPE_WEBHOOK_SECRET = 'whsec_created';
+
+  const db = createAppDatabase();
+  const tenant = db.createTenant('created-race');
+  db.setTenantBilling(tenant.id, {
+    stripeCustomerId: 'cus_old',
+    stripeSubscriptionId: 'sub_old',
+    stripeSubscriptionStatus: 'active',
+  });
+  const body = JSON.stringify({
+    id: 'evt_subscription_created_race',
+    type: 'customer.subscription.created',
+    data: {
+      object: {
+        id: 'sub_new',
+        customer: 'cus_new',
+        status: 'active',
+        metadata: { tenant_id: tenant.id, plan: 'review' },
+      },
+    },
+  });
+  const response = await billingRoutes().request('/webhooks/stripe', {
+    method: 'POST',
+    headers: { 'stripe-signature': stripeSignature(body, 'whsec_created') },
+    body,
+  });
+  assert.equal(response.status, 200);
+  assert.equal(db.getTenantBilling(tenant.id)?.stripeSubscriptionId, 'sub_old');
+});
+
+test('invoice payments become durable revenue events and webhook retries do not double-count', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-billing-revenue-'));
+  const previous = snapshotEnv(['STORE_PATH', 'PLATFORM_SECRET', 'STRIPE_WEBHOOK_SECRET']);
+  t.after(() => {
+    restoreEnv(previous);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  process.env.STORE_PATH = path.join(dir, 'app.db');
+  process.env.PLATFORM_SECRET = 'test-platform-secret';
+  process.env.STRIPE_WEBHOOK_SECRET = 'whsec_revenue';
+
+  const db = createAppDatabase();
+  const tenant = db.createTenant('revenue-workspace');
+  db.setTenantBilling(tenant.id, { stripeCustomerId: 'cus_revenue' });
+  const created = Math.floor(Date.now() / 1000);
+  const body = JSON.stringify({
+    id: 'evt_invoice_paid',
+    type: 'invoice.paid',
+    created,
+    data: {
+      object: {
+        id: 'in_revenue',
+        customer: 'cus_revenue',
+        subscription: 'sub_revenue',
+        amount_paid: 9900,
+        currency: 'usd',
+        status_transitions: { paid_at: created },
+      },
+    },
+  });
+  const signature = stripeSignature(body, 'whsec_revenue');
+  const app = billingRoutes();
+  const request = () =>
+    app.request('/webhooks/stripe', {
+      method: 'POST',
+      headers: { 'stripe-signature': signature },
+      body,
+    });
+
+  assert.equal((await request()).status, 200);
+  const analytics = db.getSuperadminCostAnalytics(
+    new Date((created - 60) * 1000).toISOString(),
+    new Date((created + 60) * 1000).toISOString(),
+  );
+  assert.equal(analytics.overview.actualRevenueUsd, 99);
+  assert.equal((await request()).status, 200);
+  assert.equal(db.getSuperadminCostAnalytics(
+    new Date((created - 60) * 1000).toISOString(),
+    new Date((created + 60) * 1000).toISOString(),
+  ).overview.actualRevenueUsd, 99);
 });
 
 test('quota exhaustion meters each metered plan but never the unlimited plan', async (t) => {
@@ -259,34 +408,36 @@ test('quota exhaustion meters each metered plan but never the unlimited plan', a
       stripeCustomerId: `cus_${item.plan}`,
       stripeCurrentPeriodStart: '2026-07-01T00:00:00.000Z',
     });
+    let includedRunId = '';
     for (let i = 0; i < item.included; i += 1) {
-      recordReview(db, tenant.id, i, 'completed');
+      includedRunId = recordReview(db, tenant.id, i, 'completed');
     }
     recordReview(db, tenant.id, item.included + 10_000, 'failed');
     assert.equal(
-      await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: item.plan, runId: `${item.plan}-included` }),
+      await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: item.plan, runId: includedRunId }),
       'included',
     );
 
-    recordReview(db, tenant.id, item.included, 'completed');
+    const overageRunId = recordReview(db, tenant.id, item.included, 'completed');
     assert.equal(
-      await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: item.plan, runId: `${item.plan}-overage` }),
+      await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: item.plan, runId: overageRunId }),
       'reported',
     );
   }
 
   const unlimited = db.createTenant('quota-review-plus');
   db.setTenantBilling(unlimited.id, { stripeCustomerId: 'cus_review_plus' });
-  recordReview(db, unlimited.id, 1, 'completed');
+  const unlimitedRunId = recordReview(db, unlimited.id, 1, 'completed');
   assert.equal(
-    await reportStripeReviewOverage({ store: db, tenantId: unlimited.id, plan: 'review-plus', runId: 'unlimited' }),
+    await reportStripeReviewOverage({ store: db, tenantId: unlimited.id, plan: 'review-plus', runId: unlimitedRunId }),
     'included',
   );
-  assert.deepEqual(events, metered.map((item) => ({
-    name: item.event,
-    value: '1',
-    idempotency: `review_run_${item.plan}-overage`,
-  })));
+  assert.equal(events.length, metered.length);
+  for (const [index, item] of metered.entries()) {
+    assert.equal(events[index]?.name, item.event);
+    assert.equal(events[index]?.value, '1');
+    assert.match(events[index]?.idempotency ?? '', /^review_run_/);
+  }
 });
 
 test('billing checkout is owner-only and throttled without contacting Stripe', async (t) => {
@@ -330,6 +481,7 @@ test('billing checkout is owner-only and throttled without contacting Stripe', a
     headers: {
       'content-type': 'application/json',
       'x-real-ip': ip,
+      origin: 'https://example.test',
       ...(cookie ? { cookie } : {}),
     },
     body: JSON.stringify({ plan: 'review' }),
@@ -412,8 +564,8 @@ test('marketing checkout resumes after login and requires an explicit workspace 
   assert.equal(selectedTenant, 'second-workspace');
 });
 
-function recordReview(db: AppDatabase, tenantId: string, n: number, status: 'completed' | 'failed'): void {
-  db.recordReviewRun({
+function recordReview(db: AppDatabase, tenantId: string, n: number, status: 'completed' | 'failed'): string {
+  return db.recordReviewRun({
     tenantId,
     installationId: 1,
     owner: tenantId,
@@ -423,8 +575,8 @@ function recordReview(db: AppDatabase, tenantId: string, n: number, status: 'com
     action: 'synchronize',
     status,
     durationMs: 1000,
-    createdAt: '2026-07-02T00:00:00.000Z',
-  });
+    createdAt: new Date(Date.parse('2026-07-02T00:00:00.000Z') + n * 1000).toISOString(),
+  }).id;
 }
 
 function snapshotEnv(keys: string[]): Map<string, string | undefined> {

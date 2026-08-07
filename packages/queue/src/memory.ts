@@ -14,15 +14,17 @@ import {
  *  (not merely the last element) — otherwise `[review(sha1), fix]` + review(sha2)
  *  leaves BOTH reviews, and the stale sha1 review later runs against old code.
  *  Commands are always kept distinct. */
-function pushCoalesced(list: ReviewJobPayload[], job: ReviewJobPayload): void {
+function pushCoalesced(list: ReviewJobPayload[], job: ReviewJobPayload): ReviewJobPayload | undefined {
   if ((job.kind ?? 'review') === 'review') {
     const idx = list.map((j) => j.kind ?? 'review').lastIndexOf('review');
     if (idx >= 0) {
+      const superseded = list[idx];
       list[idx] = job; // keep only the latest review SHA
-      return;
+      return superseded;
     }
   }
   list.push(job);
+  return undefined;
 }
 
 // The Redis backend TTLs its dedup keys; the in-memory sets have no expiry, so a
@@ -34,7 +36,7 @@ function pushCoalesced(list: ReviewJobPayload[], job: ReviewJobPayload): void {
 // disabling dedup — fall back to the default on any non-positive/non-finite value.
 const MAX_DEDUP_ENTRIES = (() => {
   const n = Number(process.env.ORVEX_QUEUE_MAX_DEDUP ?? 20_000);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 20_000;
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 1_000_000) : 20_000;
 })();
 function trimSet(set: Set<string>): void {
   if (set.size <= MAX_DEDUP_ENTRIES) return;
@@ -81,7 +83,10 @@ export class MemoryReviewQueue implements ReviewQueue {
 
     if (this.state.inFlight.has(pk)) {
       const list = this.state.pending.get(pk) ?? [];
-      pushCoalesced(list, job);
+      const superseded = pushCoalesced(list, job);
+      if (superseded && superseded.action !== 'command' && superseded.action !== 'manual') {
+        this.state.seen.delete(jobIdempotencyKey(superseded));
+      }
       this.state.pending.set(pk, list);
       return { accepted: true, jobId: idKey, reason: 'coalesced' };
     }
@@ -103,7 +108,10 @@ export class MemoryReviewQueue implements ReviewQueue {
 
       if (this.state.inFlight.has(pk)) {
         const list = this.state.pending.get(pk) ?? [];
-        pushCoalesced(list, job);
+        const superseded = pushCoalesced(list, job);
+        if (superseded && superseded.action !== 'command' && superseded.action !== 'manual') {
+          this.state.seen.delete(jobIdempotencyKey(superseded));
+        }
         this.state.pending.set(pk, list);
         continue;
       }
@@ -154,6 +162,27 @@ export class MemoryReviewQueue implements ReviewQueue {
   async recoverOrphans(): Promise<number> {
     // In-memory state is lost on restart, so there is nothing stale to recover.
     return 0;
+  }
+
+  /** Memory queue already holds the live job object in `inFlight`, so mutations
+   *  like `runId` are visible without a separate persist step. */
+  async persistJob(_job: ReviewJobPayload): Promise<void> {
+    // no-op — WeakMap/Map store the same object reference
+  }
+
+  async depth(): Promise<import('./types.js').QueueDepth> {
+    let waitingOnPr = 0;
+    for (const list of this.state.pending.values()) waitingOnPr += list.length;
+    let oldestQueuedAt: string | null = null;
+    for (const job of this.state.queue) {
+      if (!oldestQueuedAt || job.enqueuedAt < oldestQueuedAt) oldestQueuedAt = job.enqueuedAt;
+    }
+    return {
+      queued: this.state.queue.length,
+      waitingOnPr,
+      inFlight: this.state.inFlight.size,
+      oldestQueuedAt,
+    };
   }
 
   async ping(): Promise<boolean> {

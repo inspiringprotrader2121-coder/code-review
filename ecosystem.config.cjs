@@ -10,10 +10,12 @@ module.exports = {
     {
       name: 'velatrix-review',
       script: '/usr/bin/bash',
-      args: '-lc "cd /home/orvex/code-review && set -a && . ./.env && set +a && PORT=8788 HOST=0.0.0.0 pnpm start"',
+      args: '-lc "cd /home/orvex/code-review && set -a && . ./.env && set +a && NODE_ENV=production ORVEX_REQUIRE_DURABLE_STORAGE=1 PORT=8788 HOST=0.0.0.0 pnpm start"',
       cwd: '/home/orvex/code-review',
       interpreter: 'none',
       env: {
+        NODE_ENV: 'production',
+        ORVEX_REQUIRE_DURABLE_STORAGE: '1',
         HOST: '0.0.0.0',
         PORT: '8788',
       },

@@ -1,4 +1,11 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { createAppDatabase, type AppDatabase, type User } from '@orvex-review/store';
@@ -24,7 +31,7 @@ import {
   verifyTotpCodeWithEpoch,
 } from '@orvex-review/tenants';
 import { escapeHtml, pageShell } from './pages.js';
-import { checkRateLimit, clearRateLimit } from './rate-limit.js';
+import { checkAuthRateLimit, clearAuthRateLimit } from './rate-limit.js';
 
 /** Email/password login is active whenever any password account exists. */
 function passwordAuthEnabled(db: AppDatabase): boolean {
@@ -34,19 +41,167 @@ function passwordAuthEnabled(db: AppDatabase): boolean {
 export const SESSION_COOKIE = 'orvex_session';
 const MFA_CHALLENGE_COOKIE = 'orvex_mfa_challenge';
 const LOGIN_CSRF_COOKIE = 'orvex_login_csrf';
+const GITHUB_INSTALL_PROOF_COOKIE = 'orvex_github_install_proof';
+const OAUTH_REAUTH_PROOF_COOKIE = 'orvex_oauth_reauth_proof';
 const SESSION_TTL_S = 30 * 24 * 3600;
 // A valid scrypt hash to verify against when no real account/hash exists, so the
 // failure path does the SAME scrypt work as the success path (anti-enumeration).
 const DUMMY_PASSWORD_HASH = hashPassword('orvex-login-timing-guard');
-const LOGIN_WINDOW_MS = Number(process.env.ORVEX_LOGIN_RATE_WINDOW_MS ?? 15 * 60_000);
-const LOGIN_IP_MAX = Number(process.env.ORVEX_LOGIN_RATE_IP_MAX ?? 20);
-const LOGIN_ACCOUNT_MAX = Number(process.env.ORVEX_LOGIN_RATE_ACCOUNT_MAX ?? 5);
-const MFA_WINDOW_MS = Number(process.env.ORVEX_MFA_RATE_WINDOW_MS ?? 10 * 60_000);
-const MFA_MAX = Number(process.env.ORVEX_MFA_RATE_MAX ?? 5);
-const MFA_IP_MAX = Number(process.env.ORVEX_MFA_RATE_IP_MAX ?? 20);
-const REGISTER_WINDOW_MS = Number(process.env.ORVEX_REGISTER_RATE_WINDOW_MS ?? 60 * 60_000);
-const REGISTER_IP_MAX = Number(process.env.ORVEX_REGISTER_RATE_IP_MAX ?? 10);
-const REGISTER_EMAIL_MAX = Number(process.env.ORVEX_REGISTER_RATE_EMAIL_MAX ?? 3);
+function boundedEnvNumber(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
+}
+const LOGIN_WINDOW_MS = boundedEnvNumber('ORVEX_LOGIN_RATE_WINDOW_MS', 15 * 60_000, 1_000, 24 * 3600_000);
+const LOGIN_IP_MAX = boundedEnvNumber('ORVEX_LOGIN_RATE_IP_MAX', 20, 1, 10_000);
+const LOGIN_ACCOUNT_MAX = boundedEnvNumber('ORVEX_LOGIN_RATE_ACCOUNT_MAX', 5, 1, 10_000);
+const MFA_WINDOW_MS = boundedEnvNumber('ORVEX_MFA_RATE_WINDOW_MS', 10 * 60_000, 1_000, 24 * 3600_000);
+const MFA_MAX = boundedEnvNumber('ORVEX_MFA_RATE_MAX', 5, 1, 10_000);
+const MFA_IP_MAX = boundedEnvNumber('ORVEX_MFA_RATE_IP_MAX', 20, 1, 10_000);
+const REGISTER_WINDOW_MS = boundedEnvNumber('ORVEX_REGISTER_RATE_WINDOW_MS', 60 * 60_000, 1_000, 24 * 3600_000);
+const REGISTER_IP_MAX = boundedEnvNumber('ORVEX_REGISTER_RATE_IP_MAX', 10, 1, 10_000);
+const REGISTER_EMAIL_MAX = boundedEnvNumber('ORVEX_REGISTER_RATE_EMAIL_MAX', 3, 1, 10_000);
+
+const recentGitHubAccessTokens = new Map<string, { token: string; expiresAt: number }>();
+const GITHUB_INSTALL_PROOF_TTL_MS = 10 * 60_000;
+const MAX_RECENT_GITHUB_ACCESS_TOKENS = 10_000;
+
+/** Keep OAuth proof only long enough to authorize the subsequent App install. */
+export function rememberGitHubAccessToken(userId: string, token: string): void {
+  const now = Date.now();
+  for (const [id, entry] of recentGitHubAccessTokens) {
+    if (entry.expiresAt <= now) recentGitHubAccessTokens.delete(id);
+  }
+  recentGitHubAccessTokens.set(userId, { token, expiresAt: now + GITHUB_INSTALL_PROOF_TTL_MS });
+  while (recentGitHubAccessTokens.size > MAX_RECENT_GITHUB_ACCESS_TOKENS) {
+    const oldest = recentGitHubAccessTokens.keys().next().value as string | undefined;
+    if (!oldest) break;
+    recentGitHubAccessTokens.delete(oldest);
+  }
+}
+
+export function recentGitHubAccessToken(userId: string): string | undefined {
+  const entry = recentGitHubAccessTokens.get(userId);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    recentGitHubAccessTokens.delete(userId);
+    return undefined;
+  }
+  return entry.token;
+}
+
+/**
+ * Persist the short-lived GitHub proof across the App install redirect and
+ * process restarts. The token is encrypted, HttpOnly, and bound to the
+ * authenticated user id; it is never placed in the signed OAuth state or URL.
+ */
+export function setGitHubInstallProof(c: Context, userId: string, token: string): void {
+  const expiresAt = Date.now() + GITHUB_INSTALL_PROOF_TTL_MS;
+  const payload = JSON.stringify({ userId, token, expiresAt });
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', githubProofKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(payload, 'utf8'), cipher.final()]);
+  const sealed = Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+  setCookie(c, GITHUB_INSTALL_PROOF_COOKIE, sealed, {
+    httpOnly: true,
+    sameSite: 'Lax',
+    path: '/',
+    secure: appPublicUrl().startsWith('https://'),
+    maxAge: Math.floor(GITHUB_INSTALL_PROOF_TTL_MS / 1000),
+  });
+}
+
+export function peekGitHubInstallProof(c: Context, userId: string): string | undefined {
+  return readGitHubInstallProof(c, userId, false);
+}
+
+export function consumeGitHubInstallProof(c: Context, userId: string): string | undefined {
+  return readGitHubInstallProof(c, userId, true);
+}
+
+function readGitHubInstallProof(c: Context, userId: string, consume: boolean): string | undefined {
+  const sealed = getCookie(c, GITHUB_INSTALL_PROOF_COOKIE);
+  if (consume) deleteCookie(c, GITHUB_INSTALL_PROOF_COOKIE, { path: '/' });
+  if (!sealed) return undefined;
+  try {
+    const bytes = Buffer.from(sealed, 'base64url');
+    if (bytes.length <= 12 + 16) return undefined;
+    const iv = bytes.subarray(0, 12);
+    const tag = bytes.subarray(12, 28);
+    const ciphertext = bytes.subarray(28);
+    const decipher = createDecipheriv('aes-256-gcm', githubProofKey(), iv);
+    decipher.setAuthTag(tag);
+    const payload = JSON.parse(Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')) as {
+      userId?: string;
+      token?: string;
+      expiresAt?: number;
+    };
+    const expiresAt = payload.expiresAt;
+    if (
+      payload.userId !== userId ||
+      typeof payload.token !== 'string' ||
+      !payload.token.trim() ||
+      typeof expiresAt !== 'number' ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= Date.now()
+    ) {
+      return undefined;
+    }
+    return payload.token;
+  } catch {
+    return undefined;
+  }
+}
+
+function githubProofKey(): Buffer {
+  return createHash('sha256').update(`orvex-github-install-proof:${platformSecret()}`).digest();
+}
+
+export function setOAuthReauthProof(c: Context, userId: string, provider: OAuthProvider): void {
+  const expiresAt = Date.now() + 10 * 60_000;
+  const payload = JSON.stringify({ userId, provider, expiresAt });
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', githubProofKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(payload, 'utf8'), cipher.final()]);
+  const sealed = Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+  setCookie(c, OAUTH_REAUTH_PROOF_COOKIE, sealed, {
+    httpOnly: true,
+    sameSite: 'Lax',
+    path: '/',
+    secure: appPublicUrl().startsWith('https://'),
+    maxAge: 600,
+  });
+}
+
+export function peekOAuthReauthProof(c: Context, userId: string): boolean {
+  return readOAuthReauthProof(c, userId, false);
+}
+
+export function consumeOAuthReauthProof(c: Context, userId: string): boolean {
+  return readOAuthReauthProof(c, userId, true);
+}
+
+function readOAuthReauthProof(c: Context, userId: string, consume: boolean): boolean {
+  const sealed = getCookie(c, OAUTH_REAUTH_PROOF_COOKIE);
+  if (consume) deleteCookie(c, OAUTH_REAUTH_PROOF_COOKIE, { path: '/' });
+  if (!sealed) return false;
+  try {
+    const bytes = Buffer.from(sealed, 'base64url');
+    if (bytes.length <= 12 + 16) return false;
+    const decipher = createDecipheriv('aes-256-gcm', githubProofKey(), bytes.subarray(0, 12));
+    decipher.setAuthTag(bytes.subarray(12, 28));
+    const payload = JSON.parse(
+      Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8'),
+    ) as { userId?: string; provider?: string; expiresAt?: number };
+    return (
+      payload.userId === userId &&
+      (payload.provider === 'github' || payload.provider === 'google') &&
+      typeof payload.expiresAt === 'number' &&
+      Number.isFinite(payload.expiresAt) &&
+      payload.expiresAt > Date.now()
+    );
+  } catch {
+    return false;
+  }
+}
 
 function devUser(db: AppDatabase): User {
   return db.upsertUserFromGitHub({ githubId: 0, login: 'dev', name: 'Dev User' });
@@ -101,6 +256,9 @@ function beginAuthenticatedSession(c: Context, db: AppDatabase, user: User, next
     setMfaChallengeCookie(c, challenge.id);
     return c.redirect('/auth/2fa');
   }
+  // Successful password/OAuth login replaces any other live sessions for this
+  // user (stolen-session / shared-device rotation).
+  db.deleteSessionsForUser(user.id);
   const session = db.createSession(user.id);
   setSessionCookie(c, session.id);
   return c.redirect(postAuthDestination(db, user, next));
@@ -143,7 +301,7 @@ export function sessionRoutes() {
     const ip = clientIp(c);
     const ipLimitKey = `register:ip:${ip}`;
     const accountLimitKey = `register:account:${createHash('sha256').update(email).digest('hex')}`;
-    const ipLimit = checkRateLimit(ipLimitKey, { windowMs: REGISTER_WINDOW_MS, max: REGISTER_IP_MAX });
+    const ipLimit = checkAuthRateLimit(db, ipLimitKey, { windowMs: REGISTER_WINDOW_MS, max: REGISTER_IP_MAX });
     const accountLimit = db.consumeAuthAttempt(accountLimitKey, {
       windowMs: REGISTER_WINDOW_MS,
       max: REGISTER_EMAIL_MAX,
@@ -202,6 +360,51 @@ export function sessionRoutes() {
   });
 
   app.get('/auth/github', (c) => startOAuth(c, 'github'));
+  app.get('/auth/github/prove', (c) => {
+    const user = sessionUser(c, db);
+    if (!user) return loginRedirect(c, `/auth/github/prove?next=${encodeURIComponent(safeNext(c.req.query('next') ?? '/connect'))}`);
+    const oauth = loadOAuthConfigFromEnv();
+    if (!oauth) {
+      return c.redirect(`/connect?error=${encodeURIComponent('GitHub proof is unavailable; configure GitHub OAuth and try again.')}`);
+    }
+    const next = safeNext(c.req.query('next') ?? '/connect');
+    const csrf = randomBytes(32).toString('base64url');
+    setLoginCsrfCookie(c, csrf);
+    const state = signOAuthState(
+      { ts: Date.now(), next, nonce: csrf, provider: 'github', purpose: 'install-proof', userId: user.id },
+      platformSecret(),
+    );
+    return c.redirect(buildAuthorizeUrl(oauth, oauthCallbackUrl(), state));
+  });
+  app.get('/auth/reauth', (c) => {
+    const user = sessionUser(c, db);
+    if (!user) return loginRedirect(c, '/settings/security');
+    const requested = c.req.query('provider');
+    const provider =
+      requested === 'github' && user.githubId > 0 && loadOAuthConfigFromEnv()
+        ? 'github'
+        : requested === 'google' && user.googleId && loadGoogleOAuthConfigFromEnv()
+          ? 'google'
+          : reauthProviderForUser(user);
+    if (!provider) return c.redirect('/settings/security?error=reauth');
+    const next = safeNext(c.req.query('next') ?? '/settings/security');
+    const csrf = randomBytes(32).toString('base64url');
+    setLoginCsrfCookie(c, csrf);
+    const state = signOAuthState(
+      { ts: Date.now(), next, nonce: csrf, provider, purpose: 'mfa-proof', userId: user.id },
+      platformSecret(),
+    );
+    if (provider === 'github') {
+      const oauth = loadOAuthConfigFromEnv();
+      return oauth
+        ? c.redirect(buildAuthorizeUrl(oauth, oauthCallbackUrl(), state))
+        : c.redirect('/settings/security?error=reauth');
+    }
+    const oauth = loadGoogleOAuthConfigFromEnv();
+    return oauth
+      ? c.redirect(buildGoogleAuthorizeUrl(oauth, googleOAuthCallbackUrl(), state))
+      : c.redirect('/settings/security?error=reauth');
+  });
   app.get('/auth/google', (c) => startOAuth(c, 'google'));
 
   app.post('/auth/login', async (c) => {
@@ -217,7 +420,7 @@ export function sessionRoutes() {
     const ip = clientIp(c);
     const ipLimitKey = `login:ip:${ip}`;
     const accountLimitKey = `login:account:${createHash('sha256').update(email || 'empty').digest('hex')}`;
-    const ipLimit = checkRateLimit(ipLimitKey, { windowMs: LOGIN_WINDOW_MS, max: LOGIN_IP_MAX });
+    const ipLimit = checkAuthRateLimit(db, ipLimitKey, { windowMs: LOGIN_WINDOW_MS, max: LOGIN_IP_MAX });
     const accountLimit = db.consumeAuthAttempt(accountLimitKey, {
       windowMs: LOGIN_WINDOW_MS,
       max: LOGIN_ACCOUNT_MAX,
@@ -238,7 +441,7 @@ export function sessionRoutes() {
     if (!user || !storedHash || !passwordOk) {
       return c.redirect(`/auth/login?error=1&next=${encodeURIComponent(next)}`);
     }
-    clearRateLimit(ipLimitKey);
+    clearAuthRateLimit(db, ipLimitKey);
     db.clearAuthAttempts(accountLimitKey);
     return beginAuthenticatedSession(c, db, user, next);
   });
@@ -261,9 +464,31 @@ export function sessionRoutes() {
 
     try {
       const ghUser = await exchangeCodeForUser(oauth, code, oauthCallbackUrl());
+      if (payload.purpose === 'install-proof') {
+        const current = sessionUser(c, db);
+        if (!current || payload.userId !== current.id || !ghUser.accessToken) {
+          return oauthFailureRedirect(c, 'github', payload.next);
+        }
+        rememberGitHubAccessToken(current.id, ghUser.accessToken);
+        setGitHubInstallProof(c, current.id, ghUser.accessToken);
+        return c.redirect(safeNext(payload.next));
+      }
+      if (payload.purpose === 'mfa-proof') {
+        const current = sessionUser(c, db);
+        if (
+          !current ||
+          payload.userId !== current.id ||
+          ghUser.githubId !== current.githubId
+        ) {
+          return oauthFailureRedirect(c, 'github', payload.next);
+        }
+        setOAuthReauthProof(c, current.id, 'github');
+        return c.redirect(safeNext(payload.next));
+      }
       const normalizedEmail = ghUser.email ? normalizeEmail(ghUser.email) : undefined;
       const user = db.upsertUserFromGitHub({ ...ghUser, normalizedEmail });
       if (normalizedEmail) db.setUserNormalizedEmailIfMissing(user.id, normalizedEmail);
+      if (ghUser.accessToken) rememberGitHubAccessToken(user.id, ghUser.accessToken);
       return beginAuthenticatedSession(c, db, user, safeNext(payload.next));
     } catch (err) {
       console.warn('[auth] GitHub OAuth callback failed:', err instanceof Error ? err.message : String(err));
@@ -286,6 +511,14 @@ export function sessionRoutes() {
     if (!oauth) return oauthFailureRedirect(c, 'google', payload.next);
     try {
       const googleUser = await exchangeGoogleCodeForUser(oauth, code, googleOAuthCallbackUrl());
+      if (payload.purpose === 'mfa-proof') {
+        const current = sessionUser(c, db);
+        if (!current || payload.userId !== current.id || googleUser.googleId !== current.googleId) {
+          return oauthFailureRedirect(c, 'google', payload.next);
+        }
+        setOAuthReauthProof(c, current.id, 'google');
+        return c.redirect(safeNext(payload.next));
+      }
       const normalizedEmail = normalizeEmail(googleUser.email);
       const user = db.upsertUserFromGoogle({ ...googleUser, normalizedEmail });
       db.setUserNormalizedEmailIfMissing(user.id, normalizedEmail);
@@ -315,7 +548,7 @@ export function sessionRoutes() {
     }
 
     const ipLimitKey = `mfa:ip:${clientIp(c)}`;
-    const ipLimit = checkRateLimit(ipLimitKey, { windowMs: MFA_WINDOW_MS, max: MFA_IP_MAX });
+    const ipLimit = checkAuthRateLimit(db, ipLimitKey, { windowMs: MFA_WINDOW_MS, max: MFA_IP_MAX });
     const accountLimit = db.consumeMfaAttempt(challenge.userId, { windowMs: MFA_WINDOW_MS, max: MFA_MAX });
     if (!ipLimit.allowed || !accountLimit.allowed) {
       c.header('Retry-After', String(Math.max(ipLimit.retryAfterSeconds, accountLimit.retryAfterSeconds, 1)));
@@ -342,7 +575,7 @@ export function sessionRoutes() {
 
     const completed = db.completeMfaChallenge(challenge.id, factor);
     if (!completed) return c.redirect('/auth/2fa?error=1');
-    clearRateLimit(ipLimitKey);
+    clearAuthRateLimit(db, ipLimitKey);
     deleteCookie(c, MFA_CHALLENGE_COOKIE, { path: '/auth' });
     setSessionCookie(c, completed.session.id);
     const user = db.getUserById(completed.challenge.userId);
@@ -465,6 +698,12 @@ function safeNext(next: string | undefined): string {
 
 function oauthFailureRedirect(c: Context, provider: 'github' | 'google', next?: string): Response {
   return c.redirect(`/auth/login?error=${provider}&next=${encodeURIComponent(safeNext(next))}`);
+}
+
+function reauthProviderForUser(user: User): 'github' | 'google' | null {
+  if (user.githubId > 0 && loadOAuthConfigFromEnv()) return 'github';
+  if (user.googleId && loadGoogleOAuthConfigFromEnv()) return 'google';
+  return null;
 }
 
 /** Existing workspace members should not be sent back into the onboarding flow. */

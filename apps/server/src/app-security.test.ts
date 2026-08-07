@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Hono } from 'hono';
 import { canonicalHostRedirect, productionSecurityHeaders } from './app.js';
+import { sameOriginRequest } from './routes/request-security.js';
 
 test('sets browser security headers and keeps authenticated surfaces out of caches', async (t) => {
   const previousAppUrl = process.env.APP_URL;
@@ -46,4 +47,21 @@ test('redirects the www host to the canonical public host', async (t) => {
   assert.equal(response.status, 308);
   assert.equal(response.headers.get('location'), 'https://useorvex.com/connect?next=1');
   assert.equal(response.headers.get('x-frame-options'), 'DENY');
+});
+
+test('same-origin mutation checks fail closed when APP_URL is not configured', async (t) => {
+  const previousAppUrl = process.env.APP_URL;
+  delete process.env.APP_URL;
+  t.after(() => {
+    if (previousAppUrl === undefined) delete process.env.APP_URL;
+    else process.env.APP_URL = previousAppUrl;
+  });
+
+  const app = new Hono();
+  app.post('/mutate', (c) => c.json({ allowed: sameOriginRequest(c) }));
+  const response = await app.request('http://attacker.example/mutate', {
+    method: 'POST',
+    headers: { origin: 'http://attacker.example' },
+  });
+  assert.deepEqual(await response.json(), { allowed: false });
 });

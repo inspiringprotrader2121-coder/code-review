@@ -39,7 +39,8 @@ export async function fetchCompareDiff(
     }
     if (hitCap) break;
   }
-  if (hitCap) {
+  const reachedCap = hitCap || rawFiles.length >= GITHUB_COMPARE_FILE_CAP;
+  if (reachedCap) {
     console.warn(
       `[diff] compare ${baseSha.slice(0, 7)}...${headSha.slice(0, 7)} hit GitHub's ${GITHUB_COMPARE_FILE_CAP}-file cap — diff is TRUNCATED`,
     );
@@ -53,7 +54,15 @@ export async function fetchCompareDiff(
     truncated: false,
   }));
 
-  return filterChangedFiles(files, opts);
+  const filtered = filterChangedFiles(files, opts);
+  if (reachedCap) {
+    // GitHub does not tell us how many files lie beyond its hard compare cap.
+    // Keep skippedByCap limited to the exact local maxFiles count; githubCapHit
+    // separately discloses the unknown remainder without inventing a quantity.
+    filtered.coverage.complete = false;
+    filtered.coverage.githubCapHit = true;
+  }
+  return filtered;
 }
 
 /** Full diff + explicit coverage (what actually reached the reviewer). Prefer
@@ -91,7 +100,12 @@ export async function fetchPrDiffWithCoverage(
     truncated: false,
   }));
 
-  return filterChangedFiles(mapped, opts);
+  const filtered = filterChangedFiles(mapped, opts);
+  if (files.length >= 3000) {
+    filtered.coverage.complete = false;
+    filtered.coverage.githubCapHit = true;
+  }
+  return filtered;
 }
 
 /** Back-compat: returns just the files. Callers that don't need coverage. */

@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 /**
  * Hardened Docker sandbox for the Tier-2 execution engine (the TREX equivalent).
@@ -12,6 +14,7 @@ import { randomUUID } from 'node:crypto';
  *  - network-isolated by default (`--network none`); the caller opts into a
  *    network only for a dependency-install phase
  *  - killed at a hard wall-clock timeout, with captured output byte-capped
+ *  - workdir disk-quota checked by callers via {@link assertWorkdirWithinQuota}
  *
  * This gates untrusted execution behind a small, auditable surface. It is OFF by
  * default (plan + ORVEX_CODE_EXECUTION) — turning it on for public/untrusted
@@ -50,7 +53,64 @@ const MAX_CAPTURE_BYTES = 64_000; // keep evidence readable and bounded
 // Global cap on concurrent sandbox containers across ALL jobs/tenants — the
 // per-container limits bound one container; this bounds the fleet so a burst of
 // hostile PRs can't spawn unbounded containers and pin the host.
-const MAX_SANDBOXES = Math.max(1, Number(process.env.ORVEX_MAX_SANDBOXES ?? 2));
+const configuredMaxSandboxes = Number(process.env.ORVEX_MAX_SANDBOXES ?? 2);
+const MAX_SANDBOXES =
+  Number.isFinite(configuredMaxSandboxes) && configuredMaxSandboxes > 0
+    ? Math.min(Math.floor(configuredMaxSandboxes), 64)
+    : 2;
+const SLOT_WAIT_MS = (() => {
+  const raw = Number(process.env.ORVEX_SANDBOX_SLOT_WAIT_MS ?? 600_000);
+  return Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), 3_600_000) : 600_000;
+})();
+
+/** Default /work disk budget (4 GiB). Override with ORVEX_SANDBOX_WORKDIR_MAX_BYTES. */
+export const DEFAULT_WORKDIR_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+
+export function workdirMaxBytes(): number {
+  const raw = Number(process.env.ORVEX_SANDBOX_WORKDIR_MAX_BYTES ?? DEFAULT_WORKDIR_MAX_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_WORKDIR_MAX_BYTES;
+}
+
+/** Recursive on-disk size of a workdir (files only; follows neither symlinks nor mounts). */
+export function measureWorkdirBytes(root: string): number {
+  let total = 0;
+  const stack = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      try {
+        if (ent.isDirectory() && !ent.isSymbolicLink()) {
+          stack.push(full);
+        } else if (ent.isFile()) {
+          total += fs.statSync(full).size;
+        }
+      } catch {
+        /* race / permission — skip */
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * Fail the run when /work has grown past the configured disk budget (typical
+ * after a hostile install that dumps huge node_modules or artifacts).
+ */
+export function assertWorkdirWithinQuota(workdir: string, maxBytes = workdirMaxBytes()): number {
+  const used = measureWorkdirBytes(workdir);
+  if (used > maxBytes) {
+    throw new Error(`sandbox workdir exceeds ${maxBytes}-byte disk quota (used ${used} bytes)`);
+  }
+  return used;
+}
+
 let activeSandboxes = 0;
 const waiters: Array<() => void> = [];
 async function acquireSlot(): Promise<void> {
@@ -58,7 +118,23 @@ async function acquireSlot(): Promise<void> {
     activeSandboxes++;
     return;
   }
-  await new Promise<void>((r) => waiters.push(r));
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const entry = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      const idx = waiters.indexOf(entry);
+      if (idx >= 0) waiters.splice(idx, 1);
+      reject(new Error(`sandbox slot wait timed out after ${SLOT_WAIT_MS}ms`));
+    }, SLOT_WAIT_MS);
+    waiters.push(entry);
+  });
   activeSandboxes++;
 }
 function releaseSlot(): void {

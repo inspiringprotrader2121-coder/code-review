@@ -104,3 +104,54 @@ test('the OpenAI-compatible chat API still honours an explicit sample temperatur
   assert.equal(captured.length, 1);
   assert.equal(captured[0].body.temperature, 0.2);
 });
+
+test('usage callbacks identify the actual provider and model', async () => {
+  let usage: { provider?: string; model?: string; tokenSource?: string } | undefined;
+  await withStubbedFetch(
+    () => responsesStream('{"findings":[]}'),
+    async () => {
+      await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'gpt-5.6-luna',
+        baseUrl: 'https://api.example.test/v1',
+        api: 'responses',
+        thinking: false,
+        onUsage: (event) => {
+          usage = event;
+        },
+      });
+    },
+  );
+  assert.equal(usage?.provider, 'api.example.test');
+  assert.equal(usage?.model, 'gpt-5.6-luna');
+  assert.equal(usage?.tokenSource, 'provider');
+});
+
+test('global LLM concurrency hands off slots without exceeding the configured limit', async (t) => {
+  const previous = process.env.ORVEX_LLM_GLOBAL_CONCURRENCY;
+  process.env.ORVEX_LLM_GLOBAL_CONCURRENCY = '1';
+  const originalFetch = globalThis.fetch;
+  let active = 0;
+  let maximum = 0;
+  globalThis.fetch = (async () => {
+    active++;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    active--;
+    return new Response(responsesStream('{"findings":[]}'), {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    if (previous === undefined) delete process.env.ORVEX_LLM_GLOBAL_CONCURRENCY;
+    else process.env.ORVEX_LLM_GLOBAL_CONCURRENCY = previous;
+  });
+
+  await Promise.all([
+    llmChat('sys', 'one', { apiKey: 'test-key', model: 'm', baseUrl: 'https://example.test/v1', api: 'responses', thinking: false }),
+    llmChat('sys', 'two', { apiKey: 'test-key', model: 'm', baseUrl: 'https://example.test/v1', api: 'responses', thinking: false }),
+  ]);
+  assert.equal(maximum, 1);
+});

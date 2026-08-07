@@ -52,7 +52,13 @@ export interface LlmReviewOptions {
   /** cross-file context: repo tree + imported files */
   context?: ReviewPromptContext;
   /** token-usage callback for cost tracking (per model call) */
-  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
+  onUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    tokenSource?: 'provider' | 'estimate';
+    provider?: string;
+    model?: string;
+  }) => void;
 }
 
 export async function runLlmReview(
@@ -165,7 +171,11 @@ export async function runLlmReview(
 
   // Generous backstop against a runaway model, not a quality gate — the rules
   // prompt and the noise/verification passes control real finding volume.
-  const maxFindings = Number(process.env.ORVEX_MAX_FINDINGS ?? 25);
+  const configuredMaxFindings = Number(process.env.ORVEX_MAX_FINDINGS ?? 25);
+  const maxFindings =
+    Number.isFinite(configuredMaxFindings) && configuredMaxFindings > 0
+      ? Math.min(Math.floor(configuredMaxFindings), 1_000)
+      : 25;
   // Sort by severity BEFORE the cap so a runaway response keeps the most-severe
   // findings (the old prefix-slice could drop a P1 while keeping info), and LOG
   // any drop so a capped finding is never silently lost.

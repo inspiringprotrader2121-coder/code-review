@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { ReviewQueue } from '@orvex-review/queue';
@@ -7,6 +8,7 @@ import {
   createInstallationOctokit,
   fetchPullRequest,
   isRepoAllowed,
+  listInstallationRepos,
   loadGitHubConfigFromEnv,
   replyToIssueComment,
   replyToReviewComment,
@@ -30,9 +32,22 @@ import {
 import { TenantService, isPlanId, planFeatures } from '@orvex-review/tenants';
 import { createAppDatabase, type GitHubInstallation } from '@orvex-review/store';
 import { enqueueManualReview } from '../queue-runner.js';
-import { authorizedAdmin } from './admin-auth.js';
+import { authorizedAdminMutation } from './admin-auth.js';
 import { formatQuotaStatusComment, loadAccountQuotaStatus } from '../quota-status.js';
 
+/** sha256(event + NUL + body) — closes delivery-id rotation replay. */
+export function githubWebhookBodyHash(event: string | undefined, rawBody: string): string {
+  return createHash('sha256')
+    .update(event ?? '')
+    .update('\0')
+    .update(rawBody)
+    .digest('hex');
+}
+
+function bodyHashTtlMs(): number {
+  const raw = Number(process.env.ORVEX_WEBHOOK_BODY_DEDUP_TTL_MS ?? 2 * 3600_000);
+  return Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), 7 * 24 * 3600_000) : 2 * 3600_000;
+}
 // ready_for_review: draft→ready must enqueue (drafts are skipped in the worker,
 // so opened-as-draft never reviews until this event or a later push).
 const REVIEW_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
@@ -186,6 +201,7 @@ export function webhookRoutes(queue: ReviewQueue) {
       headSha: prMeta.headSha,
       action: 'command',
       fix,
+      sourceEventId: extra?.sourceEventId ?? fix?.sourceEventId,
       enqueuedAt: new Date().toISOString(),
     };
     const result = await queue.enqueue(job);
@@ -219,6 +235,14 @@ export function webhookRoutes(queue: ReviewQueue) {
 
       // commits to the branch → gate on the toggler's real write access
       const gateOctokit = createInstallationOctokit(githubConfig, installation.installationId);
+      if (!db.isRepoEnabled(installation.installationId, `${owner}/${repo}`)) {
+        await replyToIssueComment(
+          gateOctokit,
+          { owner, repo, number: pr },
+          'Orvex is disabled for this repository. Enable it in the Orvex dashboard to use commands.',
+        ).catch(() => {});
+        return 'repo_disabled';
+      }
       if (!(await userCanWrite(gateOctokit, owner, repo, data.sender.login))) {
         return 'insufficient_permissions';
       }
@@ -229,6 +253,7 @@ export function webhookRoutes(queue: ReviewQueue) {
         replyToCommentId: data.comment.id,
         isReviewComment: false,
         requestedBy: data.sender.login,
+        sourceEventId: `issue-comment:${data.comment.id}:${data.action}`,
       });
       // immediate feedback (new comments DO live-update in open browsers)
       await replyToIssueComment(
@@ -253,23 +278,34 @@ export function webhookRoutes(queue: ReviewQueue) {
 
     const octokit = createInstallationOctokit(githubConfig, installation.installationId);
 
-    // help / rate_limit are read-only (quota + command list) — allow without write.
-    // Everything else can commit or burn LLM quota, so gate on real write access
-    // (not author_association, which counts read-only org members as "write").
-    const readOnlyCmd = command.kind === 'help' || command.kind === 'rate_limit';
+    const ref = { owner, repo, number: pr };
+    if (!db.isRepoEnabled(installation.installationId, `${owner}/${repo}`)) {
+      await replyToIssueComment(
+        octokit,
+        ref,
+        'Orvex is disabled for this repository. Enable it in the Orvex dashboard to use commands.',
+      ).catch(() => {});
+      return 'repo_disabled';
+    }
+
+    // help is read-only (command list). rate_limit exposes plan/quota details, so
+    // gate it like mutating commands. Everything else can commit or burn LLM quota.
+    // Gate on real write access (not author_association, which counts read-only
+    // org members as "write").
+    const readOnlyCmd = command.kind === 'help';
     if (!readOnlyCmd && !(await userCanWrite(octokit, owner, repo, data.sender.login))) {
       return 'insufficient_permissions';
     }
 
-    const ref = { owner, repo, number: pr };
     await addCommentReaction(octokit, owner, repo, data.comment.id, 'eyes', false);
 
     const requestedBy = data.sender.login;
-    const baseFix = { replyToCommentId: data.comment.id, isReviewComment: false, requestedBy };
+    const sourceEventId = `issue-comment:${data.comment.id}:${data.action}`;
+    const baseFix = { replyToCommentId: data.comment.id, isReviewComment: false, requestedBy, sourceEventId };
 
     switch (command.kind) {
       case 'review':
-        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review');
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review', undefined, { sourceEventId });
         return 'review_enqueued';
       case 'deep': {
         // PAID-ONLY: ~2x a normal review's cost — the free trial's whole point
@@ -283,7 +319,10 @@ export function webhookRoutes(queue: ReviewQueue) {
           ).catch(() => {});
           return 'deep_not_in_plan';
         }
-        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review', undefined, { deep: true });
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review', undefined, {
+          deep: true,
+          sourceEventId,
+        });
         await replyToIssueComment(
           octokit,
           { owner, repo, number: pr },
@@ -420,6 +459,17 @@ export function webhookRoutes(queue: ReviewQueue) {
       // this path commits to the branch, so gate it on the toggler's write
       // access (there's no author_association on a bot-authored comment).
       const gateOctokit = createInstallationOctokit(githubConfig, installation.installationId);
+      if (!db.isRepoEnabled(installation.installationId, `${owner}/${repo}`)) {
+        await replyToReviewComment(
+          gateOctokit,
+          owner,
+          repo,
+          pr,
+          data.comment.id,
+          'Orvex is disabled for this repository. Enable it in the Orvex dashboard to use commands.',
+        ).catch(() => {});
+        return 'repo_disabled';
+      }
       if (!(await userCanWrite(gateOctokit, owner, repo, data.sender.login))) {
         return 'insufficient_permissions';
       }
@@ -430,6 +480,7 @@ export function webhookRoutes(queue: ReviewQueue) {
         replyToCommentId: data.comment.id,
         isReviewComment: true,
         requestedBy: data.sender.login,
+        sourceEventId: `review-comment:${data.comment.id}:${data.action}`,
       });
 
       // Immediate feedback that survives no-refresh: post a NEW reply comment
@@ -475,9 +526,23 @@ export function webhookRoutes(queue: ReviewQueue) {
     if (!installation) return 'no_installation';
 
     const octokit = createInstallationOctokit(githubConfig, installation.installationId);
+    const threadRootId = data.comment.in_reply_to_id ?? data.comment.id;
 
-    // help / rate_limit are read-only; other thread commands can commit or spend LLM.
-    const readOnlyCmd = command.kind === 'help' || command.kind === 'rate_limit';
+    if (!db.isRepoEnabled(installation.installationId, `${owner}/${repo}`)) {
+      await replyToReviewComment(
+        octokit,
+        owner,
+        repo,
+        pr,
+        threadRootId,
+        'Orvex is disabled for this repository. Enable it in the Orvex dashboard to use commands.',
+      ).catch(() => {});
+      return 'repo_disabled';
+    }
+
+    // help is read-only; rate_limit exposes plan/quota details — gate like mutations.
+    // Other thread commands can commit or spend LLM.
+    const readOnlyCmd = command.kind === 'help';
     if (!readOnlyCmd && !(await userCanWrite(octokit, owner, repo, data.sender.login))) {
       return 'insufficient_permissions';
     }
@@ -485,12 +550,13 @@ export function webhookRoutes(queue: ReviewQueue) {
     await addCommentReaction(octokit, owner, repo, data.comment.id, 'eyes', true);
 
     // the thread root is Orvex's finding comment
-    const threadRootId = data.comment.in_reply_to_id ?? data.comment.id;
     const requestedBy = data.sender.login;
+    const sourceEventId = `review-comment:${data.comment.id}:${data.action}`;
+    const baseFix = { replyToCommentId: threadRootId, isReviewComment: true, requestedBy, sourceEventId };
 
     switch (command.kind) {
       case 'review':
-        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review');
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review', undefined, { sourceEventId });
         return 'review_enqueued';
       case 'deep': {
         // PAID-ONLY: ~2x a normal review's cost — the free trial's whole point
@@ -504,7 +570,10 @@ export function webhookRoutes(queue: ReviewQueue) {
           ).catch(() => {});
           return 'deep_not_in_plan';
         }
-        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review', undefined, { deep: true });
+        await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'review', undefined, {
+          deep: true,
+          sourceEventId,
+        });
         await replyToIssueComment(
           octokit,
           { owner, repo, number: pr },
@@ -515,27 +584,21 @@ export function webhookRoutes(queue: ReviewQueue) {
       case 'fix':
       case 'fix_this':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+          ...baseFix,
           scope: 'one',
-          replyToCommentId: threadRootId,
-          isReviewComment: true,
-          requestedBy,
         });
         return 'thread_fix_enqueued';
       case 'fix_all':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+          ...baseFix,
           scope: 'all',
-          replyToCommentId: threadRootId,
-          isReviewComment: true,
-          requestedBy,
         });
         return 'fix_all_enqueued';
       case 'prompt':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'fix', {
+          ...baseFix,
           scope: 'one',
           instruction: command.instruction,
-          replyToCommentId: threadRootId,
-          isReviewComment: true,
-          requestedBy,
         });
         return 'prompt_fix_enqueued';
       case 'ignore': {
@@ -575,10 +638,8 @@ export function webhookRoutes(queue: ReviewQueue) {
       }
       case 'explain':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'explain', {
+          ...baseFix,
           scope: 'one',
-          replyToCommentId: threadRootId,
-          isReviewComment: true,
-          requestedBy,
         });
         return 'explain_enqueued';
       case 'auto_apply': {
@@ -595,10 +656,8 @@ export function webhookRoutes(queue: ReviewQueue) {
       }
       case 'resolve_conflicts':
         await enqueueCommandJob(githubConfig, installation, owner, repo, pr, 'resolve', {
+          ...baseFix,
           scope: 'all',
-          replyToCommentId: threadRootId,
-          isReviewComment: true,
-          requestedBy,
         });
         return 'resolve_enqueued';
       case 'rate_limit': {
@@ -638,10 +697,34 @@ export function webhookRoutes(queue: ReviewQueue) {
     }
 
     const deliveryId = c.req.header('x-github-delivery');
+    // Require a delivery id after signature verify — without it we cannot claim
+    // durably, and accepting the request would skip idempotency entirely.
+    if (!deliveryId) {
+      return c.json({ error: 'missing X-GitHub-Delivery' }, 400);
+    }
     // AFTER signature verification, so a forged request can't poison the durable
     // claim. Failed processing releases the claim so GitHub can retry it.
-    if (deliveryId && !db.claimWebhookEvent('github', deliveryId)) {
-      return c.json({ ok: true, deduped: true });
+    const deliveryClaim = db.claimWebhookEvent('github', deliveryId);
+    if (!deliveryClaim) {
+      const prior = db.getWebhookEvent('github', deliveryId);
+      if (prior?.processedAt) return c.json({ ok: true, deduped: true });
+      c.header('Retry-After', '5');
+      return c.json({ error: 'delivery is already being processed' }, 503);
+    }
+
+    // Second key: body hash. Delivery-id alone is not enough — an attacker who
+    // captured a valid signed payload can replay it with a new X-GitHub-Delivery.
+    // GitHub's own retries reuse the same delivery id, so this only fires on
+    // rotated-id replays (or rare identical payloads within the TTL window).
+    const bodyHash = githubWebhookBodyHash(event, rawBody);
+    const bodyProvider = db.webhookBodyProvider('github');
+    const bodyClaim = db.claimWebhookBodyHash('github', bodyHash, { ttlMs: bodyHashTtlMs() });
+    if (!bodyClaim) {
+      db.releaseWebhookEvent('github', deliveryId, deliveryClaim);
+      const prior = db.getWebhookEvent(bodyProvider, bodyHash);
+      if (prior?.processedAt) return c.json({ ok: true, deduped: true, reason: 'body' });
+      c.header('Retry-After', '5');
+      return c.json({ error: 'payload is already being processed' }, 503);
     }
 
     let processingFailed = false;
@@ -655,29 +738,55 @@ export function webhookRoutes(queue: ReviewQueue) {
 
       if (data.action === 'deleted') {
         db.disableReposForInstallation(inst.id);
-        db.upsertInstallation({
-          installationId: inst.id,
-          tenantId: db.getInstallation(inst.id)?.tenantId ?? db.createTenant(`deleted-${inst.id}`).id,
-          accountLogin: inst.account?.login ?? 'unknown',
-          accountType: inst.account?.type ?? 'Organization',
-          repositorySelection: inst.repository_selection ?? 'selected',
-          suspendedAt: new Date().toISOString(),
-        });
+        const existing = db.getInstallation(inst.id);
+        if (existing) {
+          db.upsertInstallation({
+            installationId: inst.id,
+            tenantId: existing.tenantId,
+            accountLogin: inst.account?.login ?? 'unknown',
+            accountType: inst.account?.type ?? 'Organization',
+            repositorySelection: inst.repository_selection ?? 'selected',
+            suspendedAt: new Date().toISOString(),
+          });
+        }
         return c.json({ ok: true, action: 'deleted' });
       }
 
-      await tenants.syncInstallationFromWebhook(inst.id, null, {
+      const bound = await tenants.syncInstallationFromWebhook(inst.id, null, {
         accountLogin: inst.account?.login ?? 'unknown',
         accountType: inst.account?.type ?? 'Organization',
         repositorySelection: inst.repository_selection ?? 'selected',
         suspendedAt: inst.suspended_at ?? null,
       });
 
-      // installation.created / .new_permissions_accepted carry the accessible repo list
+      // installation.created / .new_permissions_accepted carry a truncated
+      // accessible-repo list (GitHub caps the webhook payload). Prefer the
+      // truncated sync first, then — when the installation is already bound to
+      // a tenant — pull the authoritative full list like the connect flow.
       syncReposFromPayload(
         inst.id,
         (payload as unknown as InstallationRepositoriesWebhook).repositories ?? [],
       );
+      if (bound) {
+        try {
+          const repos = await listInstallationRepos(githubConfig, inst.id);
+          syncReposFromPayload(
+            inst.id,
+            repos.map((r) => ({
+              id: r.githubRepoId,
+              name: r.name,
+              full_name: r.fullName,
+              private: r.private,
+              default_branch: r.defaultBranch,
+            })),
+          );
+        } catch (err) {
+          console.warn(
+            `[webhook] full installation repo sync failed for ${inst.id}:`,
+            (err as Error).message,
+          );
+        }
+      }
 
       console.log(`[webhook] installation ${data.action} id=${inst.id} account=${inst.account?.login}`);
       return c.json({ ok: true, action: data.action });
@@ -690,10 +799,25 @@ export function webhookRoutes(queue: ReviewQueue) {
         for (const removed of data.repositories_removed ?? []) {
           db.disableRepoByGitHubId(inst.id, removed.id);
         }
+        const added = data.repositories_added ?? [];
         syncReposFromPayload(inst.id, [
-          ...(data.repositories_added ?? []),
+          ...added,
           ...(data.repositories ?? []),
         ]);
+        // Removal sets enabled=0; upsert preserves that across resyncs so a
+        // dashboard disable sticks. Re-adds must not stay stuck disabled forever —
+        // apply autoEnableNewRepos as if the repo were newly granted.
+        if (added.length > 0) {
+          const installation = db.getInstallation(inst.id);
+          if (installation) {
+            const settings = db.getWorkspaceSettings(installation.tenantId);
+            for (const r of added) {
+              if (!r?.id) continue;
+              const existing = db.getRepoByGitHubId(inst.id, r.id);
+              if (existing) db.setRepoEnabled(existing.id, settings.autoEnableNewRepos);
+            }
+          }
+        }
       }
       console.log(`[webhook] installation_repositories ${payload.action}`);
       return c.json({ ok: true, action: payload.action });
@@ -843,9 +967,13 @@ export function webhookRoutes(queue: ReviewQueue) {
       processingFailed = true;
       throw err;
     } finally {
-      if (deliveryId) {
-        if (processingFailed) db.releaseWebhookEvent('github', deliveryId);
-        else db.completeWebhookEvent('github', deliveryId);
+      if (bodyClaim) {
+        if (processingFailed) db.releaseWebhookEvent(bodyProvider, bodyHash, bodyClaim);
+        else db.completeWebhookEvent(bodyProvider, bodyHash, bodyClaim);
+      }
+      if (deliveryClaim) {
+        if (processingFailed) db.releaseWebhookEvent('github', deliveryId, deliveryClaim);
+        else db.completeWebhookEvent('github', deliveryId, deliveryClaim);
       }
     }
   });
@@ -855,19 +983,22 @@ export function webhookRoutes(queue: ReviewQueue) {
     // Fail CLOSED: an unset secret used to leave this endpoint open to anyone,
     // who could trigger reviews and bind installations to a chosen workspace.
     if (!secret) return c.json({ error: 'endpoint disabled: REVIEW_API_SECRET not set' }, 503);
-    if (c.req.header('authorization') !== `Bearer ${secret}`) {
+    const auth = c.req.header('authorization');
+    const supplied = auth?.startsWith('Bearer ') ? auth.slice(7) : undefined;
+    if (!supplied || !safeEqualBearer(supplied, secret)) {
       return c.json({ error: 'unauthorized' }, 401);
     }
 
     const body = await c.req.json<{
       owner?: string;
       repo?: string;
-      pr: number;
+      pr?: number;
       headSha?: string;
       repoSlug?: string;
       installationId?: number;
       tenantSlug?: string;
-    }>();
+    }>().catch(() => null);
+    if (!body) return c.json({ error: 'invalid JSON body' }, 400);
 
     let owner = body.owner;
     let repo = body.repo;
@@ -877,14 +1008,23 @@ export function webhookRoutes(queue: ReviewQueue) {
       repo = r;
     }
 
-    if (!owner || !repo || !body.pr) {
+    const pr = body.pr;
+    if (
+      !owner ||
+      !repo ||
+      typeof pr !== 'number' ||
+      !Number.isSafeInteger(pr) ||
+      pr < 1 ||
+      (body.installationId !== undefined &&
+        (!Number.isInteger(body.installationId) || body.installationId < 1))
+    ) {
       return c.json({ error: 'owner, repo, pr required' }, 400);
     }
 
     const job = await enqueueManualReview(queue, {
       owner,
       repo,
-      pr: body.pr,
+      pr,
       headSha: body.headSha,
       installationId: body.installationId,
       tenantSlug: body.tenantSlug,
@@ -896,9 +1036,9 @@ export function webhookRoutes(queue: ReviewQueue) {
   // Admin: set a workspace's subscription plan. This is the billing/admin hook
   // that moves a tenant off the default 'review' plan onto 'verify' etc. — until
   // a real billing surface exists it lets plans be set without hand-editing the
-  // DB. Guarded by ORVEX_ADMIN_SECRET (falls back to REVIEW_API_SECRET).
+  // DB. Guarded by the separate ORVEX_ADMIN_SECRET credential.
   app.post('/admin/tenants/:slug/plan', async (c) => {
-    if (!authorizedAdmin(c, db)) return c.json({ error: 'unauthorized' }, 401);
+    if (!authorizedAdminMutation(c, db)) return c.json({ error: 'unauthorized' }, 401);
     const { plan } = await c.req.json<{ plan?: string }>().catch(() => ({ plan: undefined }));
     if (!plan || !isPlanId(plan)) {
       return c.json({ error: 'plan is not a supported Orvex plan' }, 400);
@@ -910,4 +1050,10 @@ export function webhookRoutes(queue: ReviewQueue) {
   });
 
   return app;
+}
+
+function safeEqualBearer(a: string, b: string): boolean {
+  const aa = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return aa.length === bb.length && timingSafeEqual(aa, bb);
 }

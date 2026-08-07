@@ -26,6 +26,7 @@ export {
   fetchInstallationMeta,
   buildGitHubInstallUrl,
   listInstallationRepos,
+  userCanAccessInstallation,
   type InstallationRepo,
 } from './api.js';
 export {
@@ -38,6 +39,7 @@ export {
   type RepoContext,
 } from './repo-context.js';
 export { retrieveRelevantFiles, type RetrievedFile, type RetrieveOptions } from './repo-index.js';
+export { createCappedArchiveStream, createCappedGunzip } from './archive-stream.js';
 export {
   fetchPrHeadInfo,
   fetchBranchSha,

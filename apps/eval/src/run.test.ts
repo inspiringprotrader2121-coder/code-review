@@ -4,6 +4,7 @@ import {
   evaluationInvestigateEnabled,
   evaluationInvestigateTarget,
   evaluationPassTargets,
+  evaluationRiskHuntTarget,
   evaluationVerifier,
 } from './run.js';
 
@@ -90,4 +91,19 @@ test('evaluationInvestigateEnabled mirrors production kill-switch + target resol
   assert.ok(pro);
   assert.equal(pro.tier, 'deepseek');
   assert.equal(pro.target.model, 'deepseek-v4-pro');
+});
+
+test('evaluationRiskHuntTarget requires Flash and honors kill-switch', () => {
+  assert.equal(evaluationRiskHuntTarget({}), null);
+  assert.equal(
+    evaluationRiskHuntTarget({ ORVEX_DEEPSEEK_API_KEY: 'k', ORVEX_RISK_HUNT: '0' }),
+    null,
+  );
+  const target = evaluationRiskHuntTarget({
+    ORVEX_DEEPSEEK_API_KEY: 'k',
+    ORVEX_DEEPSEEK_FLASH_MODEL: 'deepseek-v4-flash',
+  });
+  assert.ok(target);
+  assert.equal(target.tier, 'deepseek-flash');
+  assert.equal(target.target.model, 'deepseek-v4-flash');
 });

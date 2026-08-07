@@ -5,6 +5,7 @@ import {
   fetchInstallationMeta,
   loadGitHubConfigFromEnv,
   listInstallationRepos,
+  userCanAccessInstallation,
 } from '@orvex-review/github';
 import type { AppDatabase, GitHubInstallation, Tenant } from '@orvex-review/store';
 import { createAppDatabase } from '@orvex-review/store';
@@ -111,30 +112,47 @@ export class TenantService {
     installationId: number,
     tenantSlug: string,
     config?: GitHubAppConfig,
+    githubAccessToken?: string,
+    trustedServerBinding = false,
   ): Promise<{ tenant: Tenant; installation: GitHubInstallation }> {
     const cfg = config ?? loadGitHubConfigFromEnv();
-    const tenant = this.db.getOrCreateTenant(tenantSlug);
+    let tenant = this.db.getTenantBySlug(tenantSlug);
 
-    // SECURITY: never rebind an installation that already belongs to a DIFFERENT
-    // tenant WITH members. installation_id comes from the callback URL and isn't
-    // bound into signed state, so without this guard any signed-in user could
-    // claim another org's installation by pointing the callback at that id.
-    //
-    // Memberless owners are the webhook race path: `syncInstallationFromWebhook`
-    // auto-creates `org-<login>` and binds the install before the signed
-    // callback lands. Rebinding that orphan onto the connect-flow workspace is
-    // the intended "prove org control" path (see tenantIsClaimable). Slug-claim
-    // of those org-* workspaces stays blocked in startConnect.
-    // First-time installs (no row) and same-tenant reinstalls remain allowed.
+    // The installation_id comes from the callback URL and is not bound into the
+    // signed state. Never rebind an existing installation to a different
+    // workspace, even when the old workspace has no members: a memberless row
+    // may have been created by a webhook before the browser callback, and
+    // allowing that row to move lets a signed-in user take over another
+    // organization's installation.
     const existing = this.db.getInstallation(installationId);
-    if (existing && existing.tenantId !== tenant.id && this.db.tenantHasMembers(existing.tenantId)) {
+    if (existing && (!tenant || existing.tenantId !== tenant.id)) {
       throw new WorkspaceAccessError(
         'this GitHub installation is already linked to another workspace',
         403,
       );
     }
 
+    if (!githubAccessToken && !trustedServerBinding) {
+      throw new WorkspaceAccessError(
+        're-authenticate with GitHub before connecting this installation so Orvex can verify its administrator',
+        403,
+      );
+    }
     const meta = await fetchInstallationMeta(cfg, installationId);
+    if (
+      githubAccessToken &&
+      !(await userCanAccessInstallation(githubAccessToken, installationId, {
+        accountLogin: meta.accountLogin,
+        accountType: meta.accountType,
+      }))
+    ) {
+      throw new WorkspaceAccessError(
+        'the signed-in GitHub account cannot access this installation',
+        403,
+      );
+    }
+    tenant ??= this.db.getOrCreateTenant(tenantSlug);
+
     const installation = this.db.upsertInstallation({
       installationId,
       tenantId: tenant.id,
@@ -143,6 +161,12 @@ export class TenantService {
       repositorySelection: meta.repositorySelection,
       suspendedAt: meta.suspendedAt ?? null,
     });
+    if (installation.tenantId !== tenant.id) {
+      throw new WorkspaceAccessError(
+        'this GitHub installation was linked while another connect flow was completing; start again from the linked workspace',
+        403,
+      );
+    }
     // GitHub can deliver installation.created before the browser callback, or
     // deliver the callback before the repository event. Fetch the authoritative
     // repository list here so the first dashboard render is not empty or raced.
@@ -185,10 +209,11 @@ export class TenantService {
       const existing = this.db.getInstallation(installationId);
       resolvedTenantId = existing?.tenantId ?? null;
     }
-    if (!resolvedTenantId) {
-      const tenant = this.db.createTenant(`org-${meta.accountLogin}`, meta.accountLogin);
-      resolvedTenantId = tenant.id;
-    }
+    // Do not create a predictable memberless tenant for an installation that
+    // has not completed the signed browser connect flow. The callback creates
+    // the authoritative tenant binding first; later webhook deliveries can
+    // resolve it normally.
+    if (!resolvedTenantId) return null;
 
     return this.db.upsertInstallation({
       installationId,

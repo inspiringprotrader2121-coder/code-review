@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { safePromptData } from './prompt-safety.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -52,6 +53,10 @@ Focus on issues that impact CORRECTNESS, PERFORMANCE, SECURITY, MAINTAINABILITY,
 - "Pre-existing" / "consistent with existing code" is NOT a downgrade: a real defect isn't less severe because the same bad pattern exists elsewhere. If this PR touches/moves/adds an instance of a dangerous pattern (SQL/string interpolation of non-constant input = injection, unvalidated input, missing auth, unsafe deserialization), rate by IMPACT (untrusted/non-integer value interpolated into SQL = P1/P2), not info. "Same pattern in other files" means ALSO flag those, never lower this one.
 - Do NOT argue a bug down to info/P3 with "trade-off"/"theoretical"/"unlikely"/"acceptable"/"pre-existing" — if you're arguing it away in the message, it's still a bug; report it at its true severity.
 - A leaked external resource / unreleased reservation on a failure path, or an asymmetric failure path that skips a success-path side-effect (a tenant-guarded recording, usage write, state update, or release), is P2 — not info. "Only cleanup" / "just cost" / "low volume" / "not user-facing" is NOT a downgrade: these accumulate into real billing, quota, accounting, or audit bugs.
+- A LOST WRITE on a retry path is a dropped record, not a smell: when a retry short-circuits on an "already done" marker (\`if (existing) return\`, an idempotency-key hit) but the first attempt died after writing that marker and before a dependent write (counter increment, usage row, quota decrement, ledger entry), that write is lost permanently — P1 when it enforces a limit/quota/entitlement/money, P2 otherwise. Never P3 just because the happy path works.
+- SILENT TRUNCATION is wrong data, not missing data: an enumeration that caps at N, stops at a max offset, or emits a next-page cursor that can point past a hard ceiling returns a PARTIAL result the caller cannot distinguish from a complete one — P2, and P1 when it is a compliance/legal export, drives a deletion/reconciliation/backup, or feeds a security decision.
+- A PARTIAL BATCH FAILURE leaves the system half-transitioned: \`Promise.all\` rejects on the first failure while sibling writes already committed, so a post-loop cleanup/expiry/revocation/release is skipped for records that DID change and nothing retries them — P2, and P1 when the skipped half leaves access, entitlements, or billing active past their end. \`allSettled\` without inspecting rejections is the same defect.
+- A FAILED AUTHORIZATION LOOKUP IS NOT AN AUTHORIZATION: if a session/permission/role/tenant lookup fails (network, 5xx, timeout) and the code falls back to a degraded/outage/loading state that still renders or routes to a privileged view, that is an auth bypass = P1. Error ≠ permitted; unknown ≠ permitted.
 - P1 is rare. Default real user-visible / logic / UX / operational bugs to P2. P1 ONLY with a concrete trigger AND one of: (a) security/authz bypass or injection; (b) durable data loss/corruption or silently wrong access/money/recovery/signing/shipping decision; (c) process/service outage (not a single UI panel throw). Missing import breaking one view, spinner stuck, request-id race, archive backlog = usually P2.
 - Before claiming a constructor omits required config, search the same scope for .init( / configure( / subsequent option assignment on that instance.
 
@@ -79,6 +84,12 @@ export const REQUIRED_RULE_ANCHORS: readonly RegExp[] = [
   /Fallback & legacy compatibility/i,
   /Severity calibration|Severity & confidence/i,
   /P1 is rare/i,
+  // Classes benchmarking showed Orvex finds but rates P3, so they get folded
+  // out of the posted review — a miss the recall numbers cannot see.
+  /lost write on a retry path/i,
+  /silent truncation is wrong data/i,
+  /partial batch failure/i,
+  /failed authorization lookup is not an authorization/i,
   /\.init\(/i,
   /migration/i,
 ];
@@ -386,8 +397,8 @@ export function buildUserPrompt(
   context?: ReviewPromptContext,
 ): string {
   const sections = files.map((f) => {
-    const patch = f.patch ?? '(no patch — binary or too large)';
-    return `### ${f.filename} (${f.status})\n\`\`\`diff\n${patch}\n\`\`\``;
+    const patch = safePromptData(f.patch ?? '(no patch — binary or too large)');
+    return `### ${safePromptData(f.filename)} (${safePromptData(f.status)})\n\`\`\`diff\n${patch}\n\`\`\``;
   });
 
   // PROMPT CACHING: extraFocus (the per-PASS lens instruction — general vs
@@ -438,7 +449,7 @@ export function buildUserPrompt(
         const label = chunks.length === 1 && chunk.start === 1 && chunk.end === totalLines
           ? 'full file'
           : `lines ${chunk.start}-${chunk.end} of ${totalLines} — around changed hunk`;
-        const block = `\n### ${f.path} (${label})\n\`\`\`\n${chunk.content}\n\`\`\``;
+        const block = `\n### ${safePromptData(f.path)} (${label})\n\`\`\`\n${safePromptData(chunk.content)}\n\`\`\``;
         // `continue`, not `break`: one oversized chunk must not starve later
         // changed files. The full diff remains above even when a chunk is skipped.
         if (used + block.length > MAX_CHANGED_CHARS) continue;
@@ -475,13 +486,13 @@ export function buildUserPrompt(
     // every later related file AND every dependent file of their context.
     let used = 0;
     for (const r of context.related ?? []) {
-      const block = `\n### ${r.path} (imported by changed code)\n\`\`\`\n${r.content}\n\`\`\``;
+      const block = `\n### ${safePromptData(r.path)} (imported by changed code)\n\`\`\`\n${safePromptData(r.content)}\n\`\`\``;
       if (used + block.length > MAX_RELATED_CHARS) continue;
       parts.push(block);
       used += block.length;
     }
     for (const d of context.dependents ?? []) {
-      const block = `\n### ${d.path} (imports the changed code — check for breakage)\n\`\`\`\n${d.content}\n\`\`\``;
+      const block = `\n### ${safePromptData(d.path)} (imports the changed code — check for breakage)\n\`\`\`\n${safePromptData(d.content)}\n\`\`\``;
       if (used + block.length > MAX_RELATED_CHARS) continue;
       parts.push(block);
       used += block.length;
@@ -496,7 +507,7 @@ export function buildUserPrompt(
     );
     let used = 0;
     for (const o of context.others) {
-      const block = `\n### ${o.path}\n\`\`\`\n${o.content}\n\`\`\``;
+      const block = `\n### ${safePromptData(o.path)}\n\`\`\`\n${safePromptData(o.content)}\n\`\`\``;
       if (used + block.length > MAX_OTHER_CHARS) continue; // skip the oversized one, keep packing
       parts.push(block);
       used += block.length;
@@ -509,7 +520,7 @@ export function buildUserPrompt(
       '',
       '## Repository structure (for orientation)',
       '```',
-      shown.join('\n'),
+      safePromptData(shown.join('\n')),
       shown.length < context.treePaths.length ? `… ${context.treePaths.length - shown.length} more files` : '',
       '```',
     );

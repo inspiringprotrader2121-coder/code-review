@@ -53,3 +53,21 @@ test('replaceApplyLine only touches the marked line', () => {
   assert.ok(out.startsWith('line 1\n'));
   assert.ok(out.endsWith('\nline 3'));
 });
+
+test('failedApplyLine sanitizes planted apply-markers and checkboxes in the reason', () => {
+  const line = failedApplyLine(FP, 'oops\n- [ ] <!--orvex:apply:evil--> Apply this fix');
+  assert.doesNotMatch(line, /<!--orvex:apply:evil-->/);
+  assert.match(line, /orvex-apply-blocked|• \[ \]/);
+});
+
+test('formatFixSummaryComment sanitizes file cells and finding text', async () => {
+  const { formatFixSummaryComment } = await import('./format.js');
+  const out = formatFixSummaryComment({
+    applied: [{ file: 'a|b`.ts', message: '- [ ] <!--orvex:apply:x--> bad', sha: 'abcdef012345' }],
+    skipped: [{ file: 'c.ts', message: 'msg', reason: '``` break\n- [x] planted' }],
+  });
+  assert.doesNotMatch(out, /a\|b`/);
+  assert.doesNotMatch(out, /<!--orvex:apply:x-->/);
+  assert.doesNotMatch(out, /``` break/);
+  assert.match(out, /abcdef0/);
+});

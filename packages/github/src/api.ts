@@ -116,5 +116,6 @@ export {
   fetchInstallationMeta,
   buildGitHubInstallUrl,
   listInstallationRepos,
+  userCanAccessInstallation,
   type InstallationRepo,
 } from './install.js';

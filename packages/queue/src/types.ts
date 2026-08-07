@@ -20,6 +20,8 @@ export interface FixRequest {
   isReviewComment?: boolean;
   /** login of the human who asked */
   requestedBy?: string;
+  /** Stable webhook identity used to deduplicate a retried command delivery. */
+  sourceEventId?: string;
 }
 
 export interface ReviewJobPayload {
@@ -36,6 +38,8 @@ export interface ReviewJobPayload {
   enqueuedAt: string;
   /** `@orvex deep`: run extra diverse lens passes and union the results (paid plans) */
   deep?: boolean;
+  /** UTC calendar day used to deduplicate one nightly scan per repo. */
+  scanDay?: string;
   /** SQLite review-run id to resume after a graceful restart interrupted work. */
   runId?: string;
   /** set when this job was re-queued after a restart interrupted it — a job may
@@ -44,6 +48,8 @@ export interface ReviewJobPayload {
   /** transient-failure retry counter — bounds how many times a job is re-queued
    *  after a rate-limit/network blip so a persistent failure can't loop forever */
   attempts?: number;
+  /** Stable source identity for webhook-originated command jobs. */
+  sourceEventId?: string;
 }
 
 export interface EnqueueResult {
@@ -59,6 +65,17 @@ export interface MarkCompletedOptions {
   draftSkipped?: boolean;
 }
 
+export interface QueueDepth {
+  /** Jobs waiting on the main queue (ready to claim). */
+  queued: number;
+  /** Jobs waiting behind an in-flight PR (coalesced / blocked). */
+  waitingOnPr: number;
+  /** Jobs currently claimed / in-flight on this queue backend. */
+  inFlight: number;
+  /** Oldest enqueuedAt among queued jobs, if known. */
+  oldestQueuedAt?: string | null;
+}
+
 export interface ReviewQueue {
   enqueue(job: ReviewJobPayload): Promise<EnqueueResult>;
   dequeue(): Promise<ReviewJobPayload | null>;
@@ -69,10 +86,15 @@ export interface ReviewQueue {
    *  PR is reviewed twice — duplicate GitHub comments and a double overage
    *  charge. Callers heartbeat this; implementations without a lease no-op. */
   renewLease?(job: ReviewJobPayload): Promise<void>;
+  /** Persist in-memory job mutations (e.g. runId after reserve) into the durable
+   *  PROCESSING backup so recoverOrphans requeues with the same resume identity. */
+  persistJob?(job: ReviewJobPayload): Promise<void>;
   markFailed(job: ReviewJobPayload, error: string): Promise<void>;
   releaseLockAndDrain(prKey: string): Promise<ReviewJobPayload | null>;
   /** Startup cleanup: clear stale in-flight locks + requeue pending. Returns count. */
   recoverOrphans(): Promise<number>;
+  /** Snapshot of waiting / in-flight work for the operator monitor. */
+  depth?(): Promise<QueueDepth>;
   /** Liveness probe for /health — true if the backing store is reachable. */
   ping(): Promise<boolean>;
   close(): Promise<void>;
@@ -92,11 +114,16 @@ export function draftSkipIdempotencyKey(job: ReviewJobPayload): string {
 export function jobIdempotencyKey(job: ReviewJobPayload): string {
   const kind = job.kind ?? 'review';
   const base = reviewShaIdempotencyKey(job);
+  const fix = job.fix;
+  if (kind === 'scan') {
+    return `${base}:scan:${job.scanDay ?? job.enqueuedAt.slice(0, 10)}`;
+  }
   // Explicit human triggers (`@orvex review` command, CLI manual) must ALWAYS
   // run — never dedup them against an earlier automatic review of the same sha.
   // Only automatic webhook events (opened/synchronize/reopened) dedup.
   if (job.action === 'command' || job.action === 'manual') {
-    return `${base}:${kind}:${job.enqueuedAt}`;
+    const source = job.sourceEventId ?? fix?.sourceEventId;
+    return `${base}:${kind}:${source ? `event:${hashShort(source)}` : job.enqueuedAt}`;
   }
   // Distinct SEEN/DONE key so draft `opened` (which used to mark bare SHA DONE)
   // cannot block `ready_for_review`. Successful completion ALSO marks the bare
@@ -105,7 +132,6 @@ export function jobIdempotencyKey(job: ReviewJobPayload): string {
     return `${base}:ready_for_review`;
   }
   if (kind === 'review') return base;
-  const fix = job.fix;
   // include instruction so two different free-form `@orvex <x>` replies on the
   // same thread aren't collapsed into one and silently deduped.
   const instr = fix?.instruction ? `:${hashShort(fix.instruction)}` : '';

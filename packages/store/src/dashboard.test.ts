@@ -53,6 +53,44 @@ test('repos: upsert, list, enable toggle preserved across resync', () => {
   assert.equal(db.isRepoEnabled(100, 'acme/never-seen'), true);
 });
 
+test('repos: re-add after GitHub removal applies autoEnableNewRepos', () => {
+  const db = freshDb();
+  const tenant = seedTenant(db);
+
+  const r = db.upsertRepo({
+    installationId: 100,
+    tenantId: tenant.id,
+    githubRepoId: 5,
+    owner: 'acme',
+    name: 'api',
+    fullName: 'acme/api',
+    enabled: true,
+  });
+  assert.equal(db.disableRepoByGitHubId(100, 5), true);
+  assert.equal(db.isRepoEnabled(100, 'acme/api'), false);
+
+  // Mimic installation_repositories repositories_added: upsert then force-set
+  // from workspace autoEnableNewRepos (default true).
+  db.upsertRepo({
+    installationId: 100,
+    tenantId: tenant.id,
+    githubRepoId: 5,
+    owner: 'acme',
+    name: 'api',
+    fullName: 'acme/api',
+    enabled: true,
+  });
+  assert.equal(db.isRepoEnabled(100, 'acme/api'), false, 'plain upsert still preserves disable');
+  const settings = db.getWorkspaceSettings(tenant.id);
+  db.setRepoEnabled(r.id, settings.autoEnableNewRepos);
+  assert.equal(db.isRepoEnabled(100, 'acme/api'), true);
+
+  db.setRepoEnabled(r.id, false);
+  db.updateWorkspaceSettings(tenant.id, { autoEnableNewRepos: false });
+  db.setRepoEnabled(r.id, db.getWorkspaceSettings(tenant.id).autoEnableNewRepos);
+  assert.equal(db.isRepoEnabled(100, 'acme/api'), false);
+});
+
 test('pull requests: lifecycle states and counts', () => {
   const db = freshDb();
   const tenant = seedTenant(db);

@@ -108,6 +108,8 @@ test('parseOrvexCommand', async (t) => {
     assert.equal(parseOrvexCommand('@orvexander fix all', '@orvex'), null);
     assert.equal(parseOrvexCommand('> @orvex fix all', '@orvex'), null);
     assert.equal(parseOrvexCommand('```text\n@orvex fix all\n```', '@orvex'), null);
+    assert.equal(parseOrvexCommand('~~~text\n@orvex fix all\n~~~', '@orvex'), null);
+    assert.equal(parseOrvexCommand('```text\n@orvex fix all', '@orvex'), null);
     assert.deepEqual(parseOrvexCommand('@orvex thoughts?', '@orvex'), { kind: 'help' });
     assert.deepEqual(parseOrvexCommand('@orvex looks great here', '@orvex'), { kind: 'help' });
   });

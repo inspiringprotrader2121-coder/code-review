@@ -87,7 +87,8 @@ test('P3-5: unbalanced triple-backtick fence in message is closed before the sug
     finding: { ...base.finding, message: 'bug: ```js\nunsafe()' },
   };
   const body = formatInlineFinding({ ...withFence, ...paid });
-  // There should be a closing fence before the suggestion opener so the
-  // suggestion block is not swallowed by the message's unclosed code fence.
-  assert.match(body, /unsafe\(\)\n```\n\n?```suggestion/, 'closes the message fence before the suggestion');
+  // Triple-backtick input is collapsed before rendering, so it cannot swallow
+  // the suggestion opener in the first place.
+  assert.doesNotMatch(body, /bug: ```/);
+  assert.match(body, /unsafe\(\)\n\n```suggestion/, 'the suggestion remains a live GitHub block');
 });

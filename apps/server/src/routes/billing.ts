@@ -4,21 +4,28 @@ import { bodyLimit } from 'hono/body-limit';
 import { createAppDatabase, type AppDatabase, type Tenant } from '@orvex-review/store';
 import {
   isPlanId,
+  authDisabled,
   legacyAuthMode,
   planFeatures,
   publicPlanLabel,
   TenantService,
   WorkspaceAccessError,
 } from '@orvex-review/tenants';
-import { checkRateLimit } from './rate-limit.js';
+import { checkAuthRateLimit } from './rate-limit.js';
 import { sessionUser } from './session.js';
 import { escapeHtml, pageShell } from './pages.js';
+import { sendOperationalAlert } from '../alerts.js';
+import { sameOriginRequest } from './request-security.js';
 
 type PaidPlan = 'review' | 'review-plus' | 'verify-lite' | 'verify';
 
 const CHECKOUT_PLANS: PaidPlan[] = ['review', 'review-plus', 'verify-lite', 'verify'];
-const CHECKOUT_WINDOW_MS = Number(process.env.ORVEX_CHECKOUT_RATE_WINDOW_MS ?? 10 * 60_000);
-const CHECKOUT_MAX = Number(process.env.ORVEX_CHECKOUT_RATE_MAX ?? 12);
+function boundedEnvNumber(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
+}
+const CHECKOUT_WINDOW_MS = boundedEnvNumber('ORVEX_CHECKOUT_RATE_WINDOW_MS', 10 * 60_000, 1_000, 24 * 3600_000);
+const CHECKOUT_MAX = boundedEnvNumber('ORVEX_CHECKOUT_RATE_MAX', 12, 1, 10_000);
 const OVERAGE_EVENT_NAMES: Partial<Record<PaidPlan, string>> = {
   review: 'orvex_review_overage',
   'verify-lite': 'orvex_verify_lite_overage',
@@ -56,9 +63,12 @@ export function billingRoutes() {
   app.post('/api/workspaces/:slug/billing/checkout', async (c) => {
     const ws = workspace(c);
     if (ws instanceof Response) return ws;
+    if (!authDisabled() && !legacyAuthMode(db.hasPasswordUsers()) && !sameOriginRequest(c)) {
+      return c.json({ error: 'same-origin request required' }, 403);
+    }
     if (ws.role !== 'owner') return c.json({ error: 'only a workspace owner can manage billing' }, 403);
 
-    const limit = checkRateLimit(`checkout:${clientIp(c)}:${ws.tenant.id}`, {
+    const limit = checkAuthRateLimit(db, `checkout:${clientIp(c)}:${ws.tenant.id}`, {
       windowMs: CHECKOUT_WINDOW_MS,
       max: CHECKOUT_MAX,
     });
@@ -74,7 +84,7 @@ export function billingRoutes() {
     }
 
     try {
-      const url = await createCheckoutUrl(db, ws.tenant, plan, idempotencyKey(c));
+      const url = await createCheckoutUrl(db, ws.tenant, plan, scopedIdempotencyKey(c, ws.tenant, plan));
       return c.json({ url });
     } catch (err) {
       const e = err as CheckoutError;
@@ -90,7 +100,7 @@ export function billingRoutes() {
     const plan = c.req.param('plan');
     if (!plan || !isCheckoutPlan(plan)) return c.redirect('/#pricing');
 
-    const limit = checkRateLimit(`buy:${clientIp(c)}`, { windowMs: CHECKOUT_WINDOW_MS, max: CHECKOUT_MAX });
+    const limit = checkAuthRateLimit(db, `buy:${clientIp(c)}`, { windowMs: CHECKOUT_WINDOW_MS, max: CHECKOUT_MAX });
     if (!limit.allowed) {
       return c.html(
         pageShell(
@@ -140,7 +150,7 @@ export function billingRoutes() {
     if (!selected) return c.redirect(`${buyPath}`);
 
     try {
-      const url = await createCheckoutUrl(db, selected.tenant, plan, idempotencyKey(c));
+      const url = await createCheckoutUrl(db, selected.tenant, plan, scopedIdempotencyKey(c, selected.tenant, plan));
       return c.redirect(url);
     } catch (err) {
       console.warn('[billing] /buy checkout failed:', (err as Error).message);
@@ -202,13 +212,29 @@ export function billingRoutes() {
       return c.json({ error: 'invalid Stripe signature' }, 400);
     }
 
-    const event = JSON.parse(rawBody) as {
+    let event: {
       id?: string;
-      type: string;
+      type?: string;
+      created?: number;
       data?: { object?: StripeWebhookObject };
     };
-    if (event.id && !db.claimWebhookEvent('stripe', event.id)) {
-      return c.json({ received: true, deduped: true });
+    try {
+      event = JSON.parse(rawBody) as typeof event;
+    } catch {
+      return c.json({ error: 'invalid Stripe event JSON' }, 400);
+    }
+    if (!event || typeof event !== 'object' || typeof event.type !== 'string' || !event.type) {
+      return c.json({ error: 'invalid Stripe event payload' }, 400);
+    }
+    if (!event.id || typeof event.id !== 'string') {
+      return c.json({ error: 'Stripe event missing id' }, 400);
+    }
+    const eventClaim = db.claimWebhookEvent('stripe', event.id);
+    if (!eventClaim) {
+      const prior = db.getWebhookEvent('stripe', event.id);
+      if (prior?.processedAt) return c.json({ received: true, deduped: true });
+      c.header('Retry-After', '5');
+      return c.json({ error: 'event is already being processed' }, 503);
     }
 
     try {
@@ -219,48 +245,120 @@ export function billingRoutes() {
       if (event.type === 'checkout.session.completed') {
       if (tenantId && plan && isPlanId(plan) && plan !== 'free') {
         const newSub = stripeId(object?.subscription);
+        const newCustomer = stripeId(object?.customer);
+        if (!newSub || !newCustomer) {
+          throw new Error('Stripe checkout.session.completed is missing subscription or customer');
+        }
+        // Do not unlock paid features on unpaid/incomplete Checkout sessions.
+        // Async payment methods can emit completed before funds clear; inventing
+        // status='active' bypasses getTenantPlan's dunning downgrade.
+        const paymentStatus = object?.payment_status;
+        if (paymentStatus && paymentStatus !== 'paid' && paymentStatus !== 'no_payment_required') {
+          console.warn(
+            `[billing] ignoring checkout.session.completed for unpaid session (payment_status=${paymentStatus}) tenant=${tenantId}`,
+          );
+        } else {
         // Prevent DOUBLE-BILLING: if this tenant already had a DIFFERENT active
         // subscription (a second tab, a back-button resubmit, or an upgrade via a
         // fresh Checkout), cancel the prior one so at most ONE subscription bills.
         // Cancel BEFORE repointing so a failure here doesn't orphan the old sub id.
         const prior = db.getTenantBilling(tenantId);
         if (prior?.stripeSubscriptionId && newSub && prior.stripeSubscriptionId !== newSub) {
-          await cancelStripeSubscription(prior.stripeSubscriptionId).catch((e) =>
+          try {
+            await cancelStripeSubscription(prior.stripeSubscriptionId);
+          } catch (err) {
+            // Do not repoint the tenant while the old subscription may still be
+            // active. Throw so Stripe retries the event after the cancellation
+            // endpoint recovers instead of creating a double-billing state.
             console.error(
               `[billing] could not cancel superseded subscription ${prior.stripeSubscriptionId} for tenant ${tenantId}:`,
-              (e as Error).message,
-            ),
+              (err as Error).message,
+            );
+            throw err;
+          }
+        }
+        // Prefer the subscription's real status + billing period over inventing
+        // 'active' from the Checkout Session (session.created is not period start).
+        let subscriptionStatus = object?.status;
+        let periodStart = stripeTimestampToIso(object?.current_period_start);
+        let periodEnd = stripeTimestampToIso(object?.current_period_end);
+        try {
+          const secret = process.env.STRIPE_SECRET_KEY;
+          if (secret && newSub) {
+            const sub = await stripeGet<{
+              status?: string;
+              current_period_start?: number;
+              current_period_end?: number;
+            }>(`/v1/subscriptions/${encodeURIComponent(newSub)}`, secret);
+            subscriptionStatus = sub.status ?? subscriptionStatus;
+            periodStart = stripeTimestampToIso(sub.current_period_start) ?? periodStart;
+            periodEnd = stripeTimestampToIso(sub.current_period_end) ?? periodEnd;
+          }
+        } catch (err) {
+          console.warn(
+            `[billing] could not retrieve subscription ${newSub} on checkout complete:`,
+            (err as Error).message,
           );
         }
-        db.setTenantPlan(tenantId, plan);
-        db.setTenantBilling(tenantId, {
-          stripeCustomerId: stripeId(object?.customer),
-          stripeSubscriptionId: newSub,
-          stripeSubscriptionStatus: 'active',
-          stripeCurrentPeriodStart: stripeTimestampToIso(object?.created) ?? new Date().toISOString(),
-        });
+        const unlocked =
+          !subscriptionStatus
+          || subscriptionStatus === 'active'
+          || subscriptionStatus === 'trialing';
+        if (!unlocked) {
+          console.warn(
+            `[billing] checkout complete but subscription status=${subscriptionStatus} — recording billing without plan unlock`,
+          );
+          db.setTenantBilling(tenantId, {
+            stripeCustomerId: newCustomer,
+            stripeSubscriptionId: newSub,
+            stripeSubscriptionStatus: subscriptionStatus,
+            stripeCurrentPeriodStart: periodStart,
+            stripeCurrentPeriodEnd: periodEnd,
+          });
+        } else {
+          db.setTenantPlan(tenantId, plan);
+          db.setTenantBilling(tenantId, {
+            stripeCustomerId: newCustomer,
+            stripeSubscriptionId: newSub,
+            stripeSubscriptionStatus: subscriptionStatus ?? 'active',
+            stripeCurrentPeriodStart: periodStart ?? stripeTimestampToIso(object?.created) ?? new Date().toISOString(),
+            stripeCurrentPeriodEnd: periodEnd,
+          });
+        }
+        db.assignUnlinkedStripeRevenue(newCustomer, tenantId);
+        }
       }
       }
 
       if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated') {
-      // SUB-LIFECYCLE GUARD: `updated` events for a SUPERSEDED subscription (the
-      // old sub canceled during an upgrade, or a duplicate Checkout) must never
-      // repoint billing — only the tenant's CURRENT subscription may mutate state.
-      // `created` is exempt: it announces the NEW sub (checkout.session.completed
-      // has already repointed, or will), never the old one.
-      if (event.type === 'customer.subscription.updated' && tenantId && !isCurrentSubscription(db, tenantId, object?.id)) {
+      // SUB-LIFECYCLE GUARD: events for a SUPERSEDED subscription must never
+      // repoint billing. A `created` event can arrive before checkout completion,
+      // so a tenant that already has a subscription defers the new event until
+      // checkout.session.completed atomically retires the old subscription.
+      const current = tenantId ? db.getTenantBilling(tenantId) : undefined;
+      const createdForDifferentSubscription =
+        event.type === 'customer.subscription.created' &&
+        Boolean(current?.stripeSubscriptionId) &&
+        current?.stripeSubscriptionId !== object?.id;
+      if (
+        (event.type === 'customer.subscription.updated' || createdForDifferentSubscription) &&
+        tenantId &&
+        !isCurrentSubscription(db, tenantId, object?.id)
+      ) {
         console.warn(
-          `[billing] ignoring subscription.updated for superseded sub ${object?.id} (tenant ${tenantId})`,
+          `[billing] ignoring ${event.type} for superseded/early sub ${object?.id} (tenant ${tenantId})`,
         );
       } else if (tenantId && plan && isPlanId(plan) && plan !== 'free') {
+        const subscriptionCustomerId = stripeId(object?.customer);
         db.setTenantPlan(tenantId, plan);
         db.setTenantBilling(tenantId, {
-          stripeCustomerId: stripeId(object?.customer),
+          stripeCustomerId: subscriptionCustomerId,
           stripeSubscriptionId: object?.id,
           stripeSubscriptionStatus: object?.status,
           stripeCurrentPeriodStart: stripeTimestampToIso(object?.current_period_start),
           stripeCurrentPeriodEnd: stripeTimestampToIso(object?.current_period_end),
         });
+        if (subscriptionCustomerId) db.assignUnlinkedStripeRevenue(subscriptionCustomerId, tenantId);
       }
       }
 
@@ -284,10 +382,47 @@ export function billingRoutes() {
       }
       }
 
-      if (event.id) db.completeWebhookEvent('stripe', event.id);
+      if (event.type === 'invoice.paid' || event.type === 'charge.refunded') {
+        const customerId = stripeId(object?.customer);
+        const revenueTenantId = tenantId ?? (customerId ? db.getTenantByStripeCustomerId(customerId)?.id : undefined);
+        const chargeId = event.type === 'charge.refunded' ? object?.id : undefined;
+        const cumulativeRefunded = Math.max(0, Number(object?.amount_refunded ?? 0));
+        const previouslyRecordedRefunded = chargeId ? db.sumStripeRefundsForCharge(chargeId) : 0;
+        const refundDelta = Math.max(0, cumulativeRefunded - previouslyRecordedRefunded);
+        const amountCents =
+          event.type === 'invoice.paid'
+            ? Math.max(0, Number(object?.amount_paid ?? 0))
+            : -refundDelta;
+        if (event.id && amountCents !== 0) {
+          if (!revenueTenantId) {
+            console.warn(
+              `[billing] recording unlinked ${event.type} ${event.id}; it will be assigned when customer billing is linked`,
+            );
+          }
+          db.recordStripeRevenueEvent({
+            eventId: event.id,
+            eventType: event.type,
+            // For refunds this stores the charge id so a later cumulative
+            // charge.refunded webhook can be converted to a delta.
+            invoiceId: object?.id,
+            tenantId: revenueTenantId,
+            customerId,
+            subscriptionId: stripeId(object?.subscription),
+            amountCents,
+            currency: object?.currency ?? 'usd',
+            occurredAt:
+              (event.type === 'charge.refunded'
+                ? stripeTimestampToIso(event.created)
+                : stripeTimestampToIso(object?.status_transitions?.paid_at)) ??
+              new Date().toISOString(),
+          });
+        }
+      }
+
+      if (event.id && eventClaim) db.completeWebhookEvent('stripe', event.id, eventClaim);
       return c.json({ received: true });
     } catch (err) {
-      if (event.id) db.releaseWebhookEvent('stripe', event.id);
+      if (event.id && eventClaim) db.releaseWebhookEvent('stripe', event.id, eventClaim);
       throw err;
     }
   };
@@ -324,11 +459,19 @@ export function isCurrentSubscription(db: AppDatabase, tenantId: string, subId: 
  *  billed for two at once. */
 async function cancelStripeSubscription(subscriptionId: string): Promise<void> {
   const key = process.env.STRIPE_SECRET_KEY;
-  if (!key) return;
-  const res = await fetch(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${key}` },
-  });
+  if (!key) throw new Error('Stripe secret is not configured; cannot cancel superseded subscription');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+      signal: controller.signal,
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${key}` },
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok && res.status !== 404) {
     throw new Error(`Stripe cancel ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
   }
@@ -420,6 +563,12 @@ function idempotencyKey(c: Context): string | undefined {
   return value ? value.slice(0, 255) : undefined;
 }
 
+/** Stripe keys are account-wide; never let a caller reuse one across tenants. */
+function scopedIdempotencyKey(c: Context, tenant: Tenant, plan: PaidPlan): string | undefined {
+  const key = idempotencyKey(c);
+  return key ? `orvex:${tenant.id}:${plan}:${key}`.slice(0, 255) : undefined;
+}
+
 function appBaseUrl(): string {
   return (process.env.APP_URL ?? `http://localhost:${process.env.PORT ?? 8787}`).replace(/\/+$/, '');
 }
@@ -437,15 +586,48 @@ function clientIp(c: Context): string {
 }
 
 async function stripeRequest<T>(path: string, secretKey: string, params: Record<string, string>, idempotencyKey?: string): Promise<T> {
-  const res = await fetch(`https://api.stripe.com${path}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${secretKey}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
-    },
-    body: new URLSearchParams(params),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.stripe.com${path}`, {
+      signal: controller.signal,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${secretKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
+      },
+      body: new URLSearchParams(params),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  const json: unknown = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = typeof json === 'object' && json !== null && 'error' in json ? json.error : undefined;
+    const message =
+      typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string'
+        ? error.message
+        : `Stripe request failed: ${res.status}`;
+    throw new Error(message);
+  }
+  return json as T;
+}
+
+async function stripeGet<T>(path: string, secretKey: string): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.stripe.com${path}`, {
+      signal: controller.signal,
+      method: 'GET',
+      headers: { Authorization: `Bearer ${secretKey}` },
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   const json: unknown = await res.json().catch(() => ({}));
   if (!res.ok) {
     const error = typeof json === 'object' && json !== null && 'error' in json ? json.error : undefined;
@@ -465,44 +647,149 @@ export async function reportStripeReviewOverage(input: {
   runId: string;
   /** this run is an `@orvex deep` review — bills as 2 units, not 1 */
   deep?: boolean;
-}): Promise<'reported' | 'included' | 'not_configured'> {
+}): Promise<'reported' | 'included' | 'not_configured' | 'pending'> {
   const features = planFeatures(input.plan);
   if (features.includedReviewsPerMonth === null || features.overageCentsPerReview === null) return 'included';
 
   const billing = input.store.getTenantBilling(input.tenantId);
   if (!billing?.stripeCustomerId) return 'not_configured';
 
+  const existing = input.store.getStripeMeterEvent(input.runId);
+  if (existing?.status === 'reported') return 'reported';
+
   const periodStart =
     billing.stripeCurrentPeriodStart ?? new Date(Date.now() - 30 * 24 * 3_600_000).toISOString();
 
-  // Deep reviews count as 2 units. `completedReviewUnitsSince` includes THIS
-  // run (recorded completed before we're called), so compute how many of this
-  // run's units land ABOVE the included line — never over-bill the boundary.
-  const thisWeight = input.deep ? 2 : 1;
-  const unitsWithThis = input.store.completedReviewUnitsSince(input.tenantId, periodStart);
-  const unitsBefore = unitsWithThis - thisWeight;
+  // Allocate the run's units in stable creation order. Computing from the
+  // current total lets concurrent completions each observe the same total and
+  // over-report the quota boundary.
+  const units = input.store.reviewRunOverageUnits(input.tenantId, input.runId, periodStart);
+  if (!units) throw new Error(`review run ${input.runId} was not found for overage metering`);
   const included = features.includedReviewsPerMonth;
-  const overageUnits = Math.max(0, unitsWithThis - included) - Math.max(0, unitsBefore - included);
+  const overageUnits = Math.max(0, units.unitsThrough - included) - Math.max(0, units.unitsBefore - included);
   if (overageUnits <= 0) return 'included';
 
   const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
-  const eventName = process.env[`STRIPE_METER_EVENT_${input.plan.toUpperCase().replace(/-/g, '_')}`] ?? OVERAGE_EVENT_NAMES[input.plan];
-  if (!stripeSecretKey || !eventName) return 'not_configured';
+  const eventName = stripeMeterEventName(input.plan);
+  let meter = existing;
+  if (!meter) {
+    // Create the durable outbox row before checking provider configuration.
+    // A completed overage must remain retryable across a missing secret or a
+    // temporarily unavailable meter name.
+    meter = input.store.enqueueStripeMeterEvent({
+      runId: input.runId,
+      tenantId: input.tenantId,
+      customerId: billing.stripeCustomerId,
+      eventName: eventName ?? 'orvex_review_overage',
+      plan: input.plan,
+      units: overageUnits,
+    });
+  }
+  if (!stripeSecretKey || !eventName) {
+    void sendOperationalAlert({
+      event: 'stripe-meter-configuration-missing',
+      severity: 'critical',
+      message: `Stripe overage metering is not configured for plan ${input.plan}; event ${input.runId} is pending.`,
+    });
+    input.store.markStripeMeterAttempt(
+      input.runId,
+      'Stripe meter configuration is missing',
+      new Date(Date.now() + 15 * 60_000).toISOString(),
+    );
+    return 'pending';
+  }
+  if (meter.eventName !== eventName) {
+    input.store.setStripeMeterEventName(input.runId, eventName);
+    meter = input.store.getStripeMeterEvent(input.runId);
+  }
+  if (!meter) return 'pending';
+  return sendStripeMeterEvent(input.store, meter, stripeSecretKey);
+}
 
-  await stripeRequest(
-    '/v1/billing/meter_events',
-    stripeSecretKey,
-    {
-      event_name: eventName,
-      identifier: `review_run_${input.runId}`,
-      'payload[stripe_customer_id]': billing.stripeCustomerId,
-      'payload[value]': String(overageUnits),
-      'payload[tenant_id]': input.tenantId,
-      'payload[plan]': input.plan,
-    },
-    `review_run_${input.runId}`,
-  );
-  return 'reported';
+/** Retry durable overage events after transient Stripe/configuration failures. */
+export async function retryStripeMeterEvents(store: AppDatabase, limit = 50): Promise<number> {
+  const secret = process.env.STRIPE_SECRET_KEY;
+  let reported = 0;
+  for (const event of store.listPendingStripeMeterEvents(limit)) {
+    const eventName = stripeMeterEventName(event.plan);
+    if (!secret || !eventName) {
+      void sendOperationalAlert({
+        event: 'stripe-meter-configuration-missing',
+        severity: 'critical',
+        message: `Stripe overage retry cannot report event ${event.runId}; configuration is missing.`,
+      });
+      store.markStripeMeterAttempt(
+        event.runId,
+        'Stripe meter configuration is missing',
+        new Date(Date.now() + 15 * 60_000).toISOString(),
+      );
+      continue;
+    }
+    if (event.eventName !== eventName) {
+      store.setStripeMeterEventName(event.runId, eventName);
+      event.eventName = eventName;
+    }
+    try {
+      await sendStripeMeterEvent(store, event, secret);
+      reported++;
+    } catch (err) {
+      void sendOperationalAlert({
+        event: 'stripe-meter-delivery-failed',
+        severity: 'warning',
+        message: `Stripe meter retry failed for run ${event.runId}: ${(err as Error).message}`,
+      });
+      console.error(`[billing] retrying meter event ${event.runId} failed:`, (err as Error).message);
+    }
+  }
+  return reported;
+}
+
+function stripeMeterEventName(plan: string): string | undefined {
+  const configured = process.env[`STRIPE_METER_EVENT_${plan.toUpperCase().replace(/-/g, '_')}`]?.trim();
+  return configured || OVERAGE_EVENT_NAMES[plan as PaidPlan];
+}
+
+async function sendStripeMeterEvent(
+  store: AppDatabase,
+  event: {
+    runId: string;
+    tenantId: string;
+    customerId: string;
+    eventName: string;
+    plan: string;
+    units: number;
+  },
+  secret: string,
+): Promise<'reported' | 'pending'> {
+  try {
+    await stripeRequest(
+      '/v1/billing/meter_events',
+      secret,
+      {
+        event_name: event.eventName,
+        identifier: `review_run_${event.runId}`,
+        'payload[stripe_customer_id]': event.customerId,
+        'payload[value]': String(event.units),
+        'payload[tenant_id]': event.tenantId,
+        'payload[plan]': event.plan,
+      },
+      `review_run_${event.runId}`,
+    );
+    store.markStripeMeterReported(event.runId);
+    return 'reported';
+  } catch (err) {
+    void sendOperationalAlert({
+      event: 'stripe-meter-delivery-failed',
+      severity: 'warning',
+      message: `Stripe meter delivery failed for run ${event.runId}: ${(err as Error).message}`,
+    });
+    store.markStripeMeterAttempt(
+      event.runId,
+      (err as Error).message,
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    throw err;
+  }
 }
 
 type StripeWebhookObject = {
@@ -511,9 +798,14 @@ type StripeWebhookObject = {
   customer?: string | { id?: string };
   subscription?: string | { id?: string };
   status?: string;
+  payment_status?: string;
   current_period_start?: number;
   current_period_end?: number;
   created?: number;
+  amount_paid?: number;
+  amount_refunded?: number;
+  currency?: string;
+  status_transitions?: { paid_at?: number };
 };
 
 function stripeId(value: string | { id?: string } | undefined): string | undefined {
@@ -526,26 +818,31 @@ function stripeTimestampToIso(value: number | undefined): string | undefined {
 
 export function verifyStripeSignature(rawBody: string, signature: string | undefined, secret: string): boolean {
   if (!signature || !secret) return false;
-  const parts = Object.fromEntries(
-    signature.split(',').map((part) => {
-      const [key, value] = part.split('=', 2);
-      return [key, value];
-    }),
-  );
-  const timestamp = parts.t;
-  const expected = parts.v1;
-  if (!timestamp || !expected) return false;
+  let timestamp: string | undefined;
+  const expected: string[] = [];
+  for (const part of signature.split(',')) {
+    const [key, value] = part.trim().split('=', 2);
+    if (key === 't' && value) timestamp = value;
+    if (key === 'v1' && value) expected.push(value);
+  }
+  if (!timestamp || expected.length === 0) return false;
 
   // Reject stale signatures — without a timestamp-tolerance check a captured,
   // validly-signed event (e.g. subscription.deleted) can be replayed forever to
   // force a paying tenant back to `free`. 5-minute window matches Stripe's SDK.
-  const toleranceS = Number(process.env.STRIPE_WEBHOOK_TOLERANCE_S ?? 300);
+  const configuredTolerance = Number(process.env.STRIPE_WEBHOOK_TOLERANCE_S ?? 300);
+  const toleranceS =
+    Number.isFinite(configuredTolerance) && configuredTolerance >= 0
+      ? Math.min(Math.floor(configuredTolerance), 3_600)
+      : 300;
   const t = Number(timestamp);
   if (!Number.isFinite(t) || Math.abs(Date.now() / 1000 - t) > toleranceS) return false;
 
   const signedPayload = `${timestamp}.${rawBody}`;
   const digest = createHmac('sha256', secret).update(signedPayload).digest('hex');
   const a = Buffer.from(digest);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+  return expected.some((candidate) => {
+    const b = Buffer.from(candidate);
+    return a.length === b.length && timingSafeEqual(a, b);
+  });
 }

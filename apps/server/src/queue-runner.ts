@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import type { ReviewQueue, ReviewJobPayload } from '@orvex-review/queue';
+import type { ReviewQueue, ReviewJobPayload, QueueDepth } from '@orvex-review/queue';
 import { prKey } from '@orvex-review/queue';
 import {
   createInstallationOctokit,
@@ -7,8 +7,20 @@ import {
   getInstallationIdForRepo,
 } from '@orvex-review/github';
 import { TenantService } from '@orvex-review/tenants';
-import { isTransientLlmError, killAllCodexChildren } from '@orvex-review/review';
+import { isTransientLlmError, killAllCodexChildren, setCodexChildListener } from '@orvex-review/review';
 import { processReviewJob, loadWorkerConfig } from './worker.js';
+import {
+  noteActiveChildExit,
+  noteActiveChildSpawn,
+  runWithActiveReview,
+} from './active-reviews.js';
+
+// Attribute Codex child PIDs to the in-flight review that spawned them so the
+// super-admin live monitor can show per-client RAM (not just shared Node RSS).
+setCodexChildListener({
+  onSpawn: noteActiveChildSpawn,
+  onExit: noteActiveChildExit,
+});
 
 // Live count of in-flight jobs, exposed on /ready so deploys can WAIT FOR IDLE
 // before restarting. Restarting mid-review both discards the review (now
@@ -22,22 +34,36 @@ function registerActiveGauge(fn: () => number): void {
 export function getActiveJobCount(): number {
   return activeGauge();
 }
+
+let queueDepthProvider: (() => Promise<QueueDepth>) | null = null;
+export async function getQueueDepth(): Promise<QueueDepth> {
+  if (queueDepthProvider) return queueDepthProvider();
+  return { queued: 0, waitingOnPr: 0, inFlight: getActiveJobCount(), oldestQueuedAt: null };
+}
+
 export function isDeployDraining(): boolean {
   return existsSync(process.env.ORVEX_DEPLOY_DRAIN_PATH ?? '/home/orvex/orvex-data/deploy-drain');
 }
 import { processAskJob, processExplainJob, processFixJob, processResolveJob } from './autofix.js';
 import { processScanJob } from './nightly.js';
 import { INITIAL_BACKOFF_STATE, nextBackoffState, isPaused, type BackoffState } from './backoff.js';
+import { sendOperationalAlert } from './alerts.js';
 
 const POLL_MS = 500;
+const RECOVERY_MS = 30_000;
+
+function boundedEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
+}
 
 /**
  * Circuit breaker: after this many CONSECUTIVE provider rate-limit/quota/network
  * failures across the worker, stop dequeuing new jobs for BACKOFF_MS instead of
  * continuing to fail job after job. See backoff.ts for the incident this fixes.
  */
-const BACKOFF_THRESHOLD = Math.max(1, Number(process.env.ORVEX_BACKOFF_THRESHOLD ?? 3));
-const BACKOFF_MS = Math.max(1000, Number(process.env.ORVEX_BACKOFF_MS ?? 300_000));
+const BACKOFF_THRESHOLD = boundedEnvInt('ORVEX_BACKOFF_THRESHOLD', 3, 1, 1_000);
+const BACKOFF_MS = boundedEnvInt('ORVEX_BACKOFF_MS', 300_000, 1_000, 86_400_000);
 
 /**
  * How many jobs this process runs at once. Reviews are minutes-long LLM calls,
@@ -46,7 +72,12 @@ const BACKOFF_MS = Math.max(1000, Number(process.env.ORVEX_BACKOFF_MS ?? 300_000
  * blow the provider's rate limit. This caps a single worker process; scale total
  * throughput horizontally by running more processes against the Redis queue.
  */
-const MAX_CONCURRENT = Math.max(1, Number(process.env.ORVEX_MAX_CONCURRENT_REVIEWS ?? 4));
+const MAX_CONCURRENT = boundedEnvInt('ORVEX_MAX_CONCURRENT_REVIEWS', 4, 1, 100);
+
+/** Cap used by the live resource monitor so the UI matches the worker. */
+export function maxConcurrentReviews(): number {
+  return MAX_CONCURRENT;
+}
 
 export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   let running = true;
@@ -58,6 +89,10 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   // window where a deploy could observe zero in-flight jobs while a dequeue
   // promise had already started but had not yet entered `inFlight`.
   registerActiveGauge(() => active);
+  queueDepthProvider = async () => {
+    if (queue.depth) return queue.depth();
+    return { queued: 0, waitingOnPr: 0, inFlight: active, oldestQueuedAt: null };
+  };
   let backoff: BackoffState = INITIAL_BACKOFF_STATE;
 
   const processOne = async (job: ReviewJobPayload) => {
@@ -73,17 +108,42 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     // succeed and review the SAME PR concurrently — duplicate comments and a
     // double overage charge. Renewing at a third of the TTL tolerates two missed
     // beats. A crashed worker stops renewing, so the lock still expires.
+    let leaseLost = false;
     const leaseTimer = queue.renewLease
       ? setInterval(() => {
           queue.renewLease?.(job).catch((err) => {
+            leaseLost = true;
             console.warn(`[worker] lease renewal failed for ${pk}:`, (err as Error).message);
           });
-        }, Number(process.env.ORVEX_LEASE_RENEW_MS ?? 300_000))
+        }, boundedEnvInt('ORVEX_LEASE_RENEW_MS', 300_000, 10_000, 300_000))
       : undefined;
     if (leaseTimer) leaseTimer.unref?.();
 
+    // Live ownership check used before GitHub writes. The sticky leaseLost flag
+    // alone can lag a mid-interval takeover; await renewLease here so we never
+    // publish under a stolen lease.
+    const leaseValid = async (): Promise<boolean> => {
+      if (leaseLost) return false;
+      if (!queue.renewLease) return true;
+      try {
+        await queue.renewLease(job);
+        return true;
+      } catch (err) {
+        leaseLost = true;
+        console.warn(`[worker] lease ownership check failed for ${pk}:`, (err as Error).message);
+        return false;
+      }
+    };
+
+    // Bind this async stack to the live resource registry so checkout dirs and
+    // Codex children attribute to THIS client review in the super-admin panel.
+    return runWithActiveReview(job, async () => {
     try {
-      const config = loadWorkerConfig();
+      const config = {
+        ...loadWorkerConfig(),
+        leaseValid,
+        persistJob: queue.persistJob ? (j: ReviewJobPayload) => queue.persistJob!(j) : undefined,
+      };
       let draftSkipped = false;
       if (kind === 'fix') {
         await processFixJob(job, config);
@@ -97,6 +157,9 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         await processScanJob(job, config);
       } else {
         const result = await processReviewJob(job, config);
+        if (leaseLost || !(await leaseValid())) {
+          throw new Error(`review lease lost for ${pk}; discarding this worker result`);
+        }
         draftSkipped = result.skipReason === 'draft PR';
         // auto-apply mode: commit Orvex's ready fixes right after each review
         if (!result.skipReason && result.newCount > 0) {
@@ -112,6 +175,9 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
             console.log(`[worker] auto-apply queued for ${pk}`);
           }
         }
+      }
+      if (leaseLost || !(await leaseValid())) {
+        throw new Error(`review lease lost for ${pk}; discarding this worker result`);
       }
       await queue.markCompleted(job, { draftSkipped });
       backoff = nextBackoffState(backoff, 'success', Date.now(), {
@@ -153,6 +219,11 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         console.warn(
           `[worker] ${backoff.consecutiveFailures} consecutive provider failures — pausing new reviews for ${Math.round(BACKOFF_MS / 1000)}s (provider looks rate-limited/out of quota)`,
         );
+        void sendOperationalAlert({
+          event: 'worker-provider-circuit-open',
+          severity: 'critical',
+          message: `${backoff.consecutiveFailures} consecutive provider failures; new reviews paused for ${Math.round(BACKOFF_MS / 1000)}s.`,
+        });
       }
     } finally {
       // Stop heartbeating BEFORE releasing the lock, so a renewal can never
@@ -164,6 +235,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         console.log(`[worker] coalesced follow-up ${pk} @ ${next.headSha.slice(0, 7)}`);
       }
     }
+    });
   };
 
   // Pump: fill free concurrency slots each tick. Each job decrements `active`
@@ -205,6 +277,10 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   const interval = setInterval(() => {
     pump().catch((err) => console.error('[worker] pump error', err));
   }, POLL_MS);
+  const recoveryInterval = setInterval(() => {
+    queue.recoverOrphans().catch((err) => console.error('[worker] orphan recovery error', err));
+  }, RECOVERY_MS);
+  recoveryInterval.unref?.();
 
   // Graceful shutdown. Release the lock + dedup keys for every interrupted job
   // and RE-QUEUE it so it resumes after the restart — a deploy must never eat a
@@ -215,12 +291,13 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   return async () => {
     running = false;
     clearInterval(interval);
+    clearInterval(recoveryInterval);
     if (active === 0) return;
     // DRAIN before force-requeue: give in-flight jobs a window to FINISH
     // naturally. Killing a codex process mid token-refresh corrupts its OAuth
     // session, so exiting while codex is running is the last resort, not the
     // default. pm2's kill timeout must exceed this (set on the server).
-    const drainMs = Number(process.env.ORVEX_SHUTDOWN_DRAIN_MS ?? 240_000);
+    const drainMs = boundedEnvInt('ORVEX_SHUTDOWN_DRAIN_MS', 240_000, 1_000, 86_400_000);
     const deadline = Date.now() + drainMs;
     if (active > 0) {
       console.log(`[worker] shutdown: draining ${active} active slot(s) (up to ${Math.round(drainMs / 1000)}s)…`);
@@ -258,8 +335,14 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     }
     let requeued = 0;
     let dropped = 0;
+    // Mark reserved runs interrupted BEFORE requeue so resumeReviewRun can reopen
+    // the same row after restart (status must be skipped/interrupted, not running).
+    const store = loadWorkerConfig().store;
     for (const job of inFlight) {
       try {
+        if (job.runId) {
+          store.interruptReviewRun(job.runId);
+        }
         await queue.markFailed(job, 'interrupted by restart');
         if (!job.resumedAfterRestart) {
           await queue.enqueue({ ...job, resumedAfterRestart: true, enqueuedAt: new Date().toISOString() });
@@ -305,14 +388,24 @@ export async function enqueueManualReview(
       installationId = existing.installationId;
       tenantId = existing.tenantId;
     } else {
-      installationId = await getInstallationIdForRepo(config.github, input.owner, input.repo);
-      const slug = input.tenantSlug ?? input.owner.toLowerCase();
-      const { installation } = await tenants.completeInstallCallback(
-        installationId,
-        slug,
+      // Never bind an unbound GitHub install from POST /review — that path is
+      // authenticated with REVIEW_API_SECRET and previously accepted a caller-
+      // controlled tenantSlug (trustedServerBinding), which could steal billing
+      // attribution. Resolve an existing DB row only; require the signed browser
+      // connect flow to create the binding.
+      const installationIdFromGithub = await getInstallationIdForRepo(
         config.github,
+        input.owner,
+        input.repo,
       );
-      tenantId = installation.tenantId;
+      const bound = config.store.getInstallation(installationIdFromGithub);
+      if (!bound) {
+        throw new Error(
+          `Installation ${installationIdFromGithub} for ${input.owner}/${input.repo} is not bound to a workspace — complete the GitHub App connect flow first`,
+        );
+      }
+      installationId = bound.installationId;
+      tenantId = bound.tenantId;
     }
   }
 

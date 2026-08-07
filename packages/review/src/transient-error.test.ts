@@ -6,6 +6,7 @@ import {
   resolveMaxOutputTokens,
   parseRetryAfterMs,
   isRetryableRateLimit,
+  isOversizedModelRequest,
 } from './llm-client.js';
 
 test('provider failover fires on rate-limit/quota errors specifically (narrower than transient)', () => {
@@ -67,6 +68,20 @@ test('isRetryableRateLimit: waits on recoverable limits, fails fast on hard quot
   // Not a rate limit at all.
   assert.equal(isRetryableRateLimit('terminated'), false);
   assert.equal(isRetryableRateLimit('LLM request failed (400): bad request'), false);
+});
+
+test('isOversizedModelRequest: fail-fast, never sleep-retry as TPM', () => {
+  const msg =
+    'Reconnecting... 2/2 (stream disconnected before completion: Request too large for gpt-5.6-luna in organization org-abc)';
+  assert.equal(isOversizedModelRequest(msg), true);
+  assert.equal(isRetryableRateLimit(msg), false);
+  assert.equal(isOversizedModelRequest('context_length_exceeded: max 128000'), true);
+  assert.equal(isRetryableRateLimit('context_length_exceeded: max 128000'), false);
+  // A real TPM line must still retry (raise TPM later; do not change that path).
+  assert.equal(
+    isRetryableRateLimit('Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 200000'),
+    true,
+  );
 });
 
 test('clamps an oversized ceiling to the safe cap (the 200k prod misconfig)', (t) => {

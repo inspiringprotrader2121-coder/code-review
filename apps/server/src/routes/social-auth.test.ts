@@ -25,6 +25,7 @@ test('Google and GitHub OAuth sign-in link an existing workspace account and ope
   const db = createAppDatabase();
   const existingUser = db.createPasswordUser({ email: 'member@example.test', passwordHash: 'not-used-in-this-test' });
   assert.ok(existingUser);
+  db.setUserEmailVerified(existingUser.id);
   const existingWorkspace = db.createTenant('member-workspace');
   db.addWorkspaceMember(existingWorkspace.id, existingUser.id, 'owner');
   const app = sessionRoutes();
@@ -84,6 +85,79 @@ test('Google and GitHub OAuth sign-in link an existing workspace account and ope
   const githubUser = db.getUserByGitHubId(42);
   assert.ok(githubUser);
   assert.equal(githubUser.id, googleUser.id);
+});
+
+test('OAuth-only MFA reauthentication must return the already-linked provider identity', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-mfa-reauth-route-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.STORE_PATH = path.join(dir, 'app.db');
+  process.env.PLATFORM_SECRET = 'test-platform-secret-that-is-not-used-in-production';
+  process.env.APP_URL = 'https://example.test';
+  process.env.GITHUB_OAUTH_CLIENT_ID = 'github-client';
+  process.env.GITHUB_OAUTH_CLIENT_SECRET = 'github-secret';
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const [{ createAppDatabase }, { sessionRoutes }] = await Promise.all([
+    import('@orvex-review/store'),
+    import('./session.js'),
+  ]);
+  const db = createAppDatabase();
+  const user = db.upsertUserFromGitHub({ githubId: 42, login: 'linked-user', email: 'linked@example.test' });
+  const session = db.createSession(user.id);
+  const app = sessionRoutes();
+  const start = await app.request('/auth/reauth?provider=github&next=/settings/security', {
+    headers: { cookie: `orvex_session=${session.id}` },
+  });
+  assert.equal(start.status, 302);
+  const location = new URL(start.headers.get('location')!);
+  const state = location.searchParams.get('state');
+  assert.ok(state);
+  const csrf = cookiePair(start.headers.get('set-cookie'), 'orvex_login_csrf');
+  assert.ok(csrf);
+
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'other-user-token' });
+    if (url === 'https://api.github.com/user') return Response.json({ id: 99, login: 'other-user' });
+    if (url === 'https://api.github.com/user/emails') return Response.json([]);
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const callback = await app.request(`/auth/oauth/callback?code=other-code&state=${encodeURIComponent(state)}`, {
+    headers: { cookie: `orvex_session=${session.id}; ${csrf}` },
+  });
+  assert.equal(callback.status, 302);
+  assert.equal(new URL(callback.headers.get('location')!, 'https://example.test').pathname, '/auth/login');
+  assert.match(callback.headers.get('location')!, /error=github/);
+});
+
+test('OAuth-only MFA chooses the linked Google provider when both OAuth providers are configured', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-google-mfa-route-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  process.env.STORE_PATH = path.join(dir, 'app.db');
+  process.env.PLATFORM_SECRET = 'test-platform-secret-that-is-not-used-in-production';
+  process.env.APP_URL = 'https://example.test';
+  process.env.GITHUB_OAUTH_CLIENT_ID = 'github-client';
+  process.env.GITHUB_OAUTH_CLIENT_SECRET = 'github-secret';
+  process.env.GOOGLE_OAUTH_CLIENT_ID = 'google-client';
+  process.env.GOOGLE_OAUTH_CLIENT_SECRET = 'google-secret';
+
+  const [{ createAppDatabase }, { sessionRoutes }] = await Promise.all([
+    import('@orvex-review/store'),
+    import('./session.js'),
+  ]);
+  const db = createAppDatabase();
+  const user = db.upsertUserFromGoogle({
+    googleId: 'google-linked',
+    email: 'google-only@example.test',
+  });
+  const session = db.createSession(user.id);
+  const app = sessionRoutes();
+  const start = await app.request('/auth/reauth?provider=github&next=/settings/security', {
+    headers: { cookie: `orvex_session=${session.id}` },
+  });
+  assert.equal(start.status, 302);
+  assert.equal(new URL(start.headers.get('location')!).origin, 'https://accounts.google.com');
 });
 
 function cookiePair(header: string | null, name: string): string {

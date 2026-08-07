@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { llmChat, extractJsonLoose } from './llm-client.js';
 import { redactSecrets } from './redact.js';
 import type { CodeFix } from './apply.js';
+import { safePromptData } from './prompt-safety.js';
 
 const LlmFixSchema = z.object({
   originalCode: z.string().min(1),
@@ -26,6 +27,15 @@ export interface GenerateFixOptions {
   model: string;
   /** OpenAI-compatible endpoint (e.g. MiniMax); omit to use Anthropic */
   baseUrl?: string;
+  api?: 'chat' | 'responses' | 'anthropic';
+  reasoningEffort?: string;
+  onUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    tokenSource?: 'provider' | 'estimate';
+    provider?: string;
+    model?: string;
+  }) => void;
 }
 
 const MAX_FILE_CHARS = 60_000;
@@ -62,18 +72,18 @@ export async function generateFixWithLlm(
 
   const related = (input.relatedFiles ?? [])
     .slice(0, 12)
-    .map((r) => `### ${r.path} (repo context only, do NOT edit)\n\`\`\`\n${redactSecrets(r.content.slice(0, 24_000))}\n\`\`\``)
+    .map((r) => `### ${safePromptData(r.path)} (repo context only, do NOT edit)\n\`\`\`\n${safePromptData(redactSecrets(r.content.slice(0, 24_000)))}\n\`\`\``)
     .join('\n');
 
   const user = [
-    `File: ${input.filePath}`,
+    `File: ${safePromptData(input.filePath)}`,
     input.findingLine ? `Finding is anchored at line ${input.findingLine}.` : '',
     '',
-    task,
+    safePromptData(task),
     '',
     'File content (line numbers are for reference only, they are NOT part of the file):',
     '```',
-    numbered,
+    safePromptData(numbered),
     '```',
     related ? `\nCross-file context (respect these signatures and contracts):\n${related}\n` : '',
     'Respond with JSON only:',
@@ -91,7 +101,15 @@ export async function generateFixWithLlm(
     text = await llmChat(
       'You are Orvex Review, generating minimal, safe code fixes. You respond with strict JSON only.',
       user,
-      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl, json: true },
+      {
+        apiKey: opts.apiKey,
+        model: opts.model,
+        baseUrl: opts.baseUrl,
+        api: opts.api,
+        reasoningEffort: opts.reasoningEffort,
+        json: true,
+        onUsage: opts.onUsage,
+      },
     );
   } catch (err) {
     throw new FixGenerationError((err as Error).message, 'transient');
@@ -157,7 +175,14 @@ export async function generateExplanationWithLlm(
     const text = await llmChat(
       'You are Orvex Review, explaining a code-review finding clearly and concretely.',
       user,
-      { apiKey: opts.apiKey, model: opts.model, baseUrl: opts.baseUrl },
+      {
+        apiKey: opts.apiKey,
+        model: opts.model,
+        baseUrl: opts.baseUrl,
+        api: opts.api,
+        reasoningEffort: opts.reasoningEffort,
+        onUsage: opts.onUsage,
+      },
     );
     return text.trim() || null;
   } catch {

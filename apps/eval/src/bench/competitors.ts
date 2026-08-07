@@ -26,7 +26,11 @@
  * Where a competitor's anchored total is 0, the tool says so explicitly rather
  * than letting the zero read as a loss.
  *
- * Findings are clustered (same PR + file + line within ±5) into candidate defects.
+ * Findings are clustered into candidate defects by same PR + file, and then
+ * either line within ±5 or a same-defect text match (see `similarity.ts`) —
+ * tools anchor one defect to whichever statement they blame, and a pure line
+ * window split those into a false "Orvex missed" plus a false "Orvex-only".
+ * Text-based merges are listed under NEAR-MATCH MERGES for hand audit.
  * Pairwise vs Orvex: both caught / competitor-only (Orvex missed) / Orvex-only.
  *
  * CAVEAT: this is COVERAGE (who flagged what), not correctness — a one-tool-only
@@ -43,12 +47,34 @@ import type { Octokit } from '@octokit/rest';
 import { createBenchmarkOctokit } from './github-auth.js';
 import { parseOrvexFindingTables } from './orvex-table.js';
 import { severityOf, worseSev, sameClusterLine , isOrvexStatusComment } from './severity.js';
+import { sameDefectText } from '@orvex-review/review';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
 const REPO = process.env.BENCH_REPO ?? 'Velatrix-Cloud';
 const PR_LO = Number(process.env.BENCH_PR_LO ?? 114);
 const PR_HI = Number(process.env.BENCH_PR_HI ?? 123);
 const COMPETITORS = ['codex', 'greptile', 'coderabbit', 'qodo', 'gitar'] as const;
+/**
+ * ISO cutoff that isolates ONE Orvex prompt era. Re-reviewing a PR leaves the
+ * old era's comments in place, and `dedupeRepeats` only drops byte-identical
+ * re-reports, so without this a "did the new pipeline help?" run scores the old
+ * and new pipelines fused together. Competitor findings are never filtered —
+ * they reviewed once. PRs the new era did not review are dropped rather than
+ * counted as a clean zero-finding Orvex run.
+ */
+const ORVEX_SINCE = process.env.BENCH_ORVEX_SINCE ?? '';
+/**
+ * Upper bound for the same window. Without it the era filter is open-ended, so
+ * the only selectable era is "latest", and an old pipeline can never be scored
+ * under today's clustering rules. That conflates the two things a tuning run
+ * must separate: how much of a delta came from changing the REVIEWER, and how
+ * much from changing the MEASUREMENT. With both bounds, old and new eras are
+ * scored by identical code and the difference is attributable to the pipeline.
+ */
+const ORVEX_UNTIL = process.env.BENCH_ORVEX_UNTIL ?? '';
+const inOrvexEra = (at: string): boolean =>
+  (!ORVEX_SINCE || at >= ORVEX_SINCE) && (!ORVEX_UNTIL || at < ORVEX_UNTIL);
+const ORVEX_ERA_FILTERED = Boolean(ORVEX_SINCE || ORVEX_UNTIL);
 const RESULTS_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), 'results');
 
 const LOGIN_MAP: Record<string, string> = {
@@ -110,12 +136,20 @@ interface Finding {
   line: number | null;
   sev: string | null;
   excerpt: string;
+  /** Longer copy of the same body, used only for same-defect matching. The
+   *  display excerpt is cut at 140 chars, which routinely truncates the one
+   *  identifier that proves two tools are describing the same code. */
+  matchText: string;
   /** true = mined from an INLINE review comment (every tool posts these);
    *  false = mined from Orvex's summary TABLE, which no competitor has an
    *  equivalent of in this harness. Tracked because the headline split is only
    *  apples-to-apples over anchored findings — see `pairwise`. */
   anchored: boolean;
 }
+
+/** Display length (unchanged) and the longer window kept for matching. */
+const EXCERPT_CHARS = 140;
+const MATCH_CHARS = 600;
 
 /** Drop a bot's byte-identical re-reports of the same finding within one PR.
  *  Orvex's "previously reported, still open" table is re-emitted by EVERY
@@ -142,20 +176,35 @@ function parseOrvexTable(pr: number, body: string): Finding[] {
     path: finding.path,
     line: finding.line,
     sev: finding.severity,
-    excerpt: finding.message.slice(0, 140),
+    excerpt: finding.message.slice(0, EXCERPT_CHARS),
+    matchText: finding.message.slice(0, MATCH_CHARS),
     anchored: false,
   }));
 }
 
 async function collect(octokit: Octokit) {
-  const prNums: number[] = [];
-  for (let n = PR_LO; n <= PR_HI; n++) prNums.push(n);
+  const requestedPrNums: number[] = [];
+  for (let n = PR_LO; n <= PR_HI; n++) requestedPrNums.push(n);
+  const openPulls = await octokit.paginate(octokit.rest.pulls.list, {
+    owner: OWNER,
+    repo: REPO,
+    state: 'open',
+    per_page: 100,
+  });
+  const openNumbers = new Set(openPulls.map((pull) => pull.number));
+  const prNums = requestedPrNums.filter((pr) => openNumbers.has(pr));
+  const excluded = requestedPrNums.filter((pr) => !openNumbers.has(pr));
+  if (excluded.length > 0) {
+    console.log(`[collect] excluding ${excluded.length} non-open PR(s): ${excluded.join(', ')}`);
+  }
 
   const findings: Finding[] = [];
   const reviewedPrs: Record<string, Set<number>> = {};
   const rateLimitedPrs: Record<string, Set<number>> = {};
   const skippedPrs: Record<string, Set<number>> = {};
   const orvexReviewedAt: Record<number, string> = {};
+  /** PRs Orvex reviewed within the selected era (all of them when unset). */
+  const orvexEraPrs = new Set<number>();
   const mark = (bot: string, pr: number) => (reviewedPrs[bot] ??= new Set()).add(pr);
   const markStatus = (bucket: Record<string, Set<number>>, bot: string, pr: number) =>
     (bucket[bot] ??= new Set()).add(pr);
@@ -184,7 +233,18 @@ async function collect(octokit: Octokit) {
       const body = c.body ?? '';
       if (bot === 'coderabbit') crState = mergeCoderabbitState(crState, coderabbitState(body));
       if (bot === 'orvex' && isOrvexStatus(body)) continue;
-      findings.push({ pr, bot, path: c.path ?? null, line: c.line ?? c.original_line ?? null, sev: severityOf(body), excerpt: body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 140), anchored: true });
+      if (bot === 'orvex' && !inOrvexEra(c.created_at ?? '')) continue;
+      const flat = body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+      findings.push({
+        pr,
+        bot,
+        path: c.path ?? null,
+        line: c.line ?? c.original_line ?? null,
+        sev: severityOf(body),
+        excerpt: flat.slice(0, EXCERPT_CHARS),
+        matchText: flat.slice(0, MATCH_CHARS),
+        anchored: true,
+      });
     }
 
     // review objects (greptile/codex/qodo/gitar post a review even with 0 findings)
@@ -203,6 +263,8 @@ async function collect(octokit: Octokit) {
         // mixed with no way to separate old vs new-prompt Orvex reviews).
         const at = r.submitted_at ?? '';
         if (at && at > (orvexReviewedAt[pr] ?? '')) orvexReviewedAt[pr] = at;
+        if (!inOrvexEra(at)) continue;
+        orvexEraPrs.add(pr);
         // Orvex's summary table. NOT anchored: no competitor has an equivalent
         // source in this harness, so these must not enter the headline split.
         for (const f of parseOrvexTable(pr, body)) findings.push({ ...f, anchored: false });
@@ -236,7 +298,16 @@ async function collect(octokit: Octokit) {
         `(same bot re-emitting one finding across multiple reviews on a PR)`,
     );
   }
-  return { prNums, findings: deduped, reviewedPrs, rateLimitedPrs, skippedPrs, seenLogins, orvexReviewedAt };
+  return {
+    prNums,
+    findings: deduped,
+    reviewedPrs,
+    rateLimitedPrs,
+    skippedPrs,
+    seenLogins,
+    orvexReviewedAt,
+    orvexEraPrs,
+  };
 }
 
 interface Cluster {
@@ -254,17 +325,64 @@ interface Cluster {
    *  that is not even part of that comparison. The marquee "P1/P2 only (bugs)"
    *  row was the one most corrupted by it. */
   sevByBot: Map<string, string | null>;
+  /** Every finding folded into this cluster, so a later finding can be matched
+   *  against all of them rather than only the first one seen. */
+  members: Finding[];
+  /** Merges made on text evidence rather than line proximity, printed for
+   *  hand audit — a wrong one fabricates `both caught` credit. */
+  nearMatches: NearMatch[];
 }
+
+interface NearMatch {
+  pr: number;
+  path: string | null;
+  reason: string;
+  from: { bot: string; line: number | null; excerpt: string };
+  to: { bot: string; line: number | null; excerpt: string };
+}
+
+/**
+ * How far apart two anchors may sit and still be considered one defect on text
+ * evidence. Generous because tools anchor to whichever statement they blame —
+ * the guard against over-merging is `sameDefectText`, not distance.
+ */
+const NEAR_LINE_WINDOW = 400;
+
+/** Same defect, different anchor: close enough in the file AND lexically proven. */
+function nearDefectMatch(cluster: Cluster, f: Finding): NearMatch | null {
+  if (f.line === null) return null;
+  for (const member of cluster.members) {
+    if (member.line === null) continue;
+    if (Math.abs(member.line - f.line) > NEAR_LINE_WINDOW) continue;
+    const verdict = sameDefectText(member.matchText, f.matchText);
+    if (!verdict.match) continue;
+    return {
+      pr: f.pr,
+      path: f.path,
+      reason: verdict.reason,
+      from: { bot: member.bot, line: member.line, excerpt: member.excerpt },
+      to: { bot: f.bot, line: f.line, excerpt: f.excerpt },
+    };
+  }
+  return null;
+}
+
 function clusterize(findings: Finding[]): Cluster[] {
   const clusters: Cluster[] = [];
   for (const f of findings) {
-    const hit = clusters.find(
-      (cl) => cl.pr === f.pr && cl.path === f.path && sameClusterLine(cl.line, f.line, cl.bots.has(f.bot)),
-    );
+    let near: NearMatch | null = null;
+    const hit = clusters.find((cl) => {
+      if (cl.pr !== f.pr || cl.path !== f.path) return false;
+      if (sameClusterLine(cl.line, f.line, cl.bots.has(f.bot))) return true;
+      near = nearDefectMatch(cl, f);
+      return near !== null;
+    });
     if (hit) {
       hit.bots.add(f.bot);
       hit.sev = worseSev(hit.sev, f.sev);
       hit.sevByBot.set(f.bot, worseSev(hit.sevByBot.get(f.bot) ?? null, f.sev));
+      hit.members.push(f);
+      if (near) hit.nearMatches.push(near);
     } else {
       clusters.push({
         pr: f.pr,
@@ -274,6 +392,8 @@ function clusterize(findings: Finding[]): Cluster[] {
         excerpt: f.excerpt,
         sev: f.sev,
         sevByBot: new Map([[f.bot, f.sev]]),
+        members: [f],
+        nearMatches: [],
       });
     }
   }
@@ -383,15 +503,56 @@ async function main() {
 
   const octokit = await createBenchmarkOctokit(OWNER, REPO);
 
-  const { prNums, findings, reviewedPrs, rateLimitedPrs, skippedPrs, seenLogins, orvexReviewedAt } = await collect(octokit);
+  const { prNums, findings, reviewedPrs, rateLimitedPrs, skippedPrs, seenLogins, orvexReviewedAt, orvexEraPrs } =
+    await collect(octokit);
   const clusters = clusterize(findings);
 
-  console.log(`\nCompetitor benchmark — ${OWNER}/${REPO} PRs #${PR_LO}–#${PR_HI}\n`);
+  // Restrict every head-to-head to PRs the selected Orvex era actually
+  // reviewed; scoring a PR it never saw would read as a competitor win.
+  const eraPrs = (prs: number[]) => (ORVEX_ERA_FILTERED ? prs.filter((pr) => orvexEraPrs.has(pr)) : prs);
 
-  console.log('Anchored findings per tool per PR:');
+  console.log(`\nCompetitor benchmark — ${OWNER}/${REPO} PRs #${PR_LO}–#${PR_HI}\n`);
+  if (ORVEX_ERA_FILTERED) {
+    const era = [...orvexEraPrs].sort((a, z) => a - z);
+    const window = [ORVEX_SINCE ? `at/after ${ORVEX_SINCE}` : null, ORVEX_UNTIL ? `before ${ORVEX_UNTIL}` : null]
+      .filter(Boolean)
+      .join(' and ');
+    console.log(`Orvex era filter: findings from reviews ${window}`);
+    console.log(`  in-era PRs ${era.length}/${prNums.length}  [${era.join(', ') || 'none'}]\n`);
+  }
+
+  // Anchored ONLY. This row used to count every finding, so Orvex's summary-table
+  // rows were added to its inline comments while competitors contributed inline
+  // comments alone — Orvex read 3x noisier than it posts (PR#232: 8 inline + 20
+  // table = "28"). Volume is the one thing this row is read for, so it has to be
+  // like-for-like. Orvex's table total is shown separately, never fused in.
+  console.log('Anchored (inline) findings per tool per PR:');
+  const anchoredCount = (pr: number, bot: string) =>
+    findings.filter((f) => f.pr === pr && f.bot === bot && f.anchored).length;
   for (const pr of prNums) {
-    const row = ['orvex', ...COMPETITORS].map((b) => `${b}=${findings.filter((f) => f.pr === pr && f.bot === b).length}`);
-    console.log(`  PR#${pr}:  ${row.join('  ')}`);
+    const row = ['orvex', ...COMPETITORS].map((b) => `${b}=${anchoredCount(pr, b)}`);
+    const table = findings.filter((f) => f.pr === pr && f.bot === 'orvex' && !f.anchored).length;
+    console.log(`  PR#${pr}:  ${row.join('  ')}   (orvex summary-table rows: ${table})`);
+  }
+
+  // Median inline comments per PR — the honest "how noisy is each tool" number.
+  const median = (xs: number[]) => {
+    if (xs.length === 0) return 0;
+    const s = [...xs].sort((a, z) => a - z);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  };
+  console.log('\nInline comment volume (per PR the tool reviewed):');
+  for (const b of ['orvex', ...COMPETITORS]) {
+    const prs = [...(reviewedPrs[b] ?? [])];
+    if (prs.length === 0) continue;
+    const counts = prs.map((pr) => anchoredCount(pr, b));
+    const total = counts.reduce((a, n) => a + n, 0);
+    console.log(
+      `  ${b.padEnd(11)} median ${String(median(counts)).padStart(4)}   mean ${(total / prs.length)
+        .toFixed(1)
+        .padStart(5)}   max ${String(Math.max(...counts)).padStart(3)}   total ${total}`,
+    );
   }
 
   console.log('\nPRs each tool actually reviewed:');
@@ -429,7 +590,7 @@ async function main() {
   const anchoredClusters = clusterize(findings.filter((f) => f.anchored));
   const results: Pairwise[] = [];
   for (const c of COMPETITORS) {
-    const prs = [...(reviewedPrs[c] ?? [])].sort((a, z) => a - z);
+    const prs = eraPrs([...(reviewedPrs[c] ?? [])].sort((a, z) => a - z));
     const p = pairwise(c, prs, clusters);
     const anchored = pairwise(c, prs, anchoredClusters);
     results.push(p);
@@ -452,6 +613,18 @@ async function main() {
     console.log(`  PR#${m.pr} ${m.path ?? '?'}:${m.line ?? '?'} [${[...m.bots].join(',')}] ${m.sev ?? ''} — ${m.excerpt}`);
   }
 
+  // Audit surface for the text matcher. A wrong merge here invents a "both
+  // caught" that never happened, so every one is printed with its evidence.
+  console.log('\n──────── NEAR-MATCH MERGES (same defect, different anchor line) ────────');
+  const nearMatches = clusters.flatMap((c) => c.nearMatches);
+  if (nearMatches.length === 0) console.log('  (none)');
+  for (const n of nearMatches.sort((a, b) => a.pr - b.pr)) {
+    const crossTool = n.from.bot !== n.to.bot ? '' : '  [same tool — self-duplicate]';
+    console.log(`  PR#${n.pr} ${n.path ?? '?'} — matched on ${n.reason}${crossTool}`);
+    console.log(`      ${n.from.bot}:${n.from.line ?? '?'}  ${n.from.excerpt.slice(0, 110)}`);
+    console.log(`      ${n.to.bot}:${n.to.line ?? '?'}  ${n.to.excerpt.slice(0, 110)}`);
+  }
+
   console.log('\n──────── ORVEX UNIQUE (only Orvex flagged) ────────');
   const unique = clusters.filter((c) => c.bots.size === 1 && c.bots.has('orvex'));
   for (const u of unique.sort((a, b) => a.pr - b.pr)) {
@@ -468,8 +641,13 @@ async function main() {
     mkdirSync(RESULTS_DIR, { recursive: true });
     const runAt = new Date().toISOString();
     const stamp = runAt.replace(/[:.]/g, '-');
-    const range = `${PR_LO}-${PR_HI}`;
-    const fname = `${OWNER}_${REPO}_${range}__${stamp}.json`;
+    // The era is part of the range identity. Two eras of the SAME PRs are two
+    // different measurements of one population, never two batches to add up —
+    // sharing a range key would let combine() silently pick whichever era ran
+    // last. Distinct keys make its overlap guard reject the sum outright.
+    const era = ORVEX_ERA_FILTERED ? `@${(ORVEX_SINCE || 'start').slice(0, 10)}_${(ORVEX_UNTIL || 'now').slice(0, 10)}` : '';
+    const range = `${PR_LO}-${PR_HI}${era}`;
+    const fname = `${OWNER}_${REPO}_${range.replace(/[^\w.@-]/g, '_')}__${stamp}.json`;
     writeFileSync(
       path.join(RESULTS_DIR, fname),
       JSON.stringify(
@@ -480,6 +658,11 @@ async function main() {
           prHi: PR_HI,
           prNums,
           runAt,
+          // Which Orvex prompt era these findings came from; null = every era
+          // present on the PRs, which fuses pipelines and cannot show a delta.
+          orvexSince: ORVEX_SINCE || null,
+          orvexUntil: ORVEX_UNTIL || null,
+          orvexEraPrs: [...orvexEraPrs].sort((a, z) => a - z),
           orvexReviewedAt,
           availability: {
             coderabbit: {
@@ -494,7 +677,7 @@ async function main() {
           pairwise: {
             all: results,
             anchored: COMPETITORS.map((c) => {
-              const prs = [...(reviewedPrs[c] ?? [])].sort((a, z) => a - z);
+              const prs = eraPrs([...(reviewedPrs[c] ?? [])].sort((a, z) => a - z));
               return pairwise(c, prs, anchoredClusters);
             }),
           },

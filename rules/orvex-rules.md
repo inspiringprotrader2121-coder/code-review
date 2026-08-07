@@ -161,6 +161,34 @@ P2 — not P3/info.**
   coupon/subscription/reservation/lock/temp-record created but not released on
   EVERY failure path accumulates into real billing, quota, accounting, and audit
   bugs.
+- **A lost write on a retry path is a dropped record, not a smell.** When a
+  retry short-circuits on an "already done" marker (`if (existing) return`,
+  `if (completed?.count === 0) return`, an idempotency key hit) but the FIRST
+  attempt failed after writing that marker and before a dependent write —
+  a counter increment, usage row, quota decrement, ledger entry — the dependent
+  write is lost permanently and no later attempt will make it. **P1** when the
+  lost write enforces a limit, quota, entitlement, or money (a usage counter
+  that never increments lets the limit be exceeded forever); **P2** otherwise.
+  Do not rate this P3 because the happy path is correct.
+- **Silent truncation is wrong data, not missing data.** An enumeration that
+  caps at N rows, stops at a maximum offset, or emits a next-page cursor that
+  can point past a hard ceiling returns a PARTIAL result that the caller cannot
+  distinguish from a complete one. **P2** by default; **P1** when the output is
+  a compliance/legal export, drives a deletion, reconciliation, or backup, or
+  feeds a security decision — the caller acts on data it believes is complete.
+- **A partial batch failure leaves the system half-transitioned.** `Promise.all`
+  rejects on the first failure while sibling writes have ALREADY committed, so a
+  post-loop step (cleanup, expiry, revocation, notification, release) is skipped
+  for records that did change, and nothing retries them. **P2**; **P1** when the
+  skipped half is expiry/revocation/cleanup that leaves access, entitlements, or
+  billing active past their end. `allSettled` without inspecting the rejected
+  entries is the same defect.
+- **A failed authorization lookup is not an authorization.** When a session,
+  permission, role, or tenant lookup fails (network error, 5xx, timeout) and the
+  code falls back to a degraded/outage/loading state that still renders or
+  routes to a privileged view, an attacker (or an outage) reaches protected
+  surface. Error ≠ permitted, and unknown ≠ permitted. **P1** — rate it as the
+  auth bypass it is, not as error-handling polish.
 - **Never argue a bug down.** These are NOT downgrades, in any combination:
   "validated downstream" · "checked elsewhere" · "mostly covered" ·
   "pre-existing" · "consistent with existing code" · "same pattern in other

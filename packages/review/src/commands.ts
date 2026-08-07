@@ -32,8 +32,15 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
   // Strip fenced code blocks and markdown blockquote lines BEFORE searching — a
   // quoted prior comment (GitHub "Quote reply" produces `> @orvex fix all`) or a
   // fenced mention must NOT re-trigger a command (esp. destructive `fix all`).
-  const scanBody = body
-    .replace(/```[\s\S]*?```/g, ' ')
+  const removeFencedBlocks = (source: string, fence: '`' | '~'): string =>
+    source.replace(
+      new RegExp(
+        `(^|\\n)[ \\t]*${fence}{3,}[^\\n]*(?:\\n|$)[\\s\\S]*?(?:\\n[ \\t]*${fence}{3,}[ \\t]*(?:\\n|$)|$)`,
+        'g',
+      ),
+      '$1 ',
+    );
+  const scanBody = removeFencedBlocks(removeFencedBlocks(body, '`'), '~')
     .replace(/^\s*>.*$/gm, ' ');
   const lower = scanBody.toLowerCase();
   const idx = lower.indexOf(trigger.toLowerCase());

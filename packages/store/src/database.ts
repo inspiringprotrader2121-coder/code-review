@@ -14,14 +14,19 @@ import type {
   Repo,
   ReviewRun,
   ReviewRunStatus,
+  ReviewRunUsage,
   ScorecardRun,
   Session,
+  StripeMeterEvent,
+  StripeRevenueEvent,
+  SuperadminCostAnalytics,
   StoredFinding,
   Tenant,
   TenantBilling,
   User,
   UserSecurity,
   MfaChallenge,
+  PlatformCost,
   WorkspaceMember,
   WorkspaceRole,
   WorkspaceSettings,
@@ -76,6 +81,7 @@ CREATE TABLE IF NOT EXISTS users (
   name TEXT,
   avatar_url TEXT,
   email TEXT,
+  email_verified_at TEXT,
   google_id TEXT UNIQUE,
   password_hash TEXT,
   is_superadmin INTEGER NOT NULL DEFAULT 0,
@@ -154,6 +160,75 @@ CREATE INDEX IF NOT EXISTS idx_runs_tenant_time ON review_runs(tenant_id, create
 -- table grows. IF NOT EXISTS + always-run schema → created on existing DBs too.
 CREATE INDEX IF NOT EXISTS idx_runs_owner_lower ON review_runs(lower(owner), status, created_at);
 
+CREATE TABLE IF NOT EXISTS review_run_usage (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  pass_name TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  input_rate_per_m REAL NOT NULL DEFAULT 0,
+  output_rate_per_m REAL NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  token_source TEXT NOT NULL DEFAULT 'unknown',
+  attempt_id TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_usage_run ON review_run_usage(run_id);
+CREATE INDEX IF NOT EXISTS idx_run_usage_tenant_time ON review_run_usage(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_run_usage_model_time ON review_run_usage(model, created_at);
+
+CREATE TABLE IF NOT EXISTS stripe_revenue_events (
+  event_id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  invoice_id TEXT,
+  tenant_id TEXT,
+  customer_id TEXT,
+  subscription_id TEXT,
+  amount_cents INTEGER NOT NULL DEFAULT 0,
+  currency TEXT NOT NULL DEFAULT 'usd',
+  occurred_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- A charge can receive multiple partial refunds. Keep invoice-paid events
+-- idempotent by invoice/type, while event_id remains the dedupe key for every
+-- refund delta.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stripe_revenue_invoice_paid
+  ON stripe_revenue_events(invoice_id, event_type)
+  WHERE invoice_id IS NOT NULL AND event_type = 'invoice.paid';
+CREATE INDEX IF NOT EXISTS idx_stripe_revenue_tenant_time
+  ON stripe_revenue_events(tenant_id, occurred_at);
+
+CREATE TABLE IF NOT EXISTS stripe_meter_events (
+  run_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  event_name TEXT NOT NULL,
+  plan TEXT NOT NULL,
+  units INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  next_attempt_at TEXT,
+  reported_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stripe_meter_pending
+  ON stripe_meter_events(status, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS platform_costs (
+  category TEXT PRIMARY KEY,
+  amount_cents INTEGER NOT NULL DEFAULT 0,
+  note TEXT,
+  updated_at TEXT NOT NULL
+);
+
 -- Anti-abuse signal log: one row per notable onboarding event (a GitHub account
 -- connecting, a login), tagged with the client IP. Used to spot one machine
 -- farming many free trials by connecting many GitHub accounts.
@@ -175,6 +250,7 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   provider TEXT NOT NULL,
   event_id TEXT NOT NULL,
   claimed_at TEXT NOT NULL,
+  claim_token TEXT,
   processed_at TEXT,
   PRIMARY KEY (provider, event_id)
 );
@@ -297,8 +373,23 @@ export class AppDatabase {
   private db: Database.Database;
 
   constructor(dbPath: string) {
+    const resolvedDbPath = path.resolve(dbPath);
+    const checkoutRoot = path.resolve(process.env.ORVEX_CHECKOUT_ROOT ?? process.cwd());
+    const relativeToCheckout = path.relative(checkoutRoot, resolvedDbPath);
+    const insideCheckout =
+      relativeToCheckout === '' ||
+      (!relativeToCheckout.startsWith(`..${path.sep}`) &&
+        relativeToCheckout !== '..' &&
+        !path.isAbsolute(relativeToCheckout));
+    if (
+      (process.env.NODE_ENV === 'production' || process.env.ORVEX_REQUIRE_DURABLE_STORAGE === '1') &&
+      (!path.isAbsolute(dbPath) || insideCheckout || dbPath.includes(`${path.sep}.data${path.sep}`))
+    ) {
+      throw new Error(`durable production STORE_PATH must be an absolute path outside the checkout: ${dbPath}`);
+    }
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
+    this.db.pragma('foreign_keys = ON');
     this.db.pragma('journal_mode = WAL');
     // Multi-process writers (docs allow scaling workers on one SQLite file) wait
     // briefly on SQLITE_BUSY instead of failing the quota/lock update.
@@ -312,6 +403,8 @@ export class AppDatabase {
     this.migrateRepoAutomationToggles();
     this.migrateReviewRunCostColumns();
     this.migratePrReviewColumns();
+    this.migrateRevenueIndexes();
+    this.migrateWebhookEventColumns();
   }
 
   /** Add later pr_reviews columns (codex thread id, manual-review candidates) to existing DBs. */
@@ -328,6 +421,32 @@ export class AppDatabase {
     if (!names.has('manual_review_json')) {
       this.db.exec(`ALTER TABLE pr_reviews ADD COLUMN manual_review_json TEXT`);
     }
+  }
+
+  private migrateRevenueIndexes(): void {
+    // Invoice payments are naturally one-per-invoice, but a charge can emit
+    // multiple partial-refund events. The old index treated both as one shape
+    // and discarded later refunds with INSERT OR IGNORE.
+    this.db.exec(`DROP INDEX IF EXISTS idx_stripe_revenue_invoice_type`);
+    this.db.exec(`DROP INDEX IF EXISTS idx_stripe_revenue_invoice_paid`);
+    this.db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_stripe_revenue_invoice_paid
+       ON stripe_revenue_events(invoice_id, event_type)
+       WHERE invoice_id IS NOT NULL AND event_type = 'invoice.paid'`,
+    );
+  }
+
+  /** Add fencing tokens so a timed-out worker cannot complete a claim that a
+   * newer worker has reclaimed. */
+  private migrateWebhookEventColumns(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(webhook_events)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'claim_token')) {
+      this.db.exec(`ALTER TABLE webhook_events ADD COLUMN claim_token TEXT`);
+    }
+    this.db.exec(
+      `UPDATE webhook_events SET claim_token = lower(hex(randomblob(16)))
+       WHERE claim_token IS NULL OR claim_token = ''`,
+    );
   }
 
   /** Add token/cost columns to review_runs on existing DBs (fresh DBs get them
@@ -488,10 +607,10 @@ export class AppDatabase {
    */
   countAccountReviews(owner: string, opts: { sinceMs?: number } = {}): number {
     const params: unknown[] = [owner];
-    // Exclude fix commits ('fix:%') AND interactive commands ('cmd:%') — only
+    // Exclude fix commits ('fix:%'), scans, and interactive commands ('cmd:%') — only
     // actual reviews count toward the trial/hourly/monthly review caps.
     let where =
-      "lower(owner) = lower(?) AND (status IN ('running', 'completed', 'failed') OR (status = 'skipped' AND skip_reason LIKE 'interrupted by restart%')) AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'";
+      "lower(owner) = lower(?) AND (status IN ('running', 'completed', 'failed') OR (status = 'skipped' AND skip_reason LIKE 'interrupted by restart%')) AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND action NOT LIKE 'scan:%'";
     if (opts.sinceMs !== undefined) {
       where += ' AND created_at >= ?';
       params.push(new Date(Date.now() - opts.sinceMs).toISOString());
@@ -499,6 +618,19 @@ export class AppDatabase {
     const row = this.db
       .prepare(`SELECT COUNT(*) AS n FROM review_runs WHERE ${where}`)
       .get(...params) as { n: number };
+    return row.n;
+  }
+
+  countRunningAccountReviews(owner: string, sinceMs = 30 * 24 * 3_600_000): number {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM review_runs
+         WHERE lower(owner) = lower(?) AND status = 'running' AND created_at >= ?
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND action NOT LIKE 'scan:%'`,
+      )
+      .get(owner, since) as { n: number };
     return row.n;
   }
 
@@ -513,7 +645,7 @@ export class AppDatabase {
       .prepare(
         `SELECT created_at FROM review_runs
          WHERE lower(owner) = lower(?) AND (status IN ('running', 'completed', 'failed') OR (status = 'skipped' AND skip_reason LIKE 'interrupted by restart%'))
-           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND action NOT LIKE 'scan:%'
            AND created_at >= ?
          ORDER BY created_at ASC LIMIT 1`,
       )
@@ -526,7 +658,7 @@ export class AppDatabase {
       .prepare(
         `SELECT COUNT(*) AS n FROM review_runs
          WHERE tenant_id = ? AND status = 'completed'
-           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND action NOT LIKE 'scan:%'
            AND created_at >= ?`,
       )
       .get(tenantId, sinceIso) as { n: number };
@@ -546,11 +678,55 @@ export class AppDatabase {
       .prepare(
         `SELECT COALESCE(SUM(CASE WHEN deep = 1 THEN 2 ELSE 1 END), 0) AS n FROM review_runs
          WHERE tenant_id = ? AND status = 'completed'
-           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%'
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND action NOT LIKE 'scan:%'
            AND created_at >= ?`,
       )
       .get(tenantId, sinceIso) as { n: number };
     return row.n;
+  }
+
+  /**
+   * Return the quota units before and through one completed run in a stable
+   * order. Billing must not derive a run's overage from the current total:
+   * concurrent completions would otherwise each observe the same total and
+   * double-count the boundary units. Creation time plus the UUID tie-breaker
+   * makes the per-run allocation deterministic regardless of report order.
+   */
+  reviewRunOverageUnits(
+    tenantId: string,
+    runId: string,
+    sinceIso: string,
+  ): { unitsBefore: number; unitsThrough: number } | null {
+    const row = this.db
+      .prepare(
+        `WITH target AS (
+           SELECT id, created_at
+           FROM review_runs
+           WHERE id = ? AND tenant_id = ?
+         )
+         SELECT
+           COALESCE((
+             SELECT SUM(CASE WHEN r.deep = 1 THEN 2 ELSE 1 END)
+             FROM review_runs r, target t
+             WHERE r.tenant_id = ? AND r.status = 'completed'
+               AND r.action NOT LIKE 'fix:%' AND r.action NOT LIKE 'cmd:%' AND r.action NOT LIKE 'scan:%'
+               AND r.created_at >= ?
+               AND (r.created_at < t.created_at OR (r.created_at = t.created_at AND r.id < t.id))
+           ), 0) AS units_before,
+           COALESCE((
+             SELECT SUM(CASE WHEN r.deep = 1 THEN 2 ELSE 1 END)
+             FROM review_runs r, target t
+             WHERE r.tenant_id = ? AND r.status = 'completed'
+               AND r.action NOT LIKE 'fix:%' AND r.action NOT LIKE 'cmd:%' AND r.action NOT LIKE 'scan:%'
+               AND r.created_at >= ?
+               AND (r.created_at < t.created_at OR (r.created_at = t.created_at AND r.id <= t.id))
+           ), 0) AS units_through
+         FROM target`,
+      )
+      .get(runId, tenantId, tenantId, sinceIso, tenantId, sinceIso) as
+      | { units_before: number; units_through: number }
+      | undefined;
+    return row ? { unitsBefore: row.units_before, unitsThrough: row.units_through } : null;
   }
 
   /**
@@ -593,7 +769,7 @@ export class AppDatabase {
       .prepare(
         `SELECT created_at FROM review_runs
          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr = ? AND head_sha = ?
-           AND status = 'completed' AND action NOT LIKE 'fix:%'
+           AND status = 'completed' AND action NOT LIKE 'fix:%' AND action NOT LIKE 'scan:%'
          ORDER BY created_at DESC LIMIT 1`,
       )
       .get(installationId, owner, repo, pr, headSha) as { created_at: string } | undefined;
@@ -647,43 +823,152 @@ export class AppDatabase {
    * permanent until retention; an unfinished claim may be reclaimed after the
    * stale window when a process died mid-handler.
    */
-  claimWebhookEvent(provider: string, eventId: string, staleMs = 15 * 60_000): boolean {
+  claimWebhookEvent(provider: string, eventId: string, staleMs = 15 * 60_000): string | null {
     const claimedAt = new Date().toISOString();
+    const claimToken = randomUUID();
     const inserted = this.db
       .prepare(
-        `INSERT OR IGNORE INTO webhook_events (provider, event_id, claimed_at, processed_at)
-         VALUES (?, ?, ?, NULL)`,
+        `INSERT OR IGNORE INTO webhook_events (provider, event_id, claimed_at, claim_token, processed_at)
+         VALUES (?, ?, ?, ?, NULL)`,
       )
-      .run(provider, eventId, claimedAt);
-    if (inserted.changes > 0) return true;
+      .run(provider, eventId, claimedAt, claimToken);
+    if (inserted.changes > 0) return claimToken;
 
     const existing = this.db
-      .prepare(`SELECT claimed_at, processed_at FROM webhook_events WHERE provider = ? AND event_id = ?`)
-      .get(provider, eventId) as { claimed_at: string; processed_at: string | null } | undefined;
-    if (!existing || existing.processed_at) return false;
+      .prepare(`SELECT claimed_at, claim_token, processed_at FROM webhook_events WHERE provider = ? AND event_id = ?`)
+      .get(provider, eventId) as { claimed_at: string; claim_token: string | null; processed_at: string | null } | undefined;
+    if (!existing || existing.processed_at) return null;
     const claimedTime = Date.parse(existing.claimed_at);
-    if (Number.isFinite(claimedTime) && Date.now() - claimedTime < staleMs) return false;
+    if (Number.isFinite(claimedTime) && Date.now() - claimedTime < staleMs) return null;
 
     const reclaimed = this.db
       .prepare(
         `UPDATE webhook_events
-         SET claimed_at = ?
+         SET claimed_at = ?, claim_token = ?
          WHERE provider = ? AND event_id = ? AND processed_at IS NULL AND claimed_at = ?`,
       )
-      .run(claimedAt, provider, eventId, existing.claimed_at);
-    return reclaimed.changes > 0;
+      .run(claimedAt, claimToken, provider, eventId, existing.claimed_at);
+    return reclaimed.changes > 0 ? claimToken : null;
   }
 
-  completeWebhookEvent(provider: string, eventId: string): void {
-    this.db
-      .prepare(`UPDATE webhook_events SET processed_at = ? WHERE provider = ? AND event_id = ?`)
-      .run(new Date().toISOString(), provider, eventId);
+  getWebhookEvent(
+    provider: string,
+    eventId: string,
+  ): { claimedAt: string; processedAt?: string } | null {
+    const row = this.db
+      .prepare(`SELECT claimed_at, processed_at FROM webhook_events WHERE provider = ? AND event_id = ?`)
+      .get(provider, eventId) as { claimed_at: string; processed_at: string | null } | undefined;
+    if (!row) return null;
+    return {
+      claimedAt: row.claimed_at,
+      processedAt: row.processed_at ?? undefined,
+    };
   }
 
-  releaseWebhookEvent(provider: string, eventId: string): void {
+  completeWebhookEvent(provider: string, eventId: string, claimToken: string): void {
     this.db
-      .prepare(`DELETE FROM webhook_events WHERE provider = ? AND event_id = ? AND processed_at IS NULL`)
-      .run(provider, eventId);
+      .prepare(
+        `UPDATE webhook_events
+         SET processed_at = ?
+         WHERE provider = ? AND event_id = ? AND claim_token = ? AND processed_at IS NULL`,
+      )
+      .run(new Date().toISOString(), provider, eventId, claimToken);
+  }
+
+  releaseWebhookEvent(provider: string, eventId: string, claimToken: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM webhook_events
+         WHERE provider = ? AND event_id = ? AND claim_token = ? AND processed_at IS NULL`,
+      )
+      .run(provider, eventId, claimToken);
+  }
+
+  /**
+   * Content-hash claim for webhook replay defense. GitHub retries reuse the same
+   * X-GitHub-Delivery; an attacker who captured a valid signed body can rotate
+   * the delivery id. Claiming sha256(event + body) under `${provider}-body`
+   * closes that gap.
+   *
+   * Processed body hashes EXPIRE after `ttlMs` (default 2h) so identical tiny
+   * payloads (e.g. ping `{}`) are not blocked forever — unlike delivery ids,
+   * which stay claimed until long retention.
+   */
+  claimWebhookBodyHash(
+    provider: string,
+    bodyHash: string,
+    opts: { ttlMs?: number; staleMs?: number } = {},
+  ): string | null {
+    if (!bodyHash || bodyHash.length > 128) return null;
+    const bodyProvider = `${provider}-body`;
+    const ttlMs =
+      Number.isFinite(opts.ttlMs) && (opts.ttlMs as number) > 0
+        ? Math.min(Math.floor(opts.ttlMs as number), 7 * 24 * 3600_000)
+        : 2 * 3600_000;
+    const staleMs =
+      Number.isFinite(opts.staleMs) && (opts.staleMs as number) > 0
+        ? Math.min(Math.floor(opts.staleMs as number), 24 * 3600_000)
+        : 15 * 60_000;
+
+    const claimedAt = new Date().toISOString();
+    const claimToken = randomUUID();
+
+    return this.db.transaction(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT claimed_at, claim_token, processed_at FROM webhook_events WHERE provider = ? AND event_id = ?`,
+        )
+        .get(bodyProvider, bodyHash) as
+        | { claimed_at: string; claim_token: string | null; processed_at: string | null }
+        | undefined;
+
+      if (!existing) {
+        this.db
+          .prepare(
+            `INSERT INTO webhook_events (provider, event_id, claimed_at, claim_token, processed_at)
+             VALUES (?, ?, ?, ?, NULL)`,
+          )
+          .run(bodyProvider, bodyHash, claimedAt, claimToken);
+        return claimToken;
+      }
+
+      const anchor = existing.processed_at ?? existing.claimed_at;
+      const anchorMs = Date.parse(anchor);
+      const age = Number.isFinite(anchorMs) ? Date.now() - anchorMs : 0;
+
+      if (existing.processed_at) {
+        // Still inside the replay window — reject as duplicate.
+        if (age < ttlMs) return null;
+        // TTL elapsed: drop the stale hash so a legitimate identical payload
+        // (or a later attack outside the window) can claim fresh.
+        this.db
+          .prepare(`DELETE FROM webhook_events WHERE provider = ? AND event_id = ?`)
+          .run(bodyProvider, bodyHash);
+        this.db
+          .prepare(
+            `INSERT INTO webhook_events (provider, event_id, claimed_at, claim_token, processed_at)
+             VALUES (?, ?, ?, ?, NULL)`,
+          )
+          .run(bodyProvider, bodyHash, claimedAt, claimToken);
+        return claimToken;
+      }
+
+      // In-flight claim: allow reclaim only after the stale window (crashed worker).
+      if (age < staleMs) return null;
+      const reclaimed = this.db
+        .prepare(
+          `UPDATE webhook_events
+           SET claimed_at = ?, claim_token = ?
+           WHERE provider = ? AND event_id = ? AND processed_at IS NULL AND claimed_at = ?`,
+        )
+        .run(claimedAt, claimToken, bodyProvider, bodyHash, existing.claimed_at);
+      return reclaimed.changes > 0 ? claimToken : null;
+    })();
+  }
+
+  /** Provider key used by claimWebhookBodyHash for lookups/complete/release. */
+  webhookBodyProvider(provider: string): string {
+    return `${provider}-body`;
   }
 
   /** Cheap liveness probe for /ready — throws if the DB is unreachable/locked. */
@@ -691,17 +976,39 @@ export class AppDatabase {
     this.db.prepare('SELECT 1').get();
   }
 
-  /** Clear rows left 'running' by a crash/restart so the dashboard doesn't show a
-   *  stuck spinner. Marked 'skipped' (not 'failed') because graceful restarts
-   *  re-queue the job — the interrupted attempt is retried, not a real failure. */
-  failStaleRunningRuns(): number {
+  /** Clear rows left 'running' by a crash/restart so the dashboard doesn't show
+   * a stuck spinner and resumeReviewRun can reopen them. Sole-worker boot
+   * (single PM2 process) should pass staleAfterMs: 0 to mark ALL local running
+   * rows. A positive grace is only for multi-worker rolling restarts where
+   * another process may still be executing a fresh run. */
+  failStaleRunningRuns(opts: { staleAfterMs?: number } = {}): number {
+    const staleAfterMs = opts.staleAfterMs ?? 0;
+    const cutoff = new Date(Date.now() - Math.max(0, staleAfterMs)).toISOString();
+    const where = staleAfterMs > 0 ? `status = 'running' AND created_at < ?` : `status = 'running'`;
     const res = this.db
       .prepare(
         `UPDATE review_runs SET status = 'skipped', skip_reason = 'interrupted by restart — retried'
-         WHERE status = 'running'`,
+         WHERE ${where}`,
       )
-      .run();
+      .run(...(staleAfterMs > 0 ? [cutoff] : []));
     return res.changes;
+  }
+
+  /**
+   * Atomically mark a still-running review as interrupted so a graceful
+   * shutdown requeue can resume the SAME row via resumeReviewRun (no second
+   * trial/hourly slot). Returns true when the row was still running.
+   */
+  interruptReviewRun(id: string): boolean {
+    if (!id) return false;
+    const res = this.db
+      .prepare(
+        `UPDATE review_runs
+         SET status = 'skipped', skip_reason = 'interrupted by restart — retried'
+         WHERE id = ? AND status = 'running'`,
+      )
+      .run(id);
+    return res.changes > 0;
   }
 
   /**
@@ -714,18 +1021,55 @@ export class AppDatabase {
   pruneEphemeralData(opts: { runRetentionMs?: number; abuseRetentionMs?: number } = {}): number {
     const runCutoff = new Date(Date.now() - (opts.runRetentionMs ?? 30 * 24 * 3_600_000)).toISOString();
     const abuseCutoff = new Date(Date.now() - (opts.abuseRetentionMs ?? 90 * 24 * 3_600_000)).toISOString();
+    const webhookCutoff = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    // Body-hash replay keys only need to outlive the capture→replay window.
+    // Keep them shorter than delivery ids so identical tiny payloads (ping `{}`)
+    // are not blocked for the full 30-day event retention.
+    const bodyHashCutoff = new Date(Date.now() - 6 * 3600_000).toISOString();
     const now = new Date().toISOString();
     let n = 0;
-    n += this.db
-      .prepare(`DELETE FROM review_runs WHERE status = 'skipped' AND created_at < ?`)
-      .run(runCutoff).changes;
+    n += this.db.transaction(() => {
+      // review_run_usage predates a foreign-key relationship to review_runs;
+      // remove its rows explicitly or old interrupted attempts keep inflating
+      // the profitability dashboard after their parent run is pruned.
+      const usage = this.db
+        .prepare(
+          `DELETE FROM review_run_usage
+           WHERE run_id IN (
+             SELECT id FROM review_runs
+             WHERE status = 'skipped' AND created_at < ?
+           )`,
+        )
+        .run(runCutoff).changes;
+      const runs = this.db
+        .prepare(`DELETE FROM review_runs WHERE status = 'skipped' AND created_at < ?`)
+        .run(runCutoff).changes;
+      return usage + runs;
+    })();
     n += this.db.prepare(`DELETE FROM sessions WHERE expires_at < ?`).run(now).changes;
     n += this.db.prepare(`DELETE FROM mfa_challenges WHERE expires_at < ?`).run(now).changes;
     n += this.db.prepare(`DELETE FROM auth_rate_limits WHERE reset_at < ?`).run(now).changes;
     n += this.db.prepare(`DELETE FROM abuse_signals WHERE created_at < ?`).run(abuseCutoff).changes;
     n += this.db
-      .prepare(`DELETE FROM webhook_events WHERE processed_at IS NOT NULL AND processed_at < ?`)
-      .run(runCutoff).changes;
+      .prepare(
+        `DELETE FROM webhook_events
+         WHERE provider LIKE '%-body'
+           AND (
+             (processed_at IS NOT NULL AND processed_at < ?)
+             OR (processed_at IS NULL AND claimed_at < ?)
+           )`,
+      )
+      .run(bodyHashCutoff, webhookCutoff).changes;
+    n += this.db
+      .prepare(
+        `DELETE FROM webhook_events
+         WHERE provider NOT LIKE '%-body'
+           AND (
+             (processed_at IS NOT NULL AND processed_at < ?)
+             OR (processed_at IS NULL AND claimed_at < ?)
+           )`,
+      )
+      .run(runCutoff, webhookCutoff).changes;
     return n;
   }
 
@@ -734,6 +1078,7 @@ export class AppDatabase {
     const cols = this.db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>;
     const names = new Set(cols.map((c) => c.name));
     if (!names.has('email')) this.db.exec(`ALTER TABLE users ADD COLUMN email TEXT`);
+    if (!names.has('email_verified_at')) this.db.exec(`ALTER TABLE users ADD COLUMN email_verified_at TEXT`);
     if (!names.has('google_id')) this.db.exec(`ALTER TABLE users ADD COLUMN google_id TEXT`);
     if (!names.has('password_hash')) this.db.exec(`ALTER TABLE users ADD COLUMN password_hash TEXT`);
     if (!names.has('is_superadmin')) {
@@ -786,8 +1131,15 @@ export class AppDatabase {
     if (cols.length === 0) return;
     if (cols.some((c) => c.name === 'installation_id')) return;
 
+    const names = new Set(cols.map((c) => c.name));
+    const legacyName = `pr_reviews_legacy_${Date.now()}`;
+    const column = (name: string, fallback: string): string =>
+      names.has(name) ? `"${name.replace(/"/g, '""')}"` : fallback;
+    // Preserve the old rows. The previous migration renamed the table, created
+    // an empty replacement, and dropped the renamed table, silently erasing
+    // every historical finding on the first restart after an upgrade.
+    this.db.exec(`ALTER TABLE pr_reviews RENAME TO "${legacyName}"`);
     this.db.exec(`
-      ALTER TABLE pr_reviews RENAME TO pr_reviews_legacy;
       CREATE TABLE pr_reviews (
         installation_id INTEGER NOT NULL,
         owner TEXT NOT NULL,
@@ -798,10 +1150,30 @@ export class AppDatabase {
         findings_json TEXT NOT NULL,
         last_review_at TEXT NOT NULL,
         last_summary_comment_id INTEGER,
+        codex_thread_id TEXT,
+        manual_review_json TEXT,
         PRIMARY KEY (installation_id, owner, repo, pr)
       );
-      DROP TABLE pr_reviews_legacy;
     `);
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO pr_reviews
+         (installation_id, owner, repo, pr, tenant_id, last_sha, findings_json,
+          last_review_at, last_summary_comment_id, codex_thread_id, manual_review_json)
+         SELECT 0,
+                ${column('owner', "''")},
+                ${column('repo', "''")},
+                ${column('pr', '0')},
+                'legacy',
+                ${column('last_sha', "''")},
+                ${column('findings_json', "'[]'")},
+                ${column('last_review_at', "datetime('now')")},
+                ${column('last_summary_comment_id', 'NULL')},
+                ${column('codex_thread_id', 'NULL')},
+                ${column('manual_review_json', 'NULL')}
+         FROM "${legacyName}"`,
+      )
+      .run();
   }
 
   // ——— Tenants ———
@@ -861,6 +1233,23 @@ export class AppDatabase {
     return { id: row.id, slug: row.slug, name: row.name, createdAt: row.created_at };
   }
 
+  getTenantByStripeCustomerId(customerId: string): Tenant | null {
+    const row = this.db
+      .prepare(`SELECT id, slug, name, created_at FROM tenants WHERE stripe_customer_id = ?`)
+      .get(customerId) as { id: string; slug: string; name: string; created_at: string } | undefined;
+    if (!row) return null;
+    return { id: row.id, slug: row.slug, name: row.name, createdAt: row.created_at };
+  }
+
+  listStripeCustomers(): Array<{ tenantId: string; customerId: string }> {
+    return this.db
+      .prepare(
+        `SELECT id AS tenantId, stripe_customer_id AS customerId
+         FROM tenants WHERE stripe_customer_id IS NOT NULL`,
+      )
+      .all() as Array<{ tenantId: string; customerId: string }>;
+  }
+
   // ——— Installations ———
 
   upsertInstallation(input: {
@@ -881,7 +1270,10 @@ export class AppDatabase {
          (installation_id, tenant_id, account_login, account_type, repository_selection, suspended_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(installation_id) DO UPDATE SET
-           tenant_id = excluded.tenant_id,
+           -- An installation is an ownership binding, not a mutable profile
+           -- field. Keeping the existing tenant also closes the race where two
+           -- callbacks both observe no row and the second callback rebinds it.
+           tenant_id = github_installations.tenant_id,
            account_login = excluded.account_login,
            account_type = excluded.account_type,
            repository_selection = excluded.repository_selection,
@@ -1103,18 +1495,28 @@ export class AppDatabase {
       if (existingEmail.githubId > 0) {
         throw new Error('This email is already linked to a different GitHub account');
       }
+      const passwordState = this.db
+        .prepare(`SELECT password_hash, email_verified_at FROM users WHERE id = ?`)
+        .get(existingEmail.id) as { password_hash: string | null; email_verified_at: string | null } | undefined;
+      if (passwordState?.password_hash && !passwordState.email_verified_at) {
+        throw new Error('This email belongs to an unverified password account; sign in there before linking GitHub');
+      }
       this.db
-        .prepare(`UPDATE users SET github_id = ?, login = ?, name = ?, avatar_url = ?, email = ? WHERE id = ?`)
-        .run(input.githubId, input.login, input.name ?? null, input.avatarUrl ?? null, email, existingEmail.id);
+        .prepare(
+          `UPDATE users
+           SET github_id = ?, login = ?, name = ?, avatar_url = ?, email = ?, email_verified_at = COALESCE(email_verified_at, ?)
+           WHERE id = ?`,
+        )
+        .run(input.githubId, input.login, input.name ?? null, input.avatarUrl ?? null, email, new Date().toISOString(), existingEmail.id);
       return this.getUserById(existingEmail.id)!;
     }
 
     this.db
       .prepare(
-        `INSERT INTO users (id, github_id, login, name, avatar_url, email, normalized_email, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (id, github_id, login, name, avatar_url, email, email_verified_at, normalized_email, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(randomUUID(), input.githubId, input.login, input.name ?? null, input.avatarUrl ?? null, email ?? null, normEmail, now);
+      .run(randomUUID(), input.githubId, input.login, input.name ?? null, input.avatarUrl ?? null, email ?? null, email ? now : null, normEmail, now);
     return this.getUserByGitHubId(input.githubId)!;
   }
 
@@ -1157,17 +1559,28 @@ export class AppDatabase {
       if (linkedGoogleId?.google_id) {
         throw new Error('This email is already linked to a different Google account');
       }
+      const passwordState = this.db
+        .prepare(`SELECT password_hash, email_verified_at FROM users WHERE id = ?`)
+        .get(existingEmail.id) as { password_hash: string | null; email_verified_at: string | null } | undefined;
+      if (passwordState?.password_hash && !passwordState.email_verified_at) {
+        throw new Error('This email belongs to an unverified password account; sign in there before linking Google');
+      }
       this.db
-        .prepare(`UPDATE users SET google_id = ?, name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url) WHERE id = ?`)
-        .run(input.googleId, input.name ?? null, input.avatarUrl ?? null, existingEmail.id);
+        .prepare(
+          `UPDATE users
+           SET google_id = ?, name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url),
+               email_verified_at = COALESCE(email_verified_at, ?)
+           WHERE id = ?`,
+        )
+        .run(input.googleId, input.name ?? null, input.avatarUrl ?? null, new Date().toISOString(), existingEmail.id);
       return this.getUserById(existingEmail.id)!;
     }
 
     const syntheticGithubId = syntheticUserId(`google:${input.googleId}`);
     this.db
       .prepare(
-        `INSERT INTO users (id, github_id, login, name, avatar_url, email, normalized_email, google_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (id, github_id, login, name, avatar_url, email, email_verified_at, normalized_email, google_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         randomUUID(),
@@ -1176,6 +1589,7 @@ export class AppDatabase {
         input.name ?? null,
         input.avatarUrl ?? null,
         email,
+        new Date().toISOString(),
         input.normalizedEmail ?? email,
         input.googleId,
         new Date().toISOString(),
@@ -1260,6 +1674,13 @@ export class AppDatabase {
         now,
       );
     return result.changes === 1 ? this.getUserByEmail(email) : null;
+  }
+
+  /** Mark a password email verified after a future email-verification flow. */
+  setUserEmailVerified(userId: string, verifiedAt = new Date().toISOString()): boolean {
+    return this.db
+      .prepare(`UPDATE users SET email_verified_at = ? WHERE id = ? AND password_hash IS NOT NULL`)
+      .run(verifiedAt, userId).changes > 0;
   }
 
   getUserByEmail(email: string): User | null {
@@ -1478,27 +1899,30 @@ export class AppDatabase {
     if (!rateKey || !Number.isFinite(opts.windowMs) || opts.windowMs <= 0 || !Number.isInteger(opts.max) || opts.max <= 0) {
       return { allowed: false, retryAfterSeconds: 1 };
     }
-    const tx = this.db.transaction(() => {
-      const row = this.db
-        .prepare(`SELECT attempt_count, reset_at FROM auth_rate_limits WHERE rate_key = ?`)
-        .get(rateKey) as { attempt_count: number; reset_at: string } | undefined;
-      const resetAt = row ? new Date(row.reset_at).getTime() : 0;
-      if (!row || !Number.isFinite(resetAt) || resetAt <= now) {
-        this.db
-          .prepare(
-            `INSERT INTO auth_rate_limits (rate_key, attempt_count, reset_at) VALUES (?, 1, ?)
-             ON CONFLICT(rate_key) DO UPDATE SET attempt_count = 1, reset_at = excluded.reset_at`,
-          )
-          .run(rateKey, new Date(now + opts.windowMs).toISOString());
+    // BEGIN IMMEDIATE so concurrent workers cannot both read under-budget and
+    // both increment — deferred transactions race under WAL with multi-process.
+    return this.db
+      .transaction(() => {
+        const row = this.db
+          .prepare(`SELECT attempt_count, reset_at FROM auth_rate_limits WHERE rate_key = ?`)
+          .get(rateKey) as { attempt_count: number; reset_at: string } | undefined;
+        const resetAt = row ? new Date(row.reset_at).getTime() : 0;
+        if (!row || !Number.isFinite(resetAt) || resetAt <= now) {
+          this.db
+            .prepare(
+              `INSERT INTO auth_rate_limits (rate_key, attempt_count, reset_at) VALUES (?, 1, ?)
+               ON CONFLICT(rate_key) DO UPDATE SET attempt_count = 1, reset_at = excluded.reset_at`,
+            )
+            .run(rateKey, new Date(now + opts.windowMs).toISOString());
+          return { allowed: true, retryAfterSeconds: 0 };
+        }
+        if (row.attempt_count >= opts.max) {
+          return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1000)) };
+        }
+        this.db.prepare(`UPDATE auth_rate_limits SET attempt_count = attempt_count + 1 WHERE rate_key = ?`).run(rateKey);
         return { allowed: true, retryAfterSeconds: 0 };
-      }
-      if (row.attempt_count >= opts.max) {
-        return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil((resetAt - now) / 1000)) };
-      }
-      this.db.prepare(`UPDATE auth_rate_limits SET attempt_count = attempt_count + 1 WHERE rate_key = ?`).run(rateKey);
-      return { allowed: true, retryAfterSeconds: 0 };
-    });
-    return tx();
+      })
+      .immediate();
   }
 
   clearAuthAttempts(rateKey: string): void {
@@ -1625,7 +2049,7 @@ export class AppDatabase {
           expiresAt: row.expires_at,
           createdAt: row.created_at,
         },
-        session: this.createSession(row.user_id, sessionTtlMs),
+        session: this.replaceUserSessions(row.user_id, sessionTtlMs),
       };
     });
     return tx();
@@ -2118,7 +2542,7 @@ export class AppDatabase {
       .prepare(
         `SELECT COUNT(*) AS n FROM review_runs
          WHERE free_tier = 1 AND (status IN ('running', 'completed', 'failed') OR (status = 'skipped' AND skip_reason LIKE 'interrupted by restart%'))
-           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND created_at >= ?`,
+           AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND action NOT LIKE 'scan:%' AND created_at >= ?`,
       )
       .get(since) as { n: number };
     return row.n;
@@ -2208,6 +2632,14 @@ export class AppDatabase {
       deep?: boolean;
     },
   ): void {
+    const usageTotals = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cost_usd), 0) AS cost_usd
+         FROM review_run_usage WHERE run_id = ?`,
+      )
+      .get(id) as { input_tokens: number; output_tokens: number; cost_usd: number };
     this.db
       .prepare(
         `UPDATE review_runs
@@ -2216,7 +2648,7 @@ export class AppDatabase {
              input_tokens = ?, output_tokens = ?, cost_usd = ?,
              new_findings_json = ?,
              deep = COALESCE(?, deep)
-         WHERE id = ?`,
+         WHERE id = ? AND status = 'running'`,
       )
       .run(
         patch.status,
@@ -2226,13 +2658,596 @@ export class AppDatabase {
         patch.findingsNew ?? 0,
         patch.findingsFixed ?? 0,
         patch.findingsOpen ?? 0,
-        patch.inputTokens ?? 0,
-        patch.outputTokens ?? 0,
-        patch.costUsd ?? 0,
+        patch.inputTokens ?? usageTotals.input_tokens,
+        patch.outputTokens ?? usageTotals.output_tokens,
+        patch.costUsd ?? usageTotals.cost_usd,
         patch.newFindings ? JSON.stringify(patch.newFindings) : null,
         patch.deep === undefined ? null : patch.deep ? 1 : 0,
         id,
       );
+  }
+
+  /** Persist one provider usage event as soon as the provider reports it. */
+  recordReviewRunUsage(
+    input: Omit<ReviewRunUsage, 'id' | 'createdAt'> & { createdAt?: string },
+  ): ReviewRunUsage {
+    const run = this.db
+      .prepare(`SELECT tenant_id FROM review_runs WHERE id = ?`)
+      .get(input.runId) as { tenant_id: string } | undefined;
+    if (!run) throw new Error(`cannot record usage for unknown review run ${input.runId}`);
+    if (run.tenant_id !== input.tenantId) {
+      throw new Error(`review usage tenant mismatch for run ${input.runId}`);
+    }
+    for (const [name, value] of Object.entries({
+      inputTokens: input.inputTokens,
+      outputTokens: input.outputTokens,
+      inputRatePerM: input.inputRatePerM,
+      outputRatePerM: input.outputRatePerM,
+      costUsd: input.costUsd,
+    })) {
+      if (!Number.isFinite(value) || value < 0) throw new Error(`invalid review usage ${name}`);
+    }
+    const id = randomUUID();
+    const createdAt = input.createdAt ?? new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO review_run_usage
+         (id, run_id, tenant_id, provider, model, tier, pass_name,
+          input_tokens, output_tokens, input_rate_per_m, output_rate_per_m,
+          cost_usd, token_source, attempt_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.runId,
+        input.tenantId,
+        input.provider,
+        input.model,
+        input.tier,
+        input.passName ?? null,
+        input.inputTokens,
+        input.outputTokens,
+        input.inputRatePerM,
+        input.outputRatePerM,
+        input.costUsd,
+        input.tokenSource,
+        input.attemptId ?? null,
+        createdAt,
+      );
+    return { ...input, id, createdAt };
+  }
+
+  listReviewRunUsage(runId: string): ReviewRunUsage[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM review_run_usage WHERE run_id = ? ORDER BY created_at ASC, id ASC`)
+      .all(runId) as Array<{
+      id: string;
+      run_id: string;
+      tenant_id: string;
+      provider: string;
+      model: string;
+      tier: string;
+      pass_name: string | null;
+      input_tokens: number;
+      output_tokens: number;
+      input_rate_per_m: number;
+      output_rate_per_m: number;
+      cost_usd: number;
+      token_source: string;
+      attempt_id: string | null;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      runId: row.run_id,
+      tenantId: row.tenant_id,
+      provider: row.provider,
+      model: row.model,
+      tier: row.tier,
+      passName: row.pass_name ?? undefined,
+      inputTokens: row.input_tokens,
+      outputTokens: row.output_tokens,
+      inputRatePerM: row.input_rate_per_m,
+      outputRatePerM: row.output_rate_per_m,
+      costUsd: row.cost_usd,
+      tokenSource: row.token_source as ReviewRunUsage['tokenSource'],
+      attemptId: row.attempt_id ?? undefined,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /** Record gross Stripe revenue once; event_id makes webhook retries harmless. */
+  recordStripeRevenueEvent(
+    input: Omit<StripeRevenueEvent, 'createdAt'> & { createdAt?: string },
+  ): boolean {
+    const createdAt = input.createdAt ?? new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO stripe_revenue_events
+         (event_id, event_type, invoice_id, tenant_id, customer_id, subscription_id,
+          amount_cents, currency, occurred_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.eventId,
+        input.eventType,
+        input.invoiceId ?? null,
+        input.tenantId ?? null,
+        input.customerId ?? null,
+        input.subscriptionId ?? null,
+        input.amountCents,
+        input.currency.trim().toLowerCase(),
+        input.occurredAt,
+        createdAt,
+      );
+    return result.changes > 0;
+  }
+
+  assignUnlinkedStripeRevenue(customerId: string, tenantId: string): number {
+    if (!customerId.trim() || !tenantId.trim()) return 0;
+    return this.db
+      .prepare(
+        `UPDATE stripe_revenue_events
+         SET tenant_id = ?
+         WHERE customer_id = ? AND tenant_id IS NULL`,
+      )
+      .run(tenantId, customerId)
+      .changes;
+  }
+
+  sumStripeRefundsForCharge(chargeId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(-amount_cents), 0) AS amount_cents
+         FROM stripe_revenue_events
+         WHERE event_type = 'charge.refunded' AND invoice_id = ?`,
+      )
+      .get(chargeId) as { amount_cents: number };
+    return Math.max(0, row.amount_cents);
+  }
+
+  enqueueStripeMeterEvent(input: {
+    runId: string;
+    tenantId: string;
+    customerId: string;
+    eventName: string;
+    plan: string;
+    units: number;
+  }): StripeMeterEvent {
+    const eventName = input.eventName.trim();
+    if (!eventName) throw new Error('Stripe meter event name cannot be blank');
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO stripe_meter_events
+         (run_id, tenant_id, customer_id, event_name, plan, units, status, attempts,
+          last_error, next_attempt_at, reported_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, ?, ?)`,
+      )
+      .run(
+        input.runId,
+        input.tenantId,
+        input.customerId,
+        eventName,
+        input.plan,
+        Math.max(0, Math.floor(input.units)),
+        now,
+        now,
+      );
+    return this.getStripeMeterEvent(input.runId)!;
+  }
+
+  getStripeMeterEvent(runId: string): StripeMeterEvent | null {
+    const row = this.db
+      .prepare(`SELECT * FROM stripe_meter_events WHERE run_id = ?`)
+      .get(runId) as
+      | {
+          run_id: string;
+          tenant_id: string;
+          customer_id: string;
+          event_name: string;
+          plan: string;
+          units: number;
+          status: 'pending' | 'reported';
+          attempts: number;
+          last_error: string | null;
+          next_attempt_at: string | null;
+          reported_at: string | null;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+    return row
+      ? {
+          runId: row.run_id,
+          tenantId: row.tenant_id,
+          customerId: row.customer_id,
+          eventName: row.event_name,
+          plan: row.plan,
+          units: row.units,
+          status: row.status,
+          attempts: row.attempts,
+          lastError: row.last_error ?? undefined,
+          nextAttemptAt: row.next_attempt_at ?? undefined,
+          reportedAt: row.reported_at ?? undefined,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        }
+      : null;
+  }
+
+  listPendingStripeMeterEvents(limit = 50): StripeMeterEvent[] {
+    const now = new Date().toISOString();
+    const rows = this.db
+      .prepare(
+        `SELECT run_id FROM stripe_meter_events
+         WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+         ORDER BY created_at ASC LIMIT ?`,
+      )
+      .all(now, Math.max(1, Math.min(500, Math.floor(limit)))) as Array<{ run_id: string }>;
+    return rows.map((row) => this.getStripeMeterEvent(row.run_id)!).filter(Boolean);
+  }
+
+  markStripeMeterAttempt(runId: string, error: string, nextAttemptAt: string): void {
+    this.db
+      .prepare(
+        `UPDATE stripe_meter_events
+         SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?, updated_at = ?
+         WHERE run_id = ? AND status = 'pending'`,
+      )
+      .run(error.slice(0, 1000), nextAttemptAt, new Date().toISOString(), runId);
+  }
+
+  setStripeMeterEventName(runId: string, eventName: string): void {
+    const normalized = eventName.trim();
+    if (!normalized) throw new Error('Stripe meter event name cannot be blank');
+    this.db
+      .prepare(
+        `UPDATE stripe_meter_events
+         SET event_name = ?, updated_at = ?
+         WHERE run_id = ? AND status = 'pending'`,
+      )
+      .run(normalized, new Date().toISOString(), runId);
+  }
+
+  markStripeMeterReported(runId: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `UPDATE stripe_meter_events
+         SET status = 'reported', reported_at = ?, last_error = NULL, next_attempt_at = NULL, updated_at = ?
+         WHERE run_id = ? AND status = 'pending'`,
+      )
+      .run(now, now, runId);
+  }
+
+  listPlatformCosts(): PlatformCost[] {
+    const rows = this.db
+      .prepare(`SELECT category, amount_cents, note, updated_at FROM platform_costs ORDER BY category ASC`)
+      .all() as Array<{ category: string; amount_cents: number; note: string | null; updated_at: string }>;
+    return rows.map((row) => ({
+      category: row.category,
+      amountCents: row.amount_cents,
+      note: row.note ?? undefined,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  upsertPlatformCost(input: { category: string; amountCents: number; note?: string }): PlatformCost {
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO platform_costs (category, amount_cents, note, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(category) DO UPDATE SET amount_cents = excluded.amount_cents,
+           note = excluded.note, updated_at = excluded.updated_at`,
+      )
+      .run(input.category, input.amountCents, input.note ?? null, updatedAt);
+    return { ...input, updatedAt };
+  }
+
+  deletePlatformCost(category: string): boolean {
+    return this.db.prepare(`DELETE FROM platform_costs WHERE category = ?`).run(category).changes > 0;
+  }
+
+  /**
+   * Operator-only cost and margin source. Per-run usage is preferred; old rows
+   * without ledger entries fall back to review_runs and are marked legacy.
+   */
+  getSuperadminCostAnalytics(
+    sinceIso: string,
+    untilIso: string,
+    planPricesCents: Record<string, number> = {},
+    recentLimit = 100,
+  ): SuperadminCostAnalytics {
+    const runCostCte = `
+      WITH run_costs AS (
+        SELECT run_id,
+               SUM(input_tokens) AS input_tokens,
+               SUM(output_tokens) AS output_tokens,
+               SUM(cost_usd) AS cost_usd
+        FROM review_run_usage
+        WHERE created_at >= ? AND created_at < ?
+        GROUP BY run_id
+      )`;
+    const rangeArgs = [sinceIso, untilIso];
+
+    const overviewRow = this.db
+      .prepare(
+        `${runCostCte}
+         SELECT
+           COUNT(*) AS runs,
+           SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
+           SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) AS failed_runs,
+           SUM(CASE WHEN r.status = 'skipped' THEN 1 ELSE 0 END) AS skipped_runs,
+           SUM(CASE WHEN rc.run_id IS NULL THEN r.input_tokens ELSE rc.input_tokens END) AS input_tokens,
+           SUM(CASE WHEN rc.run_id IS NULL THEN r.output_tokens ELSE rc.output_tokens END) AS output_tokens,
+           SUM(CASE WHEN rc.run_id IS NULL THEN r.cost_usd ELSE rc.cost_usd END) AS cost_usd,
+           SUM(CASE WHEN rc.run_id IS NULL AND r.cost_usd > 0 THEN r.cost_usd ELSE 0 END) AS legacy_cost_usd,
+           COUNT(CASE WHEN rc.run_id IS NOT NULL THEN 1 END) AS instrumented_runs,
+           COUNT(CASE WHEN r.cost_usd > 0 OR rc.run_id IS NOT NULL THEN 1 END) AS runs_with_cost
+         FROM review_runs r
+         LEFT JOIN run_costs rc ON rc.run_id = r.id
+         WHERE r.created_at >= ? AND r.created_at < ?`,
+      )
+      .get(...rangeArgs, ...rangeArgs) as {
+      runs: number;
+      completed_runs: number | null;
+      failed_runs: number | null;
+      skipped_runs: number | null;
+      input_tokens: number | null;
+      output_tokens: number | null;
+      cost_usd: number | null;
+      legacy_cost_usd: number | null;
+      instrumented_runs: number;
+      runs_with_cost: number;
+    };
+
+    const revenueCurrencyRows = this.db
+      .prepare(
+        `SELECT lower(currency) AS currency, COALESCE(SUM(amount_cents), 0) AS amount_cents
+         FROM stripe_revenue_events
+         WHERE occurred_at >= ? AND occurred_at < ?
+         GROUP BY lower(currency)`,
+      )
+      .all(...rangeArgs) as Array<{ currency: string; amount_cents: number }>;
+    const revenueRow = revenueCurrencyRows.find((row) => row.currency === 'usd');
+    const nonUsdRevenue = revenueCurrencyRows
+      .filter((row) => row.currency !== 'usd')
+      .map((row) => ({ currency: row.currency, amountCents: row.amount_cents }));
+    const platformCosts = this.listPlatformCosts();
+    const monthlyFixedCostUsd = platformCosts.reduce((sum, row) => sum + row.amountCents, 0) / 100;
+    const rangeDays = Math.max(1 / 24, (Date.parse(untilIso) - Date.parse(sinceIso)) / 86_400_000);
+    const allocatedFixedCostUsd = monthlyFixedCostUsd * rangeDays / 30;
+
+    const modelRows = this.db
+      .prepare(
+        `SELECT provider, model, tier, COUNT(*) AS calls, COUNT(DISTINCT run_id) AS runs,
+                SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                SUM(cost_usd) AS cost_usd
+         FROM review_run_usage
+         WHERE created_at >= ? AND created_at < ?
+         GROUP BY provider, model, tier
+         ORDER BY cost_usd DESC, model ASC`,
+      )
+      .all(...rangeArgs) as Array<{
+      provider: string;
+      model: string;
+      tier: string;
+      calls: number;
+      runs: number;
+      input_tokens: number;
+      output_tokens: number;
+      cost_usd: number;
+    }>;
+
+    const tenantRows = this.db
+      .prepare(
+        `${runCostCte}
+         SELECT
+           t.id AS tenant_id, t.slug, t.name, t.plan, t.stripe_subscription_status,
+           COUNT(r.id) AS runs,
+           SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
+           SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) AS failed_runs,
+           SUM(CASE WHEN rc.run_id IS NULL THEN r.input_tokens ELSE rc.input_tokens END) AS input_tokens,
+           SUM(CASE WHEN rc.run_id IS NULL THEN r.output_tokens ELSE rc.output_tokens END) AS output_tokens,
+           SUM(CASE WHEN rc.run_id IS NULL THEN r.cost_usd ELSE rc.cost_usd END) AS cost_usd,
+           COALESCE(revenue.amount_cents, 0) AS actual_revenue_cents
+         FROM tenants t
+         LEFT JOIN review_runs r
+           ON r.tenant_id = t.id AND r.created_at >= ? AND r.created_at < ?
+         LEFT JOIN run_costs rc ON rc.run_id = r.id
+         LEFT JOIN (
+           SELECT tenant_id, SUM(amount_cents) AS amount_cents
+           FROM stripe_revenue_events
+           WHERE occurred_at >= ? AND occurred_at < ? AND lower(currency) = 'usd'
+           GROUP BY tenant_id
+         ) revenue ON revenue.tenant_id = t.id
+         GROUP BY t.id, revenue.amount_cents
+         HAVING runs > 0 OR actual_revenue_cents != 0
+         ORDER BY cost_usd DESC, t.slug ASC`,
+      )
+      .all(...rangeArgs, ...rangeArgs, ...rangeArgs) as Array<{
+      tenant_id: string;
+      slug: string;
+      name: string;
+      plan: string;
+      stripe_subscription_status: string | null;
+      runs: number;
+      completed_runs: number | null;
+      failed_runs: number | null;
+      input_tokens: number | null;
+      output_tokens: number | null;
+      cost_usd: number | null;
+      actual_revenue_cents: number;
+    }>;
+
+    const modeledRevenue = (plan: string, status: string | null): number => {
+      if (
+        plan === 'free' ||
+        status === null ||
+        ['past_due', 'unpaid', 'canceled', 'incomplete', 'incomplete_expired'].includes(status)
+      ) {
+        return 0;
+      }
+      return (planPricesCents[plan] ?? 0) / 100;
+    };
+    // MRR is a current all-tenant metric, not a sum of only tenants that happened
+    // to run during the selected analytics window. Keeping this query independent
+    // prevents a quiet paid customer from disappearing from modeled margin when
+    // the operator selects a short range.
+    const modeledMonthlyRevenueUsd = (
+      this.db
+        .prepare(`SELECT plan, stripe_subscription_status FROM tenants`)
+        .all() as Array<{ plan: string; stripe_subscription_status: string | null }>
+    ).reduce(
+      (sum, row) => sum + modeledRevenue(row.plan, row.stripe_subscription_status),
+      0,
+    );
+    const byTenant = tenantRows.map((row) => ({
+      tenantId: row.tenant_id,
+      slug: row.slug,
+      name: row.name,
+      plan: row.plan,
+      subscriptionStatus: row.stripe_subscription_status ?? undefined,
+      runs: row.runs,
+      completedRuns: row.completed_runs ?? 0,
+      failedRuns: row.failed_runs ?? 0,
+      inputTokens: row.input_tokens ?? 0,
+      outputTokens: row.output_tokens ?? 0,
+      costUsd: row.cost_usd ?? 0,
+      actualRevenueUsd: row.actual_revenue_cents / 100,
+      modeledMonthlyRevenueUsd: modeledRevenue(row.plan, row.stripe_subscription_status),
+    }));
+
+    const dailyCostRows = this.db
+      .prepare(
+        `${runCostCte}
+         SELECT substr(r.created_at, 1, 10) AS day,
+                SUM(CASE WHEN rc.run_id IS NULL THEN r.cost_usd ELSE rc.cost_usd END) AS cost_usd,
+                COUNT(*) AS runs
+         FROM review_runs r
+         LEFT JOIN run_costs rc ON rc.run_id = r.id
+         WHERE r.created_at >= ? AND r.created_at < ?
+         GROUP BY day ORDER BY day ASC`,
+      )
+      .all(...rangeArgs, ...rangeArgs) as Array<{ day: string; cost_usd: number | null; runs: number }>;
+    const dailyRevenueRows = this.db
+      .prepare(
+        `SELECT substr(occurred_at, 1, 10) AS day, SUM(amount_cents) AS amount_cents
+         FROM stripe_revenue_events
+         WHERE occurred_at >= ? AND occurred_at < ? AND lower(currency) = 'usd'
+         GROUP BY day`,
+      )
+      .all(...rangeArgs) as Array<{ day: string; amount_cents: number }>;
+    const revenueByDay = new Map(dailyRevenueRows.map((row) => [row.day, row.amount_cents / 100]));
+    const daily = dailyCostRows.map((row) => ({
+      day: row.day,
+      costUsd: row.cost_usd ?? 0,
+      actualRevenueUsd: revenueByDay.get(row.day) ?? 0,
+      runs: row.runs,
+    }));
+    for (const row of dailyRevenueRows) {
+      if (!daily.some((day) => day.day === row.day)) {
+        daily.push({ day: row.day, costUsd: 0, actualRevenueUsd: row.amount_cents / 100, runs: 0 });
+      }
+    }
+    daily.sort((a, b) => a.day.localeCompare(b.day));
+
+    const recentRows = this.db
+      .prepare(
+        `${runCostCte}
+         SELECT r.*, rc.input_tokens AS usage_input_tokens, rc.output_tokens AS usage_output_tokens,
+                rc.cost_usd AS usage_cost_usd
+         FROM review_runs r
+         LEFT JOIN run_costs rc ON rc.run_id = r.id
+         WHERE r.created_at >= ? AND r.created_at < ?
+         ORDER BY r.created_at DESC LIMIT ?`,
+      )
+      .all(...rangeArgs, ...rangeArgs, recentLimit) as Array<{
+      id: string;
+      tenant_id: string;
+      installation_id: number;
+      owner: string;
+      repo: string;
+      pr: number;
+      head_sha: string;
+      action: string;
+      status: ReviewRunStatus;
+      skip_reason: string | null;
+      error: string | null;
+      duration_ms: number;
+      findings_new: number;
+      findings_fixed: number;
+      findings_open: number;
+      input_tokens: number;
+      output_tokens: number;
+      cost_usd: number;
+      deep: number;
+      created_at: string;
+      usage_cost_usd: number | null;
+    }>;
+    const usageByRun = new Map<string, ReviewRunUsage[]>();
+    for (const row of recentRows) usageByRun.set(row.id, this.listReviewRunUsage(row.id));
+    const recentRuns = recentRows.map((row) => ({
+      id: row.id,
+      tenantId: row.tenant_id,
+      installationId: row.installation_id,
+      owner: row.owner,
+      repo: row.repo,
+      pr: row.pr,
+      headSha: row.head_sha,
+      action: row.action,
+      status: row.status,
+      skipReason: row.skip_reason ?? undefined,
+      error: row.error ?? undefined,
+      durationMs: row.duration_ms,
+      findingsNew: row.findings_new,
+      findingsFixed: row.findings_fixed,
+      findingsOpen: row.findings_open,
+      costUsd: row.cost_usd,
+      deep: row.deep === 1,
+      createdAt: row.created_at,
+      usage: usageByRun.get(row.id) ?? [],
+      actualCostUsd: row.usage_cost_usd ?? row.cost_usd,
+      legacyCost: row.usage_cost_usd === null,
+    }));
+
+    return {
+      since: sinceIso,
+      until: untilIso,
+      overview: {
+        runs: overviewRow.runs,
+        completedRuns: overviewRow.completed_runs ?? 0,
+        failedRuns: overviewRow.failed_runs ?? 0,
+        skippedRuns: overviewRow.skipped_runs ?? 0,
+        inputTokens: overviewRow.input_tokens ?? 0,
+        outputTokens: overviewRow.output_tokens ?? 0,
+        costUsd: overviewRow.cost_usd ?? 0,
+        actualRevenueUsd: (revenueRow?.amount_cents ?? 0) / 100,
+        modeledMonthlyRevenueUsd,
+        monthlyFixedCostUsd,
+        allocatedFixedCostUsd,
+        legacyCostUsd: overviewRow.legacy_cost_usd ?? 0,
+        instrumentedRuns: overviewRow.instrumented_runs,
+        runsWithCost: overviewRow.runs_with_cost,
+        nonUsdRevenue,
+      },
+      byModel: modelRows.map((row) => ({
+        provider: row.provider,
+        model: row.model,
+        tier: row.tier,
+        calls: row.calls,
+        runs: row.runs,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+        costUsd: row.cost_usd,
+      })),
+      byTenant,
+      daily,
+      platformCosts,
+      recentRuns,
+    };
   }
 
   /** Completed runs (all tenants) for the deep-vs-normal scorecard, oldest
@@ -2284,8 +3299,22 @@ export class AppDatabase {
     const since = new Date(Date.now() - sinceMs).toISOString();
     const row = this.db
       .prepare(
-        `SELECT COALESCE(SUM(cost_usd), 0) AS cost, COUNT(*) AS n FROM review_runs
-         WHERE lower(owner) = lower(?) AND cost_usd > 0 AND created_at >= ?`,
+        `WITH account_runs AS (
+           SELECT id, cost_usd
+           FROM review_runs
+           WHERE lower(owner) = lower(?) AND created_at >= ?
+         ),
+         run_costs AS (
+           SELECT u.run_id, SUM(u.cost_usd) AS cost
+           FROM review_run_usage u
+           INNER JOIN account_runs r ON r.id = u.run_id
+           GROUP BY u.run_id
+         )
+         SELECT COALESCE(SUM(CASE WHEN rc.run_id IS NULL THEN r.cost_usd ELSE rc.cost END), 0) AS cost,
+                COUNT(*) AS n
+         FROM account_runs r
+         LEFT JOIN run_costs rc ON rc.run_id = r.id
+         WHERE r.cost_usd > 0 OR rc.run_id IS NOT NULL`,
       )
       .get(owner, since) as { cost: number; n: number };
     return { costUsd: row.cost, reviews: row.n };
@@ -2944,6 +3973,7 @@ function mapUser(row: UserRow): User {
   return {
     id: row.id,
     githubId: row.github_id,
+    googleId: row.google_id ?? undefined,
     login: row.login,
     name: row.name ?? undefined,
     avatarUrl: row.avatar_url ?? undefined,
@@ -3005,7 +4035,14 @@ let sharedDb: AppDatabase | null = null;
 
 export function createAppDatabase(): AppDatabase {
   if (!sharedDb) {
-    sharedDb = new AppDatabase(process.env.STORE_PATH ?? defaultDbPath());
+    const configured = process.env.STORE_PATH;
+    if (
+      (process.env.NODE_ENV === 'production' || process.env.ORVEX_REQUIRE_DURABLE_STORAGE === '1') &&
+      (!configured || !path.isAbsolute(configured) || configured.includes(`${path.sep}.data${path.sep}`))
+    ) {
+      throw new Error('STORE_PATH must be an absolute path outside the checkout in production');
+    }
+    sharedDb = new AppDatabase(configured ?? defaultDbPath());
   }
   return sharedDb;
 }

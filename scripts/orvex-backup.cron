@@ -1,2 +1,2 @@
 # Keep a consistent SQLite backup outside the application checkout.
-17 */6 * * * cd /home/orvex/code-review && /usr/bin/node scripts/backup-db.mjs >>/home/orvex/orvex-data/backup-db.log 2>&1 # orvex-db-backup
+17 */6 * * * cd /home/orvex/code-review && set -a && . /home/orvex/code-review/.env && set +a && ORVEX_REQUIRE_OFFSITE_BACKUP=1 /usr/bin/node scripts/backup-db.mjs >>/home/orvex/orvex-data/backup-db.log 2>&1 # orvex-db-backup

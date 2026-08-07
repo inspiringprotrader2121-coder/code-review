@@ -39,20 +39,16 @@ export async function verifyFindingOnHead(
 
   // Deterministic fix detection: retire a finding ONLY when we can see the EXACT
   // recorded fix landed — the flagged `originalCode` is gone AND the recorded
-  // `fixedCode` is now present. HIGH-SEVERITY (P1/P2) findings are NEVER closed
-  // this way: `fixedCode`-present is weak proof (the fix text may already exist in
-  // the file for unrelated reasons, so an incidental rename that removes the
-  // original could false-close it). For a real bug that risk is unacceptable —
-  // defer P1/P2 entirely to mergeFindings' stronger "file reviewed + sha advanced
-  // + model didn't re-surface it" authority. Deterministic close stays only for
-  // P3/info where a stray retirement self-corrects and the cost is low.
-  const highSeverity = finding.severity === 'P1' || finding.severity === 'P2';
-  if (!highSeverity && fixLanded(finding.originalCode, finding.fixedCode, content)) {
+  // `fixedCode` is now present. Both anchors must be reliable (see fixLanded).
+  // This is the ONLY path that may close P1/P2; mergeFindings never retires them
+  // solely because the model missed them on a new SHA.
+  if (fixLanded(finding.originalCode, finding.fixedCode, content)) {
     return { open: false, genuine: true };
   }
 
   // No proof of a fix: carry it forward WITHOUT stamping lastSeenSha, so
-  // mergeFindings' "model didn't re-surface it" + flip-flop guards decide.
+  // mergeFindings' "model didn't re-surface it" + flip-flop guards decide
+  // (P3/info only — P1/P2 stay open there).
   return { open: true, genuine: false };
 }
 
@@ -119,6 +115,12 @@ export interface MergeOptions {
   protectedFingerprints?: Set<string>;
 }
 
+const MERGE_SEV_RANK: Record<string, number> = { info: 0, P3: 1, P2: 2, P1: 3 };
+
+function isHighSeverity(severity: string): boolean {
+  return severity === 'P1' || severity === 'P2';
+}
+
 export function mergeFindings(
   incoming: ReviewFinding[],
   prior: StoredFinding[],
@@ -175,7 +177,22 @@ export function mergeFindings(
       continue;
     }
     if (incomingFp.has(p.fingerprint)) {
-      stillOpen.push({ ...p, lastSeenSha: headSha });
+      const detected = incomingByFingerprint.get(p.fingerprint);
+      let carried: StoredFinding = { ...p, lastSeenSha: headSha };
+      // Re-detection may upgrade severity/message when the new report ranks higher.
+      if (
+        detected
+        && (MERGE_SEV_RANK[detected.severity] ?? 0) > (MERGE_SEV_RANK[p.severity] ?? 0)
+      ) {
+        carried = {
+          ...carried,
+          severity: detected.severity,
+          message: detected.message,
+          ...(detected.suggestion !== undefined ? { suggestion: detected.suggestion } : {}),
+          confidence: Math.max(carried.confidence, detected.confidence),
+        };
+      }
+      stillOpen.push(carried);
     } else if (opts.reviewedFiles && !opts.reviewedFiles.has(p.file)) {
       // This run didn't review the finding's file (an incremental push that
       // didn't touch it), so its absence from `incoming` proves nothing —
@@ -187,6 +204,10 @@ export function mergeFindings(
       // Carry it forward; never flip a real finding to "fixed" just because a
       // re-run's dice rolled differently. (Using priorReviewSha keeps this gate
       // safe from reconcileFixedOnHead overwriting lastSeenSha.)
+      stillOpen.push({ ...p });
+    } else if (isHighSeverity(p.severity)) {
+      // P1/P2 must not auto-close from a model miss. Only reconcileFixedOnHead's
+      // fixLanded / file-deleted evidence may retire them.
       stillOpen.push({ ...p });
     } else {
       newlyFixed.push({ ...p, status: 'fixed', fixedAtSha: headSha });

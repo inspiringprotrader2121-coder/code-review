@@ -27,7 +27,14 @@ export interface LlmClientOptions {
    * reports exact usage; the OpenAI-compatible/streaming path estimates from
    * character counts (~4 chars/token) since it doesn't request a usage object.
    */
-  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
+  onUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    tokenSource?: 'provider' | 'estimate';
+    /** Actual provider/model after any fallback, for cost attribution. */
+    provider?: string;
+    model?: string;
+  }) => void;
 }
 
 /** Rough chars→tokens estimate (~4 chars/token) for providers that don't return
@@ -42,7 +49,7 @@ const LLM_TIMEOUT_MS = (() => {
   // A typo'd value yielded NaN, and setTimeout(NaN) fires at ~1ms — every call
   // would abort instantly as "stalled". Same guard as the other numeric envs.
   const n = Number(process.env.ORVEX_LLM_TIMEOUT_MS ?? 240_000);
-  return Number.isFinite(n) && n > 0 ? n : 240_000;
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.max(Math.floor(n), 1_000), 900_000) : 240_000;
 })();
 
 /** Total time allowed for one provider attempt, including active streaming. */
@@ -100,13 +107,56 @@ export function isRateLimitOrQuotaError(message: string): boolean {
  * ORVEX_MAX_OUTPUT_TOKENS_CAP when a provider genuinely needs more.
  */
 const DEFAULT_MAX_OUTPUT_TOKENS = 64_000;
+const ABSOLUTE_MAX_OUTPUT_TOKENS = 1_000_000;
+
+function providerName(baseUrl: string | undefined, api: LlmClientOptions['api']): string {
+  if (api === 'anthropic' || (!baseUrl && api !== 'responses' && api !== 'chat')) return 'anthropic';
+  if (!baseUrl) return 'openai';
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return 'openai-compatible';
+  }
+}
+
+/**
+ * Bound provider calls across every review in this worker process. Per-review
+ * fan-out alone multiplied by the number of worker jobs and caused provider
+ * throttling/tail latency to grow as 4 reviews × 3 calls competed at once.
+ */
+let activeLlmCalls = 0;
+const waitingLlmCalls: Array<() => void> = [];
+
+function globalLlmConcurrency(): number {
+  const raw = process.env.ORVEX_LLM_GLOBAL_CONCURRENCY;
+  const parsed = raw === undefined || raw.trim() === '' ? 6 : Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1 ? Math.min(64, Math.floor(parsed)) : 6;
+}
+
+async function withGlobalLlmSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeLlmCalls >= globalLlmConcurrency()) {
+    await new Promise<void>((resolve) => waitingLlmCalls.push(resolve));
+  } else {
+    activeLlmCalls++;
+  }
+  try {
+    return await fn();
+  } finally {
+    const next = waitingLlmCalls.shift();
+    if (next) next();
+    else activeLlmCalls--;
+  }
+}
 
 export function resolveMaxOutputTokens(explicit?: number): number {
   const configured = explicit ?? Number(process.env.ORVEX_MAX_OUTPUT_TOKENS ?? DEFAULT_MAX_OUTPUT_TOKENS);
   const valid =
     Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : DEFAULT_MAX_OUTPUT_TOKENS;
   const capRaw = Number(process.env.ORVEX_MAX_OUTPUT_TOKENS_CAP ?? DEFAULT_MAX_OUTPUT_TOKENS);
-  const cap = Number.isFinite(capRaw) && capRaw > 0 ? Math.floor(capRaw) : DEFAULT_MAX_OUTPUT_TOKENS;
+  const cap =
+    Number.isFinite(capRaw) && capRaw > 0
+      ? Math.min(Math.floor(capRaw), ABSOLUTE_MAX_OUTPUT_TOKENS)
+      : DEFAULT_MAX_OUTPUT_TOKENS;
   if (valid > cap) {
     console.warn(
       `[llm] max_output_tokens ${valid} exceeds safe cap ${cap} — clamping. ` +
@@ -150,7 +200,22 @@ export function parseRetryAfterMs(message: string): number | undefined {
 /** A rate limit that RECOVERS by waiting — a per-minute TPM/RPM 429, a 529
  * "overloaded", a "try again in Ns". Deliberately DISTINCT from a hard
  * credit/quota exhaustion (402 "insufficient credits"), which waiting will not
- * fix: that must fail fast so the job requeues instead of looping pointlessly. */
+ * fix: that must fail fast so the job requeues instead of looping pointlessly.
+ *
+ * Also DISTINCT from oversized-request / context-window errors: sleeping does
+ * not shrink the payload. Those must fail immediately so the caller can fall
+ * back to a smaller API path instead of burning minutes of backoff. */
+export function isOversizedModelRequest(message: string): boolean {
+  return (
+    /request too large/i.test(message)
+    || /context[_ ]length[_ ]exceeded/i.test(message)
+    || /maximum context length/i.test(message)
+    || /string_above_max_length/i.test(message)
+    || /prompt is too long/i.test(message)
+    || /input\s+tokens?\s+exceed/i.test(message)
+  );
+}
+
 export function isRetryableRateLimit(message: string): boolean {
   // Hard billing exhaustion is NOT recoverable by waiting, however it is dressed:
   //  - a 402 status carrying credit wording, and
@@ -161,6 +226,8 @@ export function isRetryableRateLimit(message: string): boolean {
   const status = /\brequest failed\s*\(\s*(\d{3})\b/i.exec(message)?.[1];
   if (status === '402' && /credit|insufficient|afford|top-?up/i.test(message)) return false;
   if (/insufficient_quota|exceeded your current quota|billing_hard_limit/i.test(message)) return false;
+  // Payload/context too large: never sleep-retry as if it were TPM.
+  if (isOversizedModelRequest(message)) return false;
   return /\b429\b|\b529\b|rate.?limit|tokens? per min|requests? per min|\bTPM\b|\bRPM\b|try again in|overloaded|please try again/i.test(
     message,
   );
@@ -185,21 +252,24 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
     const n = Number(raw);
     return Number.isFinite(n) ? n : fallback;
   };
-  const maxAttempts = Math.max(1, Math.floor(finite(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4)));
-  const maxWaitMs = Math.max(1_000, finite(process.env.ORVEX_RATELIMIT_MAX_WAIT_MS, 60_000));
-  const baseMs = Math.max(250, finite(process.env.ORVEX_RATELIMIT_BASE_MS, 2_000));
+  const maxAttempts = Math.min(10, Math.max(1, Math.floor(finite(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4))));
+  const maxWaitMs = Math.min(300_000, Math.max(1_000, finite(process.env.ORVEX_RATELIMIT_MAX_WAIT_MS, 60_000)));
+  const baseMs = Math.min(60_000, Math.max(250, finite(process.env.ORVEX_RATELIMIT_BASE_MS, 2_000)));
   // TOTAL sleep budget across this call. Each attempt replays the whole key
   // rotation + provider-failover chain, and `runLlmReview` wraps the result in a
   // second retry — so an unbounded per-attempt wait compounded into tens of
   // minutes of a worker slot held asleep. That starves the queue AND hides
   // failures from the circuit breaker (which only counts *failed jobs*), so the
   // breaker never trips while every slot naps. Bound the total, not just each nap.
-  const totalWaitBudgetMs = Math.max(5_000, finite(process.env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 120_000));
+  const totalWaitBudgetMs = Math.min(
+    900_000,
+    Math.max(5_000, finite(process.env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 120_000)),
+  );
   let sleptMs = 0;
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      return await llmChatWithFailover(system, user, opts);
+      return await withGlobalLlmSlot(() => llmChatWithFailover(system, user, opts));
     } catch (err) {
       lastErr = err as Error;
       if (attempt === maxAttempts - 1 || !isRetryableRateLimit(lastErr.message)) throw lastErr;
@@ -296,7 +366,7 @@ async function llmChatSingle(system: string, user: string, opts: LlmClientOption
             ...opts,
             apiKey: anthropicKey,
             baseUrl: undefined,
-            api: undefined,
+            api: 'anthropic',
             model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
           });
         }
@@ -334,6 +404,7 @@ async function llmChatSingle(system: string, user: string, opts: LlmClientOption
             ...opts,
             apiKey: anthropicKey,
             baseUrl: undefined,
+            api: 'anthropic',
             model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
           });
         }
@@ -357,8 +428,12 @@ async function anthropicChat(system: string, user: string, opts: LlmClientOption
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: user }];
   const prefill = opts.json && !think;
   if (prefill) messages.push({ role: 'assistant', content: '{' });
+  const defaultThinkingBudget = opts.model.startsWith('MiniMax-') ? 20_000 : 32_000;
+  const configuredThinkingBudget = Number(process.env.ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS ?? defaultThinkingBudget);
   const thinkingBudget = Math.min(
-    Number(process.env.ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS ?? (opts.model.startsWith('MiniMax-') ? 20_000 : 32_000)),
+    Number.isFinite(configuredThinkingBudget) && configuredThinkingBudget > 0
+      ? configuredThinkingBudget
+      : defaultThinkingBudget,
     maxTokens - 8_000,
   );
   const stream = client.messages.stream({
@@ -389,7 +464,13 @@ async function anthropicChat(system: string, user: string, opts: LlmClientOption
     clearTimeout(hardTimer);
   }
   if (response.usage) {
-    opts.onUsage?.({ inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens });
+    opts.onUsage?.({
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+      tokenSource: 'provider',
+      provider: providerName(opts.baseUrl, opts.api),
+      model: opts.model,
+    });
   }
   if (response.stop_reason === 'max_tokens') {
     throw new Error('LLM response truncated (stop_reason=max_tokens); increase max tokens');
@@ -421,7 +502,11 @@ async function anthropicChat(system: string, user: string, opts: LlmClientOption
  */
 async function openAiResponsesStreamChat(system: string, user: string, opts: LlmClientOptions): Promise<string> {
   const base = (opts.baseUrl ?? 'https://api.openai.com/v1').replace(/\/$/, '');
-  const timeoutMs = Number(process.env.ORVEX_RESPONSES_TIMEOUT_MS ?? 900_000); // 15m inactivity backstop
+  const configuredTimeout = Number(process.env.ORVEX_RESPONSES_TIMEOUT_MS ?? 900_000);
+  const timeoutMs =
+    Number.isFinite(configuredTimeout) && configuredTimeout > 0
+      ? Math.min(Math.max(Math.floor(configuredTimeout), 1_000), 900_000)
+      : 900_000; // 15m inactivity backstop
   // Hard wall-clock cap: the inactivity timer never fires on a call that streams
   // continuously (a 490s over-thinking pass keeps resetting it), so a single call
   // could hang a review indefinitely. This bounds total call time regardless.
@@ -532,14 +617,6 @@ async function openAiResponsesStreamChat(system: string, user: string, opts: Llm
     clearTimeout(timer!);
   }
 
-  if (failed) throw new Error(`LLM responses stream failed: ${failed}`);
-  // P1-4: truncation must be treated as a failure, not returned as success.
-  // `response.incomplete` with non-empty content is the /v1/responses shape for
-  // hitting max_output_tokens; mirror the chat path's `finish_reason==='length'`
-  // and the Anthropic `stop_reason==='max_tokens'` guards.
-  if (incomplete) {
-    throw new Error(`LLM responses truncated (${incomplete}); increase ORVEX_MAX_OUTPUT_TOKENS`);
-  }
   console.log(
     `[llm] model=${opts.model} api=responses effort=${effort} reasoning=${reasoningTokens}tok ` +
       `answer=${content.length}c ${Math.round((Date.now() - startedAt) / 1000)}s`,
@@ -547,7 +624,18 @@ async function openAiResponsesStreamChat(system: string, user: string, opts: Llm
   opts.onUsage?.({
     inputTokens: inTok || estimateTokens(system.length + user.length),
     outputTokens: outTok || estimateTokens(content.length),
+    tokenSource: inTok && outTok ? 'provider' : 'estimate',
+    provider: providerName(opts.baseUrl, opts.api),
+    model: opts.model,
   });
+  if (failed) throw new Error(`LLM responses stream failed: ${failed}`);
+  // P1-4: truncation must be treated as a failure, not returned as success.
+  // `response.incomplete` with non-empty content is the /v1/responses shape for
+  // hitting max_output_tokens; mirror the chat path's `finish_reason==='length'`
+  // and the Anthropic `stop_reason='max_tokens'` guards.
+  if (incomplete) {
+    throw new Error(`LLM responses truncated (${incomplete}); increase ORVEX_MAX_OUTPUT_TOKENS`);
+  }
   // A max_output_tokens cutoff mid-reasoning yields an empty answer — surface it
   // as a retryable error rather than silently returning nothing.
   if (!content) throw new Error('LLM responses returned no text');
@@ -722,6 +810,9 @@ async function openAiCompatStreamChat(
   opts.onUsage?.({
     inputTokens: estimateTokens(system.length + user.length),
     outputTokens: estimateTokens(totalReasoning + answerChars),
+    tokenSource: 'estimate',
+    provider: providerName(opts.baseUrl, opts.api),
+    model: opts.model,
   });
 
   const text = stripThinking(content);

@@ -37,6 +37,7 @@ test('social sign-in links verified provider identities to the existing account'
   const db = new AppDatabase(':memory:');
   const passwordUser = db.createPasswordUser({ email: 'member@example.com', passwordHash: 'hash' });
   assert.ok(passwordUser);
+  assert.equal(db.setUserEmailVerified(passwordUser.id), true);
 
   const googleUser = db.upsertUserFromGoogle({
     googleId: 'google-subject-1',

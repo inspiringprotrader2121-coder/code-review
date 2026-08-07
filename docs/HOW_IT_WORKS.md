@@ -131,7 +131,7 @@ tracks differ in pass count, model mix, included volume, rate limits, and billin
 
 | Capability | Free trial | Starter (`review`) | Pro Unlimited (`review-plus`) | Verify Lite | Verify |
 |---|---|---|---|---|---|
-| Review passes | 2 | 2 | 2 | 4 | 4 |
+| Review passes | 2 | 2 | 2 | 2 (cond. up to 4) | 2 (cond. up to 4) |
 | Index retrieval (top-K files) | 28 | 28 | 28 | 28 | 28 |
 | Review track | dual-model (MiniMax + Flash) | dual-model (MiniMax + Flash) | dual-model (MiniMax + Flash) | multi-model | multi-model |
 | Strict verification | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) |
@@ -149,9 +149,15 @@ commit also has a 2-minute cooldown for the same reason — a fresh push is neve
 affected.
 
 Dual-model and multi-model tracks use different review mixes; Verify Lite and
-Verify run the four-pass multi-model track. Free/Starter/Pro
+Verify default to **two discovery passes** (general + deep-dive). Breadth and
+removed-behavior lenses are conditional (large/`@orvex deep`, or
+deletes/renames) so ordinary PRs stay on the 2-pass path — see
+`packages/review/src/pass-budget.ts`. Free/Starter/Pro
 run two discovery passes (MiniMax + DeepSeek v4 Flash) plus Flash verify —
-no sandboxed investigate. Verify* plans also get a sandboxed **investigate**
+no sandboxed investigate. On high-risk diffs (auth/billing/cleanup/contracts),
+both tracks also get a best-effort Flash **risk-hunt** lens — additive recall
+only; findings still go through the same verifier (`ORVEX_RISK_HUNT=0` disables).
+Verify* plans also get a sandboxed **investigate**
 pass when Codex CLI is not already agentic: DeepSeek v4 Flash with read-only
 tools (`list_dir` / `read_file` / `grep`) over a temp checkout — skipped when
 `ORVEX_INVESTIGATE=0`. Paid plans can request the two-unit `@orvex deep`
@@ -162,7 +168,7 @@ Free is a **lifetime trial (10 reviews, 2/hour) anchored to the GitHub account**
 a second workspace or a reinstall can't reset it. Defined in
 `packages/tenants/src/plans.ts`. Set a workspace's plan via the admin endpoint:
 `POST /admin/tenants/:slug/plan` with `{ "plan": "verify" }` and a `Bearer`
-`ORVEX_ADMIN_SECRET` (falls back to `REVIEW_API_SECRET`).
+`ORVEX_ADMIN_SECRET` (separate from the review-trigger credential).
 
 Billing model: plans are the product people buy; meter/credit only the expensive
 execution runs. Over the free cap, Orvex nudges — it never silently drops.
@@ -237,7 +243,12 @@ callback refuses to rebind an installation already owned by another workspace
 | `QUEUE_BACKEND` | `redis` (prod) or `memory` |
 | `REDIS_URL` | Redis connection (with auth) |
 | `ORVEX_MAX_CONCURRENT_REVIEWS` | reviews per worker process (default 4) |
+| `ORVEX_CODEX_APIKEY_CONCURRENCY` | parallel Codex CLI processes per API-key `CODEX_HOME` (default = `ORVEX_MAX_CONCURRENT_REVIEWS`; OAuth homes always 1) |
+| `ORVEX_CODEX_HOME` / `ORVEX_CODEX_HOMES` | dedicated Codex auth dir, or comma-separated OAuth account pool |
 | `ORVEX_REVIEW_CONCURRENCY` | parallel model calls within one review (default 3 — paces Verify to ~10 min) |
+| `ORVEX_LLM_GLOBAL_CONCURRENCY` | process-wide provider-call ceiling across all reviews (default 6) |
+| `ORVEX_MONTHLY_COGS_CAP_USD` | rolling provider-cost safety ceiling for non-custom plans (default $250) |
+| `ORVEX_AGENT_ARCHIVE_MAX_BYTES` | compressed agent checkout cap (default 150 MB) |
 | `ORVEX_SWEEP_FILE_CHARS` | per-file read depth in the whole-repo sweep (default 10000) |
 | `ORVEX_REVIEW_MAX_CALLS` | hard cap on model calls per review (default 28) |
 | `ORVEX_REVIEW_AGGREGATION_RUNS` | `1` disables repeat aggregation; otherwise 5–10 complete samples |
@@ -249,6 +260,7 @@ callback refuses to rebind an installation already owned by another workspace
 | `ORVEX_INVESTIGATE` | `0` disables the sandboxed investigate pass (on by default for multi-model / Verify* when Codex isn't agentic) |
 | `ORVEX_INVESTIGATE_TIER` | investigate model: `deepseek-flash` (default), `deepseek`, `openai`, or `standard` |
 | `ORVEX_INVESTIGATE_MAX_STEPS` | max tool-loop rounds (default 8) |
+| `ORVEX_RISK_HUNT` | `0` disables the additive Flash risk-hunt pass on high-risk diffs (on by default when Flash is configured) |
 | `ORVEX_DEEPSEEK_API_KEY` / `ORVEX_DEEPSEEK_FLASH_MODEL` | DeepSeek key + Flash model id (default `deepseek-v4-flash`) |
 | `ORVEX_REVIEW_THINKING` | `0` disables reasoning (on by default) |
 | `ORVEX_CODE_EXECUTION` | `1` enables Verify-tier runtime verification (off by default) |
@@ -259,6 +271,7 @@ callback refuses to rebind an installation already owned by another workspace
 | `ORVEX_IP_ABUSE_BLOCK` / `ORVEX_IP_MAX_ACCOUNTS_PER_DAY` | hard-block signups per IP (default: log-only, 5) |
 | `ORVEX_ADMIN_SECRET` | auth for the plan-admin endpoint |
 | `REVIEW_API_SECRET` | auth for `POST /review` (required) |
+| `ORVEX_ALERT_WEBHOOK_URL` | optional operator webhook for critical queue, billing, and database alerts |
 | `GITHUB_OAUTH_CLIENT_ID` / `_SECRET` | user login; without it the app runs in legacy no-login mode |
 | `ORVEX_REQUIRE_LOGIN` | `1` forces login even without OAuth |
 | `GITHUB_WEBHOOK_SECRET` | webhook signature verification |

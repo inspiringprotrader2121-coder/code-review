@@ -6,6 +6,7 @@ import { TenantService, WorkspaceAccessError } from './service.js';
 function mockDb(over: Record<string, unknown> = {}) {
   return {
     getOrCreateTenant: (slug: string) => ({ id: 'tenant-B', slug, name: slug }),
+    getTenantBySlug: (slug: string) => ({ id: 'tenant-B', slug, name: slug }),
     getInstallation: () => ({ installationId: 1, tenantId: 'tenant-A' }),
     tenantHasMembers: () => true,
     upsertInstallation: () => {
@@ -24,16 +25,13 @@ test('refuses to rebind an installation owned by another tenant with members (ta
   );
 });
 
-test('does NOT block when the other tenant has no members (webhook orphan reclaim)', async () => {
-  // Webhook may create memberless org-* and bind the install first; the signed
-  // callback must be allowed to move it onto the connect-flow workspace.
-  // Guard passes (tenantHasMembers=false) → proceeds to fetchInstallationMeta
-  // (network), which we force as a NON-WorkspaceAccessError so we can tell the
-  // guard let it through. Slug-claim of org-* stays blocked in startConnect.
+test('refuses to rebind a memberless webhook row as well', async () => {
+  // A webhook-created memberless row is still an installation binding. Moving
+  // it based only on a callback installation_id lets an attacker swap IDs.
   const svc = new TenantService(mockDb({ tenantHasMembers: () => false }));
   await assert.rejects(
     () => svc.completeInstallCallback(1, 'owner-slug', {} as never),
-    (e) => !(e instanceof WorkspaceAccessError),
+    (e) => e instanceof WorkspaceAccessError && /already linked to another workspace/.test((e as Error).message),
   );
 });
 
@@ -41,7 +39,19 @@ test('does NOT block a same-tenant reinstall', async () => {
   const svc = new TenantService(mockDb({ getInstallation: () => ({ installationId: 1, tenantId: 'tenant-B' }) }));
   await assert.rejects(
     () => svc.completeInstallCallback(1, 'same-slug', {} as never),
-    (e) => !(e instanceof WorkspaceAccessError),
+    (e) => e instanceof WorkspaceAccessError && /re-authenticate with GitHub/.test((e as Error).message),
+  );
+});
+
+test('requires user installation proof before binding an unknown installation', async () => {
+  const svc = new TenantService(
+    mockDb({
+      getInstallation: () => null,
+    }),
+  );
+  await assert.rejects(
+    () => svc.completeInstallCallback(99, 'new-slug', {} as never),
+    (e) => e instanceof WorkspaceAccessError && /re-authenticate with GitHub/.test((e as Error).message),
   );
 });
 

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch, redactSecrets } from './redact.js';
-import { extractJsonLoose, isRetryableRateLimit, parseRetryAfterMs } from './llm-client.js';
+import { extractJsonLoose, isOversizedModelRequest, isRetryableRateLimit, parseRetryAfterMs } from './llm-client.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 import { normalizeLlmResponse } from './llm.js';
 
@@ -24,10 +24,24 @@ export interface CodexCliReviewOptions {
   /** "owner/repo" of the repo being reviewed. Required for `cwd` to be honored
    *  (first-party allowlist enforcement — see isCodexRepoAllowed). */
   repoId?: string;
+  /**
+   * Prompt budget mode. Default: `lean` when a checkout is present, else `full`.
+   * `slim` is used automatically once after a Request-too-large failure.
+   */
+  promptMode?: CodexPromptMode;
   /** token-usage callback for cost tracking. Without this the agentic pass —
    *  the most expensive one — reported $0 and spend was invisible. */
-  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
+  onUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    tokenSource?: 'provider' | 'estimate';
+    model?: string;
+    provider?: string;
+  }) => void;
 }
+
+/** How much context we paste into the Codex CLI turn. */
+export type CodexPromptMode = 'full' | 'lean' | 'slim';
 
 /** One canonical, documented fallback prevents worker and CLI routing drift. */
 export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.5';
@@ -65,6 +79,8 @@ export interface CodexCliReviewResult {
 }
 
 const CODEX_DELETE_TIMEOUT_MS = 15_000;
+const MAX_CODEX_STDOUT_CHARS = 8_000_000;
+const MAX_CODEX_STDERR_CHARS = 256_000;
 
 /**
  * Best-effort cleanup of a persisted Codex session when its PR is closed/merged.
@@ -128,6 +144,20 @@ function finiteEnv(raw: string | undefined, fallback: number): number {
  *  otherwise orphan an unsandboxed agent still running against a PR checkout. */
 const liveCodexChildren = new Set<number>();
 
+/**
+ * Optional hooks so the worker can attribute Codex PIDs to the in-flight review
+ * that spawned them (super-admin live resource monitor). Failures in listeners
+ * must never break a review.
+ */
+export type CodexChildListener = {
+  onSpawn?: (pid: number) => void;
+  onExit?: (pid: number) => void;
+};
+let codexChildListener: CodexChildListener = {};
+export function setCodexChildListener(listener: CodexChildListener): void {
+  codexChildListener = listener;
+}
+
 /** Kill every in-flight codex process group. Called from the worker's shutdown
  *  path so a deploy doesn't leave agents running. */
 export function killAllCodexChildren(): number {
@@ -189,19 +219,86 @@ function shellEnv(codexHome?: string, homeIdx?: number): NodeJS.ProcessEnv {
   return env;
 }
 
+export type CodexAuthMode = 'apikey' | 'oauth' | 'unknown';
+
 /**
- * CODEX ACCOUNT POOL — load-balance across MULTIPLE Codex OAuth accounts.
+ * Counting semaphore: up to `limit` callers run `fn` concurrently; the rest wait.
+ * Used so API-key Codex homes can run multiple CLI processes at once.
+ */
+export class CountingSemaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(private limit: number) {
+    this.limit = Math.max(1, Math.floor(limit));
+  }
+
+  get concurrency(): number {
+    return this.limit;
+  }
+
+  get inFlight(): number {
+    return this.active;
+  }
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+
+  private acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.waiters.push(() => {
+        this.active++;
+        resolve();
+      });
+    });
+  }
+
+  private release(): void {
+    this.active = Math.max(0, this.active - 1);
+    const next = this.waiters.shift();
+    if (next) next();
+  }
+}
+
+/**
+ * Resolve how many Codex CLI processes may share one API-key CODEX_HOME.
+ * OAuth callers must pass mode !== 'apikey' and always get 1.
+ */
+export function resolveCodexHomeConcurrency(mode: CodexAuthMode): number {
+  if (mode !== 'apikey') return 1;
+  const explicit = process.env.ORVEX_CODEX_APIKEY_CONCURRENCY;
+  if (explicit !== undefined && explicit.trim() !== '') {
+    return Math.max(1, Math.min(32, Math.floor(finiteEnv(explicit, 1))));
+  }
+  // Match review worker slots so Codex is not the serial bottleneck.
+  return Math.max(1, Math.min(32, Math.floor(finiteEnv(process.env.ORVEX_MAX_CONCURRENT_REVIEWS, 4))));
+}
+
+/**
+ * CODEX ACCOUNT POOL — load-balance across MULTIPLE Codex homes.
  *
  * Config: ORVEX_CODEX_HOMES=/home/x/.codex-orvex,/home/x/.codex-orvex2 (one
- * CODEX_HOME dir per logged-in account; run `CODEX_HOME=<dir> codex login
- * --device-auth` once per dir). Falls back to the single ORVEX_CODEX_HOME.
+ * CODEX_HOME dir per account). Falls back to the single ORVEX_CODEX_HOME.
  *
- * - Calls are SERIALIZED PER HOME (concurrent refreshes of one auth.json race
- *   and revoke each other) but different homes run CONCURRENTLY — N accounts
- *   = N parallel codex reviews.
+ * Concurrency rules:
+ * - **OAuth / ChatGPT homes stay SERIAL (1)** — concurrent refreshes of one
+ *   auth.json race and revoke each other. Scale OAuth by adding more homes.
+ * - **API-key homes allow N parallel Codex CLI processes** on the same home
+ *   (`ORVEX_CODEX_APIKEY_CONCURRENCY`, defaulting to
+ *   `ORVEX_MAX_CONCURRENT_REVIEWS`). No refresh-token race.
  * - A PR's session sticks to the home that created it (rollouts live in that
  *   home); the stored thread ref encodes the home as "hN:<threadId>".
- * - A home whose OAuth fails is benched for 15 minutes and the call fails
+ * - A home whose auth fails is benched for 15 minutes and the call fails
  *   over to the next healthy home with a fresh session.
  */
 const CODEX_HOME_POOL: (string | undefined)[] = (() => {
@@ -212,13 +309,78 @@ const CODEX_HOME_POOL: (string | undefined)[] = (() => {
   }
   return [process.env.ORVEX_CODEX_HOME]; // may be [undefined] → shared ~/.codex
 })();
-const homeQueues: Promise<unknown>[] = CODEX_HOME_POOL.map(() => Promise.resolve());
 const homeBusy: number[] = CODEX_HOME_POOL.map(() => 0);
 const homeDeadUntil: number[] = CODEX_HOME_POOL.map(() => 0);
+const homeSlots: CountingSemaphore[] = CODEX_HOME_POOL.map(() => new CountingSemaphore(1));
+const homeSlotLimitLogged = new Set<number>();
 const CODEX_HOME_BENCH_MS = 15 * 60_000;
+const AUTH_MODE_CACHE_TTL_MS = 60_000;
+const authModeCache = new Map<string, { mode: CodexAuthMode; expiresAt: number }>();
+const codexUsageTotals = new Map<string, { input: number; output: number; reasoning: number }>();
+const MAX_CODEX_USAGE_TOTALS = 10_000;
+
+// With API-key concurrency, two calls can RESUME the same persisted thread in
+// parallel on one home. Codex then reports each one's CUMULATIVE thread usage,
+// and both deltas would be computed against the same stale baseline — the
+// tokens burned between them are attributed to both (double-counted COGS).
+// Serialize resumes per thread so the baseline read→write below stays
+// monotonic. New sessions (threadId undefined) are independent and unchained.
+const codexResumeChains = new Map<string, Promise<unknown>>();
+
+/**
+ * Read CODEX_HOME/auth.json auth_mode without exposing secrets.
+ * `apikey` → parallel CLI safe; anything else → serialize (OAuth refresh race).
+ */
+export function detectCodexAuthMode(codexHome?: string): CodexAuthMode {
+  const dir = (codexHome && codexHome.trim()) || path.join(os.homedir(), '.codex');
+  const cached = authModeCache.get(dir);
+  if (cached && cached.expiresAt > Date.now()) return cached.mode;
+
+  let mode: CodexAuthMode = 'unknown';
+  try {
+    const raw = fs.readFileSync(path.join(dir, 'auth.json'), 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const authMode = typeof parsed.auth_mode === 'string' ? parsed.auth_mode.toLowerCase() : '';
+    if (authMode === 'apikey') mode = 'apikey';
+    else if (authMode === 'chatgpt' || authMode === 'oauth' || authMode === 'device_code') mode = 'oauth';
+    else if (typeof parsed.OPENAI_API_KEY === 'string' && parsed.OPENAI_API_KEY.length > 0) mode = 'apikey';
+    else if (parsed.tokens || parsed.refresh_token || parsed.access_token) mode = 'oauth';
+  } catch {
+    mode = 'unknown';
+  }
+  authModeCache.set(dir, { mode, expiresAt: Date.now() + AUTH_MODE_CACHE_TTL_MS });
+  return mode;
+}
+
+/** Clear auth-mode cache (tests). */
+export function clearCodexAuthModeCache(): void {
+  authModeCache.clear();
+}
 
 function homeLabel(idx: number): string {
   return CODEX_HOME_POOL[idx] ?? '~/.codex';
+}
+
+function ensureHomeSlot(idx: number): CountingSemaphore {
+  const mode = detectCodexAuthMode(CODEX_HOME_POOL[idx]);
+  const limit = resolveCodexHomeConcurrency(mode);
+  const existing = homeSlots[idx];
+  if (!existing || existing.concurrency !== limit) {
+    // Recreate only when idle; if in-flight, keep the old gate for those waiters
+    // and install a new one for future acquires once the limit changes mid-process
+    // (rare — env usually fixed at boot). Prefer stable gate if busy.
+    if (!existing || existing.inFlight === 0) {
+      homeSlots[idx] = new CountingSemaphore(limit);
+    }
+  }
+  if (!homeSlotLimitLogged.has(idx)) {
+    homeSlotLimitLogged.add(idx);
+    console.log(
+      `[codex-cli] home ${idx + 1}/${CODEX_HOME_POOL.length} (${homeLabel(idx)}) ` +
+        `auth=${mode} concurrency=${homeSlots[idx]!.concurrency}`,
+    );
+  }
+  return homeSlots[idx]!;
 }
 
 /** Prefer the session's own home (affinity); otherwise the least-busy healthy home. */
@@ -241,16 +403,18 @@ function pickHome(preferred?: number): number {
   return best;
 }
 
+/**
+ * Acquire a Codex home slot then run `fn`.
+ * API-key homes: up to N concurrent. OAuth/unknown: serial (N=1).
+ */
 function withHomeLock<T>(idx: number, fn: () => Promise<T>): Promise<T> {
+  const gate = ensureHomeSlot(idx);
   homeBusy[idx]++;
-  const run = homeQueues[idx].then(fn, fn).finally(() => {
-    homeBusy[idx]--;
-  });
-  homeQueues[idx] = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
+  return gate
+    .run(fn)
+    .finally(() => {
+      homeBusy[idx]--;
+    });
 }
 
 /** Stored thread refs encode their home as "hN:<threadId>" (multi-home only). */
@@ -276,73 +440,157 @@ export function isCodexAuthError(message: string): boolean {
   );
 }
 
-function buildPrompt(files: ReviewableFile[], context?: ReviewPromptContext, hasRepoCheckout?: boolean): string {
+function envCharBudget(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+/**
+ * Cap pasted diffs so the Codex opening turn stays under Luna's request size.
+ * Remaining files keep a stub pointing the agent at the on-disk checkout.
+ */
+export function capCodexDiffFiles<T extends { filename: string; status: string; patch?: string }>(
+  files: readonly T[],
+  maxChars: number,
+): T[] {
+  if (maxChars <= 0) {
+    return files.map((f) => ({
+      ...f,
+      patch: `(diff omitted — read ${f.filename} from the checkout)`,
+    }));
+  }
+  let used = 0;
+  const out: T[] = [];
+  for (const f of files) {
+    const patch = f.patch ?? '';
+    if (used >= maxChars) {
+      out.push({
+        ...f,
+        patch: `(diff omitted — Codex prompt budget; read ${f.filename} from the checkout)`,
+      });
+      continue;
+    }
+    const room = maxChars - used;
+    if (patch.length <= room) {
+      out.push(f);
+      used += patch.length;
+    } else {
+      out.push({
+        ...f,
+        patch:
+          patch.slice(0, Math.max(0, room - 80)) +
+          `\n… [truncated ${patch.length - room} chars — read full file from checkout]`,
+      });
+      used = maxChars;
+    }
+  }
+  return out;
+}
+
+const LEAN_EXPLORE = [
+  '## You are an agent — INVESTIGATE the repo, do not one-shot',
+  'The complete repository is checked out at your CWD. Diffs below are a STARTING',
+  'POINT only — source bodies were NOT pasted (read them from disk).',
+  'Before you report:',
+  '- `rg`/`grep` changed symbols for callers/callees and broken invariants.',
+  '- Read changed files with `sed -n` / `head` ranges — NEVER dump a whole large file',
+  '  into the conversation (that blows the context window and fails the review).',
+  '- Trace data flow and nearby tests; confirm every finding at file:line.',
+  'Return JSON: { "findings": [...], "summary": "..." }.',
+  '',
+].join('\n');
+
+const SLIM_EXPLORE = [
+  '## Agentic review (slim context — prior turn was too large)',
+  'Repo is at CWD. Use `rg` and `sed -n` only; do NOT cat whole files.',
+  'Focus on concrete P1/P2 bugs in the changed paths below.',
+  'Return JSON: { "findings": [...], "summary": "..." }.',
+  '',
+].join('\n');
+
+/**
+ * Build the Codex CLI user/system prompt.
+ *
+ * With a checkout, default mode is `lean`: omit pasted changedContents (agent
+ * reads from disk), cap diffs/tree, and keep a hard prompt ceiling so the
+ * opening turn + tool loop can still compact under Luna's request limit.
+ */
+export function buildCodexPrompt(
+  files: ReviewableFile[],
+  context?: ReviewPromptContext,
+  opts: { hasRepoCheckout?: boolean; mode?: CodexPromptMode } = {},
+): string {
+  const hasCheckout = Boolean(opts.hasRepoCheckout);
+  const mode: CodexPromptMode = opts.mode ?? (hasCheckout ? 'lean' : 'full');
   const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
-  const redactedFiles = reviewable.map((f) => ({
-    filename: f.filename,
-    status: f.status,
-    patch: redactPatch(f.patch),
-  }));
+  const maxDiffChars =
+    mode === 'slim'
+      ? envCharBudget('ORVEX_CODEX_SLIM_DIFF_CHARS', 30_000)
+      : mode === 'lean'
+        ? envCharBudget('ORVEX_CODEX_MAX_DIFF_CHARS', 60_000)
+        : Number.POSITIVE_INFINITY;
+  const redactedFiles = capCodexDiffFiles(
+    reviewable.map((f) => ({
+      filename: f.filename,
+      status: f.status,
+      patch: redactPatch(f.patch),
+    })),
+    Number.isFinite(maxDiffChars) ? maxDiffChars : 10_000_000,
+  );
 
   const redactAll = (files?: Array<{ path: string; content: string }>) =>
     files?.map((f) => ({ ...f, content: redactSecrets(f.content) }));
 
-  // When codex has the repo checked out at its CWD, DON'T paste the retrieval
-  // context (related/dependents/others) into the prompt — it reads those files
-  // itself, and the pasted copy is re-paid on EVERY exploration turn. On PR71
-  // that inversion hit 1.5M input / 3.8k reasoning tokens for a 2-file PR and
-  // codex missed a P1 it had already read the evidence for: a huge prompt DROWNS
-  // attention on small PRs instead of helping. Diff + full changed files + tree
-  // stay in; everything else codex pulls on demand.
-  const ctx = context
+  const maxTree =
+    mode === 'slim' ? 0 : mode === 'lean' ? envCharBudget('ORVEX_CODEX_MAX_TREE_PATHS', 400) : undefined;
+
+  // full: paste retrieval context. lean/slim with checkout: never paste
+  // changedContents / related / others — agent reads from disk.
+  const ctx: ReviewPromptContext | undefined = context
     ? {
-        treePaths: context.treePaths,
-        related: hasRepoCheckout ? undefined : redactAll(context.related),
-        dependents: hasRepoCheckout ? undefined : redactAll(context.dependents),
-        changedContents: redactAll(context.changedContents),
-        others: hasRepoCheckout ? undefined : redactAll(context.others),
-        // Lens focus must reach buildUserPrompt (same bug llm.ts had).
+        treePaths:
+          maxTree === 0
+            ? undefined
+            : maxTree !== undefined
+              ? context.treePaths?.slice(0, maxTree)
+              : context.treePaths,
+        related: hasCheckout || mode !== 'full' ? undefined : redactAll(context.related),
+        dependents: hasCheckout || mode !== 'full' ? undefined : redactAll(context.dependents),
+        changedContents:
+          hasCheckout || mode === 'lean' || mode === 'slim'
+            ? undefined
+            : redactAll(context.changedContents),
+        others: hasCheckout || mode !== 'full' ? undefined : redactAll(context.others),
         extraFocus: context.extraFocus,
       }
     : undefined;
 
-  const system = loadOrvexRules();
   const user = buildUserPrompt(redactedFiles, ctx);
-  // Codex runs as an AGENT with the full repo checked out at its CWD — push it to
-  // actually investigate instead of one-shotting from the excerpts below. This is
-  // the whole point of using the Codex CLI over a plain API call.
-  // ONLY claim a checkout exists when one actually does. Without this guard every
-  // non-allowlisted repo got a prompt insisting the repo was at its CWD while
-  // --cd pointed at an empty temp dir — codex burned turns rg'ing nothing.
-  const explore = !hasRepoCheckout ? '' : [
-    '## You are an agent — INVESTIGATE the repo, do not one-shot',
-    'The COMPLETE repository is checked out at your current working directory. The',
-    'diffs and file excerpts below are a STARTING POINT, not the whole story. Before',
-    'you report, actively explore with your shell:',
-    '- `rg`/`grep` for every changed symbol to find its callers and callees, and',
-    '  check whether the change breaks any call site or invariant.',
-    '- `cat`/`sed -n` the FULL changed files and their neighbours — a guard, default,',
-    '  or error path elsewhere in the file often decides whether a hunk is a bug.',
-    '- Trace data flow across files: where does this value come from, where does it go,',
-    '  what validates it on THIS path (not just some other path).',
-    '- Read the tests near the change; a missing or untouched test on new logic is a finding.',
-    '- Hunt the cross-file consequences a diff-only read misses (the classes we',
-    '  historically drop): pre-existing rows/config that BYPASS a newly-added guard or',
-    '  index (what backfills them?); OLD workers running beside NEW schema during a',
-    '  rolling deploy (a required field old code never writes, a lease it never renews);',
-    '  SIBLING flows of a changed auth/lifecycle flow (a lockout counter recovery never',
-    '  clears, a step-up one entry point skips); every existing CONSUMER of a stream a',
-    '  new enum/record type joins (totals, renderers, reconcilers that miscount it);',
-    '  and legitimate existing configurations a stricter validator now rejects.',
-    'Verify every hypothesis against the actual code you read. A finding you confirmed',
-    'by reading the surrounding code is worth ten you guessed from a hunk. Keep',
-    'investigating until you have concrete, file-and-line-anchored findings.',
-    'Before submitting, do ONE more round: re-verify each finding against the code it',
-    'cites, and probe one area you have not explored yet (tests, callers, or config)',
-    '— the last look regularly turns up the subtlest bug.',
-    '',
-  ].join('\n');
-  return explore ? `${system}\n\n${explore}\n${user}` : `${system}\n\n${user}`;
+  if (mode === 'slim') {
+    const body = `${SLIM_EXPLORE}\n${user}`;
+    return trimCodexPrompt(body, envCharBudget('ORVEX_CODEX_SLIM_PROMPT_CHARS', 50_000));
+  }
+
+  const system = loadOrvexRules();
+  if (!hasCheckout && mode === 'full') {
+    return `${system}\n\n${user}`;
+  }
+
+  const explore = hasCheckout ? LEAN_EXPLORE : '';
+  const combined = explore ? `${system}\n\n${explore}\n${user}` : `${system}\n\n${user}`;
+  return trimCodexPrompt(combined, envCharBudget('ORVEX_CODEX_MAX_PROMPT_CHARS', 100_000));
+}
+
+/** Hard ceiling: drop from the end (usually tree/context) with a clear marker. */
+export function trimCodexPrompt(prompt: string, maxChars: number): string {
+  if (maxChars <= 0 || prompt.length <= maxChars) return prompt;
+  const keep = Math.max(0, maxChars - 120);
+  return (
+    prompt.slice(0, keep) +
+    `\n\n… [Codex prompt truncated ${prompt.length - keep} chars to stay under request size — explore the checkout for omitted context]\n`
+  );
 }
 
 async function runCodexExec(
@@ -358,7 +606,54 @@ async function runCodexExec(
     /** pool index of the account (selects its sticky ISP proxy) */
     homeIdx?: number;
     /** token-usage callback for cost tracking */
-    onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
+    onUsage?: (usage: {
+      inputTokens: number;
+      outputTokens: number;
+      tokenSource?: 'provider' | 'estimate';
+      model?: string;
+      provider?: string;
+    }) => void;
+  },
+): Promise<{ text: string; threadId: string }> {
+  const homeIdx = opts.homeIdx ?? 0;
+  // Serialize concurrent resumes of the SAME thread OUTSIDE the home lock so
+  // waiters do not consume CountingSemaphore slots while queued on the chain.
+  // The home lock is acquired only for the actual exec.
+  if (opts.threadId) {
+    const key = `${homeIdx}:${opts.threadId}:${opts.model}`;
+    const prior = codexResumeChains.get(key) ?? Promise.resolve();
+    const run = prior.then(() => withHomeLock(homeIdx, () => runCodexExecInner(prompt, opts)));
+    // Store a settled-proof handle as the chain link so one rejection doesn't
+    // poison the next resume.
+    const link = run.catch(() => {});
+    codexResumeChains.set(key, link);
+    try {
+      return await run;
+    } finally {
+      // Only delete when this link is still the chain tail — a later resume may
+      // have already extended the chain past us.
+      if (codexResumeChains.get(key) === link) codexResumeChains.delete(key);
+    }
+  }
+  return withHomeLock(homeIdx, () => runCodexExecInner(prompt, opts));
+}
+
+async function runCodexExecInner(
+  prompt: string,
+  opts: {
+    model: string;
+    reasoningEffort?: string;
+    threadId?: string;
+    cwd?: string;
+    home?: string;
+    homeIdx?: number;
+    onUsage?: (usage: {
+      inputTokens: number;
+      outputTokens: number;
+      tokenSource?: 'provider' | 'estimate';
+      model?: string;
+      provider?: string;
+    }) => void;
   },
 ): Promise<{ text: string; threadId: string }> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-codex-'));
@@ -437,17 +732,26 @@ async function runCodexExec(
       });
     }, hardMs);
 
-    if (child.pid !== undefined) liveCodexChildren.add(child.pid);
+    if (child.pid !== undefined) {
+      liveCodexChildren.add(child.pid);
+      try {
+        codexChildListener.onSpawn?.(child.pid);
+      } catch (err) {
+        console.warn('[codex-cli] child spawn listener failed:', (err as Error).message);
+      }
+    }
 
     let stdout = '';
     let stderr = '';
+    const appendCapped = (current: string, chunk: string, max: number): string =>
+      current.length >= max ? current : (current + chunk).slice(0, max);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
-      stdout += chunk;
+      stdout = appendCapped(stdout, chunk, MAX_CODEX_STDOUT_CHARS);
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk;
+      stderr = appendCapped(stderr, chunk, MAX_CODEX_STDERR_CHARS);
     });
 
     child.stdin.on('error', (err) => {
@@ -476,13 +780,70 @@ async function runCodexExec(
         // only place that usage is observable. Dropping it made the most
         // expensive pass report $0 and hid spend exactly when it mattered.
         if (usage) {
+          // Codex can report cumulative usage when a persisted thread is
+          // resumed. The ledger must contain the delta for this attempt, not
+          // the whole thread total. New sessions use the temporary directory
+          // as their key so independent calls never subtract one another.
+          const usageKey = `${opts.homeIdx ?? 0}:${opts.threadId ?? tmpDir}:${opts.model}`;
+          const previous = codexUsageTotals.get(usageKey);
+          const delta = {
+            input: usage.input ?? 0,
+            output: usage.output ?? 0,
+            reasoning: usage.reasoning ?? 0,
+          };
+          // The billed counters are cumulative only when BOTH input and output
+          // remain monotonic. An OR here would subtract a reset counter when a
+          // different field happened to increase, silently under-reporting a
+          // resumed call.
+          if (previous && delta.input >= previous.input && delta.output >= previous.output) {
+            delta.input = Math.max(0, delta.input - previous.input);
+            delta.output = Math.max(0, delta.output - previous.output);
+            delta.reasoning = delta.reasoning >= previous.reasoning ? delta.reasoning - previous.reasoning : delta.reasoning;
+          }
+          const totals = {
+            input: usage.input ?? 0,
+            output: usage.output ?? 0,
+            reasoning: usage.reasoning ?? 0,
+          };
+          codexUsageTotals.set(usageKey, totals);
+          // Create→resume handoff: seed the thread-id key so the first resume
+          // deltas against this create's cumulative baseline instead of billing
+          // the whole thread again.
+          if (!opts.threadId && threadId) {
+            codexUsageTotals.set(`${opts.homeIdx ?? 0}:${threadId}:${opts.model}`, totals);
+          }
+          while (codexUsageTotals.size > MAX_CODEX_USAGE_TOTALS) {
+            const oldest = codexUsageTotals.keys().next().value as string | undefined;
+            if (oldest === undefined) break;
+            codexUsageTotals.delete(oldest);
+          }
           opts.onUsage?.({
-            inputTokens: usage.input ?? 0,
-            outputTokens: (usage.output ?? 0) + (usage.reasoning ?? 0),
+            inputTokens: delta.input,
+            // Codex output_tokens already represents the billed model output
+            // bucket; reasoning_output_tokens is diagnostic, not an additional
+            // output amount. Adding both double-counted reasoning in COGS.
+            outputTokens: delta.output,
+            tokenSource: 'provider',
+            model: opts.model,
+            provider: 'codex-cli',
           });
           console.warn(
-            `[codex-cli] usage: ${usage.input ?? 0} in / ${usage.reasoning ?? 0} reasoning / ${usage.output ?? 0} out tokens`,
+            `[codex-cli] usage: ${delta.input} in / ${delta.reasoning} reasoning / ${delta.output} out tokens`,
           );
+        } else {
+          // Usage event missing from stdout — still reserve a conservative
+          // floor so the COGS safety ceiling cannot treat a real agentic burn
+          // as $0 (which previously let Verify pass the cost gate forever).
+          const floorIn = Number(process.env.ORVEX_CODEX_USAGE_FLOOR_INPUT ?? 50_000);
+          const floorOut = Number(process.env.ORVEX_CODEX_USAGE_FLOOR_OUTPUT ?? 5_000);
+          opts.onUsage?.({
+            inputTokens: Number.isFinite(floorIn) && floorIn > 0 ? Math.floor(floorIn) : 50_000,
+            outputTokens: Number.isFinite(floorOut) && floorOut > 0 ? Math.floor(floorOut) : 5_000,
+            tokenSource: 'estimate',
+            model: opts.model,
+            provider: 'codex-cli',
+          });
+          console.warn('[codex-cli] usage event missing — recorded COGS floor estimate');
         }
         cleanup();
 
@@ -504,7 +865,14 @@ async function runCodexExec(
     });
 
     function cleanup() {
-      if (child.pid !== undefined) liveCodexChildren.delete(child.pid);
+      if (child.pid !== undefined) {
+        liveCodexChildren.delete(child.pid);
+        try {
+          codexChildListener.onExit?.(child.pid);
+        } catch (err) {
+          console.warn('[codex-cli] child exit listener failed:', (err as Error).message);
+        }
+      }
       try {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       } catch {
@@ -550,7 +918,17 @@ function extractUsage(stdout: string): { input?: number; output?: number; reason
 
 function readLastMessage(file: string): string {
   try {
-    return fs.readFileSync(file, 'utf8').trim();
+    const stat = fs.statSync(file);
+    const maxChars = 256_000;
+    if (stat.size <= maxChars) return fs.readFileSync(file, 'utf8').trim();
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buffer = Buffer.alloc(maxChars);
+      fs.readSync(fd, buffer, 0, maxChars, Math.max(0, stat.size - maxChars));
+      return buffer.toString('utf8').trim();
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     return '';
   }
@@ -573,7 +951,14 @@ function extractErrorMessage(stdout: string, stderr: string): string | undefined
     }
   }
   const combined = `${stdout}\n${stderr}`.trim();
-  return combined || undefined;
+  if (!combined) return undefined;
+  // Prefer a precise provider size/limit line over dumping the whole event stream
+  // (which can contain earlier reconnect chatter and confuse rate-limit retries).
+  const sizeHit = /request too large[^\n]{0,200}|context[_ ]length[_ ]exceeded[^\n]{0,200}|maximum context length[^\n]{0,200}/i.exec(
+    combined,
+  );
+  if (sizeHit?.[0]) return sizeHit[0].trim();
+  return combined;
 }
 
 function isUnsupportedModelError(message: string): boolean {
@@ -604,47 +989,52 @@ export async function runCodexCliReview(
     cwd = undefined;
   }
 
-  const prompt = buildPrompt(files, opts.context, Boolean(cwd));
+  let promptMode: CodexPromptMode = opts.promptMode ?? (cwd ? 'lean' : 'full');
+  let prompt = buildCodexPrompt(files, opts.context, { hasRepoCheckout: Boolean(cwd), mode: promptMode });
   const model = opts.model ?? defaultModel();
 
   const effort = opts.reasoningEffort ?? (process.env.ORVEX_CODEX_CLI_REASONING_EFFORT?.trim() || DEFAULT_CODEX_CLI_REASONING_EFFORT);
 
   // One full attempt on a given home: exec + stale-thread retry + model fallback.
+  // Home locking lives inside runCodexExec (after resume-chain wait) so retries
+  // and rate-limit sleeps never hold a CountingSemaphore slot.
   const attemptOnHome = async (
     homeIdx: number,
     threadId: string | undefined,
   ): Promise<{ text: string; threadId: string }> => {
     const home = CODEX_HOME_POOL[homeIdx];
     try {
-      return await withHomeLock(homeIdx, () =>
-        runCodexExec(prompt, { model, reasoningEffort: effort, threadId, cwd, home, homeIdx, onUsage: opts.onUsage }),
-      );
+      return await runCodexExec(prompt, {
+        model,
+        reasoningEffort: effort,
+        threadId,
+        cwd,
+        home,
+        homeIdx,
+        onUsage: opts.onUsage,
+      });
     } catch (err) {
       const msg = (err as Error).message;
       // Stale session id (expired / not persisted / cleaned up) — start fresh
       // rather than failing the whole review.
       if (isStaleThreadError(msg) && threadId) {
         console.warn(`[codex-cli] thread ${threadId} not resumable, starting a new session`);
-        return withHomeLock(homeIdx, () =>
-          runCodexExec(prompt, { model, reasoningEffort: effort, cwd, home, homeIdx, onUsage: opts.onUsage }),
-        );
+        return runCodexExec(prompt, { model, reasoningEffort: effort, cwd, home, homeIdx, onUsage: opts.onUsage });
       }
       if (isUnsupportedModelError(msg) && model !== fallbackModel().model) {
         // Auto-fallback if the desired model isn't available on this Codex account —
         // keep the SAME (high) effort, don't silently drop to medium.
         const fb = fallbackModel();
         console.warn(`[codex-cli] ${model} not supported, falling back to ${fb.model} ${fb.reasoningEffort}`);
-        return withHomeLock(homeIdx, () =>
-          runCodexExec(prompt, {
-            model: fb.model,
-            reasoningEffort: fb.reasoningEffort ?? effort,
-            threadId,
-            cwd,
-            home,
-            homeIdx,
-            onUsage: opts.onUsage,
-          }),
-        );
+        return runCodexExec(prompt, {
+          model: fb.model,
+          reasoningEffort: fb.reasoningEffort ?? effort,
+          threadId,
+          cwd,
+          home,
+          homeIdx,
+          onUsage: opts.onUsage,
+        });
       }
       throw err;
     }
@@ -660,19 +1050,34 @@ export async function runCodexCliReview(
     hIdx: number,
     tId: string | undefined,
   ): Promise<{ text: string; threadId: string }> => {
-    const maxRetries = Math.max(1, Math.floor(finiteEnv(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4)));
-    const maxWaitMs = Math.max(1_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS, 90_000));
+    const maxRetries = Math.min(10, Math.max(1, Math.floor(finiteEnv(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4))));
+    const maxWaitMs = Math.min(
+      300_000,
+      Math.max(1_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS, 90_000)),
+    );
     // Total sleep budget for this review's codex pass. llmChat got one; this loop
     // did not, yet each attempt here re-runs a FULL agentic pass (~30 min cap), so
     // unbounded retrying is what actually holds a worker slot long enough to
     // outlive the queue's 2h lease and let a second worker duplicate the review.
-    const totalWaitBudgetMs = Math.max(5_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_TOTAL_WAIT_MS, 180_000));
+    const totalWaitBudgetMs = Math.min(
+      900_000,
+      Math.max(5_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_TOTAL_WAIT_MS, 180_000)),
+    );
     let sleptMs = 0;
     for (let i = 0; ; i++) {
       try {
         return await attemptOnHome(hIdx, tId);
       } catch (err) {
         const msg = (err as Error).message;
+        // Oversized payload/context cannot be waited out — fail immediately so
+        // the pipeline can fall back to the plain API path without burning the
+        // rate-limit sleep budget on a request that will never shrink.
+        if (isOversizedModelRequest(msg)) {
+          console.warn(
+            `[codex-cli] request too large for model — failing fast (no rate-limit retry): ${msg.slice(0, 160)}`,
+          );
+          throw err;
+        }
         if (i >= maxRetries - 1 || !isRetryableRateLimit(msg)) throw err;
         // Honor the provider's advertised delay; otherwise back off toward the
         // ~1-minute TPM window. Jitter keeps concurrent passes from colliding.
@@ -709,6 +1114,7 @@ export async function runCodexCliReview(
   let homeIdx = pickHome(stored.homeIdx);
   // Resume only on the session's own home; any other home starts fresh.
   let threadId = stored.homeIdx === homeIdx ? stored.threadId : undefined;
+  let slimRetried = promptMode === 'slim';
 
   let result: { text: string; threadId: string } | undefined;
   for (let attempts = 0; ; attempts++) {
@@ -717,6 +1123,20 @@ export async function runCodexCliReview(
       break;
     } catch (err) {
       const msg = (err as Error).message;
+      // Opening turn / compact blew the request size: drop the dead thread and
+      // retry ONCE with a minimal prompt so agentic still runs before the
+      // pipeline falls back to a plain API call.
+      if (isOversizedModelRequest(msg) && !slimRetried && Boolean(cwd)) {
+        slimRetried = true;
+        promptMode = 'slim';
+        prompt = buildCodexPrompt(files, opts.context, { hasRepoCheckout: true, mode: 'slim' });
+        threadId = undefined;
+        console.warn(
+          `[codex-cli] request too large — retrying once with slim fresh thread ` +
+            `(prompt ${prompt.length} chars): ${msg.slice(0, 140)}`,
+        );
+        continue;
+      }
       if (!isCodexAuthError(msg)) throw err;
       // OAuth failure on this account: bench it, alarm loudly, fail over to the
       // next healthy account with a fresh session. A revoked token must never
@@ -741,7 +1161,11 @@ export async function runCodexCliReview(
 
   const threadRef = encodeThreadRef(homeIdx, result.threadId || threadId!);
   const parsed = LlmReviewResponseSchema.parse(normalizeLlmResponse(extractJsonLoose(result.text)));
-  const maxFindings = Number(process.env.ORVEX_MAX_FINDINGS ?? 25);
+  const configuredMaxFindings = Number(process.env.ORVEX_MAX_FINDINGS ?? 25);
+  const maxFindings =
+    Number.isFinite(configuredMaxFindings) && configuredMaxFindings > 0
+      ? Math.min(Math.floor(configuredMaxFindings), 1_000)
+      : 25;
   const response: LlmReviewResponse = {
     ...parsed,
     findings: parsed.findings.slice(0, maxFindings).map((f) => ({

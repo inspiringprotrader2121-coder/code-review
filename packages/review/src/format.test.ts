@@ -115,3 +115,21 @@ test('summary body ends with a compact commands footer', () => {
   assert.match(body, /@orvex rate limit/);
   assert.match(body, /@orvex review/);
 });
+
+test('untrusted summaries and finding text cannot escape markdown sections', () => {
+  const body = formatReviewBody(
+    [finding({ message: '<details><summary>hide the finding</summary>```', suggestion: '<details>bad```' })],
+    [],
+    { ...meta, summary: 'summary```<details><summary>bad', trigger: '@orvex', canAutofix: true },
+  );
+  assert.doesNotMatch(body, /summary```/);
+  assert.doesNotMatch(body, /<details><summary>hide/);
+  assert.ok((body.match(/<details/g) ?? []).length <= (body.match(/<\/details>/g) ?? []).length);
+});
+
+test('apply checkbox remains outside an attacker-opened code fence', () => {
+  const body = formatInlineFinding(render({ suggestion: 'suggestion\n````' }));
+  const checkbox = body.indexOf('orvex:apply:');
+  assert.ok(checkbox >= 0);
+  assert.equal((body.slice(0, checkbox).match(/```/g) ?? []).length % 2, 0);
+});

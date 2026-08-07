@@ -109,3 +109,115 @@ test('the global free-tier cap does NOT block PAID accounts (only trial plans ar
   // a paying tenant is unaffected by the free-tier abuse pause
   assert.equal(accountLimitReason(d, 'paying-co', planFeatures('verify')), null);
 });
+
+test('the rolling provider-cost safety ceiling blocks flat-plan spend', () => {
+  const d = db();
+  const cap = Number(process.env.ORVEX_MONTHLY_COGS_CAP_USD ?? 250);
+  const runId = d.startReviewRun({
+    tenantId: 't1',
+    installationId: 1,
+    owner: 'pro-user',
+    repo: 'r',
+    pr: 1,
+    headSha: 'expensive',
+    action: 'synchronize',
+  });
+  d.recordReviewRunUsage({
+    runId,
+    tenantId: 't1',
+    provider: 'test',
+    model: 'test',
+    tier: 'standard',
+    inputTokens: 0,
+    outputTokens: 0,
+    inputRatePerM: 0,
+    outputRatePerM: 0,
+    costUsd: cap,
+    tokenSource: 'estimate',
+  });
+  assert.equal(accountLimitReason(d, 'pro-user', planFeatures('review-plus')), 'cost_capped');
+});
+
+test('COGS safety reservations include running and newly requested reviews', () => {
+  const d = db();
+  const cap = Number(process.env.ORVEX_MONTHLY_COGS_CAP_USD ?? 250);
+  const completed = d.startReviewRun({
+    tenantId: 't1',
+    installationId: 1,
+    owner: 'concurrent-user',
+    repo: 'r',
+    pr: 1,
+    headSha: 'completed',
+    action: 'synchronize',
+  });
+  d.completeReviewRun(completed, { status: 'completed', durationMs: 1, costUsd: Math.max(0, cap - 10) });
+  d.startReviewRun({
+    tenantId: 't1',
+    installationId: 1,
+    owner: 'concurrent-user',
+    repo: 'r',
+    pr: 2,
+    headSha: 'running',
+    action: 'synchronize',
+  });
+  assert.equal(accountLimitReason(d, 'concurrent-user', planFeatures('review-plus')), 'cost_capped');
+});
+
+test('unlimited hourly plans still enforce the COGS gate in the atomic reservation path', () => {
+  const d = db();
+  const plan = planFeatures('review-plus');
+  const cap = Number(process.env.ORVEX_MONTHLY_COGS_CAP_USD ?? 250);
+  const prior = d.startReviewRun({
+    tenantId: 't1',
+    installationId: 1,
+    owner: 'flat-plan-user',
+    repo: 'r',
+    pr: 1,
+    headSha: 'prior',
+    action: 'synchronize',
+  });
+  d.completeReviewRun(prior, { status: 'completed', durationMs: 1, costUsd: cap });
+  const reserved = d.tryReserveReviewRun(
+    {
+      tenantId: 't1',
+      installationId: 1,
+      owner: 'flat-plan-user',
+      repo: 'r',
+      pr: 2,
+      headSha: 'next',
+      action: 'synchronize',
+    },
+    () => accountLimitReason(d, 'flat-plan-user', plan, 1),
+  );
+  assert.deepEqual(reserved, { ok: false, reason: 'cost_capped' });
+});
+
+test('resuming a run does not reserve a second full slot for its own recorded spend', () => {
+  const d = db();
+  const plan = planFeatures('review-plus');
+  const cap = Number(process.env.ORVEX_MONTHLY_COGS_CAP_USD ?? 250);
+  const runId = d.startReviewRun({
+    tenantId: 't1',
+    installationId: 1,
+    owner: 'resume-user',
+    repo: 'r',
+    pr: 1,
+    headSha: 'resume',
+    action: 'synchronize',
+  });
+  d.recordReviewRunUsage({
+    runId,
+    tenantId: 't1',
+    provider: 'test',
+    model: 'test',
+    tier: 'standard',
+    inputTokens: 0,
+    outputTokens: 0,
+    inputRatePerM: 0,
+    outputRatePerM: 0,
+    costUsd: Math.max(0, cap - 3),
+    tokenSource: 'estimate',
+  });
+  assert.equal(accountLimitReason(d, 'resume-user', plan, 0), 'cost_capped');
+  assert.equal(accountLimitReason(d, 'resume-user', plan, 0, 1), null);
+});

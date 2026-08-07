@@ -35,4 +35,19 @@ describe('fingerprintFinding', () => {
       normalizeMessage('hello world'),
     );
   });
+
+  it('includes category in the stem so same-message different categories differ', () => {
+    const base = { file: 'a.ts', ruleId: 'llm.security', message: 'Missing auth check' };
+    assert.notEqual(
+      fingerprintFinding({ ...base, category: 'security' }),
+      fingerprintFinding({ ...base, category: 'correctness' }),
+    );
+  });
+
+  it('keeps a long message stem (beyond the old 80-char cut)', () => {
+    const prefix = 'x'.repeat(90);
+    const a = fingerprintFinding({ file: 'a.ts', ruleId: 'llm.x', message: `${prefix} alpha` });
+    const b = fingerprintFinding({ file: 'a.ts', ruleId: 'llm.x', message: `${prefix} beta` });
+    assert.notEqual(a, b);
+  });
 });

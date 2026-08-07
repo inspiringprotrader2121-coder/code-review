@@ -2,8 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fetchRepoSnapshot, type createInstallationOctokit } from '@orvex-review/github';
-import { redactSecrets } from '@orvex-review/review';
-import { runInSandbox } from './sandbox.js';
+import { redactSecrets, sanitizeFindingText } from '@orvex-review/review';
+import { assertWorkdirWithinQuota, runInSandbox } from './sandbox.js';
+import { noteActiveCheckoutDir } from './active-reviews.js';
 
 /**
  * Tier-2 execution engine (the TREX equivalent): materialize the PR head, run
@@ -41,8 +42,12 @@ export interface RuntimeVerifyResult {
 }
 
 const IMAGE = process.env.ORVEX_SANDBOX_IMAGE ?? 'node:22';
-const STEP_TIMEOUT_MS = Number(process.env.ORVEX_SANDBOX_STEP_TIMEOUT_MS ?? 240_000);
-const INSTALL_TIMEOUT_MS = Number(process.env.ORVEX_SANDBOX_INSTALL_TIMEOUT_MS ?? 300_000);
+function positiveEnvNumber(name: string, fallback: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), max) : fallback;
+}
+const STEP_TIMEOUT_MS = positiveEnvNumber('ORVEX_SANDBOX_STEP_TIMEOUT_MS', 240_000, 900_000);
+const INSTALL_TIMEOUT_MS = positiveEnvNumber('ORVEX_SANDBOX_INSTALL_TIMEOUT_MS', 300_000, 900_000);
 
 // Package managers are installed HERE (under the /work bind mount) so they
 // survive from the install container into the separate, network-isolated test
@@ -145,7 +150,11 @@ async function runStepsAtSha(
   const steps = detectSteps(pkgJson, pm);
   if (steps.length === 0) return { ran: false, skippedReason: 'no typecheck/build/test scripts', steps: [] };
 
-  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-rv-'));
+  // Prefix kept DISTINCT from the sandbox container name (`orvex-rv-…`) so the
+  // abandoned-checkout sweeper can never confuse a live container's mount with
+  // a stale runtime-verify workdir.
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-rverify-'));
+  noteActiveCheckoutDir(workdir);
   try {
     for (const [rel, content] of snapshot) {
       const dest = path.join(workdir, rel);
@@ -154,7 +163,14 @@ async function runStepsAtSha(
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, content);
     }
-    fs.chmodSync(workdir, 0o777); // container runs as uid 1000
+    // Prefer 770 owned by the container uid when chown is allowed; fall back to
+    // 777 only when we cannot transfer ownership (non-root host process).
+    try {
+      fs.chownSync(workdir, 1000, 1000);
+      fs.chmodSync(workdir, 0o770);
+    } catch {
+      fs.chmodSync(workdir, 0o777);
+    }
 
     // 2) install deps — the ONE phase allowed network access
     const install = await runInSandbox({
@@ -164,6 +180,23 @@ async function runStepsAtSha(
       network: 'bridge',
       timeoutMs: INSTALL_TIMEOUT_MS,
     });
+    try {
+      assertWorkdirWithinQuota(workdir);
+    } catch (err) {
+      return {
+        ran: true,
+        steps: [
+          {
+            name: 'install',
+            command: installCmd,
+            ok: false,
+            timedOut: false,
+            durationMs: install.durationMs,
+            output: tail((err as Error).message),
+          },
+        ],
+      };
+    }
     if (install.exitCode !== 0) {
       return {
         ran: true,
@@ -183,6 +216,19 @@ async function runStepsAtSha(
     // 3) run each verification step network-ISOLATED
     const results: RuntimeStep[] = [];
     for (const step of steps) {
+      try {
+        assertWorkdirWithinQuota(workdir);
+      } catch (err) {
+        results.push({
+          name: step.name,
+          command: step.command,
+          ok: false,
+          timedOut: false,
+          durationMs: 0,
+          output: tail((err as Error).message),
+        });
+        break;
+      }
       const r = await runInSandbox({
         workdir,
         image: IMAGE,
@@ -198,6 +244,19 @@ async function runStepsAtSha(
         durationMs: r.durationMs,
         output: tail(r.stdout + (r.stderr ? `\n${r.stderr}` : '')),
       });
+      try {
+        assertWorkdirWithinQuota(workdir);
+      } catch (err) {
+        results.push({
+          name: `${step.name}-disk`,
+          command: 'workdir quota',
+          ok: false,
+          timedOut: false,
+          durationMs: 0,
+          output: tail((err as Error).message),
+        });
+        break;
+      }
     }
     return { ran: true, steps: results };
   } finally {
@@ -211,6 +270,13 @@ function tail(s: string, n = 2_000): string {
   // tail is posted into a (possibly public) PR comment as evidence.
   const t = redactSecrets(s.trimEnd());
   return t.length > n ? `…\n${t.slice(-n)}` : t;
+}
+
+/** Make command output safe to embed inside a markdown ``` fence. */
+function fenceSafeOutput(s: string): string {
+  return sanitizeFindingText(redactSecrets(s))
+    .replace(/`/g, "'")
+    .replace(/\u0000/g, '');
 }
 
 /** Render a runtime-verification result as a PR comment body (evidence attached). */
@@ -238,8 +304,9 @@ export function formatRuntimeEvidence(result: RuntimeVerifyResult): string | nul
   for (const s of result.steps) {
     const status = s.timedOut ? '⏱️ timed out' : s.ok ? '✅ passed' : '❌ failed';
     const pre = s.preExisting ? ' — also fails at base (pre-existing)' : '';
-    lines.push(`\n**${s.name}** — \`${s.command}\` — ${status}${pre} (${Math.round(s.durationMs / 1000)}s)`);
-    if (!s.ok && s.output) lines.push('```\n' + s.output + '\n```');
+    const safeCmd = fenceSafeOutput(s.command).replace(/\n/g, ' ');
+    lines.push(`\n**${sanitizeFindingText(s.name)}** — \`${safeCmd}\` — ${status}${pre} (${Math.round(s.durationMs / 1000)}s)`);
+    if (!s.ok && s.output) lines.push('```\n' + fenceSafeOutput(s.output) + '\n```');
   }
   return lines.join('\n');
 }

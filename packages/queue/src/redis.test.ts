@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { Redis } from 'ioredis';
 import { RedisReviewQueue } from './redis.js';
@@ -44,6 +45,10 @@ test(
 
     await queue.close();
     queueClosed = true;
+    await cleanup.del(`orvex-review:inflight:${prKey(orphan)}`);
+    await cleanup.del(
+      `orvex-review:processing-meta:${createHash('sha256').update(JSON.stringify(orphan)).digest('hex')}`,
+    );
     const restarted = new RedisReviewQueue(redisUrl!);
     let restartedClosed = false;
     t.after(async () => {
@@ -56,6 +61,49 @@ test(
     await restarted.markCompleted(orphan);
     await restarted.close();
     restartedClosed = true;
+  },
+);
+
+test(
+  'Redis persistJob writes runId into PROCESSING so orphan recovery keeps it',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    await cleanup.flushdb();
+    t.after(async () => {
+      await cleanup.flushdb();
+      await cleanup.quit();
+    });
+
+    const queue = new RedisReviewQueue(redisUrl!);
+    t.after(async () => {
+      await queue.close();
+    });
+
+    const payload = job('sha-persist', 99, 'opened');
+    assert.equal((await queue.enqueue(payload)).accepted, true);
+    const dequeued = await queue.dequeue();
+    assert.ok(dequeued);
+    dequeued!.runId = 'run-after-reserve';
+    await queue.persistJob!(dequeued!);
+
+    const persistedRaw = JSON.stringify(dequeued);
+    // Age past PROCESSING_RECOVERY_GRACE_MS and drop the live lease so recovery
+    // requeues the persisted payload (including runId).
+    await cleanup.set(
+      `orvex-review:processing-meta:${createHash('sha256').update(persistedRaw).digest('hex')}`,
+      String(Date.now() - 60_000),
+    );
+    await cleanup.del(`orvex-review:inflight:${prKey(dequeued!)}`);
+
+    const recovered = new RedisReviewQueue(redisUrl!);
+    t.after(async () => {
+      await recovered.close();
+    });
+    assert.equal(await recovered.recoverOrphans(), 1);
+    const again = await recovered.dequeue();
+    assert.equal(again?.runId, 'run-after-reserve');
+    await recovered.markFailed(again!, 'done');
   },
 );
 

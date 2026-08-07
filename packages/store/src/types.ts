@@ -85,6 +85,7 @@ export interface GitHubInstallation {
 export interface User {
   id: string;
   githubId: number;
+  googleId?: string;
   login: string;
   name?: string;
   avatarUrl?: string;
@@ -147,6 +148,135 @@ export interface ReviewRun {
   costUsd: number;
   deep: boolean;
   createdAt: string;
+}
+
+export type UsageTokenSource = 'provider' | 'estimate' | 'unknown';
+
+export interface ReviewRunUsage {
+  id: string;
+  runId: string;
+  tenantId: string;
+  provider: string;
+  model: string;
+  tier: string;
+  passName?: string;
+  inputTokens: number;
+  outputTokens: number;
+  inputRatePerM: number;
+  outputRatePerM: number;
+  costUsd: number;
+  tokenSource: UsageTokenSource;
+  attemptId?: string;
+  createdAt: string;
+}
+
+export interface StripeRevenueEvent {
+  eventId: string;
+  eventType: string;
+  invoiceId?: string;
+  tenantId?: string;
+  customerId?: string;
+  subscriptionId?: string;
+  amountCents: number;
+  currency: string;
+  occurredAt: string;
+  createdAt: string;
+}
+
+export interface StripeMeterEvent {
+  runId: string;
+  tenantId: string;
+  customerId: string;
+  eventName: string;
+  plan: string;
+  units: number;
+  status: 'pending' | 'reported';
+  attempts: number;
+  lastError?: string;
+  nextAttemptAt?: string;
+  reportedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlatformCost {
+  category: string;
+  amountCents: number;
+  note?: string;
+  updatedAt: string;
+}
+
+export interface CostModelAggregate {
+  provider: string;
+  model: string;
+  tier: string;
+  calls: number;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+export interface CostTenantAggregate {
+  tenantId: string;
+  slug: string;
+  name: string;
+  plan: string;
+  subscriptionStatus?: string;
+  runs: number;
+  completedRuns: number;
+  failedRuns: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+  actualRevenueUsd: number;
+  modeledMonthlyRevenueUsd: number;
+}
+
+export interface CostDailyAggregate {
+  day: string;
+  costUsd: number;
+  actualRevenueUsd: number;
+  runs: number;
+}
+
+export interface CostCurrencyAggregate {
+  currency: string;
+  amountCents: number;
+}
+
+export interface SuperadminCostAnalytics {
+  since: string;
+  until: string;
+  overview: {
+    runs: number;
+    completedRuns: number;
+    failedRuns: number;
+    skippedRuns: number;
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+    actualRevenueUsd: number;
+    modeledMonthlyRevenueUsd: number;
+    monthlyFixedCostUsd: number;
+    allocatedFixedCostUsd: number;
+    legacyCostUsd: number;
+    instrumentedRuns: number;
+    runsWithCost: number;
+    /** Non-USD revenue is reported separately rather than mixed into USD margin. */
+    nonUsdRevenue: CostCurrencyAggregate[];
+  };
+  byModel: CostModelAggregate[];
+  byTenant: CostTenantAggregate[];
+  daily: CostDailyAggregate[];
+  platformCosts: PlatformCost[];
+  recentRuns: Array<
+    ReviewRun & {
+      usage: ReviewRunUsage[];
+      actualCostUsd: number;
+      legacyCost: boolean;
+    }
+  >;
 }
 
 /** One completed run's row for the deep-vs-normal scorecard. */

@@ -9,6 +9,15 @@ import { commandTrigger } from '@orvex-review/review';
 export const MS_PER_HOUR = 3_600_000;
 export const MS_PER_30_DAYS = 30 * 24 * MS_PER_HOUR;
 
+/** Monthly provider-cost circuit breaker. This is an operator safety ceiling,
+ * not a customer-facing review allowance; set it after measuring real COGS. */
+export function monthlyCogsCapUsd(planId: string): number | null {
+  if (planId === 'enterprise') return null;
+  const raw = process.env.ORVEX_MONTHLY_COGS_CAP_USD;
+  const value = raw === undefined || raw.trim() === '' ? 250 : Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : 250;
+}
+
 export type AccountQuotaStatus = {
   planId: string;
   planLabel: string;
@@ -23,6 +32,7 @@ export type AccountQuotaStatus = {
     | { kind: 'unlimited' }
     | { kind: 'hard'; used: number; limit: number; remaining: number }
     | { kind: 'metered'; used: number; included: number; overageCents: number };
+  cost: { usedUsd: number; limitUsd: number | null };
   trial: { used: number; limit: number; remaining: number } | null;
 };
 
@@ -64,6 +74,8 @@ export function loadAccountQuotaStatus(
   } else {
     monthly = { kind: 'unlimited' };
   }
+  const cost = store.sumAccountCost(owner, MS_PER_30_DAYS);
+  const costLimit = monthlyCogsCapUsd(plan.id);
 
   let trial: AccountQuotaStatus['trial'] = null;
   if (plan.trialReviewLimit !== null) {
@@ -86,6 +98,7 @@ export function loadAccountQuotaStatus(
       nextSlotAt,
     },
     monthly,
+    cost: { usedUsd: cost.costUsd, limitUsd: costLimit },
     trial,
   };
 }
@@ -144,6 +157,9 @@ export function formatQuotaStatusComment(
     formatHourlyLine(status.hourly, now),
     formatMonthlyLine(status.monthly),
   ];
+  if (status.cost.limitUsd !== null) {
+    lines.push(`**Provider-cost safety:** $${status.cost.usedUsd.toFixed(2)} / $${status.cost.limitUsd.toFixed(2)} rolling 30-day ceiling`);
+  }
   if (status.trial) {
     lines.push(
       `**Free trial:** ${status.trial.used} / ${status.trial.limit} lifetime · **${status.trial.remaining}** left`,
@@ -161,7 +177,7 @@ export function formatQuotaStatusComment(
 /** Clearer blocked-nudge when a review was skipped for quota. */
 export function formatLimitBlockedComment(
   status: AccountQuotaStatus,
-  reason: 'rate_limited' | 'monthly_limit' | 'trial_exhausted',
+  reason: 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'cost_capped',
   trigger = commandTrigger(),
   now = Date.now(),
 ): string {
@@ -208,6 +224,16 @@ export function formatLimitBlockedComment(
     return (
       `⚠️ **Orvex free trial used up.** This GitHub account has used all **${status.trial.limit}** free reviews ` +
       `(${status.trial.used} recorded). [Upgrade](https://useorvex.com/#pricing) to keep Orvex reviewing your PRs.` +
+      tip
+    );
+  }
+
+  if (reason === 'cost_capped' && status.cost.limitUsd !== null) {
+    return (
+      `🛑 **Orvex monthly safety ceiling reached** on the **${status.planLabel}** plan. ` +
+      `Recorded provider cost is approximately **$${status.cost.usedUsd.toFixed(2)} / $${status.cost.limitUsd.toFixed(2)}** ` +
+      `in the rolling 30-day window, so this review was **not** started. ` +
+      `Contact support to review the ceiling or billing.` +
       tip
     );
   }

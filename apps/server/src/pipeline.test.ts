@@ -3,12 +3,19 @@ import assert from 'node:assert/strict';
 import {
   canRunAgentic,
   canRunInvestigate,
+  canRunRiskHunt,
+  accountUsage,
+  buildReviewPassAngles,
   effectiveReviewConfig,
   failedRequiredLensIds,
   modelForInvestigate,
   modelForPass,
   modelForPlanWithTier,
+  maxRiskProbes,
+  modelForRiskHunt,
   providerConfigurationIssue,
+  selectRiskProbes,
+  usageProvider,
   type WorkerConfig,
 } from './pipeline.js';
 import { isHedgedRejection, isTransientLlmError } from '@orvex-review/review';
@@ -61,6 +68,25 @@ test('required paid model stacks fail closed when a provider is missing', () => 
   });
   assert.ok(missingIndependent);
   assert.match(missingIndependent, /independent review provider/);
+});
+
+test('usage accounting clamps malformed provider token counts instead of poisoning cost totals', () => {
+  const accounted = accountUsage(
+    'standard',
+    modelRoutingConfig().standardModel,
+    'discovery',
+    { inputTokens: Number.NaN, outputTokens: -10, tokenSource: 'provider' },
+  );
+  assert.equal(accounted.inputTokens, 0);
+  assert.equal(accounted.outputTokens, 0);
+  assert.equal(accounted.costUsd, 0);
+});
+
+test('usage attribution labels the default no-base-url client as Anthropic', () => {
+  assert.equal(
+    usageProvider({ apiKey: 'key', model: 'claude-sonnet', api: undefined }, 'review'),
+    'anthropic',
+  );
 });
 
 test('workspace review defaults apply unless config-as-code overrides them', () => {
@@ -289,6 +315,74 @@ test('canRunInvestigate: multi-model only, not dual-model, not when Codex agenti
   assert.equal(canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: false }), false);
 });
 
+test('canRunRiskHunt: dual+multi when high-risk and Flash present; kill-switch works', (t) => {
+  const prev = process.env.ORVEX_RISK_HUNT;
+  t.after(() => {
+    if (prev === undefined) delete process.env.ORVEX_RISK_HUNT;
+    else process.env.ORVEX_RISK_HUNT = prev;
+  });
+  delete process.env.ORVEX_RISK_HUNT;
+
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: true, hasFlash: true }),
+    true,
+  );
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'multi-model' }, { highRisk: true, hasFlash: true }),
+    true,
+  );
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: false, hasFlash: true }),
+    false,
+  );
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: true, hasFlash: false }),
+    false,
+  );
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'standard' }, { highRisk: true, hasFlash: true }),
+    false,
+  );
+
+  process.env.ORVEX_RISK_HUNT = '0';
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'multi-model' }, { highRisk: true, hasFlash: true }),
+    false,
+  );
+});
+
+test('modelForRiskHunt prefers DeepSeek v4 Flash and refuses MiniMax fallback', () => {
+  const withFlash = {
+    deepseekFlashModel: {
+      apiKey: 'k',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-flash',
+      reasoningEffort: 'max',
+    },
+    deepseekModel: {
+      apiKey: 'k',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-pro',
+      reasoningEffort: 'max',
+    },
+    openaiModel: { apiKey: 'o', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-luna' },
+    standardModel: { apiKey: 's', baseUrl: 'https://x/v1', model: 'MiniMax-M3' },
+  } as WorkerConfig;
+  assert.equal(modelForRiskHunt(withFlash)?.tier, 'deepseek-flash');
+
+  const noFlash = {
+    deepseekFlashModel: null,
+    deepseekModel: {
+      apiKey: 'k',
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-v4-pro',
+    },
+    openaiModel: { apiKey: 'o', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-luna' },
+    standardModel: { apiKey: 's', baseUrl: 'https://x/v1', model: 'MiniMax-M3' },
+  } as unknown as WorkerConfig;
+  assert.equal(modelForRiskHunt(noFlash), null);
+});
+
 test('modelForInvestigate prefers DeepSeek v4 Flash', () => {
   const config = {
     deepseekFlashModel: {
@@ -364,32 +458,86 @@ test('a successful deep extra cannot satisfy a failed required lens', () => {
   assert.deepEqual(failed, [0]);
 });
 
-test('the 4th lens is tier-scoped and breadth stays LAST on every tier', () => {
-  // Regression: the 4th lens was inserted mid-list and relied on index-clamping.
-  // That silently pushed the breadth lens off the end of the 3-pass tiers, so
-  // free/review lost it entirely AND lost their only best-effort pass — a
-  // MiniMax timeout there would then abort the whole review instead of
-  // degrading it.
-  const anglesFor = (tier: string, passes: number): string[] => {
-    const fourth = tier === 'multi-model' || tier === 'codex-hybrid';
-    const list = ['general', 'deep-dive', ...(fourth ? ['removed-behavior/callers'] : []), 'perf/completeness/api'];
-    return Array.from({ length: passes }, (_, p) => list[Math.min(p, list.length - 1)]);
-  };
-  // 2-pass volume tier: general + deep-dive (breadth exists in the list but
-  // is not scheduled when reviewPasses=2).
-  assert.deepEqual(anglesFor('dual-model', 2), ['general', 'deep-dive']);
-  // Legacy 3-pass clamp still keeps breadth last if someone raises passes.
-  assert.deepEqual(anglesFor('dual-model', 3), ['general', 'deep-dive', 'perf/completeness/api']);
-  // 4-pass quality tier: the new lens sits between deep-dive and breadth.
-  assert.deepEqual(anglesFor('multi-model', 4), [
-    'general',
-    'deep-dive',
-    'removed-behavior/callers',
-    'perf/completeness/api',
-  ]);
-  // Breadth is last on BOTH, so an over-configured pass count clamps onto a
-  // best-effort angle rather than a required one.
-  for (const [tier, passes] of [['dual-model', 5], ['multi-model', 6]] as const) {
-    assert.equal(anglesFor(tier, passes).at(-1), 'perf/completeness/api', `${tier} must end on breadth`);
-  }
+test('buildReviewPassAngles: ordinary Verify PRs skip removed-behavior and breadth', (t) => {
+  t.after(() => {
+    delete process.env.ORVEX_BREADTH_ON;
+    delete process.env.ORVEX_REMOVED_BEHAVIOR;
+    delete process.env.ORVEX_LARGE_PR_FILES;
+    delete process.env.ORVEX_LARGE_PR_PATCH_CHARS;
+  });
+  delete process.env.ORVEX_BREADTH_ON;
+  delete process.env.ORVEX_REMOVED_BEHAVIOR;
+  delete process.env.ORVEX_LARGE_PR_FILES;
+  delete process.env.ORVEX_LARGE_PR_PATCH_CHARS;
+  const small = [{ filename: 'a.ts', patch: '+x\n', status: 'modified' }];
+  assert.deepEqual(
+    buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag),
+    ['general', 'deep-dive'],
+  );
+  const withDelete = [
+    ...small,
+    { filename: 'gone.ts', patch: '-old\n', status: 'removed' },
+  ];
+  assert.deepEqual(
+    buildReviewPassAngles({ modelTier: 'multi-model', files: withDelete }).map((a) => a.tag),
+    ['general', 'deep-dive', 'removed-behavior/callers'],
+  );
+  process.env.ORVEX_LARGE_PR_FILES = '1';
+  assert.deepEqual(
+    buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag),
+    ['general', 'deep-dive', 'perf/completeness/api'],
+  );
+  // Dual-model never gets the fourth-tier removed-behavior lens, even with deletes.
+  delete process.env.ORVEX_LARGE_PR_FILES;
+  assert.deepEqual(
+    buildReviewPassAngles({ modelTier: 'dual-model', files: withDelete }).map((a) => a.tag),
+    ['general', 'deep-dive'],
+  );
+  process.env.ORVEX_BREADTH_ON = 'always';
+  process.env.ORVEX_REMOVED_BEHAVIOR = 'always';
+  assert.deepEqual(
+    buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag),
+    ['general', 'deep-dive', 'removed-behavior/callers', 'perf/completeness/api'],
+  );
+});
+
+test('selectRiskProbes: second probe only when top signal is selective', (t) => {
+  t.after(() => {
+    delete process.env.ORVEX_RISK_PROBE_SELECTIVITY;
+  });
+  const wide = [
+    { id: 'a', files: ['a.ts', 'b.ts', 'c.ts', 'd.ts'] },
+    { id: 'b', files: ['e.ts', 'f.ts', 'g.ts', 'h.ts'] },
+  ];
+  assert.deepEqual(
+    selectRiskProbes(wide, 2).map((s) => s.id),
+    ['a'],
+  );
+  const narrow = [
+    { id: 'a', files: ['a.ts'] },
+    { id: 'b', files: ['b.ts', 'c.ts', 'd.ts', 'e.ts'] },
+  ];
+  assert.deepEqual(
+    selectRiskProbes(narrow, 2).map((s) => s.id),
+    ['a', 'b'],
+  );
+  assert.deepEqual(selectRiskProbes(narrow, 1).map((s) => s.id), ['a']);
+  assert.deepEqual(selectRiskProbes([], 2), []);
+});
+
+test('maxRiskProbes: only the top tiers may take a second hypothesis probe', (t) => {
+  t.after(() => {
+    delete process.env.ORVEX_RISK_PROBES;
+  });
+  assert.equal(maxRiskProbes({ modelTier: 'codex-hybrid' }), 2);
+  assert.equal(maxRiskProbes({ modelTier: 'multi-model' }), 2);
+  // Lower tiers keep costing exactly what the single hunting pass cost before.
+  assert.equal(maxRiskProbes({ modelTier: 'dual-model' }), 1);
+
+  process.env.ORVEX_RISK_PROBES = '0';
+  assert.equal(maxRiskProbes({ modelTier: 'multi-model' }), 0);
+  process.env.ORVEX_RISK_PROBES = '9';
+  assert.equal(maxRiskProbes({ modelTier: 'multi-model' }), 4);
+  process.env.ORVEX_RISK_PROBES = 'nonsense';
+  assert.equal(maxRiskProbes({ modelTier: 'multi-model' }), 2);
 });

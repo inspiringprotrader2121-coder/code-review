@@ -33,10 +33,17 @@ import {
   type AgentFile,
   type CodeFix,
   type ReviewFinding,
+  sanitizeFindingText,
 } from '@orvex-review/review';
 import type { StoredFinding } from '@orvex-review/store';
 import { planFeatures } from '@orvex-review/tenants';
-import type { WorkerConfig } from './pipeline.js';
+import {
+  accountLimitReason,
+  createUsageRecorder,
+  type WorkerConfig,
+  type UsageEvent,
+} from './pipeline.js';
+import { isVerificationEnabled } from './verify-gate.js';
 
 export interface FixResult {
   applied: number;
@@ -56,28 +63,54 @@ interface FixTarget {
  * unbounded provider spend. A real user never approaches this — it's a runaway
  * backstop, same idea as the review hourly ceiling.
  */
-const COMMANDS_PER_HOUR = Math.max(1, Number(process.env.ORVEX_COMMANDS_PER_HOUR ?? 60));
+const COMMANDS_PER_HOUR = (() => {
+  const value = Number(process.env.ORVEX_COMMANDS_PER_HOUR ?? 60);
+  return Number.isFinite(value) && value >= 1 ? Math.min(10_000, Math.floor(value)) : 60;
+})();
+
+function boundedPositiveInt(name: string, fallback: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) && value >= 1 ? Math.min(max, Math.floor(value)) : fallback;
+}
 
 /** True when this account has exhausted its hourly interactive-command budget. */
 function commandOverRateLimit(store: WorkerConfig['store'], owner: string, planId: string): boolean {
   if (planId === 'enterprise') return false; // custom-contract tier
-  return store.countAccountCommandRuns(owner, 3_600_000) >= COMMANDS_PER_HOUR;
+  if (store.countAccountCommandRuns(owner, 3_600_000) >= COMMANDS_PER_HOUR) return true;
+  return accountLimitReason(store, owner, planFeatures(planId), 1) === 'cost_capped';
 }
 
-/** Record an interactive command as a `cmd:*` run so it counts toward the
- *  hourly ceiling (and is excluded from the review caps). Reserved BEFORE the
- *  LLM call so concurrent commands see each other. */
-function recordCommandRun(config: WorkerConfig, job: ReviewJobPayload, kind: string): void {
-  config.store.recordReviewRun({
-    tenantId: job.tenantId,
-    installationId: job.installationId,
-    owner: job.owner,
-    repo: job.repo,
-    pr: job.pr,
-    headSha: job.headSha,
-    action: `cmd:${kind}`,
-    status: 'completed',
-    durationMs: 0,
+/** Reserve an interactive command before any provider call. The transaction
+ * makes concurrent comments observe each other's reservation, and the same row
+ * later receives its actual usage ledger and terminal status. */
+function reserveCommandRun(config: WorkerConfig, job: ReviewJobPayload, kind: string, planId: string): string | null {
+  const reserved = config.store.tryReserveReviewRun(
+    {
+      tenantId: job.tenantId,
+      installationId: job.installationId,
+      owner: job.owner,
+      repo: job.repo,
+      pr: job.pr,
+      headSha: job.headSha,
+      action: `cmd:${kind}`,
+    },
+    () => (planId !== 'enterprise' && commandOverRateLimit(config.store, job.owner, planId) ? 'command_rate_limited' : null),
+  );
+  return reserved.ok ? reserved.runId : null;
+}
+
+function completeCommandRun(
+  config: WorkerConfig,
+  runId: string | null,
+  startedAt: number,
+  status: 'completed' | 'failed' | 'skipped',
+  error?: string,
+): void {
+  if (!runId) return;
+  config.store.completeReviewRun(runId, {
+    status,
+    error,
+    durationMs: Date.now() - startedAt,
   });
 }
 
@@ -108,6 +141,7 @@ export async function processFixJob(
   const ref = { owner, repo, number: pr };
   const octokit = createInstallationOctokit(config.github, installationId);
   const startedAt = Date.now();
+  let commandRunId: string | null = null;
 
   const respond = (body: string) =>
     fix.replyToCommentId && fix.isReviewComment
@@ -120,13 +154,17 @@ export async function processFixJob(
   // "Applying" forever (the recurring apply-fix bug). `skip()` does the revert +
   // the reply + the zero-result return in one call, so no gate can forget it.
   const skip = async (msg: string, buttonReason: string): Promise<FixResult> => {
-    if (fix.isReviewComment && fix.replyToCommentId) {
-      await setApplyButtonState(octokit, owner, repo, fix.replyToCommentId, (fp) =>
-        failedApplyLine(fp, buttonReason),
-      );
+    try {
+      if (fix.isReviewComment && fix.replyToCommentId) {
+        await setApplyButtonState(octokit, owner, repo, fix.replyToCommentId, (fp) =>
+          failedApplyLine(fp, buttonReason),
+        );
+      }
+      await respond(formatFixSkippedReply(msg));
+      return { applied: 0, skipped: 0, headMoved: false };
+    } finally {
+      completeCommandRun(config, commandRunId, startedAt, 'skipped');
     }
-    await respond(formatFixSkippedReply(msg));
-    return { applied: 0, skipped: 0, headMoved: false };
   };
 
   // Plan gate: committing fixes (`@orvex fix`, apply-fix checkbox) is a paid
@@ -167,13 +205,29 @@ export async function processFixJob(
   }
 
   // runaway guard: cap fix commits per PR per day
-  const maxFixRuns = Number(process.env.ORVEX_MAX_FIX_RUNS_PER_DAY ?? 30);
+  const maxFixRuns = boundedPositiveInt('ORVEX_MAX_FIX_RUNS_PER_DAY', 30, 10_000);
   if (config.store.countRecentFixRuns(prKeyObj) >= maxFixRuns) {
     return skip(
       `this PR hit the auto-fix limit (${maxFixRuns} fix runs in 24 h). Apply the remaining fixes manually or raise ORVEX_MAX_FIX_RUNS_PER_DAY.`,
       'daily fix limit reached',
     );
   }
+
+  commandRunId = reserveCommandRun(config, job, 'fix', plan.id);
+  if (!commandRunId) {
+    return skip(
+      `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+      'interactive command limit reached',
+    );
+  }
+  const commandUsage = createUsageRecorder(
+    config,
+    commandRunId,
+    job.tenantId,
+    'standard',
+    config.standardModel,
+    'autofix',
+  );
 
   // one fix operation per PR at a time — the concurrency guard, part 1
   const holder = `${job.enqueuedAt}:${fix.scope}`;
@@ -186,7 +240,7 @@ export async function processFixJob(
     // EVERY open finding; each non-ready one triggers an LLM fix-generation call
     // plus verification, so an uncapped run on a many-finding PR is a large,
     // repeatable provider bill. Excess findings are handled on the next run.
-    const MAX_FIX_TARGETS = Number(process.env.ORVEX_MAX_FIX_TARGETS ?? 25);
+    const MAX_FIX_TARGETS = boundedPositiveInt('ORVEX_MAX_FIX_TARGETS', 25, 500);
     const allTargets = selectTargets(openFindings, fix);
     const targets = allTargets.slice(0, MAX_FIX_TARGETS);
     if (allTargets.length > targets.length) {
@@ -283,9 +337,10 @@ export async function processFixJob(
       // bad comment turning into a bad commit is the worst outcome. Re-check each
       // target against the CURRENT file with the strict verifier; drop any that
       // no longer hold. Bias is safe: a skipped real fix is a re-run away, but a
-      // fix applied to a non-bug is a silent regression. ORVEX_VERIFY=0 disables.
+      // fix applied to a non-bug is a silent regression. ORVEX_VERIFY=0 disables
+      // outside production; in production it is ignored unless FORCE_OFF=1.
       let confirmed = fileTargets;
-      if (process.env.ORVEX_VERIFY !== '0' && fileTargets.length > 0) {
+      if (isVerificationEnabled() && fileTargets.length > 0) {
         try {
           const asFindings: ReviewFinding[] = fileTargets.map((t) => ({
             file: t.finding.file,
@@ -304,6 +359,7 @@ export async function processFixJob(
             model: config.standardModel.model,
             baseUrl: config.standardModel.baseUrl,
             strict: true,
+            onUsage: commandUsage,
           });
           if (dropped.length > 0) {
             const rejected = new Set(dropped.map((d) => `${d.finding.line ?? '?'}|${d.finding.message}`));
@@ -329,7 +385,7 @@ export async function processFixJob(
       for (const t of confirmed) {
         let codeFix: CodeFix | null;
         try {
-          codeFix = await resolveCodeFix(t.finding, content, fix, config, relatedByFile.get(file));
+          codeFix = await resolveCodeFix(t.finding, content, fix, config, relatedByFile.get(file), commandUsage);
         } catch (err) {
           // P2-5: distinguish transient model failures from "no safe fix".
           if (err instanceof FixGenerationError) {
@@ -370,7 +426,7 @@ export async function processFixJob(
     // Phase 1b: adversarial verification — a skeptical model call gates every
     // candidate against the full file before anything is committed.
     let approvedCandidates = candidates;
-    if (candidates.length > 0 && process.env.ORVEX_VERIFY !== '0') {
+    if (candidates.length > 0 && isVerificationEnabled()) {
       const { approved, rejected } = await verifyFixes(
         candidates.map((c) => ({
           file: c.file,
@@ -379,7 +435,12 @@ export async function processFixJob(
           fixedCode: c.codeFix.fixedCode,
         })),
         [...pristine.entries()].map(([path, content]) => ({ path, content })),
-        { apiKey: config.standardModel.apiKey, model: config.standardModel.model, baseUrl: config.standardModel.baseUrl },
+        {
+          apiKey: config.standardModel.apiKey,
+          model: config.standardModel.model,
+          baseUrl: config.standardModel.baseUrl,
+          onUsage: commandUsage,
+        },
       );
       for (const r of rejected) {
         const c = candidates[r.index];
@@ -427,6 +488,9 @@ export async function processFixJob(
     // Phase 2: commit all changes atomically (all-or-nothing).
     let commitSha: string | null = null;
     if (fileChanges.length > 0) {
+      if (config.leaseValid && !(await config.leaseValid())) {
+        throw new Error('review lease lost before fix commit; discarding this worker result');
+      }
       const lead = pendingFindings[0].message;
       const coAuthor = fix.requestedBy
         ? `\nCo-authored-by: ${fix.requestedBy} <${fix.requestedBy}@users.noreply.github.com>`
@@ -544,6 +608,7 @@ export async function processFixJob(
       findingsFixed: applied.length,
       findingsOpen: openFindings.length - applied.length,
     });
+    completeCommandRun(config, commandRunId, startedAt, 'completed');
 
     console.log(
       `[autofix] ${owner}/${repo}#${pr} scope=${fix.scope} applied=${applied.length} skipped=${skipped.length}${headMoved ? ' (head moved)' : ''}`,
@@ -551,6 +616,7 @@ export async function processFixJob(
 
     return { applied: applied.length, skipped: skipped.length, headMoved };
   } catch (err) {
+    completeCommandRun(config, commandRunId, startedAt, 'failed', err instanceof Error ? err.message : String(err));
     // P1-2: any unexpected throw must revert the optimistic "⏳ Applying…" button
     // back to a retry checkbox BEFORE we let the job fail; otherwise the button
     // is stuck forever. `skip()` handles its own revert, but non-skip throws
@@ -598,35 +664,74 @@ export async function processExplainJob(
       ),
     ));
   }
-  recordCommandRun(config, job, 'explain');
-
-  const state = config.store.getState({ installationId, owner, repo, pr });
-  const finding = (state?.findings ?? []).find(
-    (f) =>
-      (fix.fingerprint && f.fingerprint === fix.fingerprint) ||
-      (fix.replyToCommentId && f.githubCommentId === fix.replyToCommentId),
-  );
-  if (!finding) {
-    await reply(formatFixSkippedReply('could not match this thread to an Orvex finding.'));
-    return;
+  const commandRunId = reserveCommandRun(config, job, 'explain', plan.id);
+  if (!commandRunId) {
+    return void (await reply(
+      formatFixSkippedReply(
+        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+      ),
+    ));
   }
-
-  const head = await fetchPrHeadInfo(octokit, { owner, repo, number: pr });
-  const content = (await fetchFileContent(octokit, owner, repo, finding.file, head.sha)) ?? '';
-
-  const explanation = await generateExplanationWithLlm(
-    {
-      filePath: finding.file,
-      fileContent: content,
-      findingMessage: finding.message,
-      findingLine: finding.line,
-      suggestion: finding.suggestion,
-      severity: finding.severity,
-    },
-    { apiKey: config.standardModel.apiKey, model: config.standardModel.model, baseUrl: config.standardModel.baseUrl },
+  const commandUsage = createUsageRecorder(
+    config,
+    commandRunId,
+    job.tenantId,
+    'standard',
+    config.standardModel,
+    'explain',
   );
+  const commandStartedAt = Date.now();
+  let commandFinished = false;
+  const finishCommand = (status: 'completed' | 'failed', error?: string) => {
+    if (commandFinished) return;
+    commandFinished = true;
+    completeCommandRun(config, commandRunId, commandStartedAt, status, error);
+  };
+  try {
+    const state = config.store.getState({ installationId, owner, repo, pr });
+    const finding = (state?.findings ?? []).find(
+      (f) =>
+        (fix.fingerprint && f.fingerprint === fix.fingerprint) ||
+        (fix.replyToCommentId && f.githubCommentId === fix.replyToCommentId),
+    );
+    if (!finding) {
+      await reply(formatFixSkippedReply('could not match this thread to an Orvex finding.'));
+      return;
+    }
 
-  await reply(explanation ?? formatFixSkippedReply('could not generate an explanation, try again.'));
+    const head = await fetchPrHeadInfo(octokit, { owner, repo, number: pr });
+    const content = (await fetchFileContent(octokit, owner, repo, finding.file, head.sha)) ?? '';
+
+    const explanation = await generateExplanationWithLlm(
+      {
+        filePath: finding.file,
+        fileContent: content,
+        findingMessage: finding.message,
+        findingLine: finding.line,
+        suggestion: finding.suggestion,
+        severity: finding.severity,
+      },
+      {
+        apiKey: config.standardModel.apiKey,
+        model: config.standardModel.model,
+        baseUrl: config.standardModel.baseUrl,
+        api: config.standardModel.api,
+        reasoningEffort: config.standardModel.reasoningEffort,
+        onUsage: commandUsage,
+      },
+    );
+
+    await reply(
+      explanation
+        ? sanitizeFindingText(explanation)
+        : formatFixSkippedReply('could not generate an explanation, try again.'),
+    );
+  } catch (err) {
+    finishCommand('failed', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    finishCommand('completed');
+  }
 }
 
 /** `@orvex <free-form instruction>` at PR level — answer a question or make a change. */
@@ -660,8 +765,34 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
       ),
     ));
   }
-  recordCommandRun(config, job, 'ask');
+  const commandRunId = reserveCommandRun(config, job, 'ask', plan.id);
+  if (!commandRunId) {
+    return void (await reply(
+      formatFixSkippedReply(
+        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+      ),
+    ));
+  }
+  const commandUsage = createUsageRecorder(
+    config,
+    commandRunId,
+    job.tenantId,
+    'standard',
+    config.standardModel,
+    'ask',
+  );
+  const commandStartedAt = Date.now();
+  let commandFinished = false;
+  const finishCommand = (status: 'completed' | 'failed', error?: string) => {
+    if (commandFinished) return;
+    commandFinished = true;
+    completeCommandRun(config, commandRunId, commandStartedAt, status, error);
+  };
 
+  try {
+  if (config.leaseValid && !(await config.leaseValid())) {
+    throw new Error('review lease lost before conflict-resolution write; discarding this worker result');
+  }
   const head = await fetchPrHeadInfo(octokit, ref);
   if (head.state !== 'open') return void (await reply(formatFixSkippedReply('this pull request is closed.')));
 
@@ -682,12 +813,15 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
     apiKey: config.standardModel.apiKey,
     model: config.standardModel.model,
     baseUrl: config.standardModel.baseUrl,
+    api: config.standardModel.api,
+    reasoningEffort: config.standardModel.reasoningEffort,
+    onUsage: commandUsage,
   });
   if (!result) return void (await reply(formatFixSkippedReply('could not process that request, try rephrasing.')));
 
   // Pure question → answer.
   if (result.mode === 'answer' || !result.changes || result.changes.length === 0) {
-    await reply(`## Orvex\n\n${result.answer ?? 'Nothing to change.'}`);
+    await reply(`## Orvex\n\n${sanitizeFindingText(result.answer ?? 'Nothing to change.')}`);
     return;
   }
 
@@ -718,7 +852,16 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
     const freshContent = new Map<string, string>();
     const editList: Array<{ path: string; originalCode: string; fixedCode: string }> = [];
     const editsByFile = new Map<string, typeof result.changes>();
+    const allowedAgentPaths = new Set(agentFiles.map((file) => file.path));
     for (const ch of result.changes) {
+      if (!allowedAgentPaths.has(ch.file)) {
+        skipped.push({
+          file: ch.file,
+          message: 'requested change',
+          reason: 'the requested path was not part of the files supplied to the agent',
+        });
+        continue;
+      }
       const list = editsByFile.get(ch.file) ?? [];
       list.push(ch);
       editsByFile.set(ch.file, list);
@@ -737,7 +880,7 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
     // arbitrary-edit surface and previously committed unverified. Drop any edit
     // the verifier can't confirm is a safe, correct application of the request.
     let approvedEdits = editList;
-    if (editList.length > 0 && process.env.ORVEX_VERIFY !== '0') {
+    if (editList.length > 0 && isVerificationEnabled()) {
       try {
         const { rejected } = await verifyFixes(
           editList.map((e) => ({
@@ -747,13 +890,22 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
             fixedCode: e.fixedCode,
           })),
           [...freshContent.entries()].map(([path, content]) => ({ path, content })),
-          { apiKey: config.standardModel.apiKey, model: config.standardModel.model, baseUrl: config.standardModel.baseUrl },
+          {
+            apiKey: config.standardModel.apiKey,
+            model: config.standardModel.model,
+            baseUrl: config.standardModel.baseUrl,
+            api: config.standardModel.api,
+            reasoningEffort: config.standardModel.reasoningEffort,
+            onUsage: commandUsage,
+          },
         );
         const rej = new Set(rejected.map((r) => r.index));
         for (const r of rejected) skipped.push({ file: editList[r.index]!.path, message: 'requested change', reason: 'change not verified as safe' });
         approvedEdits = editList.filter((_, i) => !rej.has(i));
-      } catch {
-        /* verifier unavailable → proceed; the CAS commit still guards head moves */
+      } catch (err) {
+        console.warn('[autofix] ask edit verification unavailable; refusing to commit:', (err as Error).message);
+        await reply(formatFixSkippedReply('the requested edit could not be independently verified, so nothing was committed. Try again.'));
+        return;
       }
     }
 
@@ -773,7 +925,7 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
 
     if (changes.length === 0) {
       await reply(
-        `## Orvex\n\n${result.summary ?? 'I could not safely apply that change.'}\n\n${
+        `## Orvex\n\n${sanitizeFindingText(result.summary ?? 'I could not safely apply that change.')}\n\n${
           skipped.length ? formatFixSummaryComment({ applied: [], skipped, headMoved: false }) : ''
         }`,
       );
@@ -785,10 +937,13 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
       : '';
     const message = `chore: ${(result.summary ?? instruction).slice(0, 64)}\n\nRequested via @orvex by ${fix.requestedBy ?? 'a reviewer'}\n${coAuthor}`;
     try {
+      if (config.leaseValid && !(await config.leaseValid())) {
+        throw new Error('review lease lost before fix commit; discarding this worker result');
+      }
       const commit = await commitFilesAtomic(octokit, owner, repo, head.ref, expectedHead, changes, message);
       for (const ch of changes) applied.push({ file: ch.path, message: 'requested change', sha: commit.commitSha });
       await reply(
-        `## Orvex\n\n${result.summary ?? 'Done.'}\n\n${formatFixSummaryComment({ applied, skipped, headMoved: false })}`,
+        `## Orvex\n\n${sanitizeFindingText(result.summary ?? 'Done.')}\n\n${formatFixSummaryComment({ applied, skipped, headMoved: false })}`,
       );
     } catch (err) {
       if (err instanceof Error && err.message === 'branch_moved') {
@@ -801,6 +956,12 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
     }
   } finally {
     config.store.releaseFixLock(prKeyObj, `ask:${job.enqueuedAt}`);
+  }
+  } catch (err) {
+    finishCommand('failed', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    finishCommand('completed');
   }
 }
 
@@ -830,8 +991,23 @@ export async function processResolveJob(job: ReviewJobPayload, config: WorkerCon
       ),
     ));
   }
-  recordCommandRun(config, job, 'resolve');
+  const commandRunId = reserveCommandRun(config, job, 'resolve', plan.id);
+  if (!commandRunId) {
+    return void (await reply(
+      formatFixSkippedReply(
+        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+      ),
+    ));
+  }
+  const commandStartedAt = Date.now();
+  let commandFinished = false;
+  const finishCommand = (status: 'completed' | 'failed', error?: string) => {
+    if (commandFinished) return;
+    commandFinished = true;
+    completeCommandRun(config, commandRunId, commandStartedAt, status, error);
+  };
 
+  try {
   const head = await fetchPrHeadInfo(octokit, ref);
   if (head.state !== 'open') return void (await reply(formatFixSkippedReply('this pull request is closed.')));
   if (!head.sameRepo) {
@@ -842,6 +1018,9 @@ export async function processResolveJob(job: ReviewJobPayload, config: WorkerCon
   }
 
   try {
+    if (config.leaseValid && !(await config.leaseValid())) {
+      throw new Error('review lease lost before conflict-resolution write; discarding this worker result');
+    }
     const result = await mergeBranchInto(octokit, owner, repo, head.ref, head.baseRef);
     if (result.status === 'up_to_date') {
       await reply(`✅ \`${head.ref}\` is already up to date with \`${head.baseRef}\`.`);
@@ -860,6 +1039,12 @@ export async function processResolveJob(job: ReviewJobPayload, config: WorkerCon
     } else {
       throw err;
     }
+  }
+  } catch (err) {
+    finishCommand('failed', err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    finishCommand('completed');
   }
 }
 
@@ -886,6 +1071,7 @@ async function resolveCodeFix(
   fix: FixRequest,
   config: WorkerConfig,
   relatedFiles?: Array<{ path: string; content: string }>,
+  onUsage?: (usage: UsageEvent) => void,
 ): Promise<CodeFix | null> {
   // custom instruction always regenerates, even when a ready fix exists
   if (!fix.instruction && finding.originalCode && finding.fixedCode !== undefined) {
@@ -901,7 +1087,14 @@ async function resolveCodeFix(
       instruction: fix.instruction,
       relatedFiles,
     },
-    { apiKey: config.standardModel.apiKey, model: config.standardModel.model, baseUrl: config.standardModel.baseUrl },
+    {
+      apiKey: config.standardModel.apiKey,
+      model: config.standardModel.model,
+      baseUrl: config.standardModel.baseUrl,
+      api: config.standardModel.api,
+      reasoningEffort: config.standardModel.reasoningEffort,
+      onUsage,
+    },
   );
   return generated;
 }

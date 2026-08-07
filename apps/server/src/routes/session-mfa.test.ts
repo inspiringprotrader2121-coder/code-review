@@ -108,6 +108,18 @@ test('password login requires optional MFA and a super-admin session unlocks the
   const disabledHtml = await disabledSettings.text();
   const setupCsrf = disabledHtml.match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(setupCsrf);
+
+  const getStart = await security.request('/settings/security/totp/start', {
+    headers: { cookie: activeSessionCookie },
+  });
+  assert.equal(getStart.status, 302);
+  assert.equal(getStart.headers.get('location'), '/settings/security');
+  assert.equal(
+    db.getUserSecurity(user.id).totpSecretEncrypted ?? null,
+    null,
+    'GET /totp/start must not generate a pending secret',
+  );
+
   const start = await security.request('/settings/security/totp/start', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: activeSessionCookie },
@@ -117,6 +129,13 @@ test('password login requires optional MFA and a super-admin session unlocks the
   assert.equal(start.headers.get('location'), '/settings/security/totp/setup');
   assert.equal(db.getUserSecurity(user.id).totpEnabled, false, 'starting enrollment does not enable MFA');
 
+  const getStartWithPending = await security.request('/settings/security/totp/start', {
+    headers: { cookie: activeSessionCookie },
+  });
+  assert.equal(getStartWithPending.status, 302);
+  assert.equal(getStartWithPending.headers.get('location'), '/settings/security/totp/setup');
+  const pendingAfterGet = db.getUserSecurity(user.id).totpSecretEncrypted;
+  assert.ok(pendingAfterGet);
   const setup = await security.request('/settings/security/totp/setup', { headers: { cookie: activeSessionCookie } });
   assert.equal(setup.status, 200);
   const setupHtml = await setup.text();

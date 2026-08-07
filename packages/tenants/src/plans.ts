@@ -14,6 +14,8 @@ export type PlanId = 'free' | 'review' | 'review-plus' | 'verify-lite' | 'verify
 export interface PlanFeatures {
   id: PlanId;
   label: string;
+  /** Published monthly subscription price in cents for operator unit economics. */
+  monthlyPriceCents?: number;
   /** number of deep review passes over the diff + neighborhood */
   reviewPasses: number;
   /** how many index-retrieved relevant files feed the review passes (cross-file depth) */
@@ -116,6 +118,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   free: {
     id: 'free',
     label: 'Free trial',
+    monthlyPriceCents: 0,
     reviewPasses: 2,
     retrievalTopK: 28,
     repoSweep: false,
@@ -136,6 +139,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   review: {
     id: 'review',
     label: 'Starter', // MiniMax + DeepSeek v4 Flash — the entry paid tier
+    monthlyPriceCents: 2900,
     // $29/mo — 100 reviews/month included, 5/hour (matches CodeRabbit's rate),
     // then $0.50/review overage (re-reviews count as reviews). TWO discovery
     // passes (MiniMax + Flash) + Flash verify — volume and paid features
@@ -161,6 +165,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   'review-plus': {
     id: 'review-plus',
     label: 'Pro Unlimited',
+    monthlyPriceCents: 6900,
     // $69/mo — UNLIMITED reviews at 10/hour. Same MiniMax + Flash two-pass
     // discovery + Flash verify as Starter; more volume, not more models.
     // The 10/hr cap is the abuse defense, so no monthly ceiling.
@@ -184,6 +189,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   'verify-lite': {
     id: 'verify-lite',
     label: 'Verify Lite',
+    monthlyPriceCents: 4900,
     // $49/mo — the budget entry to the PREMIUM quality track: the SAME
     // multi-model stack as Verify (Luna + Flash lenses + MiniMax + Flash
     // verify), just a smaller quota for lower-volume or price-sensitive teams.
@@ -208,6 +214,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   verify: {
     id: 'verify',
     label: 'Verify',
+    monthlyPriceCents: 9900,
     // multi-model full track (~5 model calls):
     //   pass 1 — Luna / Codex CLI (general)
     //   pass 2 — DeepSeek v4 Flash (deep-dive)

@@ -8,7 +8,13 @@ import {
   verifyInstallState,
   platformSecret,
 } from '@orvex-review/tenants';
-import { loginRedirect, sessionUser } from './session.js';
+import {
+  consumeGitHubInstallProof,
+  loginRedirect,
+  peekGitHubInstallProof,
+  recentGitHubAccessToken,
+  sessionUser,
+} from './session.js';
 import { escapeHtml, onboardingSteps, pageShell } from './pages.js';
 
 /**
@@ -23,9 +29,6 @@ function legacyConnectMode(hasPasswordUsers: boolean): boolean {
   return legacyAuthMode(hasPasswordUsers);
 }
 
-const LEGACY_BANNER = `<div class="banner info">You can connect GitHub and start reviewing now — no sign-in required yet.
-To require per-user login later, set <code>GITHUB_OAUTH_CLIENT_ID</code>; the workspace you create now stays yours.</div>`;
-
 export function authRoutes() {
   const app = new Hono();
   const db = createAppDatabase();
@@ -38,27 +41,15 @@ export function authRoutes() {
   app.get('/connect', (c) => {
     const user = sessionUser(c, db);
     if (!user && legacyConnectMode(db.hasPasswordUsers())) {
-      const error = c.req.query('error');
-      const errorBanner = error ? `<div class="banner error">${escapeHtml(error)}</div>` : '';
       return c.html(
         pageShell(
-          'Connect GitHub',
+          'Sign-in required',
           `${onboardingSteps(2)}
-           ${errorBanner}
-           ${LEGACY_BANNER}
-           <h1>Start your workspace</h1>
-           <p class="lead">Pick a workspace slug, then install the Orvex Review GitHub App and
-           choose which repositories it can review.</p>
-           <form method="get" action="/auth/github/install">
-             <label for="tenant">Workspace slug</label>
-             <input id="tenant" name="tenant" required pattern="[a-zA-Z0-9-]{2,40}" placeholder="acme" />
-             <p class="hint">Lowercase letters, numbers, and dashes.</p>
-             <label for="name">Display name <span style="font-weight:400;color:var(--ink-3)">(optional)</span></label>
-             <input id="name" name="name" placeholder="Acme Corp" />
-             <button type="submit">Continue to GitHub →</button>
-           </form>
-           <p class="muted" style="margin-top:14px">You'll authorize the GitHub App with scoped
-           permissions — no passwords are ever shared.</p>`,
+           <div class="banner error">GitHub OAuth must be configured before a workspace can be connected.
+           This prevents an installation from being bound without proof that the signed-in user administers it.</div>
+           <h1>Connect GitHub</h1>
+           <p class="lead">Ask the operator to configure <code>GITHUB_OAUTH_CLIENT_ID</code> and
+           <code>GITHUB_OAUTH_CLIENT_SECRET</code>, then sign in and try again.</p>`,
         ),
       );
     }
@@ -122,10 +113,15 @@ export function authRoutes() {
     }
 
     if (!user && legacyConnectMode(db.hasPasswordUsers())) {
-      const { installUrl } = tenants.startConnectLegacy(tenantSlug, name);
-      return c.redirect(installUrl);
+      return c.redirect('/connect?error=GitHub%20sign-in%20is%20required%20before%20connecting%20an%20installation');
     }
     if (!user) return loginRedirect(c, fullPath(c.req.url));
+
+    const proof = recentGitHubAccessToken(user.id) ?? peekGitHubInstallProof(c, user.id);
+    if (!proof) {
+      const next = `/auth/github/install?tenant=${encodeURIComponent(tenantSlug)}${name ? `&name=${encodeURIComponent(name)}` : ''}`;
+      return c.redirect(`/auth/github/prove?next=${encodeURIComponent(next)}`);
+    }
 
     try {
       const { installUrl } = tenants.startConnect(tenantSlug, user.id, name);
@@ -143,43 +139,16 @@ export function authRoutes() {
     const ip = clientIp(c);
 
     if (!user && legacyConnectMode(db.hasPasswordUsers())) {
-      const legacyInstallationId = Number(c.req.query('installation_id'));
-      if (!legacyInstallationId || Number.isNaN(legacyInstallationId)) {
-        return c.json({ error: 'missing installation_id' }, 400);
-      }
-      let legacySlug = 'default';
-      const legacyState = c.req.query('state');
-      if (legacyState) {
-        const payload = verifyInstallState(legacyState, platformSecret());
-        if (!payload) return c.json({ error: 'invalid or expired state' }, 400);
-        legacySlug = payload.tenantSlug;
-      }
-      const legacyBlock = ipAbuseBlockMessage(db, ip);
-      if (legacyBlock) return c.html(signupPausedPage(legacyBlock), 429);
-      try {
-        const { tenant, installation } = await tenants.completeInstallCallback(
-          legacyInstallationId,
-          legacySlug,
-          loadGitHubConfigFromEnv(),
-        );
-        recordInstallSignal(db, ip, installation.accountLogin, tenant.slug);
-        return c.html(
-          pageShell(
-            'Connected',
-            `${onboardingSteps(3)}
-             <div class="banner ok">✓ GitHub connected</div>
-             <h1>Workspace ready</h1>
-             <p class="lead">Workspace <strong>${escapeHtml(tenant.name)}</strong> is linked to
-             <strong>${escapeHtml(installation.accountLogin)}</strong>. Orvex reviews the next
-             pull request automatically — comment <code>@orvex help</code> on any PR for commands.</p>
-             <a class="btn" href="/dashboard/${encodeURIComponent(tenant.slug)}">Open dashboard</a>
-             ${LEGACY_BANNER}`,
-          ),
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return c.json({ error: message }, 500);
-      }
+      return c.html(
+        pageShell(
+          'Sign-in required',
+          `${onboardingSteps(2)}
+           <h1>Connect GitHub</h1>
+           <p class="lead">This installation callback cannot be accepted without a
+           GitHub-authenticated user who can administer the installation.</p>`,
+        ),
+        403,
+      );
     }
 
     if (!user) return loginRedirect(c, fullPath(c.req.url));
@@ -245,6 +214,7 @@ export function authRoutes() {
         installationId,
         tenantSlug,
         loadGitHubConfigFromEnv(),
+        recentGitHubAccessToken(user.id) ?? consumeGitHubInstallProof(c, user.id),
       );
       recordInstallSignal(db, ip, installation.accountLogin, tenant.slug);
 
@@ -326,12 +296,15 @@ function fullPath(url: string): string {
 }
 
 // ——— IP-based anti-abuse (secondary signal to the per-account trial cap) ———
-// IP is a weak signal (shared NAT, VPNs), so the DEFAULT is log-only: record the
-// signal and warn, never block. Set ORVEX_IP_ABUSE_BLOCK=1 to hard-block a new
-// account when an IP has connected more than ORVEX_IP_MAX_ACCOUNTS_PER_DAY
-// distinct accounts in 24h.
-const IP_ACCOUNT_LIMIT = Number(process.env.ORVEX_IP_MAX_ACCOUNTS_PER_DAY ?? 5);
-const IP_ABUSE_BLOCK = process.env.ORVEX_IP_ABUSE_BLOCK === '1';
+// IP is a weak signal (shared NAT, VPNs). Default is ON for free-trial farming
+// defense; set ORVEX_IP_ABUSE_BLOCK=0 to log-only. Blocks when an IP has
+// connected more than ORVEX_IP_MAX_ACCOUNTS_PER_DAY distinct accounts in 24h.
+const configuredIpAccountLimit = Number(process.env.ORVEX_IP_MAX_ACCOUNTS_PER_DAY ?? 5);
+const IP_ACCOUNT_LIMIT =
+  Number.isFinite(configuredIpAccountLimit) && configuredIpAccountLimit >= 1
+    ? Math.min(Math.floor(configuredIpAccountLimit), 10_000)
+    : 5;
+const IP_ABUSE_BLOCK = process.env.ORVEX_IP_ABUSE_BLOCK !== '0';
 const DAY_MS = 24 * 3600_000;
 
 /** Best-effort client IP behind the nginx proxy (first X-Forwarded-For hop). */

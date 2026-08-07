@@ -97,6 +97,16 @@ export interface FileChange {
   content: string;
 }
 
+function isSafeRepoPath(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 1024 &&
+    !value.startsWith('/') &&
+    !value.includes('\\') &&
+    !value.split('/').some((part) => part === '' || part === '.' || part === '..')
+  );
+}
+
 /**
  * Commit several file changes as ONE commit, atomically. The ref update uses
  * `force: false`, so if the branch advanced since `expectedHeadSha` (a
@@ -121,7 +131,10 @@ export async function commitFilesAtomic(
   });
 
   const tree: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string }> = [];
+  const paths = new Set<string>();
   for (const f of files) {
+    if (!isSafeRepoPath(f.path) || paths.has(f.path)) throw new Error('invalid_fix_path');
+    paths.add(f.path);
     const { data: blob } = await octokit.rest.git.createBlob({
       owner,
       repo,

@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { mergeFindings, toStoredFinding, reconcileFixedOnHead, type FileReader } from './merge.js';
 import type { ReviewFinding } from './finding.js';
 
-function finding(file: string, message: string): ReviewFinding {
+function finding(file: string, message: string, severity: ReviewFinding['severity'] = 'P1'): ReviewFinding {
   return {
     file,
     line: 10,
-    severity: 'P1',
+    severity,
     category: 'security',
     message,
     confidence: 0.9,
@@ -28,10 +28,19 @@ test('a prior finding re-detected this run stays open', () => {
   assert.equal(res.stillOpen.length, 1);
 });
 
-test('a prior finding whose file WAS reviewed but is no longer detected is marked fixed', () => {
-  const fa = finding('authz.ts', 'auth bypass');
+test('P1 model-miss on a reviewed file is carried forward, not false-fixed', () => {
+  const fa = finding('authz.ts', 'auth bypass', 'P1');
   const prior = [toStoredFinding(fa, 'sha1')];
-  // reviewedFiles includes authz.ts, incoming is empty → genuinely fixed
+  const res = mergeFindings([], prior, 'sha2', {
+    reviewedFiles: new Set(['authz.ts']),
+  });
+  assert.equal(res.newlyFixed.length, 0, 'P1 must not auto-close from a model miss');
+  assert.equal(res.stillOpen.length, 1);
+});
+
+test('P3 whose file WAS reviewed but is no longer detected is marked fixed', () => {
+  const fa = finding('authz.ts', 'style nit', 'P3');
+  const prior = [toStoredFinding(fa, 'sha1')];
   const res = mergeFindings([], prior, 'sha2', {
     reviewedFiles: new Set(['authz.ts']),
   });
@@ -63,9 +72,16 @@ test('empty-diff push (reviewedFiles empty) carries ALL prior findings forward, 
   assert.equal(res.stillOpen.length, 2);
 });
 
-test('without reviewedFiles (legacy/full-review callers): a finding on a NEW sha not re-detected is fixed', () => {
-  const a = toStoredFinding(finding('a.ts', 'bug a'), 'sha1'); // last seen at sha1
-  const res = mergeFindings([], [a], 'sha2', {}); // reviewing sha2 (code advanced)
+test('without reviewedFiles: P1 on a NEW sha not re-detected stays open', () => {
+  const a = toStoredFinding(finding('a.ts', 'bug a', 'P1'), 'sha1');
+  const res = mergeFindings([], [a], 'sha2', {});
+  assert.equal(res.newlyFixed.length, 0);
+  assert.equal(res.stillOpen.length, 1);
+});
+
+test('without reviewedFiles: P3 on a NEW sha not re-detected is fixed', () => {
+  const a = toStoredFinding(finding('a.ts', 'bug a', 'P3'), 'sha1');
+  const res = mergeFindings([], [a], 'sha2', {});
   assert.equal(res.newlyFixed.length, 1);
 });
 
@@ -82,9 +98,18 @@ test('THE FLIP-FLOP FIX: re-reviewing the SAME sha never marks a finding fixed (
   assert.equal(res.stillOpen.length, 1, 'the finding is carried forward, not lost');
 });
 
-test('a genuine new push (different sha) that touches the file still retires a fixed finding', () => {
-  const a = toStoredFinding(finding('a.ts', 'bug a'), 'sha1'); // lastSeenSha = sha1
-  // sha2 = new commit touched a.ts, finding no longer detected → genuinely fixed
+test('a genuine new push that misses a P1 still carries it (no model-miss close)', () => {
+  const a = toStoredFinding(finding('a.ts', 'bug a', 'P1'), 'sha1');
+  const res = mergeFindings([], [a], 'sha2', {
+    reviewedFiles: new Set(['a.ts']),
+    priorReviewSha: 'sha1',
+  });
+  assert.equal(res.newlyFixed.length, 0);
+  assert.equal(res.stillOpen.length, 1);
+});
+
+test('a genuine new push that misses a P3 retires it as fixed', () => {
+  const a = toStoredFinding(finding('a.ts', 'bug a', 'P3'), 'sha1');
   const res = mergeFindings([], [a], 'sha2', {
     reviewedFiles: new Set(['a.ts']),
     priorReviewSha: 'sha1',
@@ -113,6 +138,21 @@ test('a low-confidence re-detection still counts as seen and prevents false fixe
   assert.equal(res.newlyFixed.length, 0, 're-detected below threshold must still block false fixed');
   assert.equal(res.toPost.length, 0, 'an already-open finding is not posted again');
   assert.equal(res.reviewOnly.length, 0, 'an already-open finding is not duplicated in manual review');
+});
+
+test('re-detection upgrades severity/message when incoming ranks higher', () => {
+  const priorOpen = toStoredFinding(finding('a.ts', 'auth bypass!', 'P3'), 'sha1');
+  // Same fingerprint (punctuation stripped) but higher severity + cleaned message.
+  const upgraded = finding('a.ts', 'auth bypass', 'P1');
+  const res = mergeFindings([upgraded], [priorOpen], 'sha2', {
+    reviewedFiles: new Set(['a.ts']),
+    priorReviewSha: 'sha1',
+  });
+  assert.equal(res.newlyFixed.length, 0);
+  assert.equal(res.stillOpen.length, 1);
+  assert.equal(res.stillOpen[0].severity, 'P1');
+  assert.equal(res.stillOpen[0].message, 'auth bypass');
+  assert.equal(res.toPost.length, 0);
 });
 
 test('a new low-confidence finding stays on the normal review surface', () => {
@@ -153,9 +193,8 @@ test('P2-9: incoming duplicates are deduped by fingerprint before posting', () =
 
 // ——— Deterministic fix detection: retire ONLY when the recorded fix is present ———
 
-// P3/info can be deterministically closed; P1/P2 never are (see below).
 const anchored = (file: string, originalCode: string, fixedCode?: string, severity: ReviewFinding['severity'] = 'P3'): ReviewFinding => ({
-  ...finding(file, 'null deref on user'),
+  ...finding(file, 'null deref on user', severity),
   ruleId: 'llm.correctness',
   severity,
   originalCode,
@@ -171,15 +210,29 @@ test('FIX LANDED: P3 original gone AND recorded fixedCode present → marked fix
   assert.equal(res.stillOpen.length, 0);
 });
 
-test('HIGH-SEVERITY GUARD: a P1/P2 is NEVER deterministically closed, even with fixedCode present', async () => {
-  // fixedCode is coincidentally present; for a P1 we must NOT auto-close on that
-  // weak signal — defer to mergeFindings' model-recall authority.
+test('FIX LANDED: P1 with original gone AND fixedCode present → marked fixed', async () => {
+  const f = anchored(
+    'auth.ts',
+    'const role = req.query.role',
+    'const role = session.user.role',
+    'P1',
+  );
+  const prior = [toStoredFinding(f, 'sha1')];
+  const reader = readerFor({ 'auth.ts': 'const role = session.user.role' });
+  const res = await reconcileFixedOnHead(prior, 'sha2', reader);
+  assert.equal(res.newlyFixed.length, 1, 'deterministic fixLanded may close P1');
+  assert.equal(res.stillOpen.length, 0);
+});
+
+test('INCIDENTAL fixedCode: a P1 is NOT closed when original still present', async () => {
+  // fixedCode is coincidentally present; original remains → not fixLanded.
   const f = anchored('auth.ts', 'const role = req.query.role', 'const role = session.user.role', 'P1');
   const prior = [toStoredFinding(f, 'sha1')];
-  const reader = readerFor({ 'auth.ts': 'const role = session.user.role; // (present for unrelated reasons)\nconst role = req.query.role' });
-  // note: original still present here too, but the key assertion is P1 isn't closed
+  const reader = readerFor({
+    'auth.ts': 'const role = session.user.role; // (present for unrelated reasons)\nconst role = req.query.role',
+  });
   const res = await reconcileFixedOnHead(prior, 'sha2', reader);
-  assert.equal(res.newlyFixed.length, 0, 'a P1 is never deterministically closed');
+  assert.equal(res.newlyFixed.length, 0, 'original still present → not fixed');
   assert.equal(res.stillOpen.length, 1);
 });
 

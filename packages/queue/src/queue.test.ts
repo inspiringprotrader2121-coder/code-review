@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryReviewQueue } from './memory.js';
-import type { ReviewJobPayload } from './types.js';
+import { jobIdempotencyKey, type ReviewJobPayload } from './types.js';
 
 function job(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   return {
@@ -109,4 +109,33 @@ test('a queue without leases is safe to heartbeat (optional-method contract)', a
   await assert.doesNotReject(async () => {
     await optional.renewLease?.(j);
   });
+});
+
+test('nightly scans are idempotent for a repo within one UTC day', () => {
+  const first = job({
+    kind: 'scan',
+    action: 'command',
+    pr: 0,
+    headSha: 'nightly',
+    scanDay: '2026-08-06',
+    enqueuedAt: '2026-08-06T03:00:00Z',
+  });
+  const retry = { ...first, enqueuedAt: '2026-08-06T03:45:00Z' };
+  const nextDay = { ...first, scanDay: '2026-08-07', enqueuedAt: '2026-08-07T03:00:00Z' };
+  assert.equal(jobIdempotencyKey(first), jobIdempotencyKey(retry));
+  assert.notEqual(jobIdempotencyKey(first), jobIdempotencyKey(nextDay));
+});
+
+test('webhook command retries reuse a stable source idempotency key', async () => {
+  const q = new MemoryReviewQueue();
+  const first = job({
+    kind: 'ask',
+    action: 'command',
+    sourceEventId: 'github-delivery-1',
+    enqueuedAt: '2026-08-06T03:00:00Z',
+  });
+  const retry = { ...first, enqueuedAt: '2026-08-06T03:01:00Z' };
+  assert.equal(jobIdempotencyKey(first), jobIdempotencyKey(retry));
+  assert.equal((await q.enqueue(first)).accepted, true);
+  assert.equal((await q.enqueue(retry)).accepted, false);
 });

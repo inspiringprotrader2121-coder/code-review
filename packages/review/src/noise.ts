@@ -19,20 +19,23 @@ const SELF_NEGATING = [
   'purely stylistic',
   'purely cosmetic',
   'just a style',
-  'nitpick',
   'none expected in practice',
   'never contains these',
   'unlikely to ever',
   'in practice never',
   'flagging as p3 to call out',
   'flagging to call out',
-  'for completeness',
   'not strictly a defect',
   'not strictly a bug',
 ];
 
+/** Whole-message / phrase hedges — NOT bare substrings like "nitpick" inside a real scenario. */
+const SELF_NEGATING_PHRASES = [
+  /\bnitpick\b/,
+  /\bfor completeness\b/,
+];
+
 const HEDGE_OPENERS = [
-  'consider ',
   'you might want to',
   'it would be nice',
   'as a minor',
@@ -85,8 +88,12 @@ export function dropSelfNegatingFindings(findings: ReviewFinding[]): {
       continue;
     }
     const msg = lower(f.message);
-    const negates = SELF_NEGATING.some((p) => msg.includes(p));
-    const opensAsHedge = HEDGE_OPENERS.some((p) => msg.startsWith(p));
+    const negates =
+      SELF_NEGATING.some((p) => msg.includes(p))
+      || SELF_NEGATING_PHRASES.some((re) => re.test(msg));
+    // Hedge openers only drop `info` — a P3 that starts with "Consider …" often
+    // describes a real medium defect and must reach the author/verifier.
+    const opensAsHedge = f.severity === 'info' && HEDGE_OPENERS.some((p) => msg.startsWith(p));
     if (negates || opensAsHedge) dropped.push(f);
     else kept.push(f);
   }

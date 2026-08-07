@@ -1,14 +1,24 @@
-import { buildRepoContext, createInstallationOctokit } from '@orvex-review/github';
+import { buildRepoContext, createInstallationOctokit, fetchCompareDiff } from '@orvex-review/github';
 import type { ReviewQueue } from '@orvex-review/queue';
 import {
   dropSelfNegatingFindings,
+  fingerprintFinding,
   llmFindingsToReviewFindings,
   runLlmReview,
+  sanitizeFileCell,
+  sanitizeFindingText,
   verifyFindings,
   type ReviewFinding,
 } from '@orvex-review/review';
 import { planFeatures } from '@orvex-review/tenants';
-import { loadWorkerConfig, type WorkerConfig } from './pipeline.js';
+import {
+  createUsageRecorder,
+  loadWorkerConfig,
+  accountLimitReason,
+  type LlmTarget,
+  type WorkerConfig,
+} from './pipeline.js';
+import { isVerificationEnabled } from './verify-gate.js';
 
 /**
  * Nightly whole-repo scans — the Verify/Enterprise scheduled-scan feature.
@@ -21,8 +31,13 @@ import { loadWorkerConfig, type WorkerConfig } from './pipeline.js';
  * plan has `nightlyScans`. Both gates must hold.
  */
 
-const LOOKBACK_DAYS = Number(process.env.ORVEX_NIGHTLY_LOOKBACK_DAYS ?? 1);
-const SCAN_HOUR = Number(process.env.ORVEX_NIGHTLY_HOUR ?? 3); // UTC hour to run
+function boundedEnvInt(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
+}
+
+const LOOKBACK_DAYS = boundedEnvInt('ORVEX_NIGHTLY_LOOKBACK_DAYS', 1, 1, 30);
+const SCAN_HOUR = boundedEnvInt('ORVEX_NIGHTLY_HOUR', 3, 0, 23); // UTC hour to run
 
 export function startNightlyScheduler(queue: ReviewQueue): () => void {
   if (process.env.ORVEX_NIGHTLY_SCANS !== '1') {
@@ -30,6 +45,7 @@ export function startNightlyScheduler(queue: ReviewQueue): () => void {
   }
   let running = true;
   let lastRunDay = '';
+  let checkInProgress = false;
 
   // Check hourly and fire once when the target hour arrives — robust to restarts
   // (an in-memory "already ran today" guard), unlike a naive 24h interval.
@@ -37,11 +53,17 @@ export function startNightlyScheduler(queue: ReviewQueue): () => void {
     if (!running) return;
     const now = new Date();
     const day = now.toISOString().slice(0, 10);
-    if (now.getUTCHours() !== SCAN_HOUR || lastRunDay === day) return;
-    lastRunDay = day;
-    await enqueueNightlyScans(queue);
+    if (now.getUTCHours() !== SCAN_HOUR || lastRunDay === day || checkInProgress) return;
+    checkInProgress = true;
+    try {
+      await enqueueNightlyScans(queue);
+      lastRunDay = day;
+    } finally {
+      checkInProgress = false;
+    }
   };
 
+  void check().catch((err) => console.error('[nightly] scheduler error', err));
   const interval = setInterval(() => {
     check().catch((err) => console.error('[nightly] scheduler error', err));
   }, 3_600_000); // hourly
@@ -57,16 +79,18 @@ export function startNightlyScheduler(queue: ReviewQueue): () => void {
 export async function enqueueNightlyScans(queue: ReviewQueue): Promise<number> {
   const config = loadWorkerConfig();
   const targets = config.store.listScanTargets().filter((t) => planFeatures(t.plan).nightlyScans);
+  const scanDay = new Date().toISOString().slice(0, 10);
   for (const t of targets) {
     await queue.enqueue({
       kind: 'scan',
-      action: 'command', // time-based idempotency key; never deduped
+      action: 'command', // scanDay makes one enqueue idempotent per repo/day
       installationId: t.installationId,
       tenantId: t.tenantId,
       owner: t.owner,
       repo: t.name,
       pr: 0,
       headSha: 'nightly',
+      scanDay,
       enqueuedAt: new Date().toISOString(),
     });
   }
@@ -76,13 +100,38 @@ export async function enqueueNightlyScans(queue: ReviewQueue): Promise<number> {
 
 /** Review a repo's recent default-branch commits and file findings as an issue. */
 export async function processScanJob(
-  job: { installationId: number; tenantId: string; owner: string; repo: string },
+  job: { installationId: number; tenantId: string; owner: string; repo: string; scanDay?: string },
   config: WorkerConfig,
 ): Promise<void> {
   const { installationId, tenantId, owner, repo } = job;
-  if (!planFeatures(config.store.getTenantPlan(tenantId)).nightlyScans) return; // double-gate
+  const plan = planFeatures(config.store.getTenantPlan(tenantId));
+  if (!plan.nightlyScans) return; // double-gate
+  const startedAt = Date.now();
+  const scanTarget: LlmTarget = {
+    apiKey: config.llmApiKey,
+    baseUrl: config.llmBaseUrl,
+    model: config.llmModel,
+    api: config.llmApi,
+  };
+  const reserved = config.store.tryReserveReviewRun({
+    tenantId,
+    installationId,
+    owner,
+    repo,
+    pr: 0,
+    headSha: `nightly:${job.scanDay ?? new Date().toISOString().slice(0, 10)}`,
+    action: 'scan:nightly',
+  }, () => accountLimitReason(config.store, owner, plan));
+  if (!reserved.ok) {
+    console.warn(`[nightly] ${owner}/${repo}: ${reserved.reason} — skipping`);
+    return;
+  }
+  const runId = reserved.runId;
+  let status: 'completed' | 'skipped' | 'failed' = 'completed';
+  let error: string | undefined;
 
-  const octokit = createInstallationOctokit(config.github, installationId);
+  try {
+    const octokit = createInstallationOctokit(config.github, installationId);
 
   const info = await octokit.rest.repos.get({ owner, repo });
   const branch = info.data.default_branch;
@@ -93,18 +142,30 @@ export async function processScanJob(
     octokit.rest.repos.listCommits({ owner, repo, sha: branch, until, per_page: 1 }),
   ]);
   const headSha = headCommits.data[0]?.sha;
-  const baseSha = baseCommits.data[0]?.sha;
+  let baseSha = baseCommits.data[0]?.sha;
+  // New repos often have no commits older than the lookback window, so `until`
+  // returns empty. Fall back to the oldest commit we can page so the first
+  // nightly still has a compare base.
+  if (headSha && !baseSha) {
+    const recent = await octokit.rest.repos.listCommits({ owner, repo, sha: branch, per_page: 100 });
+    baseSha = recent.data[recent.data.length - 1]?.sha;
+  }
   if (!headSha || !baseSha || headSha === baseSha) {
     console.log(`[nightly] ${owner}/${repo}: no new commits in the last ${LOOKBACK_DAYS}d — skipping`);
+    status = 'skipped';
     return;
   }
 
-  const cmp = await octokit.rest.repos.compareCommits({ owner, repo, base: baseSha, head: headSha });
-  const files = (cmp.data.files ?? [])
+  const compared = await fetchCompareDiff(octokit, owner, repo, baseSha, headSha, {
+    maxFileBytes: 100_000,
+    maxFiles: 1_000,
+  });
+  const files = compared.files
     .filter((f) => f.patch && f.status !== 'removed')
     .map((f) => ({ filename: f.filename, status: f.status, patch: f.patch as string }));
   if (files.length === 0) {
     console.log(`[nightly] ${owner}/${repo}: no reviewable changes — skipping`);
+    status = 'skipped';
     return;
   }
 
@@ -125,20 +186,38 @@ export async function processScanJob(
     apiKey: config.llmApiKey,
     baseUrl: config.llmBaseUrl,
     model: config.llmModel,
+    api: scanTarget.api,
+    reasoningEffort: scanTarget.reasoningEffort,
     context,
+    onUsage: createUsageRecorder(config, runId, tenantId, 'premium', scanTarget, 'nightly discovery'),
   });
 
   let findings = dropSelfNegatingFindings(llmFindingsToReviewFindings(llm.findings)).kept;
 
-  if (findings.length > 0 && process.env.ORVEX_VERIFY !== '0' && context) {
+  if (findings.length > 0 && isVerificationEnabled() && context) {
     const verifyFiles = [...context.changedContents, ...context.related, ...context.dependents, ...context.others];
     const verified = await verifyFindings(findings, verifyFiles, {
       apiKey: config.llmApiKey,
       model: config.llmModel,
       baseUrl: config.llmBaseUrl,
+      api: scanTarget.api,
+      reasoningEffort: scanTarget.reasoningEffort,
+      onUsage: createUsageRecorder(config, runId, tenantId, 'premium', scanTarget, 'nightly verification'),
     });
     if (verified.status === 'verified') {
-      findings = verified.kept;
+      // Keep unverified candidates too (same union as PR partitionVerifiedFindings
+      // for missing verdicts) — dropping them discarded real P1/P2s when the
+      // verifier omitted a verdict.
+      const seen = new Set(verified.kept.map((f) => fingerprintFinding(f)));
+      findings = [
+        ...verified.kept,
+        ...verified.unverified.filter((f) => {
+          const fp = fingerprintFinding(f);
+          if (seen.has(fp)) return false;
+          seen.add(fp);
+          return true;
+        }),
+      ];
     } else {
       console.warn(`[nightly] verification ${verified.status}; keeping discovery findings`);
     }
@@ -146,6 +225,7 @@ export async function processScanJob(
 
   if (findings.length === 0) {
     console.log(`[nightly] ${owner}/${repo}: scan clean (0 findings)`);
+    status = 'completed';
     return;
   }
 
@@ -156,6 +236,18 @@ export async function processScanJob(
     body: formatScanIssue(branch, baseSha, headSha, findings, llm.summary),
   });
   console.log(`[nightly] ${owner}/${repo}: filed issue with ${findings.length} findings`);
+  } catch (err) {
+    status = 'failed';
+    error = err instanceof Error ? err.message : String(err);
+    throw err;
+  } finally {
+    config.store.completeReviewRun(runId, {
+      status,
+      error,
+      skipReason: status === 'skipped' ? error : undefined,
+      durationMs: Date.now() - startedAt,
+    });
+  }
 }
 
 function formatScanIssue(
@@ -170,11 +262,13 @@ function formatScanIssue(
   const lines = [
     `Orvex scanned the last ${LOOKBACK_DAYS} day(s) of commits on \`${branch}\` (\`${baseSha.slice(0, 7)}\`…\`${headSha.slice(0, 7)}\`).`,
   ];
-  if (summary) lines.push('', summary);
+  if (summary) lines.push('', sanitizeFindingText(summary));
   lines.push('', '| Severity | File | Finding |', '| --- | --- | --- |');
   for (const f of sorted) {
-    const loc = f.line ? `\`${f.file}:${f.line}\`` : `\`${f.file}\``;
-    lines.push(`| ${f.severity} | ${loc} | ${f.message.replace(/\|/g, '\\|').replace(/\n/g, ' ')} |`);
+    const safeFile = sanitizeFileCell(f.file);
+    const loc = f.line ? `\`${safeFile}:${f.line}\`` : `\`${safeFile}\``;
+    const message = sanitizeFindingText(f.message).replace(/\|/g, '\\|').replace(/\n/g, ' ');
+    lines.push(`| ${f.severity} | ${loc} | ${message} |`);
   }
   lines.push('', '<sub>Automated nightly scan by Orvex Review. Open a PR to get inline, fixable review comments.</sub>');
   return lines.join('\n');

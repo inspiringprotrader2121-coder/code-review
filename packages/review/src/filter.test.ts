@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterAndCapFindings } from './filter.js';
+import {
+  collapseSameDefect,
+  dedupeByFileLine,
+  filterAndCapFindings,
+  hasConcreteFailurePath,
+} from './filter.js';
 import type { ReviewFinding } from './finding.js';
 
 const f = (over: Partial<ReviewFinding>): ReviewFinding => ({
@@ -8,7 +13,9 @@ const f = (over: Partial<ReviewFinding>): ReviewFinding => ({
   line: 10,
   severity: 'P2',
   category: 'correctness',
-  message: 'msg',
+  // Default to a message that states a trigger and an outcome, so tests about
+  // severity routing are not silently also testing the inline evidence gate.
+  message: 'When the request arrives without a tenant scope, the lookup returns another tenant\'s record.',
   confidence: 0.8,
   ruleId: 'llm.general',
   ...over,
@@ -73,4 +80,121 @@ test('confidence never suppresses or demotes an anchored actionable finding', ()
   assert.equal(inline.length, 2);
   assert.equal(inline[1].confidence, 0.01);
   assert.equal(summaryOnly.length, 0);
+});
+
+test('same-line dedupe preserves provenance from every corroborating pass', () => {
+  const [merged] = dedupeByFileLine([
+    f({
+      sourceTier: 'standard',
+      sourcePass: 'general',
+      message: 'first pass found the defect',
+    }),
+    f({
+      sourceTier: 'deepseek-flash',
+      sourcePass: 'deep-dive',
+      message: 'more detailed second pass found the defect',
+    }),
+  ]);
+  assert.equal(merged.provenance?.length, 2);
+  assert.deepEqual(
+    merged.provenance?.map((item) => item.sourcePass).sort(),
+    ['deep-dive', 'general'],
+  );
+});
+
+test('collapseSameDefect: one defect reported at two lines becomes one comment', () => {
+  // Both halves of this pair were posted on PR #231 as separate inline comments.
+  const kept = collapseSameDefect([
+    f({
+      file: 'ApiDocs.jsx',
+      line: 42,
+      severity: 'P2',
+      message:
+        'The public API page now advertises `PUT /{slug}/api/lines/{id}`, but '
+        + '`backend/src/openapi.yaml` no longer defines any such operation.',
+    }),
+    f({
+      file: 'ApiDocs.jsx',
+      line: 48,
+      severity: 'P1',
+      message:
+        'The page advertises `PUT /{slug}/api/lines/{id}`, but the revised OpenAPI '
+        + 'document has no corresponding path entry.',
+    }),
+  ]);
+  assert.equal(kept.length, 1);
+  // Highest severity survives, so collapsing can never quietly downgrade a bug.
+  assert.equal(kept[0].severity, 'P1');
+  assert.ok((kept[0].provenance?.length ?? 0) >= 2);
+});
+
+test('collapseSameDefect: distinct defects in one file both survive', () => {
+  const kept = collapseSameDefect([
+    f({ file: 'a.ts', line: 10, message: 'The rate limiter permits a burst past the documented quota.' }),
+    f({ file: 'a.ts', line: 40, message: 'Timestamps are stored without a timezone, so the audit trail is off by hours.' }),
+  ]);
+  assert.equal(kept.length, 2);
+});
+
+test('collapseSameDefect: findings in different files never merge', () => {
+  const message = 'The `paginateExportRows` cursor can exceed `GDPR_EXPORT_MAX_OFFSET`.';
+  const kept = collapseSameDefect([
+    f({ file: 'routes/gdpr.js', line: 70, message }),
+    f({ file: 'repositories/gdpr.js', line: 70, message }),
+  ]);
+  assert.equal(kept.length, 2);
+});
+
+test('collapseSameDefect: unanchored findings are left alone', () => {
+  const message = 'The `paginateExportRows` cursor can exceed `GDPR_EXPORT_MAX_OFFSET`.';
+  const kept = collapseSameDefect([
+    f({ file: 'gdpr.js', line: undefined, message }),
+    f({ file: 'gdpr.js', line: 70, message }),
+  ]);
+  assert.equal(kept.length, 2);
+});
+
+test('hasConcreteFailurePath: a stated trigger and outcome passes; an assertion does not', () => {
+  assert.equal(
+    hasConcreteFailurePath(
+      'When a retry runs after the redemption row already exists, `incrementUsedCountIfAllowed` '
+      + 'is skipped, so the coupon usage counter never increments and the limit can be exceeded.',
+    ),
+    true,
+  );
+  assert.equal(
+    hasConcreteFailurePath(
+      'This validation pattern is risky and inconsistent with the rest of the codebase; consider '
+      + 'extracting it into a shared helper for maintainability and clarity going forward.',
+    ),
+    false,
+  );
+});
+
+test('the evidence gate moves vague P2/P3s to the table and never touches P1', (t) => {
+  t.after(() => {
+    delete process.env.ORVEX_INLINE_EVIDENCE_GATE;
+  });
+  const vague = 'This pattern is risky and inconsistent with the surrounding code; a shared helper would read better here.';
+  const concrete =
+    'When the cursor exceeds the export ceiling, the final page is emitted without a truncation '
+    + 'marker, so the caller silently receives partial data.';
+
+  const { inline, summaryOnly } = filterAndCapFindings(
+    [
+      f({ severity: 'P1', line: 1, message: vague }),
+      f({ severity: 'P2', line: 2, message: vague }),
+      f({ severity: 'P2', line: 5, message: concrete }),
+      f({ severity: 'P3', line: 3, message: vague }),
+      f({ severity: 'P3', line: 4, message: concrete }),
+    ],
+    cfg,
+  );
+  assert.deepEqual(inline.map((x) => x.line), [1, 5, 4]);
+  // Gated, not dropped — they still reach the author in the summary table.
+  assert.deepEqual(summaryOnly.map((x) => x.line), [2, 3]);
+
+  process.env.ORVEX_INLINE_EVIDENCE_GATE = '0';
+  const off = filterAndCapFindings([f({ severity: 'P3', line: 3, message: vague })], cfg);
+  assert.equal(off.inline.length, 1);
 });

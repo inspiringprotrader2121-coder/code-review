@@ -7,6 +7,7 @@ export type {
   FixRequest,
   ReviewJobPayload,
   MarkCompletedOptions,
+  QueueDepth,
 } from './types.js';
 export {
   jobIdempotencyKey,

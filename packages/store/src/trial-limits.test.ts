@@ -55,6 +55,40 @@ test('pruneEphemeralData never deletes failed rows (lifetime trial anti-farm)', 
   assert.equal(d.countAccountReviews('alice'), 1, 'failed lifetime rows survive prune');
 });
 
+test('pruning skipped runs also removes their usage ledger rows', () => {
+  const d = db();
+  const run = d.recordReviewRun({
+    tenantId: 't1',
+    installationId: 1,
+    owner: 'alice',
+    repo: 'r',
+    pr: 2,
+    headSha: 'sha-usage',
+    action: 'synchronize',
+    status: 'skipped',
+    durationMs: 1,
+  });
+  d.recordReviewRunUsage({
+    runId: run.id,
+    tenantId: 't1',
+    provider: 'test',
+    model: 'test',
+    tier: 'standard',
+    inputTokens: 10,
+    outputTokens: 5,
+    inputRatePerM: 1,
+    outputRatePerM: 1,
+    costUsd: 0.000015,
+    tokenSource: 'estimate',
+  });
+  const old = new Date(Date.now() - 40 * 24 * 3_600_000).toISOString();
+  (d as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } } }).db
+    .prepare(`UPDATE review_runs SET created_at = ?`)
+    .run(old);
+  d.pruneEphemeralData({ runRetentionMs: 30 * 24 * 3_600_000 });
+  assert.deepEqual(d.listReviewRunUsage(run.id), []);
+});
+
 test('countAccountReviews matches the account case-insensitively', () => {
   const d = db();
   addReview(d, { owner: 'Alice', status: 'completed' });

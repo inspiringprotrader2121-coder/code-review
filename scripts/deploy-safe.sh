@@ -30,6 +30,7 @@ DEFAULT_SOURCES=(
   scripts/deploy-safe.sh
   scripts/deploy-safe.test.sh
   scripts/backup-db.mjs
+  scripts/restore-db-drill.mjs
   scripts/orvex-backup.cron
   README.md
   PLAN.md
@@ -139,6 +140,14 @@ REMOTE_CLEAR
       fi
       drain_set=0
     fi
+  }
+  set_drain() {
+    "${SSH[@]}" bash -s -- "$DRAIN_PATH" <<'REMOTE_DRAIN'
+set -euo pipefail
+mkdir -p "$(dirname -- "$1")"
+touch -- "$1"
+REMOTE_DRAIN
+    drain_set=1
   }
   release_deploy_lock() {
     if ((lock_held)); then
@@ -283,12 +292,7 @@ REMOTE_CHECK
   }
 
   echo "[deploy] enabling server-side drain before the idle check"
-  "${SSH[@]}" bash -s -- "$DRAIN_PATH" <<'REMOTE_DRAIN'
-set -euo pipefail
-mkdir -p "$(dirname -- "$1")"
-touch -- "$1"
-REMOTE_DRAIN
-  drain_set=1
+  set_drain
 
   IDLE=0
   IDLE_ATTEMPTS=${DEPLOY_IDLE_ATTEMPTS:-90}
@@ -411,6 +415,10 @@ REMOTE_BACKUP_SCHEDULE
   rollback_release() {
     echo "[deploy] rolling back staged release" >&2
     local failed=0
+    if ! set_drain; then
+      echo "[deploy] CRITICAL: could not re-enable the drain before rollback" >&2
+      return 1
+    fi
     if ! "${SSH[@]}" 'pm2 stop velatrix-review >/dev/null'; then
       echo "[deploy] CRITICAL: rollback PM2 stop failed; refusing to restore files under a running app" >&2
       return 1
@@ -464,28 +472,32 @@ REMOTE_ROLLBACK
   fi
   if ! ready_json "$READY_ATTEMPTS" "$READY_SLEEP_S" 1 0 >/dev/null; then
     echo "[deploy] app did not report healthy after releasing drain; restoring the previous release" >&2
-    if ! "${SSH[@]}" bash -s -- "$DRAIN_PATH" <<'REMOTE_RE-DRAIN'
-set -euo pipefail
-mkdir -p "$(dirname -- "$1")"
-touch -- "$1"
-REMOTE_RE-DRAIN
-    then
+    if ! set_drain; then
       echo "[deploy] could not re-enable the drain before rollback" >&2
-    else
-      drain_set=1
     fi
     if ! rollback_release; then exit 20; fi
     exit 9
   fi
   if ! install_backup_schedule; then
-    echo "[deploy] WARNING: could not install the local database backup schedule" >&2
+    echo "[deploy] CRITICAL: could not install the local database backup schedule" >&2
+    if ! rollback_release; then exit 20; fi
+    exit 11
   fi
   "${SSH[@]}" bash -s -- "$STAGE_DIR" "$BACKUP_DIR" <<'REMOTE_CLEAN'
 set -euo pipefail
-rm -rf "$1" "$2"
+# Keep the previous source release available for an immediate rollback. The
+# next deployment rotates this directory only after its own staged release is
+# healthy; deleting it here made a failed post-deploy check unrecoverable.
+rm -rf "$1"
 REMOTE_CLEAN
   echo "[deploy] staged release is live and healthy"
   exit 0
 fi
 
+# Bare rsync without drain/stage is only for --dry-run inspection. Never write
+# straight to the live tree during reviews — that path tore packages mid-run.
+if ((${#DRY_RUN[@]} == 0)); then
+  echo "[deploy] refusing live sync without --restart (use --dry-run to inspect, or --restart to stage+drain)" >&2
+  exit 2
+fi
 "${cmd[@]}"

@@ -23,7 +23,7 @@
 <main>
   <a class="home" href="/">← useorvex.com</a>
   <h1>Privacy Policy</h1>
-  <p class="meta">Last updated: 19 July 2026</p>
+  <p class="meta">Last updated: 6 August 2026</p>
 
   <p>This policy explains what Orvex Review ("Orvex", "we") processes when you
   use the service, and the choices you have. Contact:
@@ -35,8 +35,9 @@
     fetch the diff and may build a temporary filesystem snapshot of the
     repository tree and text files under the permissions you granted the GitHub
     App. Orvex uses that snapshot to identify imports, dependents, and other
-    relevant context; only selected excerpts are included in review requests.
-    Temporary snapshots are removed when the review finishes.</li>
+    relevant context. Standard API review requests contain the diff and selected
+    excerpts; when an agentic review is enabled, its read-only investigation
+    path may inspect additional files in that temporary checkout.</li>
     <li><strong>AI inference providers.</strong> Excerpts of that content are sent to
     contracted third-party AI inference providers for transient processing.
     We apply automated secret redaction
@@ -45,7 +46,9 @@
     <li><strong>Review artifacts.</strong> We store the findings, summaries,
     review metadata (repository name, PR number, commit SHAs, token counts,
     costs), and workspace settings needed to run the service and show your
-    dashboard. We do not keep a copy of your repository.</li>
+    dashboard. A finding or suggested fix can include a code excerpt, file path,
+    or line reference supplied by the model. We do not keep a complete copy of
+    your repository.</li>
     <li><strong>Account data.</strong> GitHub account identifiers, workspace
     membership, email address for sign-in and billing, and session cookies
     (strictly necessary; we use no advertising or cross-site trackers).</li>
@@ -65,9 +68,15 @@
   <h2>3. Retention</h2>
   <ul>
     <li>The repository snapshot and source content fetched for a review are
-    held in memory for the duration of that review run and then discarded.</li>
+    held in temporary worker storage or memory for the duration of that review
+    run and are normally removed when the run finishes. A process or host
+    failure can leave temporary data until the operating system or an operator
+    cleanup removes it.</li>
     <li>Review findings and metadata are retained while your workspace is
     active so re-reviews, dashboards, and dedup work.</li>
+    <li>Operational backups can retain the database, including account,
+    billing, review metadata, and stored finding excerpts, for the configured
+    backup-retention period before rotation.</li>
     <li>Uninstalling the GitHub App stops all processing. You can request
     deletion of stored workspace data at any time via
     <a href="mailto:support@useorvex.com">support@useorvex.com</a>; we delete

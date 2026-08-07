@@ -9,15 +9,23 @@ import {
   generateRecoveryCodes,
   generateTotpSecret,
   hashRecoveryCode,
+  loadGoogleOAuthConfigFromEnv,
+  loadOAuthConfigFromEnv,
   platformSecret,
   recoveryCodeMatches,
   totpEnrollmentUri,
   verifyPassword,
   verifyTotpCodeWithEpoch,
 } from '@orvex-review/tenants';
-import { checkRateLimit, clearRateLimit } from './rate-limit.js';
+import { checkAuthRateLimit, clearAuthRateLimit } from './rate-limit.js';
 import { escapeHtml, pageShell } from './pages.js';
-import { setSessionCookie, SESSION_COOKIE, sessionUser } from './session.js';
+import {
+  consumeOAuthReauthProof,
+  peekOAuthReauthProof,
+  setSessionCookie,
+  SESSION_COOKIE,
+  sessionUser,
+} from './session.js';
 
 const SECURITY_WINDOW_MS = 10 * 60_000;
 const SECURITY_MAX_ATTEMPTS = 5;
@@ -51,12 +59,31 @@ export function securityRoutes() {
     if (!user) return c.redirect('/auth/login?next=/settings/security');
     if (!(await validCsrf(c))) return c.text('Invalid security token', 403);
     if (db.getUserSecurity(user.id).totpEnabled) return c.redirect('/settings/security');
+    if (!db.getPasswordHash(user.id)) {
+      const provider = mfaReauthProvider(user);
+      if (!provider) return c.redirect('/settings/security?error=reauth');
+      if (!peekOAuthReauthProof(c, user.id)) {
+        return c.redirect(`/auth/reauth?provider=${provider}&next=${encodeURIComponent('/settings/security')}`);
+      }
+    }
 
     const secret = generateTotpSecret();
     if (!db.setPendingTotpSecret(user.id, encryptTotpSecret(secret, platformSecret()))) {
       return c.redirect('/settings/security');
     }
     return c.redirect('/settings/security/totp/setup');
+  });
+
+  app.get('/settings/security/totp/start', (c) => {
+    // Read-only: enrollment must be CSRF'd POST only. After OAuth reauth the
+    // browser may land here via `next=` — send them back to the security page
+    // (or setup if a secret is already pending) without generating a secret.
+    const user = sessionUser(c, db);
+    if (!user) return c.redirect('/auth/login?next=/settings/security');
+    const security = db.getUserSecurity(user.id);
+    if (security.totpEnabled) return c.redirect('/settings/security');
+    if (security.totpSecretEncrypted) return c.redirect('/settings/security/totp/setup');
+    return c.redirect('/settings/security');
   });
 
   app.get('/settings/security/totp/setup', async (c) => {
@@ -83,15 +110,23 @@ export function securityRoutes() {
 
     const body = await c.req.parseBody();
     const password = String(body.password ?? '');
+    const passwordHash = db.getPasswordHash(user.id);
+    const oauthProof = !passwordHash && peekOAuthReauthProof(c, user.id);
     const encrypted = db.getUserSecurity(user.id).totpSecretEncrypted;
     const secret = encrypted ? decryptTotpSecret(encrypted, platformSecret()) : null;
     const totp = secret
       ? await verifyTotpCodeWithEpoch(secret, String(body.code ?? ''))
       : { valid: false as const };
-    if (!verifyPassword(password, db.getPasswordHash(user.id)) || !totp.valid || totp.epoch === undefined || !encrypted) {
+    if (
+      (passwordHash ? !verifyPassword(password, passwordHash) : !oauthProof) ||
+      !totp.valid ||
+      totp.epoch === undefined ||
+      !encrypted
+    ) {
       return c.redirect('/settings/security/totp/setup?error=code');
     }
 
+    if (!passwordHash) consumeOAuthReauthProof(c, user.id);
     const codes = generateRecoveryCodes();
     const hashes = codes.map((code) => hashRecoveryCode(user.id, code, platformSecret()));
     const session = db.completeTotpEnrollment({
@@ -102,7 +137,7 @@ export function securityRoutes() {
     });
     if (!session) return c.redirect('/settings/security/totp/setup?error=stale');
     setSessionCookie(c, session.id);
-    clearSecurityIpRateLimit(limit);
+    clearSecurityIpRateLimit(db, limit);
     return c.html(recoveryCodesPage(user, codes));
   });
 
@@ -120,7 +155,8 @@ export function securityRoutes() {
     const secret = security.totpSecretEncrypted
       ? decryptTotpSecret(security.totpSecretEncrypted, platformSecret())
       : null;
-    const validPassword = verifyPassword(password, db.getPasswordHash(user.id));
+    const passwordHash = db.getPasswordHash(user.id);
+    const validPassword = passwordHash ? verifyPassword(password, passwordHash) : peekOAuthReauthProof(c, user.id);
     const totp = secret ? await verifyTotpCodeWithEpoch(secret, code) : { valid: false as const };
     const recoveryHash = security.recoveryCodeHashes.find((hash) =>
       recoveryCodeMatches(hash, user.id, code, platformSecret()),
@@ -133,11 +169,12 @@ export function securityRoutes() {
     if (!security.totpEnabled || !validPassword || !factor) {
       return c.redirect('/settings/security?error=invalid');
     }
+    if (!passwordHash) consumeOAuthReauthProof(c, user.id);
 
     const session = db.disableTotpAndRotateSession({ userId: user.id, factor });
     if (!session) return c.redirect('/settings/security?error=invalid');
     setSessionCookie(c, session.id);
-    clearSecurityIpRateLimit(limit);
+    clearSecurityIpRateLimit(db, limit);
     return c.redirect('/settings/security?disabled=1');
   });
 
@@ -156,14 +193,17 @@ export function securityRoutes() {
       ? decryptTotpSecret(security.totpSecretEncrypted, platformSecret())
       : null;
     const totp = secret ? await verifyTotpCodeWithEpoch(secret, code) : { valid: false as const };
+    const passwordHash = db.getPasswordHash(user.id);
+    const reauth = passwordHash ? verifyPassword(password, passwordHash) : peekOAuthReauthProof(c, user.id);
     if (
       !security.totpEnabled ||
-      !verifyPassword(password, db.getPasswordHash(user.id)) ||
+      !reauth ||
       !totp.valid ||
       totp.epoch === undefined
     ) {
       return c.redirect('/settings/security?error=invalid');
     }
+    if (!passwordHash) consumeOAuthReauthProof(c, user.id);
 
     const codes = generateRecoveryCodes();
     const hashes = codes.map((recoveryCode) => hashRecoveryCode(user.id, recoveryCode, platformSecret()));
@@ -174,7 +214,7 @@ export function securityRoutes() {
     });
     if (!session) return c.redirect('/settings/security?error=invalid');
     setSessionCookie(c, session.id);
-    clearSecurityIpRateLimit(limit);
+    clearSecurityIpRateLimit(db, limit);
     return c.html(recoveryCodesPage(user, codes));
   });
 
@@ -206,6 +246,12 @@ function safeEqual(a: string, b: string): boolean {
   return aa.length === bb.length && timingSafeEqual(aa, bb);
 }
 
+function mfaReauthProvider(user: User): 'github' | 'google' | null {
+  if (user.githubId > 0 && loadOAuthConfigFromEnv()) return 'github';
+  if (user.googleId && loadGoogleOAuthConfigFromEnv()) return 'google';
+  return null;
+}
+
 function securityRateIpKey(c: Context, action: string): string {
   const ip = c.req.header('x-real-ip')?.trim() || c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim() || 'unknown';
   return `account-security:ip:${action}:${ip}`;
@@ -214,7 +260,7 @@ function securityRateIpKey(c: Context, action: string): string {
 function checkSecurityRateLimit(c: Context, db: AppDatabase, userId: string, action: string) {
   const ipKey = securityRateIpKey(c, action);
   const accountKey = `security:${action}:${userId}`;
-  const ip = checkRateLimit(ipKey, { windowMs: SECURITY_WINDOW_MS, max: SECURITY_MAX_ATTEMPTS });
+  const ip = checkAuthRateLimit(db, ipKey, { windowMs: SECURITY_WINDOW_MS, max: SECURITY_MAX_ATTEMPTS });
   const account = db.consumeAuthAttempt(accountKey, {
     windowMs: SECURITY_WINDOW_MS,
     max: SECURITY_MAX_ATTEMPTS,
@@ -226,8 +272,8 @@ function checkSecurityRateLimit(c: Context, db: AppDatabase, userId: string, act
   };
 }
 
-function clearSecurityIpRateLimit(limit: { ipKey: string }): void {
-  clearRateLimit(limit.ipKey);
+function clearSecurityIpRateLimit(db: AppDatabase, limit: { ipKey: string }): void {
+  clearAuthRateLimit(db, limit.ipKey);
 }
 
 function securityPage(

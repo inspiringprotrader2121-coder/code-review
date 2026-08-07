@@ -53,4 +53,6 @@ export interface DiffCoverage {
   omittedPatch: number;
   /** true iff nothing was dropped by the cap, no patch was truncated, and no patch was omitted */
   complete: boolean;
+  /** GitHub's own hard file cap truncated the source list; the exact remainder is unknown. */
+  githubCapHit?: boolean;
 }

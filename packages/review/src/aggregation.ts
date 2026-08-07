@@ -1,7 +1,12 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { extractJsonLoose } from './llm-client.js';
-import { fingerprintFinding, type ReviewFinding, type ReviewSurfaceFinding } from './finding.js';
+import {
+  fingerprintFinding,
+  mergeFindingProvenance,
+  type ReviewFinding,
+  type ReviewSurfaceFinding,
+} from './finding.js';
 
 export interface ReviewAggregationConfig {
   /** Number of complete review samples requested. `1` disables aggregation. */
@@ -241,9 +246,12 @@ function boundedLlmClusters(entries: RepeatedFinding[], raw: unknown): Cluster[]
     const anchorLine = entries[anchorId].finding.line;
     const near = members.filter((id) => {
       const line = entries[id].finding.line;
-      if (anchorLine === undefined || line === undefined) return true;
+      // Multi-member clusters must have concrete line anchors; undefined-line
+      // members are split out as singletons rather than spreading unbounded.
+      if (anchorLine === undefined || line === undefined) return false;
       return Math.abs(line - anchorLine) <= MAX_CLUSTER_LINE_SPREAD;
     });
+    if (near.length === 0) continue;
     const representative = near.includes(proposed.representative) ? proposed.representative : near[0];
     near.forEach((id) => claimed.add(id));
     clusters.push({ representative, members: near });
@@ -324,6 +332,14 @@ export async function aggregateRepeatedFindings(
   const reviewOnly: ReviewSurfaceFinding[] = [];
   for (const cluster of allClusters) {
     const representative = selectRepresentative(entries, cluster.members);
+    // Recurrence clustering chooses one report to surface, but the verifier
+    // needs to know every independent lens/sample that corroborated it.
+    mergeFindingProvenance(
+      representative,
+      ...cluster.members
+        .map((id) => entries[id].finding)
+        .filter((finding) => finding !== representative),
+    );
     const occurrences = new Set(cluster.members.map((id) => entries[id].sample)).size;
     if (occurrences >= opts.minOccurrences) {
       findings.push(representative);

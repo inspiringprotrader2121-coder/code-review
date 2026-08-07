@@ -53,6 +53,8 @@ export interface OAuthStatePayload {
   next?: string;
   nonce: string;
   provider?: OAuthProvider;
+  purpose?: 'login' | 'install-proof' | 'mfa-proof';
+  userId?: string;
 }
 
 export function signOAuthState(payload: OAuthStatePayload, secret: string): string {
@@ -82,6 +84,15 @@ export function verifyOAuthState(
   }
   if (!payload.ts || Date.now() - payload.ts > maxAgeMs) return null;
   if (typeof payload.nonce !== 'string' || payload.nonce.length < 32) return null;
+  if (
+    payload.purpose !== undefined &&
+    payload.purpose !== 'login' &&
+    payload.purpose !== 'install-proof' &&
+    payload.purpose !== 'mfa-proof'
+  ) return null;
+  if ((payload.purpose === 'install-proof' || payload.purpose === 'mfa-proof') && typeof payload.userId !== 'string') {
+    return null;
+  }
   return payload;
 }
 
@@ -89,7 +100,9 @@ export function buildAuthorizeUrl(config: OAuthConfig, redirectUri: string, stat
   const url = new URL('https://github.com/login/oauth/authorize');
   url.searchParams.set('client_id', config.clientId);
   url.searchParams.set('redirect_uri', redirectUri);
-  url.searchParams.set('scope', 'read:user user:email');
+  // read:org is required to prove that a GitHub OAuth user administers an
+  // organization installation, rather than merely being an org member.
+  url.searchParams.set('scope', 'read:user user:email read:org');
   url.searchParams.set('state', state);
   return url.toString();
 }
@@ -110,6 +123,18 @@ export interface GitHubOAuthUser {
   name?: string;
   avatarUrl?: string;
   email?: string;
+  /** Short-lived proof for the GitHub App installation callback; never persist. */
+  accessToken?: string;
+}
+
+async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs = 15_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function exchangeCodeForUser(
@@ -117,7 +142,7 @@ export async function exchangeCodeForUser(
   code: string,
   redirectUri: string,
 ): Promise<GitHubOAuthUser> {
-  const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+  const tokenRes = await fetchWithTimeout('https://github.com/login/oauth/access_token', {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({
@@ -141,7 +166,7 @@ export async function exchangeCodeForUser(
     );
   }
 
-  const userRes = await fetch('https://api.github.com/user', {
+  const userRes = await fetchWithTimeout('https://api.github.com/user', {
     headers: {
       authorization: `Bearer ${tokenJson.access_token}`,
       accept: 'application/vnd.github+json',
@@ -165,11 +190,12 @@ export async function exchangeCodeForUser(
     name: user.name ?? undefined,
     avatarUrl: user.avatar_url ?? undefined,
     email,
+    accessToken: tokenJson.access_token,
   };
 }
 
 async function verifiedGitHubEmail(accessToken: string): Promise<string | undefined> {
-  const emailsRes = await fetch('https://api.github.com/user/emails', {
+  const emailsRes = await fetchWithTimeout('https://api.github.com/user/emails', {
     headers: {
       authorization: `Bearer ${accessToken}`,
       accept: 'application/vnd.github+json',
@@ -206,7 +232,7 @@ export async function exchangeGoogleCodeForUser(
     grant_type: 'authorization_code',
     redirect_uri: redirectUri,
   });
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+  const tokenRes = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body,
@@ -215,7 +241,7 @@ export async function exchangeGoogleCodeForUser(
   const token = (await tokenRes.json()) as { access_token?: string };
   if (!token.access_token) throw new Error('Google OAuth token exchange returned no access token');
 
-  const userRes = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+  const userRes = await fetchWithTimeout('https://openidconnect.googleapis.com/v1/userinfo', {
     headers: { authorization: `Bearer ${token.access_token}` },
   });
   if (!userRes.ok) throw new Error(`Google user lookup failed: HTTP ${userRes.status}`);

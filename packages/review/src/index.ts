@@ -15,17 +15,32 @@ export {
   closeCodexSession,
   isCodexRepoAllowed,
   killAllCodexChildren,
+  setCodexChildListener,
+  buildCodexPrompt,
+  capCodexDiffFiles,
+  trimCodexPrompt,
+  CountingSemaphore,
+  detectCodexAuthMode,
+  clearCodexAuthModeCache,
+  resolveCodexHomeConcurrency,
   DEFAULT_CODEX_CLI_MODEL,
   DEFAULT_CODEX_CLI_REASONING_EFFORT,
+  type CodexAuthMode,
   type CodexCliReviewOptions,
   type CodexCliReviewResult,
+  type CodexChildListener,
+  type CodexPromptMode,
 } from './codex-cli.js';
 export {
   type ReviewFinding,
   type ReviewSurfaceFinding,
+  type FindingProvenance,
   fingerprintFinding,
   normalizeMessage,
   findingId,
+  findingProvenance,
+  tagFindingProvenance,
+  mergeFindingProvenance,
 } from './finding.js';
 export {
   mergeFindings,
@@ -35,7 +50,19 @@ export {
   type FileReader,
   type MergeResult,
 } from './merge.js';
-export { filterAndCapFindings, dedupeByFileLine } from './filter.js';
+export {
+  collapseSameDefect,
+  dedupeByFileLine,
+  filterAndCapFindings,
+  hasConcreteFailurePath,
+} from './filter.js';
+export {
+  extractSymbols,
+  extractTerms,
+  isStrongSymbol,
+  sameDefectText,
+  type DefectMatch,
+} from './similarity.js';
 export {
   formatReviewBody,
   formatFixedReply,
@@ -61,6 +88,8 @@ export {
   type ReviewCommentMeta,
   type InlineFindingRender,
   type FixSummaryInput,
+  sanitizeFileCell,
+  sanitizeFindingText,
 } from './format.js';
 export { parseOrvexCommand, commandTrigger, type OrvexCommand } from './commands.js';
 export type { OrvexCommandDoc, CommandWhere } from './commands-catalog.js';
@@ -106,7 +135,7 @@ export {
   type ModelContributionRow,
 } from './contribution.js';
 export { checkImportBindings, enumerateExports, extractNamedImports } from './import-check.js';
-export { isRateLimitOrQuotaError, llmChat, type LlmClientOptions } from './llm-client.js';
+export { isRateLimitOrQuotaError, isOversizedModelRequest, llmChat, type LlmClientOptions } from './llm-client.js';
 export {
   aggregateRepeatedFindings,
   fitReviewAggregationToBudget,
@@ -116,5 +145,20 @@ export {
   type RepeatedFindingAggregation,
   type ReviewAggregationConfig,
 } from './aggregation.js';
-export { DEEP_DIVE_FOCUS, THIRD_ANGLE_FOCUS, REMOVED_BEHAVIOR_FOCUS } from './lenses.js';
+export { DEEP_DIVE_FOCUS, THIRD_ANGLE_FOCUS, REMOVED_BEHAVIOR_FOCUS, RISK_HUNT_FOCUS } from './lenses.js';
+export {
+  maxRiskProbes,
+  selectRiskProbes,
+  isLargePr,
+  hasDeleteOrRename,
+  buildReviewPassAngles,
+  type PassAngle,
+} from './pass-budget.js';
+export {
+  detectRiskSignals,
+  isHighRiskDiff,
+  riskProbeFocus,
+  type RiskDiffFile,
+  type RiskSignal,
+} from './risk.js';
 export { isHedgedRejection } from './verifier.js';

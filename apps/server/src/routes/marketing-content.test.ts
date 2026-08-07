@@ -71,7 +71,7 @@ test('public marketing explains every plan and does not disclose review provider
   assert.doesNotMatch(llms, /same three-pass depth/i);
   assert.match(privacy, /contracted third-party AI inference providers/);
   assert.match(privacy, /temporary filesystem snapshot/);
-  assert.match(privacy, /only selected excerpts are included in review\s+requests/);
+  assert.match(privacy, /standard API review requests contain the diff and selected\s+excerpts/i);
   assert.match(terms, /support@useorvex\.com/);
   assert.match(refunds, /support@useorvex\.com/);
   assert.doesNotMatch(`${terms}\n${refunds}`, /cancel at any time from the dashboard/i);

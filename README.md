@@ -1,84 +1,126 @@
 # Orvex Review
 
-Self-hosted GitHub App that reviews PRs on **Velatrixcloud/Velatrix-Cloud** with deterministic rules first, LLM second, and intelligent re-review on push.
+Self-hosted AI code review for GitHub. Install the GitHub App, open a PR, and Orvex posts inline findings — with optional auto-fix, deep review, and billing for multi-tenant SaaS.
 
-**Service repo:** [Velatrixcloud/code-review](https://github.com/Velatrixcloud/code-review)
+**License:** [MIT](./LICENSE)  
+**Repos:** [Velatrixcloud/code-review](https://github.com/Velatrixcloud/code-review) · [inspiringprotrader2121-coder/code-review](https://github.com/inspiringprotrader2121-coder/code-review)
 
-## Features (Phase 1–3)
+---
 
-| Phase | Capability |
-|-------|------------|
-| **1** | Webhook → queue → diff → LLM → PR comment |
-| **2** | SQLite state, fingerprints, incremental diff, “fixed on sha” replies |
-| **3** | Inline P1/P2 comments, `.orvex-review.yml`, doc-audit + Semgrep, check runs |
+## What you get
 
-## Prerequisites
+| Capability | Notes |
+|------------|--------|
+| PR review on open / push | Diff + repo context → LLM → summary + inline comments |
+| Deterministic layers | Optional Semgrep + config rules before the model |
+| Re-review on push | Fingerprints prior findings; replies when issues are fixed |
+| PR commands | `@orvex review`, `deep`, `fix`, `explain`, `ignore`, `help`, … |
+| Auto-fix | Suggestion blocks + Apply checkbox; commits only with safety locks |
+| Multi-tenant SaaS | Installations, plans, Stripe overage, dashboards |
+| Check runs | Optional GitHub Check `orvex-review` |
 
-1. **GitHub App** `Orvex Review` on Velatrixcloud org
-   - Permissions: `pull_requests` R/W, `contents` R/W (auto-fix commits), `metadata` R, `checks` W (optional)
-   - Events: `pull_request`, `issue_comment`, `pull_request_review_comment`, `installation`, `installation_repositories`
-2. **LLM API key** — MiniMax (OpenAI-compatible, default) or Anthropic
-3. Node 20+, pnpm 9+
-4. Optional: `semgrep` CLI on PATH for deterministic scans
+---
 
-## Setup
+## Requirements
+
+- **Node.js 22.13+** and **pnpm 11** (via Corepack)
+- A **GitHub App** (permissions below)
+- At least one **LLM API key** (MiniMax default; OpenAI / DeepSeek / Anthropic optional)
+- Optional: Redis (`QUEUE_BACKEND=redis`), Semgrep on `PATH`, Docker (runtime-verify)
+
+---
+
+## Quick start (local)
 
 ```bash
-cp .env.example .env
-# GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, GITHUB_WEBHOOK_SECRET,
-# MINIMAX_API_KEY (or ANTHROPIC_API_KEY)
-
+git clone https://github.com/Velatrixcloud/code-review.git
+cd code-review
+corepack enable
 pnpm install
+
+cp .env.example .env
+# Fill at least:
+#   GITHUB_APP_ID
+#   GITHUB_APP_PRIVATE_KEY_PATH=./orvex-review.pem   # download from the App settings
+#   GITHUB_WEBHOOK_SECRET
+#   PLATFORM_SECRET=$(openssl rand -hex 32)
+#   MINIMAX_API_KEY=...   # or configure another provider in .env.example
+#   STORE_PATH=./.data/orvex-review.db
+#   APP_URL=http://localhost:8787
+
+pnpm typecheck
+pnpm test
 pnpm dev
 ```
 
-## Manual review
+Server listens on `HOST`/`PORT` (default `0.0.0.0:8787`).
+
+Expose it for GitHub webhooks (e.g. ngrok):
+
+```bash
+ngrok http 8787
+# Set APP_URL to the ngrok https URL
+# Update the GitHub App webhook + setup URLs to the same host
+```
+
+Health: `GET /readyz` (when the server is up).
+
+---
+
+## GitHub App setup
+
+Create an app (org or user): [New GitHub App](https://github.com/settings/apps/new).
+
+| Setting | Value |
+|---------|--------|
+| Webhook URL | `{APP_URL}/webhooks/github` |
+| Webhook secret | same as `GITHUB_WEBHOOK_SECRET` |
+| Setup / callback | see [docs/SAAS_SETUP.md](./docs/SAAS_SETUP.md) |
+
+**Permissions:** Metadata (R), Contents (R/W), Pull requests (R/W), Issues (R/W), Checks (R/W optional).
+
+**Events:** `pull_request`, `issue_comment`, `pull_request_review_comment`, `installation`, `installation_repositories`.
+
+Download a private key → save as `orvex-review.pem` (gitignored) and point `GITHUB_APP_PRIVATE_KEY_PATH` at it.
+
+Install the app on a test repo, open a PR, and you should see a review comment within a few minutes (model latency depends on tier).
+
+More detail: **[docs/SAAS_SETUP.md](./docs/SAAS_SETUP.md)** · **[docs/HOW_IT_WORKS.md](./docs/HOW_IT_WORKS.md)**
+
+---
+
+## Manual one-shot review (CLI)
+
+With the same `.env` as the server:
 
 ```bash
 pnpm review --pr 67 --sync
+# typically needs --owner OWNER --repo REPO (see CLI --help)
 ```
 
-## PR commands & auto-fix
+---
 
-Anyone with write access can drive Orvex from PR comments (trigger word
-configurable via `ORVEX_TRIGGER`, default `@orvex`). `@orvex help` and
-`@orvex rate limit` also work without write:
+## PR commands
 
-| Command | Where | Effect |
-|---------|-------|--------|
-| `@orvex review` | PR or finding thread | Re-run the review on the current head |
-| `@orvex deep` | PR or finding thread | Extra analysis passes (paid; counts as 2 units) |
-| `@orvex fix` | PR comment | Commit all ready fix suggestions |
-| `@orvex fix` | finding thread | That finding only (same as `fix this`) |
-| `@orvex fix all` | PR or finding thread | Ready fixes + AI-generate fixes for remaining findings |
-| `@orvex fix this` | reply on a finding | Fix just that finding |
-| `@orvex <instructions>` | reply on a finding / PR | AI fix or free-form ask/change |
-| `@orvex explain` | reply on a finding | Deep-dive explanation of the issue |
-| `@orvex ignore` | reply on a finding | Suppress this finding permanently for the repo |
-| `@orvex ignore <file>:<line>` | PR comment | Silence a manual-review candidate by location |
-| `@orvex resolve conflicts` | PR or finding thread | Merge base to clear auto-resolvable conflicts |
-| `@orvex auto-apply on/off` | PR or finding thread | Auto-commit ready fixes after each future review of this PR |
-| `@orvex rate limit` | anywhere | Show remaining hourly / monthly review quota |
-| `@orvex help` | anywhere | Show the command list |
+Trigger word defaults to `@orvex` (`ORVEX_TRIGGER`). Write access is required for mutating commands; `help` / public rate info may be restricted by plan.
 
-Each inline finding also carries:
+| Command | Effect |
+|---------|--------|
+| `@orvex review` | Re-run review on current head |
+| `@orvex deep` | Extra analysis (counts as more billable units on paid plans) |
+| `@orvex fix` / `fix this` / `fix all` | Commit ready / AI fixes |
+| `@orvex explain` | Explain a finding (thread) |
+| `@orvex ignore` | Suppress a finding for the repo |
+| `@orvex rate limit` | Quota status (collaborators) |
+| `@orvex help` | Command list |
 
-- a native GitHub **```suggestion** block — GitHub shows the exact diff and its
-  own *Commit suggestion* button per issue (and batching for several at once)
-- an **`Apply fix` checkbox** — tick it and Orvex commits that one fix, then
-  replies `✅ Fix applied in <sha>` and marks the checkbox done
+Fixes only land when the branch head is unchanged, the target code still matches, and no other Orvex fix holds the PR lock. Fork PRs are never pushed.
 
-**Safety:** fixes are only committed when the PR branch head hasn't moved since
-the command, the exact target code still exists at HEAD, and no other Orvex fix
-is running on the PR (per-PR lock). Concurrent edits abort the fix instead of
-overwriting. Fork PRs are never pushed to — use the native suggestion buttons.
-
-**GitHub App requirements:** `Contents: Read & write` permission, plus the
-**Issue comment** and **Pull request review comment** event subscriptions.
+---
 
 ## Per-repo config
 
-Copy `examples/orvex-review.yml` to **Velatrix-Cloud** as `.orvex-review.yml`:
+Copy [examples/orvex-review.yml](./examples/orvex-review.yml) into a customer repo as `.orvex-review.yml`:
 
 ```yaml
 mode: normal
@@ -89,42 +131,63 @@ ignore_labels:
   - review-bot:ignore
 ```
 
-## Architecture
+---
+
+## Project layout
 
 ```
-apps/server/src/pipeline.ts   Full review orchestration
-packages/store                SQLite PR state + findings
-packages/rules                doc-audit, Semgrep, config
-packages/review               LLM, fingerprints, merge, format
-packages/github               API client (diff, reviews, checks)
-packages/queue                Webhook job queue
+apps/server/     HTTP API, webhooks, worker pipeline
+apps/cli/        One-shot review CLI
+apps/eval/       Offline eval / benchmarks
+packages/github  GitHub App client, diffs, archives
+packages/review  LLM passes, verifier, formatting, Codex CLI
+packages/store   SQLite tenants, runs, findings
+packages/queue   Memory / Redis job queue
+packages/rules   Config + Semgrep / audits
+packages/tenants Plans, install binding, auth helpers
+docs/            SaaS setup + how it works
+scripts/         Deploy, backup, restore drill
 ```
 
-## Re-review behavior
-
-On `synchronize`:
-
-1. Diff only `last_sha..head_sha`
-2. Re-run doc-audit / Semgrep / LLM on new hunks
-3. Verify prior findings on HEAD (audit rules)
-4. Reply `✅ Fixed on abc123` on resolved inline comments
-5. Post only **new** fingerprints (no spam)
-
-State persists in `.data/reviews.db` (or `STORE_PATH`).
+---
 
 ## Scripts
 
 | Command | Description |
 |---------|-------------|
-| `pnpm dev` | Webhook + worker |
-| `pnpm review --pr N --sync` | One-shot review |
-| `pnpm typecheck` | TypeScript |
-| `pnpm test` | Unit tests |
+| `pnpm dev` | API + worker (development) |
+| `pnpm start` | Production start for `@orvex-review/server` |
+| `pnpm build` | Build all packages |
+| `pnpm typecheck` | TypeScript across the workspace |
+| `pnpm test` | Unit tests (+ script tests) |
+| `pnpm review --pr N` | CLI review |
+| `pnpm eval` | Eval harness |
 
-## Env
+---
 
-See `.env.example` for full list. Key vars:
+## Environment
 
-- `STORE_PATH` — SQLite database
-- `CHECK_RUNS_ENABLED=1` — GitHub check `orvex-review`
-- `SEMGREP_DISABLED=1` — skip Semgrep layer
+All variables are documented in **[.env.example](./.env.example)**. Minimum for a first review:
+
+- `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, `GITHUB_WEBHOOK_SECRET`
+- `PLATFORM_SECRET`
+- `STORE_PATH` (SQLite path outside the repo in production)
+- One LLM provider key (e.g. `MINIMAX_API_KEY`)
+- `APP_URL` matching your public webhook host
+
+Never commit `.env`, `*.pem`, or database files — they are gitignored.
+
+---
+
+## Production notes
+
+- Keep `STORE_PATH` on durable disk **outside** the git checkout.
+- Prefer `scripts/deploy-safe.sh --dry-run` then `--restart` over raw `rsync` (see `AGENTS.md`).
+- Set `ORVEX_ADMIN_SECRET` for admin bearer automation (do not reuse `PLATFORM_SECRET`).
+- Optional: Redis queue, Stripe keys, Codex CLI homes — see `.env.example`.
+
+---
+
+## License
+
+[MIT](./LICENSE) © 2026 Orvex / Velatrixcloud

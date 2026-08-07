@@ -6,6 +6,9 @@ import { authDisabled, legacyAuthMode } from '@orvex-review/tenants';
 import { createApp } from './app.js';
 import { startWorkerLoop } from './queue-runner.js';
 import { startNightlyScheduler } from './nightly.js';
+import { retryStripeMeterEvents } from './routes/billing.js';
+import { sendOperationalAlert } from './alerts.js';
+import { cleanupAbandonedAgentCheckouts } from './temp-cleanup.js';
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? '0.0.0.0';
@@ -36,7 +39,27 @@ if (!isLoopbackBind && legacyAuthMode() && process.env.ORVEX_ALLOW_PUBLIC_NOLOGI
 // Clear review rows left 'running' by a previous crash/restart so the dashboard
 // doesn't show a perpetual in-progress spinner.
 const bootDb = createAppDatabase();
-const staleRuns = bootDb.failStaleRunningRuns();
+const abandonedCheckouts = cleanupAbandonedAgentCheckouts();
+if (abandonedCheckouts > 0) {
+  console.log(`[server] removed ${abandonedCheckouts} abandoned agent checkout(s)`);
+}
+const tempCleanupTimer = setInterval(() => {
+  const removed = cleanupAbandonedAgentCheckouts();
+  if (removed > 0) {
+    console.log(`[server] removed ${removed} abandoned agent temp director${removed === 1 ? 'y' : 'ies'}`);
+  }
+}, 24 * 3_600_000);
+tempCleanupTimer.unref();
+// Sole-worker boot (single PM2 process): mark ALL local 'running' rows interrupted
+// so resumeReviewRun can reopen them and the dashboard doesn't show a stuck
+// spinner. Multi-worker rolling restarts may set ORVEX_RUNNING_STALE_MS to a
+// positive grace so a peer's fresh work is not interrupted mid-flight.
+const configuredStaleRunMs = Number(process.env.ORVEX_RUNNING_STALE_MS ?? 0);
+const staleRunMs =
+  Number.isFinite(configuredStaleRunMs) && configuredStaleRunMs >= 0
+    ? Math.min(Math.floor(configuredStaleRunMs), 24 * 3_600_000)
+    : 0;
+const staleRuns = bootDb.failStaleRunningRuns({ staleAfterMs: staleRunMs });
 if (staleRuns > 0) console.log(`[server] cleared ${staleRuns} stale 'running' review row(s)`);
 
 // Bounded retention: prune ephemeral rows (skipped/failed runs, expired
@@ -48,11 +71,20 @@ function pruneOnce(): void {
     if (pruned > 0) console.log(`[server] pruned ${pruned} ephemeral row(s)`);
   } catch (err) {
     console.error('[server] prune failed', err);
+    void sendOperationalAlert({
+      event: 'database-prune-failed',
+      severity: 'warning',
+      message: `Ephemeral database cleanup failed: ${(err as Error).message}`,
+    });
   }
 }
 pruneOnce();
 const pruneTimer = setInterval(pruneOnce, 24 * 3_600_000);
 pruneTimer.unref();
+const meterRetryTimer = setInterval(() => {
+  retryStripeMeterEvents(bootDb).catch((err) => console.error('[server] Stripe meter retry failed', err));
+}, 60_000);
+meterRetryTimer.unref();
 
 const queue = createReviewQueue();
 const app = createApp(queue);
@@ -65,6 +97,12 @@ try {
   if (recovered > 0) console.log(`[server] recovered ${recovered} orphaned/pending queue item(s)`);
 } catch (err) {
   console.error('[server] queue recovery failed', err);
+  void sendOperationalAlert({
+    event: 'queue-recovery-failed',
+    severity: 'critical',
+    message: `Queue recovery failed during startup: ${(err as Error).message}`,
+  });
+  throw err;
 }
 
 const stopWorker = startWorkerLoop(queue);
@@ -81,6 +119,8 @@ async function shutdown() {
   shuttingDown = true;
   console.log('[server] shutting down…');
   stopNightly();
+  clearInterval(meterRetryTimer);
+  clearInterval(tempCleanupTimer);
   await stopWorker(); // re-queues in-flight reviews so they resume after restart
   await queue.close();
   process.exit(0);

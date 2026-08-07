@@ -95,3 +95,39 @@ test('a SMALL caller budget (nightly 24KB / autofix 32KB) must NOT shrink the sn
     'a 60KB file must survive in the snapshot even when the caller budget is 24KB',
   );
 });
+
+test('the streaming snapshot parser enforces the total retained-byte cap', async () => {
+  const tarball = makeTarball({
+    'src/a.ts': 'a'.repeat(20_000),
+    'src/b.ts': 'b'.repeat(20_000),
+  });
+  const snapshot = await fetchRepoSnapshot(fakeOctokit(tarball), 'o', 'r', 'sha', {
+    maxFileBytes: 30_000,
+    maxTotalBytes: 25_000,
+  });
+  assert.equal(snapshot.has('src/a.ts'), true);
+  assert.equal(snapshot.has('src/b.ts'), false);
+});
+
+test('the snapshot keeps package metadata required by runtime verification', async () => {
+  const snapshot = await fetchRepoSnapshot(
+    fakeOctokit(makeTarball({
+      'package.json': '{"scripts":{"test":"node --test"}}',
+      'pnpm-lock.yaml': 'lockfileVersion: 9.0',
+      'src/index.ts': 'export const answer = 42;',
+    })),
+    'o',
+    'r',
+    'sha',
+  );
+  assert.equal(snapshot.get('package.json'), '{"scripts":{"test":"node --test"}}');
+  assert.equal(snapshot.has('pnpm-lock.yaml'), true);
+});
+
+test('the snapshot parser rejects an archive above its compressed-byte cap', async () => {
+  const tarball = makeTarball({ 'src/a.ts': 'a'.repeat(10_000) });
+  await assert.rejects(
+    fetchRepoSnapshot(fakeOctokit(tarball), 'o', 'r', 'sha', { maxArchiveBytes: tarball.length - 1 }),
+    /archive exceeds/,
+  );
+});

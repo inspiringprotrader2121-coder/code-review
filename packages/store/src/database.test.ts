@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { AppDatabase } from './database.js';
 
 function freshDb(): AppDatabase {
@@ -13,6 +14,104 @@ test('users: upsert by github id updates profile, keeps id', () => {
   assert.equal(a.id, b.id);
   assert.equal(b.login, 'octocat-renamed');
   assert.equal(b.name, 'Octo');
+});
+
+test('stale-run cleanup leaves fresh running work alone during a rolling restart', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('live-worker');
+  db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'live-worker',
+    repo: 'api',
+    pr: 1,
+    headSha: 'live',
+    action: 'synchronize',
+  });
+  assert.equal(db.failStaleRunningRuns({ staleAfterMs: 60 * 60_000 }), 0);
+});
+
+test('sole-worker boot interrupts all running rows so resume can reopen them', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('sole-worker');
+  const runId = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'sole-worker',
+    repo: 'api',
+    pr: 1,
+    headSha: 'fresh',
+    action: 'synchronize',
+  });
+  assert.equal(db.failStaleRunningRuns({ staleAfterMs: 0 }), 1);
+  assert.equal(
+    db.resumeReviewRun(runId, {
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'sole-worker',
+      repo: 'api',
+      pr: 1,
+      action: 'synchronize',
+    }),
+    'resumed',
+  );
+});
+
+test('interruptReviewRun marks running rows so resumeReviewRun can reopen them', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('interrupt');
+  const input = {
+    tenantId: tenant.id,
+    installationId: 9,
+    owner: 'interrupt',
+    repo: 'api',
+    pr: 3,
+    headSha: 'abc',
+    action: 'synchronize' as const,
+  };
+  const runId = db.startReviewRun(input);
+  assert.equal(db.interruptReviewRun(runId), true);
+  assert.equal(db.interruptReviewRun(runId), false, 'already interrupted');
+  assert.equal(
+    db.resumeReviewRun(runId, {
+      tenantId: input.tenantId,
+      installationId: input.installationId,
+      owner: input.owner,
+      repo: input.repo,
+      pr: input.pr,
+      action: input.action,
+    }),
+    'resumed',
+  );
+});
+
+test('durable storage rejects database files anywhere inside the checkout', () => {
+  const previous = process.env.ORVEX_REQUIRE_DURABLE_STORAGE;
+  process.env.ORVEX_REQUIRE_DURABLE_STORAGE = '1';
+  try {
+    assert.throws(
+      () => new AppDatabase(path.join(process.cwd(), 'velatrix-review.db')),
+      /outside the checkout/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ORVEX_REQUIRE_DURABLE_STORAGE;
+    else process.env.ORVEX_REQUIRE_DURABLE_STORAGE = previous;
+  }
+});
+
+test('installation upsert never rebinds an existing installation to another tenant', () => {
+  const db = freshDb();
+  const first = db.createTenant('first');
+  const second = db.createTenant('second');
+  db.upsertInstallation({ installationId: 7, tenantId: first.id, accountLogin: 'org', accountType: 'Organization' });
+  const result = db.upsertInstallation({
+    installationId: 7,
+    tenantId: second.id,
+    accountLogin: 'org-renamed',
+    accountType: 'Organization',
+  });
+  assert.equal(result.tenantId, first.id);
+  assert.equal(result.accountLogin, 'org-renamed');
 });
 
 test('sessions: valid session resolves user, expired session is rejected', () => {
@@ -58,11 +157,12 @@ test('paid access downgrades on explicit dunning status and durable webhook clai
   db.setTenantBilling(tenant.id, { stripeSubscriptionStatus: 'active' });
   assert.equal(db.getTenantPlan(tenant.id), 'review');
 
-  assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), true);
-  assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), false);
-  db.completeWebhookEvent('stripe', 'evt_1');
-  assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), false);
-  assert.equal(db.claimWebhookEvent('github', 'evt_1'), true, 'providers use independent delivery namespaces');
+  const stripeClaim = db.claimWebhookEvent('stripe', 'evt_1');
+  assert.ok(stripeClaim);
+  assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), null);
+  db.completeWebhookEvent('stripe', 'evt_1', stripeClaim);
+  assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), null);
+  assert.ok(db.claimWebhookEvent('github', 'evt_1'), 'providers use independent delivery namespaces');
 
   const runId = db.startReviewRun({
     tenantId: tenant.id,
@@ -73,7 +173,7 @@ test('paid access downgrades on explicit dunning status and durable webhook clai
     headSha: 'abc',
     action: 'synchronize',
   });
-  assert.equal(db.failStaleRunningRuns(), 1);
+  assert.equal(db.failStaleRunningRuns({ staleAfterMs: 0 }), 1);
   assert.equal(db.countAccountReviews('billing'), 1, 'an interrupted attempt remains quota-consuming');
   assert.equal(
     db.resumeReviewRun(runId, {
@@ -98,6 +198,48 @@ test('paid access downgrades on explicit dunning status and durable webhook clai
     }),
     'completed',
   );
+});
+
+test('retention removes abandoned webhook claims so the event ledger stays bounded', () => {
+  const db = freshDb();
+  const firstClaim = db.claimWebhookEvent('github', 'stale-event');
+  assert.ok(firstClaim);
+  const old = new Date(Date.now() - 2 * 24 * 3_600_000).toISOString();
+  (db as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db
+    .prepare(`UPDATE webhook_events SET claimed_at = ?`)
+    .run(old);
+
+  assert.equal(db.pruneEphemeralData(), 1);
+  const reclaimed = db.claimWebhookEvent('github', 'stale-event');
+  assert.ok(reclaimed);
+  assert.notEqual(reclaimed, firstClaim);
+  db.completeWebhookEvent('github', 'stale-event', firstClaim);
+  assert.equal(db.getWebhookEvent('github', 'stale-event')?.processedAt, undefined);
+  db.completeWebhookEvent('github', 'stale-event', reclaimed);
+  assert.ok(db.getWebhookEvent('github', 'stale-event')?.processedAt);
+});
+
+test('body-hash claims dedupe replays inside the TTL and reopen after it', () => {
+  const db = freshDb();
+  const hash = 'a'.repeat(64);
+  const first = db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 });
+  assert.ok(first);
+  assert.equal(db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 }), null, 'in-flight blocks');
+  db.completeWebhookEvent(db.webhookBodyProvider('github'), hash, first);
+  assert.equal(
+    db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 }),
+    null,
+    'processed body hash blocks inside TTL',
+  );
+
+  const expired = new Date(Date.now() - 120_000).toISOString();
+  (db as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db
+    .prepare(`UPDATE webhook_events SET processed_at = ?, claimed_at = ? WHERE provider = ? AND event_id = ?`)
+    .run(expired, expired, db.webhookBodyProvider('github'), hash);
+
+  const afterTtl = db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 });
+  assert.ok(afterTtl, 'TTL expiry allows a fresh claim');
+  assert.notEqual(afterTtl, first);
 });
 
 test('review runs: recorded and aggregated into workspace stats', () => {
