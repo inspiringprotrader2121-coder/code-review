@@ -34,6 +34,18 @@ grep -q 'flock -n' scripts/deploy-safe.sh || {
   echo "deploy lock takeover is not guarded by flock" >&2
   exit 1
 }
+grep -Fq 'rmdir -- "$lock"' scripts/deploy-safe.sh || {
+  echo "deploy stale-lock reclaim must use rmdir (not rm -rf) so mis-set LOCK_DIR cannot wipe data" >&2
+  exit 1
+}
+grep -Eq 'SSH_KEY is unset or missing' scripts/deploy-safe.sh || {
+  echo "deploy must require SSH_KEY instead of a hardcoded local path" >&2
+  exit 1
+}
+if grep -F 'Documents - John' scripts/deploy-safe.sh >/dev/null; then
+  echo "deploy still embeds a machine-local SSH key path" >&2
+  exit 1
+fi
 
 assert_rejected() {
   local source=$1
@@ -51,6 +63,9 @@ assert_rejected apps/server/node_modules
 FAKE_BIN=$(mktemp -d)
 STATE=$(mktemp -d)
 trap 'rm -rf "$FAKE_BIN" "$STATE"' EXIT
+# Script no longer hardcodes a personal key path; tests must supply one.
+: >"$STATE/deploy_key"
+export SSH_KEY="$STATE/deploy_key"
 
 printf '%s\n' \
   '#!/usr/bin/env bash' \
