@@ -333,17 +333,34 @@ export class RedisReviewQueue implements ReviewQueue {
     const newRaw = JSON.stringify(job);
     if (newRaw === oldRaw) return;
 
+    // Inflight lease value is `token\\nraw` (see CLAIM_LUA). renewLease /
+    // markCompleted compare-and-swap against that exact string. Updating only
+    // the local WeakMap (or only PROCESSING) leaves Redis on the old claim, so
+    // the next heartbeat fails with "lease lost" and the worker aborts after
+    // having already mutated the job (e.g. runId).
+    const newClaim = `${token}\n${newRaw}`;
     const replaced = await this.redis.eval(
       `
 local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
 if removed == 0 then return 0 end
 redis.call('RPUSH', KEYS[1], ARGV[2])
+if redis.call('GET', KEYS[2]) ~= ARGV[3] then
+  -- Inflight claim missing/stolen — roll PROCESSING back so we never desync
+  -- lockTokens from Redis (renewLease/markCompleted CAS would fail).
+  redis.call('LREM', KEYS[1], 1, ARGV[2])
+  redis.call('RPUSH', KEYS[1], ARGV[1])
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[4], 'KEEPTTL')
 return 1
 `,
-      1,
+      2,
       PROCESSING_KEY,
+      `${INFLIGHT_PREFIX}${prKey(job)}`,
       oldRaw,
       newRaw,
+      claim,
+      newClaim,
     );
     if (Number(replaced) !== 1) return;
 
@@ -356,7 +373,7 @@ return 1
     } else {
       await this.redis.set(newMeta, String(Date.now()), 'EX', 3600, 'NX');
     }
-    this.lockTokens.set(job, `${token}\n${newRaw}`);
+    this.lockTokens.set(job, newClaim);
   }
 
   async markFailed(job: ReviewJobPayload, _error: string): Promise<void> {
