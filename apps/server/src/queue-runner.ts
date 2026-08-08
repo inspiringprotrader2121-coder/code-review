@@ -109,12 +109,21 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     // double overage charge. Renewing at a third of the TTL tolerates two missed
     // beats. A crashed worker stops renewing, so the lock still expires.
     let leaseLost = false;
+    const noteLeaseLoss = (err: unknown, where: string) => {
+      const message = err instanceof Error ? err.message : String(err);
+      // Only true ownership loss sticks. Transient Redis blips must not poison
+      // the whole job — that previously forced markFailed after a successful
+      // GitHub publish (SEEN cleared, DONE never set → duplicate post + credit).
+      if (!/lease lost/i.test(message)) {
+        console.warn(`[worker] lease ${where} transient error for ${pk}:`, message);
+        return;
+      }
+      leaseLost = true;
+      console.warn(`[worker] lease ${where} failed for ${pk}:`, message);
+    };
     const leaseTimer = queue.renewLease
       ? setInterval(() => {
-          queue.renewLease?.(job).catch((err) => {
-            leaseLost = true;
-            console.warn(`[worker] lease renewal failed for ${pk}:`, (err as Error).message);
-          });
+          queue.renewLease?.(job).catch((err) => noteLeaseLoss(err, 'renewal'));
         }, boundedEnvInt('ORVEX_LEASE_RENEW_MS', 300_000, 10_000, 300_000))
       : undefined;
     if (leaseTimer) leaseTimer.unref?.();
@@ -129,8 +138,10 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         await queue.renewLease(job);
         return true;
       } catch (err) {
-        leaseLost = true;
-        console.warn(`[worker] lease ownership check failed for ${pk}:`, (err as Error).message);
+        noteLeaseLoss(err, 'ownership check');
+        // Fail-closed for this check (do not publish without a confirmed lease)
+        // but only sticky-poison on true ownership loss — transient Redis blips
+        // must not permanently mark the job lost.
         return false;
       }
     };
@@ -138,13 +149,13 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     // Bind this async stack to the live resource registry so checkout dirs and
     // Codex children attribute to THIS client review in the super-admin panel.
     return runWithActiveReview(job, async () => {
+    let draftSkipped = false;
     try {
       const config = {
         ...loadWorkerConfig(),
         leaseValid,
         persistJob: queue.persistJob ? (j: ReviewJobPayload) => queue.persistJob!(j) : undefined,
       };
-      let draftSkipped = false;
       if (kind === 'fix') {
         await processFixJob(job, config);
       } else if (kind === 'explain') {
@@ -157,10 +168,14 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         await processScanJob(job, config);
       } else {
         const result = await processReviewJob(job, config);
-        if (leaseLost || !(await leaseValid())) {
-          throw new Error(`review lease lost for ${pk}; discarding this worker result`);
-        }
         draftSkipped = result.skipReason === 'draft PR';
+        if (leaseLost || !(await leaseValid())) {
+          // Distinct from pipeline/autofix "before publication/fix commit" throws —
+          // those must markFailed. This path already published (or intentionally
+          // skipped a draft), so we must markCompleted to keep DONE and avoid a
+          // duplicate post + credit.
+          throw new Error(`review lease lost for ${pk}; post-success lease abort`);
+        }
         // auto-apply mode: commit Orvex's ready fixes right after each review
         if (!result.skipReason && result.newCount > 0) {
           const settings = config.store.getPrSettings(job);
@@ -177,7 +192,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         }
       }
       if (leaseLost || !(await leaseValid())) {
-        throw new Error(`review lease lost for ${pk}; discarding this worker result`);
+        throw new Error(`review lease lost for ${pk}; post-success lease abort`);
       }
       await queue.markCompleted(job, { draftSkipped });
       backoff = nextBackoffState(backoff, 'success', Date.now(), {
@@ -187,6 +202,16 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[worker] failed ${pk}:`, message);
+      // Only the post-success abort uses markCompleted. Pre-publish "discarding
+      // this worker result" throws from pipeline/autofix must still markFailed.
+      if (/post-success lease abort/i.test(message)) {
+        await queue.markCompleted(job, { draftSkipped });
+        backoff = nextBackoffState(backoff, 'success', Date.now(), {
+          threshold: BACKOFF_THRESHOLD,
+          backoffMs: BACKOFF_MS,
+        });
+        return;
+      }
       await queue.markFailed(job, message);
       // Re-queue a TRANSIENT failure (bounded) so a rate-limit/network blip on a
       // `synchronize` doesn't leave that PR silently unreviewed — the webhook
