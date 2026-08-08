@@ -26,7 +26,9 @@ export function isHighRiskDiff(files: readonly RiskDiffFile[]): boolean {
   let pathHits = 0;
   let diffHits = 0;
   for (const file of files) {
-    if (!file.filename || file.status === 'removed') continue;
+    if (!file.filename) continue;
+    // Deletion hunks still carry risk keywords (auth/cleanup/lease); skipping
+    // status===removed made delete-only PRs invisible to the risk hunt.
     if (RISK_PATH_RE.test(file.filename)) pathHits += 1;
     const patch = file.patch ?? '';
     if (!patch) continue;

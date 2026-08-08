@@ -50,7 +50,7 @@ test('isHighRiskDiff: a single weak token in a non-risk path does not trigger', 
   );
 });
 
-test('isHighRiskDiff: removed files are ignored', () => {
+test('isHighRiskDiff: removed risk-path files still trigger (delete-only PRs)', () => {
   assert.equal(
     isHighRiskDiff([
       {
@@ -59,7 +59,7 @@ test('isHighRiskDiff: removed files are ignored', () => {
         patch: '@@\n-checkSession()\n',
       },
     ]),
-    false,
+    true,
   );
 });
 

@@ -524,7 +524,8 @@ export function buildCodexPrompt(
 ): string {
   const hasCheckout = Boolean(opts.hasRepoCheckout);
   const mode: CodexPromptMode = opts.mode ?? (hasCheckout ? 'lean' : 'full');
-  const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
+  // Include deleted-file patches — same reason as runLlmReview (delete-only PRs).
+  const reviewable = files.filter((f) => Boolean(f.patch));
   const maxDiffChars =
     mode === 'slim'
       ? envCharBudget('ORVEX_CODEX_SLIM_DIFF_CHARS', 30_000)
