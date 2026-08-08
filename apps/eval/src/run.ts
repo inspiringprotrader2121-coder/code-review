@@ -161,8 +161,8 @@ export function evaluationVerifier(
 }
 
 /** Mirror production's multi-model tier (modelForPass + buildReviewPassAngles),
- *  pass for pass. Conditional lenses match production: ordinary PRs drop
- *  removed-behavior / breadth unless the diff warrants them.
+ *  pass for pass. Multi-model defaults to the full four discovery passes;
+ *  dual-model stays at general + deep-dive.
  *
  *  This drifted twice and both times silently invalidated the benchmark: the
  *  eval ran three passes while the multi-model tier ran four (so bench170 was

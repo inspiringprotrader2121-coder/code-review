@@ -73,11 +73,43 @@ function boundedPositiveInt(name: string, fallback: number, max: number): number
   return Number.isFinite(value) && value >= 1 ? Math.min(max, Math.floor(value)) : fallback;
 }
 
-/** True when this account has exhausted its hourly interactive-command budget. */
-function commandOverRateLimit(store: WorkerConfig['store'], owner: string, planId: string): boolean {
-  if (planId === 'enterprise') return false; // custom-contract tier
-  if (store.countAccountCommandRuns(owner, 3_600_000) >= COMMANDS_PER_HOUR) return true;
-  return accountLimitReason(store, owner, planFeatures(planId), 1) === 'cost_capped';
+function commandBlockedMessage(reason: string | null): string | null {
+  if (!reason) return null;
+  if (reason === 'cost_capped') {
+    return 'Orvex has paused interactive commands for this account because the monthly cost safety ceiling was reached — contact support if you need this raised.';
+  }
+  if (reason === 'command_rate_limited' || reason === 'concurrency_limited') {
+    return `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`;
+  }
+  return `Orvex could not start this command (${reason}). Try again shortly or check the dashboard.`;
+}
+
+/** True when this account has exhausted its hourly interactive-command budget
+ *  or the monthly COGS safety ceiling (including enterprise). */
+function commandBlockReason(
+  store: WorkerConfig['store'],
+  owner: string,
+  planId: string,
+  tenantId?: string,
+): string | null {
+  if (planId !== 'enterprise' && store.countAccountCommandRuns(owner, 3_600_000) >= COMMANDS_PER_HOUR) {
+    return 'command_rate_limited';
+  }
+  // Always enforce COGS — enterprise must not bypass the dollar ceiling.
+  // Commands use cogsOnly so prepaid/included PR quota does not block them.
+  return accountLimitReason(store, owner, planFeatures(planId), 1, 0, {
+    tenantId,
+    cogsOnly: true,
+  });
+}
+
+function commandPrecheck(
+  store: WorkerConfig['store'],
+  owner: string,
+  planId: string,
+  tenantId?: string,
+): string | null {
+  return commandBlockedMessage(commandBlockReason(store, owner, planId, tenantId));
 }
 
 /** Reserve an interactive command before any provider call. The transaction
@@ -94,7 +126,7 @@ function reserveCommandRun(config: WorkerConfig, job: ReviewJobPayload, kind: st
       headSha: job.headSha,
       action: `cmd:${kind}`,
     },
-    () => (planId !== 'enterprise' && commandOverRateLimit(config.store, job.owner, planId) ? 'command_rate_limited' : null),
+    () => commandBlockReason(config.store, job.owner, planId, job.tenantId),
   );
   return reserved.ok ? reserved.runId : null;
 }
@@ -216,7 +248,8 @@ export async function processFixJob(
   commandRunId = reserveCommandRun(config, job, 'fix', plan.id);
   if (!commandRunId) {
     return skip(
-      `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+      commandPrecheck(config.store, owner, plan.id, job.tenantId) ??
+        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
       'interactive command limit reached',
     );
   }
@@ -657,18 +690,18 @@ export async function processExplainJob(
       ),
     ));
   }
-  if (commandOverRateLimit(config.store, owner, plan.id)) {
-    return void (await reply(
-      formatFixSkippedReply(
-        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
-      ),
-    ));
+  {
+    const blocked = commandPrecheck(config.store, owner, plan.id, job.tenantId);
+    if (blocked) {
+      return void (await reply(formatFixSkippedReply(blocked)));
+    }
   }
   const commandRunId = reserveCommandRun(config, job, 'explain', plan.id);
   if (!commandRunId) {
     return void (await reply(
       formatFixSkippedReply(
-        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+        commandPrecheck(config.store, owner, plan.id, job.tenantId) ??
+          `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
       ),
     ));
   }
@@ -758,18 +791,18 @@ export async function processAskJob(job: ReviewJobPayload, config: WorkerConfig)
       ),
     ));
   }
-  if (commandOverRateLimit(config.store, owner, plan.id)) {
-    return void (await reply(
-      formatFixSkippedReply(
-        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
-      ),
-    ));
+  {
+    const blocked = commandPrecheck(config.store, owner, plan.id, job.tenantId);
+    if (blocked) {
+      return void (await reply(formatFixSkippedReply(blocked)));
+    }
   }
   const commandRunId = reserveCommandRun(config, job, 'ask', plan.id);
   if (!commandRunId) {
     return void (await reply(
       formatFixSkippedReply(
-        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+        commandPrecheck(config.store, owner, plan.id, job.tenantId) ??
+          `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
       ),
     ));
   }
@@ -984,18 +1017,18 @@ export async function processResolveJob(job: ReviewJobPayload, config: WorkerCon
       formatFixSkippedReply('conflict resolution is a paid feature — [upgrade](https://useorvex.com/#pricing).'),
     ));
   }
-  if (commandOverRateLimit(config.store, owner, plan.id)) {
-    return void (await reply(
-      formatFixSkippedReply(
-        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
-      ),
-    ));
+  {
+    const blocked = commandPrecheck(config.store, owner, plan.id, job.tenantId);
+    if (blocked) {
+      return void (await reply(formatFixSkippedReply(blocked)));
+    }
   }
   const commandRunId = reserveCommandRun(config, job, 'resolve', plan.id);
   if (!commandRunId) {
     return void (await reply(
       formatFixSkippedReply(
-        `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
+        commandPrecheck(config.store, owner, plan.id, job.tenantId) ??
+          `Orvex interactive commands are capped at ${COMMANDS_PER_HOUR}/hour per account to prevent runaway cost — try again shortly.`,
       ),
     ));
   }

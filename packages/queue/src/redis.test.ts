@@ -107,6 +107,35 @@ test(
   },
 );
 
+test(
+  'Redis renewLease still succeeds after persistJob rewrites the job payload',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    await cleanup.flushdb();
+    t.after(async () => {
+      await cleanup.flushdb();
+      await cleanup.quit();
+    });
+
+    const queue = new RedisReviewQueue(redisUrl!);
+    t.after(async () => {
+      await queue.close();
+    });
+
+    const payload = job('sha-renew', 77, 'opened');
+    assert.equal((await queue.enqueue(payload)).accepted, true);
+    const dequeued = await queue.dequeue();
+    assert.ok(dequeued);
+    dequeued!.runId = 'run-renew-check';
+    await queue.persistJob!(dequeued!);
+    // Regression: comparing the full token\\nraw claim made renew fail here and
+    // discarded expensive reviews at publication.
+    await queue.renewLease!(dequeued!);
+    await queue.markCompleted(dequeued!);
+  },
+);
+
 function job(headSha: string, pr: number, action: ReviewJobPayload['action']): ReviewJobPayload {
   return {
     installationId: 7,

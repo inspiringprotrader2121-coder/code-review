@@ -26,6 +26,20 @@ function boundedEnvNumber(name: string, fallback: number, min: number, max: numb
 }
 const CHECKOUT_WINDOW_MS = boundedEnvNumber('ORVEX_CHECKOUT_RATE_WINDOW_MS', 10 * 60_000, 1_000, 24 * 3600_000);
 const CHECKOUT_MAX = boundedEnvNumber('ORVEX_CHECKOUT_RATE_MAX', 12, 1, 10_000);
+/** Prepaid credit packs (USD cents). Override with ORVEX_CREDIT_PACKS_CENTS=1000,2500,5000,10000 */
+const CREDIT_PACKS_CENTS: number[] = (() => {
+  const raw = process.env.ORVEX_CREDIT_PACKS_CENTS?.trim();
+  if (!raw) return [1000, 2500, 5000, 10_000];
+  const parsed = raw
+    .split(',')
+    .map((p) => Number(p.trim()))
+    .filter((n) => Number.isFinite(n) && n >= 100 && n <= 1_000_000)
+    .map((n) => Math.floor(n));
+  return parsed.length > 0 ? [...new Set(parsed)] : [1000, 2500, 5000, 10_000];
+})();
+function isCreditPackCents(n: number): boolean {
+  return CREDIT_PACKS_CENTS.includes(Math.floor(n));
+}
 const OVERAGE_EVENT_NAMES: Partial<Record<PaidPlan, string>> = {
   review: 'orvex_review_overage',
   'verify-lite': 'orvex_verify_lite_overage',
@@ -90,6 +104,66 @@ export function billingRoutes() {
       const e = err as CheckoutError;
       return c.json({ error: e.message }, e.status ?? 502);
     }
+  });
+
+  /** Prepaid overage top-up — one-time Stripe Payment Checkout that credits the wallet. */
+  app.post('/api/workspaces/:slug/billing/credits', async (c) => {
+    const ws = workspace(c);
+    if (ws instanceof Response) return ws;
+    if (!authDisabled() && !legacyAuthMode(db.hasPasswordUsers()) && !sameOriginRequest(c)) {
+      return c.json({ error: 'same-origin request required' }, 403);
+    }
+    if (ws.role !== 'owner') return c.json({ error: 'only a workspace owner can buy credits' }, 403);
+
+    const planId = db.getTenantPlan(ws.tenant.id) ?? 'free';
+    const features = planFeatures(planId);
+    if (features.overageCentsPerReview === null) {
+      return c.json(
+        {
+          error:
+            'Prepaid credits are only available on plans with prepaid overage (Starter, Verify Lite, Verify).',
+        },
+        400,
+      );
+    }
+
+    const limit = checkAuthRateLimit(db, `credits:${clientIp(c)}:${ws.tenant.id}`, {
+      windowMs: CHECKOUT_WINDOW_MS,
+      max: CHECKOUT_MAX,
+    });
+    if (!limit.allowed) {
+      c.header('Retry-After', String(Math.max(limit.retryAfterSeconds, 1)));
+      return c.json({ error: 'Too many checkout attempts. Try again in a few minutes.' }, 429);
+    }
+
+    const body: { amountCents?: number } = await c.req.json().catch(() => ({}));
+    const amountCents = Number(body.amountCents);
+    if (!isCreditPackCents(amountCents)) {
+      return c.json(
+        { error: `amountCents must be one of: ${CREDIT_PACKS_CENTS.join(', ')}` },
+        400,
+      );
+    }
+
+    try {
+      const url = await createCreditTopUpUrl(db, ws.tenant, amountCents);
+      return c.json({ url, amountCents, balanceCents: db.getCreditBalanceCents(ws.tenant.id) });
+    } catch (err) {
+      const e = err as CheckoutError;
+      return c.json({ error: e.message }, e.status ?? 502);
+    }
+  });
+
+  app.get('/api/workspaces/:slug/billing/credits', async (c) => {
+    const ws = workspace(c);
+    if (ws instanceof Response) return ws;
+    const features = planFeatures(db.getTenantPlan(ws.tenant.id) ?? 'free');
+    return c.json({
+      balanceCents: db.getCreditBalanceCents(ws.tenant.id),
+      packsCents: features.overageCentsPerReview != null ? CREDIT_PACKS_CENTS : [],
+      overageCentsPerReview: features.overageCentsPerReview,
+      creditsAvailable: features.overageCentsPerReview != null,
+    });
   });
 
   // Buy from the MARKETING page while signed in: /buy/review | /buy/review-plus
@@ -243,7 +317,42 @@ export function billingRoutes() {
       const plan = object?.metadata?.plan;
 
       if (event.type === 'checkout.session.completed') {
-      if (tenantId && plan && isPlanId(plan) && plan !== 'free') {
+      // Prepaid overage top-up (mode=payment) — credit wallet before plan unlock path.
+      if (object?.metadata?.purpose === 'credit_topup' && tenantId) {
+        const paymentStatus = object?.payment_status;
+        if (paymentStatus && paymentStatus !== 'paid' && paymentStatus !== 'no_payment_required') {
+          console.warn(
+            `[billing] ignoring unpaid credit top-up session for tenant ${tenantId} (payment_status=${paymentStatus})`,
+          );
+        } else {
+          // Prefer Stripe amount_total (what was actually charged) over client metadata.
+          const amountTotal = Number(object?.amount_total);
+          const metaAmount = Number(object?.metadata?.amount_cents);
+          const amountCents =
+            Number.isFinite(amountTotal) && amountTotal > 0
+              ? amountTotal
+              : Number.isFinite(metaAmount) && metaAmount > 0
+                ? metaAmount
+                : NaN;
+          const sessionId = stripeId(object?.id);
+          const customerId = stripeId(object?.customer);
+          if (!sessionId || !Number.isFinite(amountCents) || amountCents <= 0) {
+            throw new Error('Stripe credit top-up checkout is missing session id or amount');
+          }
+          if (customerId) {
+            db.setTenantBilling(tenantId, { stripeCustomerId: customerId });
+          }
+          const credited = db.creditPrepaidTopUp({
+            tenantId,
+            amountCents: Math.floor(amountCents),
+            stripeSessionId: sessionId,
+            note: `prepaid overage top-up $${(amountCents / 100).toFixed(2)}`,
+          });
+          console.log(
+            `[billing] credit top-up tenant=${tenantId} session=${sessionId} applied=${credited.applied} balance_cents=${credited.balanceCents}`,
+          );
+        }
+      } else if (tenantId && plan && isPlanId(plan) && plan !== 'free') {
         const newSub = stripeId(object?.subscription);
         const newCustomer = stripeId(object?.customer);
         if (!newSub || !newCustomer) {
@@ -417,6 +526,41 @@ export function billingRoutes() {
               new Date().toISOString(),
           });
         }
+        // Claw back unused prepaid wallet credits on charge refunds so a
+        // refunded top-up cannot keep funding overage reviews.
+        if (event.type === 'charge.refunded' && revenueTenantId && refundDelta > 0 && event.id) {
+          const clawed = db.clawbackPrepaidCredits({
+            tenantId: revenueTenantId,
+            amountCents: refundDelta,
+            stripeSessionId: `refund:${event.id}`,
+            note: `clawback unused credits for Stripe charge refund ${chargeId ?? ''}`.trim(),
+          });
+          console.log(
+            `[billing] credit clawback tenant=${revenueTenantId} event=${event.id} clawed_cents=${clawed.clawedCents} balance_cents=${clawed.balanceCents}`,
+          );
+        }
+      }
+
+      if (
+        event.type === 'charge.dispute.created' ||
+        event.type === 'charge.dispute.funds_withdrawn'
+      ) {
+        const customerId = stripeId(object?.customer);
+        const disputeTenantId =
+          tenantId ?? (customerId ? db.getTenantByStripeCustomerId(customerId)?.id : undefined);
+        const disputeAmount = Math.max(0, Number(object?.amount ?? 0));
+        const disputeId = stripeId(object?.id) ?? event.id;
+        if (disputeTenantId && disputeAmount > 0 && disputeId) {
+          const clawed = db.clawbackPrepaidCredits({
+            tenantId: disputeTenantId,
+            amountCents: disputeAmount,
+            stripeSessionId: `dispute:${disputeId}`,
+            note: `clawback unused credits for Stripe dispute ${disputeId}`,
+          });
+          console.log(
+            `[billing] credit dispute clawback tenant=${disputeTenantId} dispute=${disputeId} clawed_cents=${clawed.clawedCents} balance_cents=${clawed.balanceCents}`,
+          );
+        }
       }
 
       if (event.id && eventClaim) db.completeWebhookEvent('stripe', event.id, eventClaim);
@@ -499,10 +643,7 @@ async function createCheckoutUrl(
 
   const basePrice = stripePriceForPlan(plan);
   if (!basePrice) throw new CheckoutError(`missing Stripe price env var for ${plan}`, 501);
-  const overagePrice = stripeOveragePriceForPlan(plan);
-  if (planFeatures(plan).overageCentsPerReview !== null && !overagePrice) {
-    throw new CheckoutError(`missing Stripe overage price env var for ${plan}`, 501);
-  }
+  // Overage is prepaid via credit packs — subscription Checkout is base plan only.
 
   const baseUrl = appBaseUrl();
   const params: Record<string, string> = {
@@ -520,7 +661,6 @@ async function createCheckoutUrl(
     'subscription_data[metadata][plan]': plan,
     allow_promotion_codes: 'true',
   };
-  if (overagePrice) params['line_items[1][price]'] = overagePrice;
   const billing = db.getTenantBilling(tenant.id);
   if (billing?.stripeCustomerId) params.customer = billing.stripeCustomerId;
 
@@ -529,6 +669,44 @@ async function createCheckoutUrl(
     stripeSecretKey,
     params,
     checkoutIdempotencyKey,
+  );
+  if (!session.url) throw new CheckoutError('Stripe did not return a checkout URL', 502);
+  return session.url;
+}
+
+async function createCreditTopUpUrl(
+  db: AppDatabase,
+  tenant: Tenant,
+  amountCents: number,
+): Promise<string> {
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeSecretKey) throw new CheckoutError('Stripe is not configured', 501);
+
+  const baseUrl = appBaseUrl();
+  const dollars = (amountCents / 100).toFixed(2);
+  const params: Record<string, string> = {
+    mode: 'payment',
+    'line_items[0][price_data][currency]': 'usd',
+    'line_items[0][price_data][product_data][name]': `Orvex prepaid review credits ($${dollars})`,
+    'line_items[0][price_data][product_data][description]':
+      'Prepaid wallet balance for reviews past your plan included quota. Credits are non-refundable once used.',
+    'line_items[0][price_data][unit_amount]': String(amountCents),
+    'line_items[0][quantity]': '1',
+    success_url: `${baseUrl}/dashboard/${encodeURIComponent(tenant.slug)}?billing=credits-success`,
+    cancel_url: `${baseUrl}/dashboard/${encodeURIComponent(tenant.slug)}?billing=credits-cancelled`,
+    client_reference_id: tenant.id,
+    'metadata[tenant_id]': tenant.id,
+    'metadata[tenant_slug]': tenant.slug,
+    'metadata[purpose]': 'credit_topup',
+    'metadata[amount_cents]': String(amountCents),
+  };
+  const billing = db.getTenantBilling(tenant.id);
+  if (billing?.stripeCustomerId) params.customer = billing.stripeCustomerId;
+
+  const session = await stripeRequest<{ url?: string; id?: string }>(
+    '/v1/checkout/sessions',
+    stripeSecretKey,
+    params,
   );
   if (!session.url) throw new CheckoutError('Stripe did not return a checkout URL', 502);
   return session.url;
@@ -552,10 +730,6 @@ async function createBillingPortalUrl(tenant: Tenant, customerId: string): Promi
 function stripePriceForPlan(plan: PaidPlan): string | undefined {
   // 'review-plus' → STRIPE_PRICE_REVIEW_PLUS (env names can't contain hyphens)
   return process.env[`STRIPE_PRICE_${plan.toUpperCase().replace(/-/g, '_')}`];
-}
-
-function stripeOveragePriceForPlan(plan: PaidPlan): string | undefined {
-  return process.env[`STRIPE_PRICE_${plan.toUpperCase().replace(/-/g, '_')}_OVERAGE`];
 }
 
 function idempotencyKey(c: Context): string | undefined {
@@ -804,6 +978,10 @@ type StripeWebhookObject = {
   created?: number;
   amount_paid?: number;
   amount_refunded?: number;
+  /** Checkout Session total charged (preferred for credit top-ups). */
+  amount_total?: number;
+  /** Dispute amount (cents). */
+  amount?: number;
   currency?: string;
   status_transitions?: { paid_at?: number };
 };

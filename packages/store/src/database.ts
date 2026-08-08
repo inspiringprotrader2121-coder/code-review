@@ -222,6 +222,28 @@ CREATE TABLE IF NOT EXISTS stripe_meter_events (
 CREATE INDEX IF NOT EXISTS idx_stripe_meter_pending
   ON stripe_meter_events(status, next_attempt_at);
 
+-- Prepaid overage wallet: positive rows are top-ups (Stripe payment), negative
+-- rows are review debits. Balance = SUM(amount_cents). Top-ups are unique by
+-- stripe_session_id; per-run debits are unique by run_id so a retry cannot
+-- double-charge the wallet.
+CREATE TABLE IF NOT EXISTS tenant_credit_ledger (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  amount_cents INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  run_id TEXT,
+  stripe_session_id TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_tenant ON tenant_credit_ledger(tenant_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_stripe_session
+  ON tenant_credit_ledger(stripe_session_id) WHERE stripe_session_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_debit
+  ON tenant_credit_ledger(run_id) WHERE run_id IS NOT NULL AND amount_cents < 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
+  ON tenant_credit_ledger(run_id) WHERE run_id IS NOT NULL AND kind = 'overage_refund';
+
 CREATE TABLE IF NOT EXISTS platform_costs (
   category TEXT PRIMARY KEY,
   amount_cents INTEGER NOT NULL DEFAULT 0,
@@ -400,6 +422,7 @@ export class AppDatabase {
     this.migrateUserSecurityColumns();
     this.migrateTenantPlan();
     this.migrateTenantBillingColumns();
+    this.migratePrepaidCreditLedger();
     this.migrateRepoAutomationToggles();
     this.migrateReviewRunCostColumns();
     this.migratePrReviewColumns();
@@ -505,6 +528,242 @@ export class AppDatabase {
     ]) {
       if (!names.has(col)) this.db.exec(`ALTER TABLE tenants ADD COLUMN ${col} TEXT`);
     }
+  }
+
+  /** Prepaid overage wallet — CREATE IF NOT EXISTS is enough for existing DBs. */
+  private migratePrepaidCreditLedger(): void {
+    this.db.exec(`
+CREATE TABLE IF NOT EXISTS tenant_credit_ledger (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
+  amount_cents INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  run_id TEXT,
+  stripe_session_id TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_tenant ON tenant_credit_ledger(tenant_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_stripe_session
+  ON tenant_credit_ledger(stripe_session_id) WHERE stripe_session_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_debit
+  ON tenant_credit_ledger(run_id) WHERE run_id IS NOT NULL AND amount_cents < 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
+  ON tenant_credit_ledger(run_id) WHERE run_id IS NOT NULL AND kind = 'overage_refund';
+`);
+  }
+
+  /** Current prepaid overage balance in USD cents (can be 0, never negative in normal use). */
+  getCreditBalanceCents(tenantId: string): number {
+    const row = this.db
+      .prepare(`SELECT COALESCE(SUM(amount_cents), 0) AS n FROM tenant_credit_ledger WHERE tenant_id = ?`)
+      .get(tenantId) as { n: number };
+    return Number(row.n) || 0;
+  }
+
+  /**
+   * Apply a Stripe Checkout top-up. Idempotent on stripe_session_id — Stripe
+   * retries must not double-credit the wallet.
+   */
+  creditPrepaidTopUp(input: {
+    tenantId: string;
+    amountCents: number;
+    stripeSessionId: string;
+    note?: string;
+  }): { applied: boolean; balanceCents: number } {
+    if (!Number.isFinite(input.amountCents) || input.amountCents <= 0) {
+      throw new Error('credit top-up amount must be a positive integer (cents)');
+    }
+    const amount = Math.floor(input.amountCents);
+    const existing = this.db
+      .prepare(`SELECT id FROM tenant_credit_ledger WHERE stripe_session_id = ?`)
+      .get(input.stripeSessionId) as { id: string } | undefined;
+    if (existing) {
+      return { applied: false, balanceCents: this.getCreditBalanceCents(input.tenantId) };
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO tenant_credit_ledger (id, tenant_id, amount_cents, kind, run_id, stripe_session_id, note, created_at)
+         VALUES (?, ?, ?, 'topup', NULL, ?, ?, ?)`,
+      )
+      .run(id, input.tenantId, amount, input.stripeSessionId, input.note ?? null, now);
+    return { applied: true, balanceCents: this.getCreditBalanceCents(input.tenantId) };
+  }
+
+  /**
+   * Debit prepaid overage for a review run. Returns false when the balance is
+   * insufficient. Unique on run_id so a second debit for the same run is a no-op success.
+   */
+  debitOverageCredits(tenantId: string, runId: string, amountCents: number, note?: string): boolean {
+    if (!Number.isFinite(amountCents) || amountCents <= 0) return true;
+    const amount = Math.floor(amountCents);
+    const prior = this.db
+      .prepare(`SELECT id FROM tenant_credit_ledger WHERE run_id = ? AND amount_cents < 0`)
+      .get(runId) as { id: string } | undefined;
+    if (prior) return true;
+    const balance = this.getCreditBalanceCents(tenantId);
+    if (balance < amount) return false;
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO tenant_credit_ledger (id, tenant_id, amount_cents, kind, run_id, stripe_session_id, note, created_at)
+         VALUES (?, ?, ?, 'overage_debit', ?, NULL, ?, ?)`,
+      )
+      .run(id, tenantId, -amount, runId, note ?? null, now);
+    return true;
+  }
+
+  /** Net prepaid debit still held for a run (debit minus any refunds/adjustments). */
+  overageDebitNetCents(runId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_cents), 0) AS n FROM tenant_credit_ledger WHERE run_id = ?`,
+      )
+      .get(runId) as { n: number };
+    // Debits are negative; net held = -sum when sum < 0.
+    return Math.max(0, -(Number(row.n) || 0));
+  }
+
+  /** Refund a prepaid overage debit when the review was skipped before provider spend. */
+  refundOverageCredits(runId: string, note?: string): boolean {
+    return this.db
+      .transaction(() => {
+        const debit = this.db
+          .prepare(
+            `SELECT id, tenant_id, amount_cents FROM tenant_credit_ledger
+             WHERE run_id = ? AND kind = 'overage_debit' AND amount_cents < 0`,
+          )
+          .get(runId) as { id: string; tenant_id: string; amount_cents: number } | undefined;
+        if (!debit) return false;
+        const already = this.db
+          .prepare(
+            `SELECT id FROM tenant_credit_ledger WHERE run_id = ? AND kind = 'overage_refund'`,
+          )
+          .get(runId) as { id: string } | undefined;
+        if (already) return false;
+        const net = this.overageDebitNetCents(runId);
+        if (net <= 0) return false;
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        this.db
+          .prepare(
+            `INSERT INTO tenant_credit_ledger (id, tenant_id, amount_cents, kind, run_id, stripe_session_id, note, created_at)
+             VALUES (?, ?, ?, 'overage_refund', ?, NULL, ?, ?)`,
+          )
+          .run(id, debit.tenant_id, net, runId, note ?? 'refund unused overage reservation', now);
+        return true;
+      })
+      .immediate();
+  }
+
+  /**
+   * After delivery, reduce a reserved deep (2×) debit to the units actually
+   * delivered. Idempotent via kind=overage_partial_refund uniqueness per run.
+   */
+  reconcileOverageDebit(runId: string, correctDebitCents: number, note?: string): boolean {
+    const correct = Math.max(0, Math.floor(correctDebitCents));
+    return this.db
+      .transaction(() => {
+        const debit = this.db
+          .prepare(
+            `SELECT tenant_id FROM tenant_credit_ledger
+             WHERE run_id = ? AND kind = 'overage_debit' AND amount_cents < 0`,
+          )
+          .get(runId) as { tenant_id: string } | undefined;
+        if (!debit) return false;
+        const priorPartial = this.db
+          .prepare(
+            `SELECT id FROM tenant_credit_ledger WHERE run_id = ? AND kind = 'overage_partial_refund'`,
+          )
+          .get(runId) as { id: string } | undefined;
+        if (priorPartial) return false;
+        const net = this.overageDebitNetCents(runId);
+        if (net <= correct) return false;
+        const delta = net - correct;
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        this.db
+          .prepare(
+            `INSERT INTO tenant_credit_ledger (id, tenant_id, amount_cents, kind, run_id, stripe_session_id, note, created_at)
+             VALUES (?, ?, ?, 'overage_partial_refund', ?, NULL, ?, ?)`,
+          )
+          .run(id, debit.tenant_id, delta, runId, note ?? 'reconcile overage to delivered units', now);
+        return true;
+      })
+      .immediate();
+  }
+
+  /**
+   * Claw back unused prepaid credits after a Stripe charge refund/dispute.
+   * Idempotent on stripe_session_id (pass `refund:${eventId}` / `dispute:${id}`).
+   * Never drives the wallet below zero — only unused balance is removed.
+   */
+  clawbackPrepaidCredits(input: {
+    tenantId: string;
+    amountCents: number;
+    stripeSessionId: string;
+    note?: string;
+  }): { applied: boolean; clawedCents: number; balanceCents: number } {
+    const requested = Math.max(0, Math.floor(input.amountCents));
+    if (requested <= 0) {
+      return { applied: false, clawedCents: 0, balanceCents: this.getCreditBalanceCents(input.tenantId) };
+    }
+    return this.db
+      .transaction(() => {
+        const existing = this.db
+          .prepare(`SELECT id FROM tenant_credit_ledger WHERE stripe_session_id = ?`)
+          .get(input.stripeSessionId) as { id: string } | undefined;
+        if (existing) {
+          return {
+            applied: false,
+            clawedCents: 0,
+            balanceCents: this.getCreditBalanceCents(input.tenantId),
+          };
+        }
+        const balance = this.getCreditBalanceCents(input.tenantId);
+        const clawed = Math.min(balance, requested);
+        if (clawed <= 0) {
+          // Still record a zero-effect marker? Skip — leave Stripe retries able to
+          // apply later if a top-up lands first. Use a sentinel row with 0? No —
+          // without a row retries re-enter. Record a 0-amount marker via note-only
+          // is invalid (CHECK). Insert -0 meaningless. Insert kind with 0 cents:
+          this.db
+            .prepare(
+              `INSERT INTO tenant_credit_ledger (id, tenant_id, amount_cents, kind, run_id, stripe_session_id, note, created_at)
+               VALUES (?, ?, 0, 'topup_clawback', NULL, ?, ?, ?)`,
+            )
+            .run(
+              randomUUID(),
+              input.tenantId,
+              input.stripeSessionId,
+              input.note ?? 'refund clawback (no unused balance)',
+              new Date().toISOString(),
+            );
+          return { applied: true, clawedCents: 0, balanceCents: balance };
+        }
+        this.db
+          .prepare(
+            `INSERT INTO tenant_credit_ledger (id, tenant_id, amount_cents, kind, run_id, stripe_session_id, note, created_at)
+             VALUES (?, ?, ?, 'topup_clawback', NULL, ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            input.tenantId,
+            -clawed,
+            input.stripeSessionId,
+            input.note ?? 'Stripe refund clawback',
+            new Date().toISOString(),
+          );
+        return {
+          applied: true,
+          clawedCents: clawed,
+          balanceCents: this.getCreditBalanceCents(input.tenantId),
+        };
+      })
+      .immediate();
   }
 
   /** Split the single `enabled` repo toggle into two: review on PR open
@@ -632,6 +891,43 @@ export class AppDatabase {
       )
       .get(owner, since) as { n: number };
     return row.n;
+  }
+
+  /**
+   * In-flight rows that reserve COGS headroom — includes scans and interactive
+   * commands so a stampede cannot under-reserve the monthly dollar ceiling.
+   */
+  countRunningCogsReservations(owner: string, sinceMs = 30 * 24 * 3_600_000): number {
+    const since = new Date(Date.now() - sinceMs).toISOString();
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM review_runs
+         WHERE lower(owner) = lower(?) AND status = 'running' AND created_at >= ?`,
+      )
+      .get(owner, since) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Tenant-scoped review UNITS in the rolling window (deep=2, normal=1), same
+   * status filter as countAccountReviews. Used for paid included/hard/prepaid
+   * gates so wallets are not drained by another workspace's owner history.
+   */
+  countTenantReviewUnits(tenantId: string, opts: { sinceMs?: number } = {}): number {
+    const params: unknown[] = [tenantId];
+    let where =
+      "tenant_id = ? AND (status IN ('running', 'completed', 'failed') OR (status = 'skipped' AND skip_reason LIKE 'interrupted by restart%')) AND action NOT LIKE 'fix:%' AND action NOT LIKE 'cmd:%' AND action NOT LIKE 'scan:%'";
+    if (opts.sinceMs !== undefined) {
+      where += ' AND created_at >= ?';
+      params.push(new Date(Date.now() - opts.sinceMs).toISOString());
+    }
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN deep = 1 THEN 2 ELSE 1 END), 0) AS n FROM review_runs WHERE ${where}`,
+      )
+      .get(...params) as { n: number };
+    return Number(row.n) || 0;
   }
 
   /**
@@ -1001,14 +1297,22 @@ export class AppDatabase {
    */
   interruptReviewRun(id: string): boolean {
     if (!id) return false;
-    const res = this.db
-      .prepare(
-        `UPDATE review_runs
-         SET status = 'skipped', skip_reason = 'interrupted by restart — retried'
-         WHERE id = ? AND status = 'running'`,
-      )
-      .run(id);
-    return res.changes > 0;
+    return this.db
+      .transaction(() => {
+        const res = this.db
+          .prepare(
+            `UPDATE review_runs
+             SET status = 'skipped', skip_reason = 'interrupted by restart — retried'
+             WHERE id = ? AND status = 'running'`,
+          )
+          .run(id);
+        if (res.changes > 0) {
+          // Wallet debit stays until resume completes or is abandoned; resume
+          // reuses this run id so a second debit is not charged.
+        }
+        return res.changes > 0;
+      })
+      .immediate();
   }
 
   /**
@@ -1044,7 +1348,25 @@ export class AppDatabase {
       const runs = this.db
         .prepare(`DELETE FROM review_runs WHERE status = 'skipped' AND created_at < ?`)
         .run(runCutoff).changes;
-      return usage + runs;
+      // Remove orphaned overage ledger rows only when their net is already zero
+      // (debit + refund). Never delete a lone debit — that would inflate balance.
+      const ledger = this.db
+        .prepare(
+          `DELETE FROM tenant_credit_ledger
+           WHERE run_id IN (
+             SELECT run_id FROM (
+               SELECT run_id AS run_id, SUM(amount_cents) AS net
+               FROM tenant_credit_ledger
+               WHERE run_id IS NOT NULL
+                 AND run_id NOT IN (SELECT id FROM review_runs)
+                 AND kind IN ('overage_debit', 'overage_refund', 'overage_partial_refund')
+               GROUP BY run_id
+               HAVING net = 0
+             )
+           )`,
+        )
+        .run().changes;
+      return usage + runs + ledger;
     })();
     n += this.db.prepare(`DELETE FROM sessions WHERE expires_at < ?`).run(now).changes;
     n += this.db.prepare(`DELETE FROM mfa_challenges WHERE expires_at < ?`).run(now).changes;
@@ -2513,6 +2835,14 @@ export class AppDatabase {
       action: string;
       deep?: boolean;
       freeTier?: boolean;
+      /** @deprecated Prefer computeOverageDebit so the amount is read inside the txn. */
+      overageDebitCents?: number;
+      /**
+       * Compute prepaid debit INSIDE the BEGIN IMMEDIATE transaction after
+       * limitReason() passes, so concurrent workers cannot both observe
+       * "still included" and skip the debit.
+       */
+      computeOverageDebit?: () => number;
     },
     limitReason: () => string | null,
   ): { ok: true; runId: string } | { ok: false; reason: string } {
@@ -2528,7 +2858,31 @@ export class AppDatabase {
           });
           return { ok: false as const, reason };
         }
-        return { ok: true as const, runId: this.startReviewRun(input) };
+        // Compute debit BEFORE inserting the running row so `used` still
+        // excludes this reservation (same semantics as the pre-txn check).
+        const rawDebit =
+          typeof input.computeOverageDebit === 'function'
+            ? input.computeOverageDebit()
+            : (input.overageDebitCents ?? 0);
+        const debit = Math.max(0, Math.floor(Number(rawDebit) || 0));
+        const runId = this.startReviewRun(input);
+        if (debit > 0) {
+          const ok = this.debitOverageCredits(
+            input.tenantId,
+            runId,
+            debit,
+            input.deep ? 'prepaid overage (deep=2 units)' : 'prepaid overage',
+          );
+          if (!ok) {
+            this.completeReviewRun(runId, {
+              status: 'skipped',
+              skipReason: 'insufficient_credits',
+              durationMs: 0,
+            });
+            return { ok: false as const, reason: 'insufficient_credits' };
+          }
+        }
+        return { ok: true as const, runId };
       })
       .immediate();
   }

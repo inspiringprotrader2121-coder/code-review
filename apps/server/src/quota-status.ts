@@ -10,9 +10,10 @@ export const MS_PER_HOUR = 3_600_000;
 export const MS_PER_30_DAYS = 30 * 24 * MS_PER_HOUR;
 
 /** Monthly provider-cost circuit breaker. This is an operator safety ceiling,
- * not a customer-facing review allowance; set it after measuring real COGS. */
-export function monthlyCogsCapUsd(planId: string): number | null {
-  if (planId === 'enterprise') return null;
+ * not a customer-facing review allowance; set it after measuring real COGS.
+ * Applies to every plan including enterprise — custom contracts still need a
+ * spend backstop so a runaway cannot burn uncapped provider dollars. */
+export function monthlyCogsCapUsd(_planId: string): number | null {
   const raw = process.env.ORVEX_MONTHLY_COGS_CAP_USD;
   const value = raw === undefined || raw.trim() === '' ? 250 : Number(raw);
   return Number.isFinite(value) && value > 0 ? value : 250;
@@ -28,6 +29,14 @@ export type AccountQuotaStatus = {
     /** ISO time when the next hourly slot frees, if currently at/over the limit */
     nextSlotAt: string | null;
   };
+  concurrent: {
+    running: number;
+    limit: number | null;
+  };
+  credits: {
+    balanceCents: number;
+    overageCentsPerReview: number | null;
+  };
   monthly:
     | { kind: 'unlimited' }
     | { kind: 'hard'; used: number; limit: number; remaining: number }
@@ -41,7 +50,7 @@ export function loadAccountQuotaStatus(
   owner: string,
   tenantId: string,
   plan: PlanFeatures,
-  now = Date.now(),
+  _now = Date.now(),
 ): AccountQuotaStatus {
   const hourlyUsed = plan.reviewsPerHour !== null ? store.countAccountReviews(owner, { sinceMs: MS_PER_HOUR }) : 0;
   let nextSlotAt: string | null = null;
@@ -53,23 +62,27 @@ export function loadAccountQuotaStatus(
   }
 
   let monthly: AccountQuotaStatus['monthly'];
+  const useTenantUnits =
+    plan.trialReviewLimit === null &&
+    (plan.includedReviewsPerMonth !== null || plan.reviewsPerMonth !== null);
+  const monthlyUsed = useTenantUnits
+    ? store.countTenantReviewUnits(tenantId, { sinceMs: MS_PER_30_DAYS })
+    : store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS });
   if (plan.includedReviewsPerMonth !== null && plan.overageCentsPerReview !== null) {
-    const billing = store.getTenantBilling(tenantId);
-    const periodStart =
-      billing?.stripeCurrentPeriodStart ?? new Date(now - MS_PER_30_DAYS).toISOString();
+    // Included allotment + prepaid overage — show included usage; hard ceiling is
+    // still enforced by accountLimitReason.
     monthly = {
       kind: 'metered',
-      used: store.completedReviewUnitsSince(tenantId, periodStart),
+      used: monthlyUsed,
       included: plan.includedReviewsPerMonth,
       overageCents: plan.overageCentsPerReview,
     };
   } else if (plan.reviewsPerMonth !== null) {
-    const used = store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS });
     monthly = {
       kind: 'hard',
-      used,
+      used: monthlyUsed,
       limit: plan.reviewsPerMonth,
-      remaining: Math.max(0, plan.reviewsPerMonth - used),
+      remaining: Math.max(0, plan.reviewsPerMonth - monthlyUsed),
     };
   } else {
     monthly = { kind: 'unlimited' };
@@ -96,6 +109,14 @@ export function loadAccountQuotaStatus(
       remaining:
         plan.reviewsPerHour === null ? null : Math.max(0, plan.reviewsPerHour - hourlyUsed),
       nextSlotAt,
+    },
+    concurrent: {
+      running: store.countRunningAccountReviews(owner),
+      limit: plan.maxConcurrentReviews,
+    },
+    credits: {
+      balanceCents: store.getCreditBalanceCents(tenantId),
+      overageCentsPerReview: plan.overageCentsPerReview,
     },
     monthly,
     cost: { usedUsd: cost.costUsd, limitUsd: costLimit },
@@ -155,6 +176,12 @@ export function formatQuotaStatusComment(
     '',
     `**Plan:** ${status.planLabel}`,
     formatHourlyLine(status.hourly, now),
+    status.concurrent.limit === null
+      ? '**Concurrent:** unlimited (worker capacity still applies)'
+      : `**Concurrent:** ${status.concurrent.running} / ${status.concurrent.limit} in flight`,
+    status.credits.overageCentsPerReview != null
+      ? `**Prepaid overage wallet:** $${(status.credits.balanceCents / 100).toFixed(2)} · $${(status.credits.overageCentsPerReview / 100).toFixed(2)}/review past included`
+      : '**Prepaid overage:** not on this plan (hard monthly total only)',
     formatMonthlyLine(status.monthly),
   ];
   if (status.cost.limitUsd !== null) {
@@ -177,7 +204,7 @@ export function formatQuotaStatusComment(
 /** Clearer blocked-nudge when a review was skipped for quota. */
 export function formatLimitBlockedComment(
   status: AccountQuotaStatus,
-  reason: 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'cost_capped',
+  reason: 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'cost_capped' | 'concurrency_limited' | 'insufficient_credits',
   trigger = commandTrigger(),
   now = Date.now(),
 ): string {
@@ -186,6 +213,32 @@ export function formatLimitBlockedComment(
     'If push storms are burning the hourly bucket, turn off **Run on each commit** in the Orvex dashboard (manual `' +
     trigger +
     ' review` still works).';
+
+  if (reason === 'insufficient_credits') {
+    const bal =
+      status.credits.balanceCents > 0
+        ? `Wallet balance: **$${(status.credits.balanceCents / 100).toFixed(2)}**.`
+        : 'Wallet balance: **$0.00**.';
+    const rate =
+      status.credits.overageCentsPerReview != null
+        ? ` Overage is **$${(status.credits.overageCentsPerReview / 100).toFixed(2)}**/review prepaid.`
+        : '';
+    return (
+      `💳 **Orvex prepaid overage required** on the **${status.planLabel}** plan. ` +
+      `Your included monthly reviews are used up. ${bal}${rate} ` +
+      `Add credits in the [Orvex dashboard](https://useorvex.com/dashboard) (**Plan and billing → Buy credits**) before more reviews can run.` +
+      tip
+    );
+  }
+
+  if (reason === 'concurrency_limited' && status.concurrent.limit !== null) {
+    return (
+      `⏳ **Orvex concurrency limit reached** on the **${status.planLabel}** plan. ` +
+      `Already running **${status.concurrent.running} / ${status.concurrent.limit}** reviews for this account. ` +
+      `This push/command was **not** started — wait for an in-flight review to finish, then retry.` +
+      tip
+    );
+  }
 
   if (reason === 'rate_limited') {
     const wait =

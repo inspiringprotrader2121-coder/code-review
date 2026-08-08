@@ -65,31 +65,24 @@ test('free tier is a lifetime trial; paid tiers have no lifetime cap', () => {
   assert.equal(planFeatures('verify').trialReviewLimit, null);
 });
 
-test('pricing structure: Starter $29 (100/mo @ 5/hr, $0.50 overage) < Pro Unlimited $69 (∞ @ 10/hr); Verify Lite $49 (50/mo) < Verify $99 (120/mo), both $0.75 overage', () => {
-  // Two tracks: volume (dual-model) — Free < Starter < Pro Unlimited; and
-  // quality (multi-model) — Verify Lite < Verify. Verify tiers are quota-capped.
+test('pricing structure: Starter/Verify use included + prepaid overage; Pro/Enterprise hard totals only', () => {
   assert.equal(planFeatures('review').reviewsPerHour, 5);
-  assert.equal(planFeatures('review').reviewsPerMonth, 100);
   assert.equal(planFeatures('review').includedReviewsPerMonth, 100);
+  assert.equal(planFeatures('review').reviewsPerMonth, 1000);
   assert.equal(planFeatures('review').overageCentsPerReview, 50);
-  assert.equal(planFeatures('review-plus').reviewsPerHour, 10);
-  assert.equal(planFeatures('review-plus').reviewsPerMonth, null, 'unlimited — the hourly cap is the abuse defense');
-  assert.equal(planFeatures('review-plus').includedReviewsPerMonth, null);
+  assert.equal(planFeatures('review-plus').label, 'Pro');
+  assert.equal(planFeatures('review-plus').reviewsPerMonth, 500);
   assert.equal(planFeatures('review-plus').overageCentsPerReview, null);
-  // Verify Lite: budget entry to the multi-model track.
-  assert.equal(planFeatures('verify-lite').modelTier, 'multi-model', 'same review track as Verify');
-  assert.equal(planFeatures('verify-lite').reviewsPerHour, 5);
-  assert.equal(planFeatures('verify-lite').reviewsPerMonth, 50);
   assert.equal(planFeatures('verify-lite').includedReviewsPerMonth, 50);
+  assert.equal(planFeatures('verify-lite').reviewsPerMonth, 500);
   assert.equal(planFeatures('verify-lite').overageCentsPerReview, 75);
-  assert.equal(planFeatures('verify').reviewsPerHour, 10);
-  assert.equal(planFeatures('verify').reviewsPerMonth, 120);
   assert.equal(planFeatures('verify').includedReviewsPerMonth, 120);
+  assert.equal(planFeatures('verify').reviewsPerMonth, 1000);
   assert.equal(planFeatures('verify').overageCentsPerReview, 75);
-  // Verify tiers are quota-capped, never unlimited (Luna cost defense).
-  assert.notEqual(planFeatures('verify-lite').reviewsPerMonth, null);
-  assert.notEqual(planFeatures('verify').reviewsPerMonth, null);
-  // Free trial keeps its tight burst cap.
+  for (const id of ['review', 'review-plus', 'verify-lite', 'verify', 'enterprise'] as const) {
+    assert.notEqual(planFeatures(id).reviewsPerMonth, null, `${id} must have a monthly safety ceiling`);
+  }
+  assert.equal(planFeatures('enterprise').reviewsPerMonth, 2000);
   assert.equal(planFeatures('free').reviewsPerHour, 2);
 });
 

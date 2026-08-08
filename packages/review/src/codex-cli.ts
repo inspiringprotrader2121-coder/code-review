@@ -45,7 +45,7 @@ export type CodexPromptMode = 'full' | 'lean' | 'slim';
 
 /** One canonical, documented fallback prevents worker and CLI routing drift. */
 export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.5';
-export const DEFAULT_CODEX_CLI_REASONING_EFFORT = 'xhigh';
+export const DEFAULT_CODEX_CLI_REASONING_EFFORT = 'max';
 
 /**
  * FIRST-PARTY REPO ALLOWLIST — defense in depth, INDEPENDENT of the
@@ -708,7 +708,9 @@ async function runCodexExecInner(
     // behind it, the worker slot is never released, /ready never goes idle, and
     // every future deploy aborts on its idle wait. So we reject on the timer
     // itself rather than trusting `close` to arrive.
-    const hardMs = Math.max(60_000, finiteEnv(process.env.ORVEX_CODEX_TIMEOUT_MS, 1_800_000));
+    // Cap hung/agentic stalls. Successful Luna calls usually finish in 1–3 min;
+    // the old 30m default let dead Cloudflare streams burn a full review slot.
+    const hardMs = Math.max(60_000, finiteEnv(process.env.ORVEX_CODEX_TIMEOUT_MS, 480_000));
     let settled = false;
     const finish = (fn: () => void) => {
       if (settled) return;

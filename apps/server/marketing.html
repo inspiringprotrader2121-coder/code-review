@@ -76,10 +76,10 @@
         "offerCount": "5",
         "offers": [
           { "@type": "Offer", "name": "Free", "price": "0", "priceCurrency": "USD", "description": "10 lifetime reviews, up to 2 per hour, no card required." },
-          { "@type": "Offer", "name": "Starter", "price": "29", "priceCurrency": "USD", "description": "100 reviews per month at up to 5 per hour, then $0.50 per review." },
-          { "@type": "Offer", "name": "Pro Unlimited", "price": "69", "priceCurrency": "USD", "description": "Unlimited monthly reviews at up to 10 per hour, with no per-review overage." },
-          { "@type": "Offer", "name": "Verify Lite", "price": "49", "priceCurrency": "USD", "description": "50 reviews per month at up to 5 per hour, then $0.75 per review on the advanced review track." },
-          { "@type": "Offer", "name": "Verify", "price": "99", "priceCurrency": "USD", "description": "120 reviews per month at up to 10 per hour, then $0.75 per review on the advanced review track." }
+          { "@type": "Offer", "name": "Starter", "price": "29", "priceCurrency": "USD", "description": "100 reviews per month at up to 5 per hour." },
+          { "@type": "Offer", "name": "Pro", "price": "69", "priceCurrency": "USD", "description": "500 reviews per month at up to 10 per hour." },
+          { "@type": "Offer", "name": "Verify Lite", "price": "49", "priceCurrency": "USD", "description": "50 reviews per month at up to 5 per hour on the advanced review track." },
+          { "@type": "Offer", "name": "Verify", "price": "99", "priceCurrency": "USD", "description": "120 reviews per month at up to 10 per hour on the advanced review track." }
         ]
       }
     },
@@ -95,17 +95,17 @@
         {
           "@type": "Question",
           "name": "How much does Orvex cost?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Free includes 10 lifetime reviews at up to 2 per hour. Starter is $29/month for 100 reviews at up to 5 per hour, then $0.50 per review. Pro Unlimited is $69/month with no monthly quota or overage and a 10-per-hour limit. Verify Lite is $49/month for 50 reviews at up to 5 per hour, then $0.75 per review. Verify is $99/month for 120 reviews at up to 10 per hour, then $0.75 per review." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Free includes 10 lifetime reviews at up to 2 per hour. Starter is $29/month for 100 included reviews at up to 5 per hour, then prepaid overage. Pro is $69/month for 500 reviews at up to 10 per hour. Verify Lite is $49/month for 50 included at up to 5 per hour, then prepaid overage. Verify is $99/month for 120 included at up to 10 per hour, then prepaid overage. Every plan also has a hard monthly ceiling." }
         },
         {
           "@type": "Question",
           "name": "What counts as a review?",
-          "acceptedAnswer": { "@type": "Answer", "text": "A completed standard pull-request review uses one review unit. An on-demand deep review uses two units. Skipped reviews and fix or explanation commands do not consume review units. Failed reviews still count toward free-trial and hourly caps." }
+          "acceptedAnswer": { "@type": "Answer", "text": "A completed standard pull-request review uses one review unit. An on-demand deep review uses two units. Skipped reviews and fix or explanation commands do not consume review units. Failed reviews still count toward free-trial, hourly, and monthly caps." }
         },
         {
           "@type": "Question",
           "name": "What happens after I use my included reviews?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Starter, Verify Lite, and Verify continue reviewing and bill only completed overage units at the published per-review rate. Pro Unlimited has no monthly quota or overage. The Free plan stops after its 10 lifetime reviews. Hourly capacity is enforced according to each plan." }
+          "acceptedAnswer": { "@type": "Answer", "text": "On Starter, Verify Lite, and Verify, buy prepaid credits in the dashboard. Reviews continue drawing from that wallet until it is empty or the plan hard monthly ceiling is reached. Free and Pro stop at their hard monthly totals. Hourly and concurrent caps also apply on every plan." }
         },
         {
           "@type": "Question",
@@ -119,8 +119,8 @@
         },
         {
           "@type": "Question",
-          "name": "Why does Pro Unlimited have an hourly limit?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Unlimited means there is no monthly quota and no per-review overage. The 10-per-hour limit prevents runaway automation and keeps review capacity fair and reliable for every workspace." }
+          "name": "Why does every plan have an hourly limit?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Hourly and concurrent caps prevent accidental review loops and keep processing reliable. Monthly totals cap total spend; hourly caps stop burst abuse." }
         },
         {
           "@type": "Question",
@@ -853,7 +853,7 @@
         <div class="price"><span class="per">$</span><span class="amt num">29</span><span class="per">/mo</span></div>
         <div class="reviews num">100/month · 5/hour</div>
         <ul>
-          <li><span class="tick">✓</span>Then $0.50 per review</li>
+          <li><span class="tick">✓</span>Then prepaid overage</li>
           <li><span class="tick">✓</span>Full standard review track</li>
           <li><span class="tick">✓</span>Deep review on demand</li>
         </ul>
@@ -861,11 +861,11 @@
       </div>
 
       <div class="plan">
-        <span class="pname">Pro Unlimited</span>
+        <span class="pname">Pro</span>
         <div class="price"><span class="per">$</span><span class="amt num">69</span><span class="per">/mo</span></div>
-        <div class="reviews num">unlimited monthly · 10/hour</div>
+        <div class="reviews num">500/month · 10/hour</div>
         <ul>
-          <li><span class="tick">✓</span>No per-review overage</li>
+          <li><span class="tick">✓</span>Hard monthly total</li>
           <li><span class="tick">✓</span>Full standard review track</li>
           <li><span class="tick">✓</span>Deep review on demand</li>
         </ul>
@@ -877,7 +877,7 @@
         <div class="price"><span class="per">$</span><span class="amt num">49</span><span class="per">/mo</span></div>
         <div class="reviews num">50/month · 5/hour</div>
         <ul>
-          <li><span class="tick">✓</span>Then $0.75 per review</li>
+          <li><span class="tick">✓</span>Then prepaid overage</li>
           <li><span class="tick">✓</span><b style="color:var(--ink)">Advanced review track</b></li>
           <li><span class="tick">✓</span>Deep review on demand</li>
         </ul>
@@ -889,7 +889,7 @@
         <div class="price"><span class="per">$</span><span class="amt num">99</span><span class="per">/mo</span></div>
         <div class="reviews num">120/month · 10/hour</div>
         <ul>
-          <li><span class="tick">✓</span>Then $0.75 per review</li>
+          <li><span class="tick">✓</span>Then prepaid overage</li>
           <li><span class="tick">✓</span><b style="color:var(--ink)">Advanced review track</b></li>
           <li><span class="tick">✓</span>Deep review on demand</li>
           <li><span class="tick">✓</span>Higher monthly capacity</li>
@@ -908,7 +908,7 @@
     <div class="sec-head">
       <p class="eyebrow"><span class="dot">//</span> FAQ</p>
       <h2>Plans, limits, and billing.</h2>
-      <p>The practical details: what consumes usage, when overage starts, and what “unlimited” means.</p>
+      <p>The practical details: what consumes usage, monthly totals, and hourly caps.</p>
     </div>
     <div class="faq-list">
       <details class="faq-item" open>
@@ -921,15 +921,15 @@
       </details>
       <details class="faq-item">
         <summary>What counts as one review?</summary>
-        <p>A completed standard pull-request review uses one review unit. An <span class="mono">@orvex deep</span> review uses two units because it performs additional analysis. Skipped reviews, fix commands, and explanation commands do not consume review units; failed reviews still count toward free-trial and hourly caps. A fresh review after a new push counts as a new review.</p>
+        <p>A completed standard pull-request review uses one review unit. An <span class="mono">@orvex deep</span> review uses two units because it performs additional analysis. Skipped reviews, fix commands, and explanation commands do not consume review units; failed reviews still count toward free-trial, hourly, and monthly caps. A fresh review after a new push counts as a new review.</p>
       </details>
       <details class="faq-item">
-        <summary>What happens when I use my included reviews?</summary>
-        <p>Starter, Verify Lite, and Verify keep working and bill only completed overage units at the published rate. Starter is $0.50 per additional unit; Verify Lite and Verify are $0.75. A deep review uses two units, so its overage is $1.00 on Starter or $1.50 on a Verify plan. Pro Unlimited has no monthly overage. Free stops after 10 lifetime reviews.</p>
+        <summary>What happens when I use my monthly reviews?</summary>
+        <p>On Starter, Verify Lite, and Verify, buy prepaid credits in the Orvex dashboard after the included allotment. Reviews draw from that wallet until it is empty or the hard monthly ceiling is reached. Free stops after 10 lifetime reviews; Pro stops at its hard monthly total. Comment <span class="mono">@orvex rate limit</span> anytime to see remaining capacity.</p>
       </details>
       <details class="faq-item">
-        <summary>Why does an unlimited plan have an hourly limit?</summary>
-        <p>Unlimited means Pro has no monthly review quota and no per-review overage. Its 10-per-hour limit prevents accidental review loops and keeps processing reliable across every workspace.</p>
+        <summary>Why does every plan have an hourly limit?</summary>
+        <p>Monthly totals cap overall spend. Hourly and concurrent caps prevent accidental review loops and keep processing reliable across every workspace.</p>
       </details>
       <details class="faq-item">
         <summary>Does the Free allowance reset?</summary>
@@ -945,7 +945,7 @@
       </details>
       <details class="faq-item">
         <summary>When does the monthly allowance reset?</summary>
-        <p>Included review units reset at the start of the workspace's subscription billing period. Hourly limits are separate burst controls and continue to apply after the monthly allowance resets.</p>
+        <p>Included review units use a rolling 30-day window (not calendar billing-period reset). Hourly limits are separate burst controls and continue to apply. Prepaid wallet credits do not expire with the rolling window.</p>
       </details>
       <details class="faq-item">
         <summary>How do I cancel or get billing help?</summary>

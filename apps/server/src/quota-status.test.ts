@@ -58,14 +58,19 @@ test('loadAccountQuotaStatus reports hourly remaining and next slot when exhaust
     new Date(oldest).getTime() + MS_PER_HOUR,
   );
   assert.equal(status.monthly.kind, 'metered');
+  if (status.monthly.kind === 'metered') {
+    assert.equal(status.monthly.included, 100);
+  }
 });
 
 test('formatQuotaStatusComment includes plan, hourly, and dashboard tip', () => {
   const status = loadAccountQuotaStatus(db(), 'acme', 't1', planFeatures('review-plus'));
   const body = formatQuotaStatusComment(status, '@orvex');
-  assert.match(body, /Pro Unlimited/);
+  assert.match(body, /\*\*Plan:\*\* Pro/);
   assert.match(body, /Hourly:/);
-  assert.match(body, /unlimited \(no monthly quota/);
+  assert.match(body, /Monthly \(hard cap\):/);
+  assert.match(body, /500/);
+  assert.match(body, /Prepaid overage/);
   assert.match(body, /Run on each commit/);
   assert.match(body, /@orvex review/);
 });

@@ -46,13 +46,26 @@ export function dashboardRoutes() {
         ? '<div class="banner success" role="status">Payment received. Your plan is activating now; refresh in a moment if the new allowance is not visible yet.</div>'
         : billingState === 'cancelled'
           ? '<div class="banner" role="status">Checkout was cancelled. No plan change was made.</div>'
+          : billingState === 'credits-success'
+            ? '<div class="banner success" role="status">Prepaid credits added. Reviews past your included monthly quota will draw from this wallet.</div>'
+            : billingState === 'credits-cancelled'
+              ? '<div class="banner" role="status">Credit purchase was cancelled. No wallet change was made.</div>'
           : billingState === 'portal-error'
             ? '<div class="banner" role="alert">Billing management is temporarily unavailable. Please try again or email support@useorvex.com.</div>'
             : billingState === 'unavailable'
               ? '<div class="banner" role="status">No active billing profile is connected yet. Choose a plan below to start billing.</div>'
           : '';
     return c.html(
-      dashboardHtml(slug, isSuperAdmin, logoutCsrfToken(c), showLlmCost, plan, canManageBilling, billingBanner),
+      dashboardHtml(
+        slug,
+        isSuperAdmin,
+        logoutCsrfToken(c),
+        showLlmCost,
+        plan,
+        canManageBilling,
+        billingBanner,
+        tenant ? db.getCreditBalanceCents(tenant.id) : 0,
+      ),
     );
   });
 
@@ -64,11 +77,13 @@ function planQuotaSummary(plan: PlanFeatures): string {
   const bits: string[] = [];
   if (plan.reviewsPerHour != null) bits.push(`${plan.reviewsPerHour}/hour`);
   else bits.push('unlimited hourly');
+  if (plan.maxConcurrentReviews != null) bits.push(`${plan.maxConcurrentReviews} concurrent`);
   if (plan.trialReviewLimit != null) bits.push(`${plan.trialReviewLimit} lifetime free reviews`);
   else if (plan.includedReviewsPerMonth != null && plan.overageCentsPerReview != null) {
     bits.push(
-      `${plan.includedReviewsPerMonth}/month included, then $${(plan.overageCentsPerReview / 100).toFixed(2)}/review`,
+      `${plan.includedReviewsPerMonth}/mo included · then $${(plan.overageCentsPerReview / 100).toFixed(2)} prepaid`,
     );
+    if (plan.reviewsPerMonth != null) bits.push(`hard stop ${plan.reviewsPerMonth}/mo`);
   } else if (plan.reviewsPerMonth != null) bits.push(`${plan.reviewsPerMonth}/month hard cap`);
   else bits.push('unlimited monthly');
   return bits.join(' · ');
@@ -82,6 +97,7 @@ function dashboardHtml(
   plan: PlanFeatures,
   canManageBilling: boolean,
   billingBanner: string,
+  creditBalanceCents = 0,
 ): string {
   // JSON.stringify alone leaves `</script>` intact — escape for an inline <script> sink
   const s = JSON.stringify(slug)
@@ -359,7 +375,19 @@ function dashboardHtml(
       <!-- SETTINGS --><div class="view" id="v-settings">
         <div class="panel"><div class="panel-h"><div><h2>Plan and billing</h2><span class="sub">Current plan: ${escapeHtml(planLabel)} · billed per workspace.</span></div></div><div class="panel-body">${canManageBilling
           ? `<button class="btn" onclick="location.href='/#pricing'">View plans</button> <button class="btn" onclick="location.href='/billing/portal/${encodeURIComponent(slug)}'">Manage billing</button> <button class="btn" onclick="location.href='mailto:support@useorvex.com?subject=${encodeURIComponent(`Orvex billing help - ${slug}`)}'">Billing help</button>`
-          : '<span class="muted">Only a workspace owner can change the plan or request cancellation.</span>'}<p class="muted" style="margin:12px 0 0;font-size:13px">Your allowance: <strong>${escapeHtml(quotaLine)}</strong>. Comment <code>@orvex rate limit</code> on any PR to see remaining capacity.</p></div></div>
+          : '<span class="muted">Only a workspace owner can change the plan or request cancellation.</span>'}<p class="muted" style="margin:12px 0 0;font-size:13px">Your allowance: <strong>${escapeHtml(quotaLine)}</strong>. Comment <code>@orvex rate limit</code> on any PR to see remaining capacity.</p>
+          ${plan.overageCentsPerReview != null
+            ? `<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line,#e5e7eb)"><p style="margin:0 0 8px;font-size:14px"><strong>Prepaid overage wallet:</strong> $${(creditBalanceCents / 100).toFixed(2)} · $${(plan.overageCentsPerReview / 100).toFixed(2)}/review after included quota</p>
+          ${canManageBilling
+            ? `<p class="muted" style="margin:0 0 10px;font-size:12px">Add money before reviews past your included monthly total. Credits are charged only when a review actually runs.</p>
+          <button class="btn" type="button" onclick="buyCredits(1000)">Buy $10</button>
+          <button class="btn" type="button" onclick="buyCredits(2500)">Buy $25</button>
+          <button class="btn" type="button" onclick="buyCredits(5000)">Buy $50</button>
+          <button class="btn" type="button" onclick="buyCredits(10000)">Buy $100</button>`
+            : '<p class="muted" style="margin:0;font-size:12px">Ask a workspace owner to add prepaid credits.</p>'}
+          </div>`
+            : ''}
+          </div></div>
         <div class="panel"><div class="panel-h"><div><h2>Account security</h2><span class="sub">Password and authenticator settings.</span></div></div><div class="panel-body"><button class="btn" onclick="location.href='/settings/security'">Manage account security</button></div></div>
         <div class="panel"><div class="panel-h"><div><h2>Privacy and data</h2><span class="sub">Review the policy or request a copy or deletion of workspace data.</span></div></div><div class="panel-body"><button class="btn" onclick="location.href='/privacy'">Privacy policy</button> <button class="btn" onclick="location.href='mailto:support@useorvex.com?subject=${encodeURIComponent(`Orvex data request - ${slug}`)}'">Request data help</button></div></div>
         <div class="panel"><div class="panel-h"><div><h2>Automatic review triggers</h2><span class="sub">Per repo. <code>@orvex review</code> always works regardless.</span></div></div><div class="panel-body" id="settingsList"><div class="loading">Loading…</div></div></div>
@@ -376,6 +404,17 @@ function dashboardHtml(
 const SLUG=${s};
 const SHOW_LLM_COST=${showLlmCost ? 'true' : 'false'};
 const api=(p)=>fetch('/api/workspaces/'+encodeURIComponent(SLUG)+p,{credentials:'same-origin'}).then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e)));
+async function buyCredits(amountCents){
+  try{
+    const r=await fetch('/api/workspaces/'+encodeURIComponent(SLUG)+'/billing/credits',{
+      method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},
+      body:JSON.stringify({amountCents})
+    });
+    const body=await r.json().catch(()=>({}));
+    if(!r.ok){alert(body.error||'Could not start credit checkout');return;}
+    if(body.url) location.href=body.url; else alert('Stripe did not return a checkout URL');
+  }catch(e){alert('Could not start credit checkout');}
+}
 const esc=(x)=>String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const sevCls=(s)=>({P1:'p1',P2:'p2',P3:'p3'}[s]||'muted');
 const runCls=(s)=>s==='completed'?'done':s==='failed'?'fail':s==='running'?'run':'queued';

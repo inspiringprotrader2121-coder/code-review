@@ -112,8 +112,13 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     const leaseTimer = queue.renewLease
       ? setInterval(() => {
           queue.renewLease?.(job).catch((err) => {
-            leaseLost = true;
-            console.warn(`[worker] lease renewal failed for ${pk}:`, (err as Error).message);
+            const message = (err as Error).message ?? String(err);
+            // Only sticky-fail on confirmed ownership loss. A transient Redis
+            // blip must not discard a multi-minute review that already spent $$.
+            if (/lease lost/i.test(message)) {
+              leaseLost = true;
+            }
+            console.warn(`[worker] lease renewal failed for ${pk}:`, message);
           });
         }, boundedEnvInt('ORVEX_LEASE_RENEW_MS', 300_000, 10_000, 300_000))
       : undefined;
@@ -121,7 +126,8 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
 
     // Live ownership check used before GitHub writes. The sticky leaseLost flag
     // alone can lag a mid-interval takeover; await renewLease here so we never
-    // publish under a stolen lease.
+    // publish under a stolen lease. Transient Redis errors must NOT sticky-fail
+    // a review that already burned LLM spend.
     const leaseValid = async (): Promise<boolean> => {
       if (leaseLost) return false;
       if (!queue.renewLease) return true;
@@ -129,9 +135,27 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         await queue.renewLease(job);
         return true;
       } catch (err) {
-        leaseLost = true;
-        console.warn(`[worker] lease ownership check failed for ${pk}:`, (err as Error).message);
-        return false;
+        const message = (err as Error).message ?? String(err);
+        if (/lease lost/i.test(message)) {
+          leaseLost = true;
+          console.warn(`[worker] lease ownership lost for ${pk}:`, message);
+          return false;
+        }
+        console.warn(`[worker] transient lease check failed for ${pk}:`, message);
+        try {
+          await queue.renewLease(job);
+          return true;
+        } catch (err2) {
+          const message2 = (err2 as Error).message ?? String(err2);
+          if (/lease lost/i.test(message2)) {
+            leaseLost = true;
+            console.warn(`[worker] lease ownership lost on retry for ${pk}:`, message2);
+            return false;
+          }
+          // Still transient — do not sticky-fail; caller decides.
+          console.warn(`[worker] lease check still transient for ${pk}; treating as valid for completion`);
+          return true;
+        }
       }
     };
 
@@ -176,8 +200,16 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
           }
         }
       }
-      if (leaseLost || !(await leaseValid())) {
-        throw new Error(`review lease lost for ${pk}; discarding this worker result`);
+      // processReviewJob already published (or skipped) on success. Never
+      // markFailed after that — clearing SEEN without DONE causes duplicate reviews.
+      if (leaseLost) {
+        console.warn(
+          `[worker] lease lost after job finished for ${pk} — marking completed to avoid duplicate`,
+        );
+      } else if (!(await leaseValid())) {
+        console.warn(
+          `[worker] post-job lease check failed for ${pk} — marking completed anyway`,
+        );
       }
       await queue.markCompleted(job, { draftSkipped });
       backoff = nextBackoffState(backoff, 'success', Date.now(), {

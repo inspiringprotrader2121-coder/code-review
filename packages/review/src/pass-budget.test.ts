@@ -40,36 +40,51 @@ test('buildReviewPassAngles keeps breadth last when present', () => {
   }
 });
 
-test('buildReviewPassAngles gives a small multi-model PR only general + deep-dive', (t) => {
-  t.after(() => {
-    delete process.env.ORVEX_LARGE_PR_FILES;
-    delete process.env.ORVEX_LARGE_PR_PATCH_CHARS;
-  });
+test('buildReviewPassAngles gives small multi-model PRs the full four-pass track', () => {
   delete process.env.ORVEX_BREADTH_ON;
   delete process.env.ORVEX_REMOVED_BEHAVIOR;
-  // A small diff: no deletes/renames, under the large-PR file/char caps.
+  // Small diff, no deletes — Verify/Enterprise must still run all four discovery passes.
   const small = Array.from({ length: 5 }, (_, i) => ({
     filename: `src/f${i}.ts`,
     patch: '+const x = 1;\n',
     status: 'modified',
   }));
   const tags = buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag);
-  assert.deepEqual(tags, ['general', 'deep-dive']);
+  assert.deepEqual(tags, [
+    'general',
+    'deep-dive',
+    'removed-behavior/callers',
+    'perf/completeness/api',
+  ]);
 });
 
-test('buildReviewPassAngles adds breadth for a genuinely large PR', (t) => {
-  t.after(() => delete process.env.ORVEX_LARGE_PR_FILES);
+test('buildReviewPassAngles dual-model stays at general + deep-dive on small PRs', () => {
   delete process.env.ORVEX_BREADTH_ON;
-  process.env.ORVEX_LARGE_PR_FILES = '40';
-  const large = Array.from({ length: 41 }, (_, i) => ({
+  delete process.env.ORVEX_REMOVED_BEHAVIOR;
+  const small = Array.from({ length: 5 }, (_, i) => ({
     filename: `src/f${i}.ts`,
     patch: '+const x = 1;\n',
     status: 'modified',
   }));
-  const tags = buildReviewPassAngles({ modelTier: 'multi-model', files: large }).map((a) => a.tag);
-  assert.ok(tags.includes('perf/completeness/api'), 'large PR adds the breadth lens');
-  assert.equal(tags[0], 'general');
-  assert.equal(tags[1], 'deep-dive');
+  const tags = buildReviewPassAngles({ modelTier: 'dual-model', files: small }).map((a) => a.tag);
+  assert.deepEqual(tags, ['general', 'deep-dive']);
+});
+
+test('buildReviewPassAngles can still opt multi-model back to conditional lenses', () => {
+  process.env.ORVEX_BREADTH_ON = 'deep-or-large';
+  process.env.ORVEX_REMOVED_BEHAVIOR = 'deletes-or-renames';
+  try {
+    const small = Array.from({ length: 5 }, (_, i) => ({
+      filename: `src/f${i}.ts`,
+      patch: '+const x = 1;\n',
+      status: 'modified',
+    }));
+    const tags = buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag);
+    assert.deepEqual(tags, ['general', 'deep-dive']);
+  } finally {
+    delete process.env.ORVEX_BREADTH_ON;
+    delete process.env.ORVEX_REMOVED_BEHAVIOR;
+  }
 });
 
 test('selectRiskProbes returns empty for zero budget', () => {

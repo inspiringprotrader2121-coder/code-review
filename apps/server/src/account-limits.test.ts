@@ -8,37 +8,68 @@ function db(): AppDatabase {
   return new AppDatabase(':memory:');
 }
 
-function complete(d: AppDatabase, owner: string, n: number): void {
+function complete(d: AppDatabase, owner: string, n: number, tenantId = 't1'): void {
   for (let i = 0; i < n; i++) {
     d.recordReviewRun({
-      tenantId: 't1', installationId: 1, owner, repo: 'r', pr: 1, headSha: `sha${i}`,
+      tenantId, installationId: 1, owner, repo: 'r', pr: 1, headSha: `sha${i}`,
       action: 'synchronize', status: 'completed', durationMs: 1000,
     });
   }
 }
 
-/** Rows spread across the last ~29 days (well outside the 1h rate-limit window,
+/** Rows spread across ~2h–28d ago (outside the 1h rate-limit window,
  *  but inside the 30-day monthly window) — isolates the monthly check from the
  *  hourly one, since a same-instant burst would always trip hourly first given
  *  reviewsPerHour << reviewsPerMonth by design. */
-function completeSpreadOverDays(d: AppDatabase, owner: string, n: number): void {
+function completeSpreadOverDays(
+  d: AppDatabase,
+  owner: string,
+  n: number,
+  tenantId = 't1',
+): void {
   const now = Date.now();
+  const span = 28 * 24 * 3_600_000;
   for (let i = 0; i < n; i++) {
+    const offset = 2 * 3_600_000 + (n <= 1 ? 0 : (i * span) / (n - 1));
     d.recordReviewRun({
-      tenantId: 't1', installationId: 1, owner, repo: 'r', pr: 1, headSha: `sha${i}`,
+      tenantId, installationId: 1, owner, repo: 'r', pr: 1, headSha: `sha${i}`,
       action: 'synchronize', status: 'completed', durationMs: 1000,
-      createdAt: new Date(now - 3 * 3_600_000 - i * 3_600_000).toISOString(), // 3h+ ago, spaced 1h apart
+      createdAt: new Date(now - offset).toISOString(),
     });
   }
 }
 
-test('Review monthly quota is included usage, not a hard stop', () => {
+test('Review monthly included quota requires prepaid credits for overage', () => {
   const d = db();
   const plan = planFeatures('review');
-  assert.ok(plan.reviewsPerMonth !== null);
-  assert.equal(plan.overageCentsPerReview, 50);
-  completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth! + 10);
-  assert.equal(accountLimitReason(d, 'acme', plan), null, 'over quota is billed as overage');
+  const tenant = d.createTenant('prepaid-acme');
+  completeSpreadOverDays(d, 'acme', plan.includedReviewsPerMonth!, tenant.id);
+  assert.equal(
+    accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }),
+    'insufficient_credits',
+  );
+  d.creditPrepaidTopUp({
+    tenantId: tenant.id,
+    amountCents: 500,
+    stripeSessionId: 'cs_test_prepaid_1',
+  });
+  assert.equal(accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }), null);
+});
+
+test('Review hard safety ceiling still stops even with prepaid balance', () => {
+  const d = db();
+  const plan = planFeatures('review');
+  const tenant = d.createTenant('prepaid-cap');
+  d.creditPrepaidTopUp({
+    tenantId: tenant.id,
+    amountCents: 50_000,
+    stripeSessionId: 'cs_test_prepaid_cap',
+  });
+  completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth!, tenant.id);
+  assert.equal(
+    accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }),
+    'monthly_limit',
+  );
 });
 
 test('the hourly ceiling is checked FIRST — when a burst crosses BOTH thresholds at once, it reports rate_limited, not monthly_limit', () => {
@@ -65,20 +96,38 @@ test('free tier has no separate monthly ceiling — the lifetime trial cap alrea
   assert.equal(plan.reviewsPerMonth, null);
 });
 
-test('enterprise (custom contract) is never limited by these code defaults', () => {
+test('enterprise uses high safety ceilings, not uncapped nulls', () => {
   const d = db();
   const plan = planFeatures('enterprise');
-  complete(d, 'acme', 10_000);
-  assert.equal(accountLimitReason(d, 'acme', plan), null);
+  assert.equal(plan.reviewsPerMonth, 2000);
+  assert.equal(plan.reviewsPerHour, 50);
+  completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth!);
+  assert.equal(accountLimitReason(d, 'acme', plan), 'monthly_limit');
 });
 
-test('Verify monthly quota is included usage, not a hard stop', () => {
+test('Verify monthly included quota requires prepaid credits; hard ceiling still applies', () => {
   const d = db();
   const plan = planFeatures('verify');
-  assert.equal(plan.overageCentsPerReview, 75);
-  completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth! + 10);
-  assert.equal(accountLimitReason(d, 'acme', plan), null, 'over quota is billed as overage');
-  assert.equal(accountLimitReason(d, 'other-co', plan), null, 'a fresh account is unaffected');
+  const tenant = d.createTenant('verify-prepaid');
+  completeSpreadOverDays(d, 'acme', plan.includedReviewsPerMonth!, tenant.id);
+  assert.equal(
+    accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }),
+    'insufficient_credits',
+  );
+  // Paid included/prepaid is tenant-scoped — another GitHub owner on the same
+  // workspace still shares the wallet/quota.
+  assert.equal(
+    accountLimitReason(d, 'other-co', plan, 1, 0, { tenantId: tenant.id }),
+    'insufficient_credits',
+  );
+});
+
+test('Pro has a hard monthly total (500) — not unlimited', () => {
+  const d = db();
+  const plan = planFeatures('review-plus');
+  assert.equal(plan.reviewsPerMonth, 500);
+  completeSpreadOverDays(d, 'pro-co', plan.reviewsPerMonth!);
+  assert.equal(accountLimitReason(d, 'pro-co', plan), 'monthly_limit');
 });
 
 test('GLOBAL free-tier daily cap trips for a trial account once total free reviews cross the ceiling (abuse backstop)', () => {
@@ -220,4 +269,35 @@ test('resuming a run does not reserve a second full slot for its own recorded sp
   });
   assert.equal(accountLimitReason(d, 'resume-user', plan, 0), 'cost_capped');
   assert.equal(accountLimitReason(d, 'resume-user', plan, 0, 1), null);
+});
+
+test('per-account concurrency caps parallel burn of the hourly bucket', () => {
+  const d = db();
+  const plan = planFeatures('verify');
+  assert.equal(plan.maxConcurrentReviews, 3);
+  for (let i = 0; i < 3; i++) {
+    d.startReviewRun({
+      tenantId: 't1',
+      installationId: 1,
+      owner: 'busy',
+      repo: 'r',
+      pr: i + 1,
+      headSha: `run${i}`,
+      action: 'opened',
+    });
+  }
+  assert.equal(accountLimitReason(d, 'busy', plan, 1), 'concurrency_limited');
+  assert.equal(accountLimitReason(d, 'busy', plan, 0, 0), null, 'no new reservation is still under the in-flight cap');
+  assert.equal(
+    accountLimitReason(d, 'busy', plan, 0, 1),
+    null,
+    'resuming one of the running rows does not trip concurrency',
+  );
+});
+
+test('small plans allow fewer concurrent reviews than Verify', () => {
+  assert.equal(planFeatures('review').maxConcurrentReviews, 2);
+  assert.equal(planFeatures('verify-lite').maxConcurrentReviews, 2);
+  assert.equal(planFeatures('review-plus').maxConcurrentReviews, 3);
+  assert.equal(planFeatures('enterprise').maxConcurrentReviews, 8);
 });

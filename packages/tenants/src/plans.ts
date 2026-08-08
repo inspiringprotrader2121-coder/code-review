@@ -50,6 +50,13 @@ export interface PlanFeatures {
   /** max reviews per rolling hour for the account (null = unlimited) */
   reviewsPerHour: number | null;
   /**
+   * Max in-flight reviews for this account at once (null = unlimited besides the
+   * worker's global ORVEX_MAX_CONCURRENT_REVIEWS). Prevents a single push storm
+   * from burning the entire hourly bucket in parallel — especially costly when
+   * reviews fail after LLM spend.
+   */
+  maxConcurrentReviews: number | null;
+  /**
    * Max reviews per rolling 30 days for the account (null = unlimited). Unlike
    * reviewsPerHour (burst/abuse protection), this bounds total MONTHLY cost
    * exposure — the gap that let one account run unlimited reviews all month on
@@ -130,6 +137,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true, // Flash verify — cheap precision gate on the 2-model track
     trialReviewLimit: 10, // 10 free reviews for the account, ever — bounds autofix/execution cost too
     reviewsPerHour: 2,
+    maxConcurrentReviews: 1,
     reviewsPerMonth: null, // the lifetime cap already bounds free-tier cost; no separate monthly needed
     includedReviewsPerMonth: null,
     overageCentsPerReview: null,
@@ -140,11 +148,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     id: 'review',
     label: 'Starter', // MiniMax + DeepSeek v4 Flash — the entry paid tier
     monthlyPriceCents: 2900,
-    // $29/mo — 100 reviews/month included, 5/hour (matches CodeRabbit's rate),
-    // then $0.50/review overage (re-reviews count as reviews). TWO discovery
-    // passes (MiniMax + Flash) + Flash verify — volume and paid features
-    // (deep, nightly) are the upsell, not Luna. Flash verify keeps FPs down
-    // without Pro/Luna cost.
+    // $29/mo — 100 reviews included, then prepaid overage at $0.50/review up to
+    // a 1000/mo hard safety ceiling. Overage requires wallet balance first.
     reviewPasses: 2,
     retrievalTopK: 28,
     repoSweep: false,
@@ -156,7 +161,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true,
     trialReviewLimit: null,
     reviewsPerHour: 5,
-    reviewsPerMonth: 100,
+    maxConcurrentReviews: 2,
+    reviewsPerMonth: 1000, // hard safety ceiling; included 100, then prepaid overage
     includedReviewsPerMonth: 100,
     overageCentsPerReview: 50,
     modelTier: 'dual-model',
@@ -164,11 +170,10 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   },
   'review-plus': {
     id: 'review-plus',
-    label: 'Pro Unlimited',
+    label: 'Pro',
     monthlyPriceCents: 6900,
-    // $69/mo — UNLIMITED reviews at 10/hour. Same MiniMax + Flash two-pass
-    // discovery + Flash verify as Starter; more volume, not more models.
-    // The 10/hr cap is the abuse defense, so no monthly ceiling.
+    // $69/mo — 500 reviews/month HARD total at 10/hour. Same MiniMax + Flash
+    // two-pass as Starter; more volume, not more models. Not unlimited.
     reviewPasses: 2,
     retrievalTopK: 28,
     repoSweep: false,
@@ -180,8 +185,9 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true,
     trialReviewLimit: null,
     reviewsPerHour: 10,
-    reviewsPerMonth: null,
-    includedReviewsPerMonth: null,
+    maxConcurrentReviews: 3,
+    reviewsPerMonth: 500,
+    includedReviewsPerMonth: 500,
     overageCentsPerReview: null,
     modelTier: 'dual-model',
     priority: 1,
@@ -190,10 +196,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     id: 'verify-lite',
     label: 'Verify Lite',
     monthlyPriceCents: 4900,
-    // $49/mo — the budget entry to the PREMIUM quality track: the SAME
-    // multi-model stack as Verify (Luna + Flash lenses + MiniMax + Flash
-    // verify), just a smaller quota for lower-volume or price-sensitive teams.
-    // 50 reviews/month included at 5/hour, then $0.75/review overage.
+    // $49/mo — 50 reviews included, then prepaid overage at $0.75/review up to
+    // a 500/mo hard safety ceiling on the multi-model track.
     reviewPasses: 4,
     retrievalTopK: 28,
     repoSweep: false,
@@ -205,7 +209,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true,
     trialReviewLimit: null,
     reviewsPerHour: 5,
-    reviewsPerMonth: 50,
+    maxConcurrentReviews: 2,
+    reviewsPerMonth: 500,
     includedReviewsPerMonth: 50,
     overageCentsPerReview: 75,
     modelTier: 'multi-model',
@@ -215,13 +220,15 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     id: 'verify',
     label: 'Verify',
     monthlyPriceCents: 9900,
-    // multi-model full track (~5 model calls):
+    // multi-model full track (~5 model calls) on EVERY PR:
     //   pass 1 — Luna / Codex CLI (general)
     //   pass 2 — DeepSeek v4 Flash (deep-dive)
     //   pass 3 — DeepSeek v4 Flash (removed-behavior/callers; Pro via env)
     //   pass 4 — MiniMax (perf / completeness / API-contract)
-    //   then ONE strict verification on DeepSeek v4 Flash
+    //   then ONE strict verification on DeepSeek v4 Flash (when candidates exist)
     // (+ sandboxed investigate when Codex isn't already agentic)
+    // $99/mo — 120 reviews included, then prepaid overage at $0.75/review up to
+    // a 1000/mo hard safety ceiling at 10/hour.
     reviewPasses: 4,
     retrievalTopK: 28,
     repoSweep: false,
@@ -233,7 +240,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true,
     trialReviewLimit: null,
     reviewsPerHour: 10,
-    reviewsPerMonth: 120,
+    maxConcurrentReviews: 3,
+    reviewsPerMonth: 1000,
     includedReviewsPerMonth: 120,
     overageCentsPerReview: 75,
     modelTier: 'multi-model',
@@ -252,9 +260,12 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     nightlyScans: true,
     deepVerify: true,
     trialReviewLimit: null,
-    reviewsPerHour: null,
-    reviewsPerMonth: null, // custom-contract tier — negotiated limits, not a code default
-    includedReviewsPerMonth: null,
+    // Safety defaults for the custom-contract tier — raise per customer via
+    // plan-admin; never ship a null monthly/hourly path that can burn uncapped.
+    reviewsPerHour: 50,
+    maxConcurrentReviews: 8,
+    reviewsPerMonth: 2000,
+    includedReviewsPerMonth: 2000,
     overageCentsPerReview: null,
     modelTier: 'multi-model',
     priority: 4,

@@ -125,27 +125,41 @@ function processingMetaKey(raw: string): string {
   return `${PROCESSING_META_PREFIX}${createHash('sha256').update(raw).digest('hex')}`;
 }
 
-// Compare-and-delete: DEL the key only if it still holds our exact value.
-// Compare-and-EXTEND: only refresh the TTL while the lock is still OURS. An
-// unconditional EXPIRE would extend a lock another worker legitimately took
-// over after ours expired.
+// Compare-and-delete / compare-and-EXTEND against the immutable claim TOKEN
+// (prefix before the first newline). The inflight value is `token\\nrawJob`, and
+// persistJob rewrites `rawJob` after reservation — comparing the FULL value
+// made every renewLease fail after the first persist, so reviews burned LLM
+// spend then died at publication with "lease lost".
 /** In-flight lease TTL. Heartbeated by renewLease() while a job runs, so this
  *  bounds how long a CRASHED worker's PR stays locked — not how long a review
  *  may take. */
 const LEASE_TTL_SECONDS = 900;
 
 const CASEXPIRE_LUA = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
+local cur = redis.call('GET', KEYS[1])
+if not cur then return 0 end
+local sep = string.find(cur, '\\n', 1, true)
+local curToken = sep and string.sub(cur, 1, sep - 1) or cur
+if curToken == ARGV[1] then
   return redis.call('EXPIRE', KEYS[1], ARGV[2])
 end
 return 0`;
 
 const CASDEL_LUA = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
+local cur = redis.call('GET', KEYS[1])
+if not cur then return 0 end
+local sep = string.find(cur, '\\n', 1, true)
+local curToken = sep and string.sub(cur, 1, sep - 1) or cur
+if curToken == ARGV[1] then
   return redis.call('DEL', KEYS[1])
 end
 return 0`;
 
+/** Inflight lock values are `token\\nraw`. Ownership CAS uses the token only. */
+function claimToken(claim: string): string {
+  const sep = claim.indexOf('\n');
+  return sep >= 0 ? claim.slice(0, sep) : claim;
+}
 // Crash-loop guard for startup recovery: a job that kills the worker (OOM, native
 // crash) would otherwise be requeued by recoverOrphans on EVERY restart and crash
 // it again forever. Count how many times each job has been resumed after a
@@ -277,7 +291,7 @@ export class RedisReviewQueue implements ReviewQueue {
       await this.redis.set(`${DONE_PREFIX}${draftSkipIdempotencyKey(job)}`, '1', 'EX', 604800);
       const claim = this.lockTokens.get(job);
       if (claim) {
-        await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claim);
+        await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claimToken(claim));
       }
       await this.removeProcessing(job);
       this.lockTokens.delete(job);
@@ -296,20 +310,20 @@ export class RedisReviewQueue implements ReviewQueue {
     // DEL would delete the new run's lock and let a third run start concurrently.
     const claim = this.lockTokens.get(job);
     if (claim) {
-      await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claim);
+      await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claimToken(claim));
     }
     await this.removeProcessing(job);
     this.lockTokens.delete(job);
   }
 
   async renewLease(job: ReviewJobPayload): Promise<void> {
-    const token = this.lockTokens.get(job);
-    if (!token) return;
+    const claim = this.lockTokens.get(job);
+    if (!claim) return;
     const renewed = await this.redis.eval(
       CASEXPIRE_LUA,
       1,
       `${INFLIGHT_PREFIX}${prKey(job)}`,
-      token,
+      claimToken(claim),
       LEASE_TTL_SECONDS,
     );
     if (Number(renewed) !== 1) {
@@ -347,6 +361,32 @@ return 1
     );
     if (Number(replaced) !== 1) return;
 
+    // Keep the inflight lock payload aligned with PROCESSING. Ownership CAS
+    // keys off the token prefix, but matching values avoid confusion in ops.
+    const lockKey = `${INFLIGHT_PREFIX}${prKey(job)}`;
+    const newClaim = `${token}\n${newRaw}`;
+    await this.redis.eval(
+      `
+local cur = redis.call('GET', KEYS[1])
+if not cur then return 0 end
+local sep = string.find(cur, '\\n', 1, true)
+local curToken = sep and string.sub(cur, 1, sep - 1) or cur
+if curToken ~= ARGV[1] then return 0 end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl ~= false and ttl > 0 then
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ttl)
+else
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
+end
+return 1
+`,
+      1,
+      lockKey,
+      token,
+      newClaim,
+      LEASE_TTL_SECONDS,
+    );
+
     const oldMeta = processingMetaKey(oldRaw);
     const newMeta = processingMetaKey(newRaw);
     const startedAt = await this.redis.get(oldMeta);
@@ -356,7 +396,7 @@ return 1
     } else {
       await this.redis.set(newMeta, String(Date.now()), 'EX', 3600, 'NX');
     }
-    this.lockTokens.set(job, `${token}\n${newRaw}`);
+    this.lockTokens.set(job, newClaim);
   }
 
   async markFailed(job: ReviewJobPayload, _error: string): Promise<void> {
@@ -364,7 +404,7 @@ return 1
     await this.redis.del(`${SEEN_PREFIX}${idKey}`);
     const claim = this.lockTokens.get(job);
     if (claim) {
-      await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claim);
+      await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claimToken(claim));
     }
     await this.removeProcessing(job);
     this.lockTokens.delete(job);

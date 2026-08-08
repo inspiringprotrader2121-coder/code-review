@@ -129,7 +129,7 @@ Every plan includes deterministic checks, source-grounded verification, autofix,
 and optional runtime verification behind the relevant operations flag. The review
 tracks differ in pass count, model mix, included volume, rate limits, and billing.
 
-| Capability | Free trial | Starter (`review`) | Pro Unlimited (`review-plus`) | Verify Lite | Verify |
+| Capability | Free trial | Starter (`review`) | Pro (`review-plus`) | Verify Lite | Verify |
 |---|---|---|---|---|---|
 | Review passes | 2 | 2 | 2 | 2 (cond. up to 4) | 2 (cond. up to 4) |
 | Index retrieval (top-K files) | 28 | 28 | 28 | 28 | 28 |
@@ -138,25 +138,29 @@ tracks differ in pass count, model mix, included volume, rate limits, and billin
 | Commit fixes / `@orvex` commands | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Code execution (runtime verify) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
 | Nightly whole-repo scans | — | ✓ (flag) | ✓ (flag) | ✓ (flag) | ✓ (flag) |
-| Included reviews and rate | 10 lifetime, 2/hr | 100/mo, 5/hr; +$0.50/review | no monthly quota, 10/hr | 50/mo, 5/hr; +$0.75/review | 120/mo, 10/hr; +$0.75/review |
+| Included reviews and rate | 10 lifetime, 2/hr | 100 included + prepaid overage ($0.50), hard ceiling 1000, 5/hr | 500/mo hard, 10/hr | 50 included + prepaid ($0.75), hard 500, 5/hr | 120 included + prepaid ($0.75), hard 1000, 10/hr |
 
 The hourly/monthly numbers are **safety ceilings, not usage targets** — sized as
 tail-risk insurance (see `packages/tenants/src/plans.ts` for the cost math) so a
 bug, restart loop, or repeated manual re-triggering can't silently run up an
-unbounded bill on a flat subscription. A real team should never come close;
-they're a backstop, not a constraint. Command/manual re-review of an unchanged
+unbounded bill. Metered plans (Starter / Verify Lite / Verify) continue past the
+included allotment only while the workspace prepaid wallet has balance; Pro and
+Enterprise have no prepaid overage and stop at the hard monthly total. A real
+team should never come close to the hard ceiling; it's a backstop, not a
+constraint. Command/manual re-review of an unchanged
 commit also has a 2-minute cooldown for the same reason — a fresh push is never
 affected.
 
 Dual-model and multi-model tracks use different review mixes; Verify Lite and
 Verify default to **two discovery passes** (general + deep-dive). Breadth and
 removed-behavior lenses are conditional (large/`@orvex deep`, or
-deletes/renames) so ordinary PRs stay on the 2-pass path — see
-`packages/review/src/pass-budget.ts`. Free/Starter/Pro
-run two discovery passes (MiniMax + DeepSeek v4 Flash) plus Flash verify —
-no sandboxed investigate. On high-risk diffs (auth/billing/cleanup/contracts),
-both tracks also get a best-effort Flash **risk-hunt** lens — additive recall
-only; findings still go through the same verifier (`ORVEX_RISK_HUNT=0` disables).
+Verify / Enterprise / multi-model always run four discovery passes (Luna/Codex
++ Flash deep-dive + Flash removed-behavior + MiniMax breadth) then Flash verify
+— see `packages/review/src/pass-budget.ts`. Free/Starter/Pro stay on two
+discovery passes (MiniMax + DeepSeek v4 Flash) plus Flash verify — no sandboxed
+investigate. On high-risk diffs (auth/billing/cleanup/contracts), both tracks
+also get a best-effort Flash **risk-hunt** lens — additive recall only; findings
+still go through the same verifier (`ORVEX_RISK_HUNT=0` disables).
 Verify* plans also get a sandboxed **investigate**
 pass when Codex CLI is not already agentic: DeepSeek v4 Flash with read-only
 tools (`list_dir` / `read_file` / `grep`) over a temp checkout — skipped when

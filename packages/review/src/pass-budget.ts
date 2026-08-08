@@ -94,13 +94,15 @@ export type PassAngle = {
 /**
  * Build the discovery lens list for this review.
  *
- * Default Verify path aims at ~2 discovery passes (general + deep-dive).
- * Breadth and removed-behavior are conditional so ordinary PRs stop paying for
- * overlapping lenses that mostly rediscover.
+ * Multi-model / Verify / Enterprise always run the full four discovery passes
+ * (Luna/Codex + Flash deep-dive + Flash removed-behavior + MiniMax breadth),
+ * then Flash verify when there are candidates. That is the paid precision track.
  *
- * Env:
- *   ORVEX_BREADTH_ON=deep-or-large|always|never  (default deep-or-large)
- *   ORVEX_REMOVED_BEHAVIOR=deletes-or-renames|always|never  (default deletes-or-renames)
+ * Dual-model (Free/Starter/Pro) stays at general + deep-dive only.
+ *
+ * Env kill-switches (optional):
+ *   ORVEX_BREADTH_ON=always|deep-or-large|never  (multi-model default: always)
+ *   ORVEX_REMOVED_BEHAVIOR=always|deletes-or-renames|never  (multi-model default: always)
  */
 export function buildReviewPassAngles(opts: {
   modelTier?: string;
@@ -115,8 +117,17 @@ export function buildReviewPassAngles(opts: {
 }): PassAngle[] {
   const tier = opts.modelTier;
   const fourthTier = tier === 'multi-model' || tier === 'codex-hybrid';
-  const breadthMode = (process.env.ORVEX_BREADTH_ON ?? 'deep-or-large').trim().toLowerCase();
-  const removedMode = (process.env.ORVEX_REMOVED_BEHAVIOR ?? 'deletes-or-renames').trim().toLowerCase();
+  // Paid multi-model track: full 4 discovery passes unless explicitly disabled.
+  const breadthMode = (
+    process.env.ORVEX_BREADTH_ON ?? (fourthTier ? 'always' : 'deep-or-large')
+  )
+    .trim()
+    .toLowerCase();
+  const removedMode = (
+    process.env.ORVEX_REMOVED_BEHAVIOR ?? (fourthTier ? 'always' : 'deletes-or-renames')
+  )
+    .trim()
+    .toLowerCase();
   const large = isLargePr(opts.files);
   const wantRemoved =
     fourthTier

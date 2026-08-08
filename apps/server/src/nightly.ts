@@ -38,6 +38,8 @@ function boundedEnvInt(name: string, fallback: number, min: number, max: number)
 
 const LOOKBACK_DAYS = boundedEnvInt('ORVEX_NIGHTLY_LOOKBACK_DAYS', 1, 1, 30);
 const SCAN_HOUR = boundedEnvInt('ORVEX_NIGHTLY_HOUR', 3, 0, 23); // UTC hour to run
+/** Per-tenant daily ceiling on nightly scan reservations (unbounded repos → cost). */
+const MAX_SCANS_PER_TENANT_DAY = boundedEnvInt('ORVEX_NIGHTLY_MAX_SCANS_PER_TENANT', 25, 1, 500);
 
 export function startNightlyScheduler(queue: ReviewQueue): () => void {
   if (process.env.ORVEX_NIGHTLY_SCANS !== '1') {
@@ -80,7 +82,17 @@ export async function enqueueNightlyScans(queue: ReviewQueue): Promise<number> {
   const config = loadWorkerConfig();
   const targets = config.store.listScanTargets().filter((t) => planFeatures(t.plan).nightlyScans);
   const scanDay = new Date().toISOString().slice(0, 10);
+  const perTenant = new Map<string, number>();
+  let enqueued = 0;
   for (const t of targets) {
+    const n = perTenant.get(t.tenantId) ?? 0;
+    if (n >= MAX_SCANS_PER_TENANT_DAY) {
+      console.warn(
+        `[nightly] tenant ${t.tenantId} hit daily scan cap (${MAX_SCANS_PER_TENANT_DAY}) — skipping ${t.owner}/${t.name}`,
+      );
+      continue;
+    }
+    perTenant.set(t.tenantId, n + 1);
     await queue.enqueue({
       kind: 'scan',
       action: 'command', // scanDay makes one enqueue idempotent per repo/day
@@ -93,9 +105,10 @@ export async function enqueueNightlyScans(queue: ReviewQueue): Promise<number> {
       scanDay,
       enqueuedAt: new Date().toISOString(),
     });
+    enqueued++;
   }
-  if (targets.length > 0) console.log(`[nightly] enqueued ${targets.length} scan(s)`);
-  return targets.length;
+  if (enqueued > 0) console.log(`[nightly] enqueued ${enqueued} scan(s)`);
+  return enqueued;
 }
 
 /** Review a repo's recent default-branch commits and file findings as an issue. */
@@ -121,7 +134,11 @@ export async function processScanJob(
     pr: 0,
     headSha: `nightly:${job.scanDay ?? new Date().toISOString().slice(0, 10)}`,
     action: 'scan:nightly',
-  }, () => accountLimitReason(config.store, owner, plan));
+  }, () =>
+    // Scans must not consume PR included/prepaid quota, but they MUST reserve
+    // COGS headroom (and pass tenantId for any future prepaid hooks).
+    accountLimitReason(config.store, owner, plan, 1, 0, { tenantId, cogsOnly: true }),
+  );
   if (!reserved.ok) {
     console.warn(`[nightly] ${owner}/${repo}: ${reserved.reason} — skipping`);
     return;

@@ -43,11 +43,11 @@ test('public marketing explains every plan and does not disclose review provider
   for (const expected of [
     '10 lifetime reviews · 2/hour',
     '100/month · 5/hour',
-    'unlimited monthly · 10/hour',
+    '500/month · 10/hour',
     '50/month · 5/hour',
     '120/month · 10/hour',
-    'Then $0.50 per review',
-    'Then $0.75 per review',
+    'Hard monthly total',
+    'Then prepaid overage',
     'An <span class="mono">@orvex deep</span> review uses two units',
     'Only a workspace owner can start or change billing',
   ]) {

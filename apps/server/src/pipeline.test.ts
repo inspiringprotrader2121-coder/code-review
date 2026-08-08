@@ -458,7 +458,7 @@ test('a successful deep extra cannot satisfy a failed required lens', () => {
   assert.deepEqual(failed, [0]);
 });
 
-test('buildReviewPassAngles: ordinary Verify PRs skip removed-behavior and breadth', (t) => {
+test('buildReviewPassAngles: multi-model always runs the full four-pass track', (t) => {
   t.after(() => {
     delete process.env.ORVEX_BREADTH_ON;
     delete process.env.ORVEX_REMOVED_BEHAVIOR;
@@ -470,34 +470,30 @@ test('buildReviewPassAngles: ordinary Verify PRs skip removed-behavior and bread
   delete process.env.ORVEX_LARGE_PR_FILES;
   delete process.env.ORVEX_LARGE_PR_PATCH_CHARS;
   const small = [{ filename: 'a.ts', patch: '+x\n', status: 'modified' }];
+  // Verify/Enterprise multi-model: full track even on tiny PRs.
   assert.deepEqual(
     buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag),
-    ['general', 'deep-dive'],
+    ['general', 'deep-dive', 'removed-behavior/callers', 'perf/completeness/api'],
   );
+  // Dual-model never gets the fourth-tier lenses.
   const withDelete = [
     ...small,
     { filename: 'gone.ts', patch: '-old\n', status: 'removed' },
   ];
   assert.deepEqual(
-    buildReviewPassAngles({ modelTier: 'multi-model', files: withDelete }).map((a) => a.tag),
-    ['general', 'deep-dive', 'removed-behavior/callers'],
-  );
-  process.env.ORVEX_LARGE_PR_FILES = '1';
-  assert.deepEqual(
-    buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag),
-    ['general', 'deep-dive', 'perf/completeness/api'],
-  );
-  // Dual-model never gets the fourth-tier removed-behavior lens, even with deletes.
-  delete process.env.ORVEX_LARGE_PR_FILES;
-  assert.deepEqual(
     buildReviewPassAngles({ modelTier: 'dual-model', files: withDelete }).map((a) => a.tag),
     ['general', 'deep-dive'],
   );
-  process.env.ORVEX_BREADTH_ON = 'always';
-  process.env.ORVEX_REMOVED_BEHAVIOR = 'always';
+  // Explicit opt-out still allows the old conditional behavior.
+  process.env.ORVEX_BREADTH_ON = 'deep-or-large';
+  process.env.ORVEX_REMOVED_BEHAVIOR = 'deletes-or-renames';
   assert.deepEqual(
     buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag),
-    ['general', 'deep-dive', 'removed-behavior/callers', 'perf/completeness/api'],
+    ['general', 'deep-dive'],
+  );
+  assert.deepEqual(
+    buildReviewPassAngles({ modelTier: 'multi-model', files: withDelete }).map((a) => a.tag),
+    ['general', 'deep-dive', 'removed-behavior/callers'],
   );
 });
 

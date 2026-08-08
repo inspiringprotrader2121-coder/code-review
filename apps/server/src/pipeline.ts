@@ -80,7 +80,6 @@ import {
   type StoredFinding,
 } from '@orvex-review/store';
 import { planFeatures } from '@orvex-review/tenants';
-import { reportStripeReviewOverage } from './routes/billing.js';
 import { runtimeVerify, formatRuntimeEvidence } from './runtime-verify.js';
 import { formatLimitBlockedComment, loadAccountQuotaStatus, monthlyCogsCapUsd } from './quota-status.js';
 import { noteActiveCheckoutDir } from './active-reviews.js';
@@ -581,7 +580,7 @@ export function loadWorkerConfig(): WorkerConfig {
         // OpenAI-compatible gateways (OpenRouter etc. — verified live: streams
         // and accepts reasoning_effort on /chat/completions).
         api: process.env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
-        reasoningEffort: process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'xhigh',
+        reasoningEffort: process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'max',
       }
     : null;
 
@@ -893,42 +892,102 @@ export function accountLimitReason(
   plan: ReturnType<typeof planFeatures>,
   pendingReservations = 1,
   excludedRunningReservations = 0,
-): 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'free_tier_capped' | 'cost_capped' | null {
-  // GLOBAL free-tier circuit-breaker: a hard ceiling on total free reviews per
-  // rolling 24h across ALL accounts. This is the abuse BACKSTOP — it bounds the
-  // dollar damage of trial-farming no matter how a farmer evades the per-account
-  // (10/owner) and per-IP (5 accounts/IP/day) gates. Trips well above any real
-  // free-tier day; when it fires, ops gets a loud log and can raise it.
-  if (plan.trialReviewLimit !== null) {
-    const globalToday = store.countGlobalFreeTierReviewsSince(3_600_000 * 24);
-    if (globalToday >= GLOBAL_FREE_TIER_DAILY_CAP) {
-      console.error(
-        `[abuse] FREE-TIER DAILY CAP HIT: ${globalToday} free reviews in 24h (cap ${GLOBAL_FREE_TIER_DAILY_CAP}). Pausing free reviews — likely trial-farming. Raise ORVEX_FREE_TIER_DAILY_CAP if this is genuine growth.`,
-      );
-      return 'free_tier_capped';
+  opts: {
+    tenantId?: string;
+    deep?: boolean;
+    /** Nightly/scan/cmd: enforce COGS (+ optional concurrency) only — not PR included/prepaid. */
+    cogsOnly?: boolean;
+  } = {},
+): 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'free_tier_capped' | 'cost_capped' | 'concurrency_limited' | 'insufficient_credits' | null {
+  if (!opts.cogsOnly) {
+    // GLOBAL free-tier circuit-breaker: a hard ceiling on total free reviews per
+    // rolling 24h across ALL accounts. This is the abuse BACKSTOP — it bounds the
+    // dollar damage of trial-farming no matter how a farmer evades the per-account
+    // (10/owner) and per-IP (5 accounts/IP/day) gates. Trips well above any real
+    // free-tier day; when it fires, ops gets a loud log and can raise it.
+    if (plan.trialReviewLimit !== null) {
+      const globalToday = store.countGlobalFreeTierReviewsSince(3_600_000 * 24);
+      if (globalToday >= GLOBAL_FREE_TIER_DAILY_CAP) {
+        console.error(
+          `[abuse] FREE-TIER DAILY CAP HIT: ${globalToday} free reviews in 24h (cap ${GLOBAL_FREE_TIER_DAILY_CAP}). Pausing free reviews — likely trial-farming. Raise ORVEX_FREE_TIER_DAILY_CAP if this is genuine growth.`,
+        );
+        return 'free_tier_capped';
+      }
+    }
+    // Prefer trial_exhausted over hourly when the lifetime trial is spent — otherwise a
+    // free account at 10/10 with 2/2 hourly gets "wait ~Xh" instead of "upgrade".
+    if (plan.trialReviewLimit !== null && store.countAccountReviews(owner) >= plan.trialReviewLimit) {
+      return 'trial_exhausted';
+    }
+    if (plan.maxConcurrentReviews !== null) {
+      const running = store.countRunningAccountReviews(owner);
+      const projected =
+        Math.max(0, running - Math.max(0, excludedRunningReservations)) + Math.max(0, pendingReservations);
+      if (projected > plan.maxConcurrentReviews) {
+        return 'concurrency_limited';
+      }
+    }
+    if (
+      plan.reviewsPerHour !== null &&
+      store.countAccountReviews(owner, { sinceMs: 3_600_000 }) >= plan.reviewsPerHour
+    ) {
+      return 'rate_limited';
+    }
+
+    // Paid included / hard / prepaid: tenant-scoped UNITS (deep=2) so another
+    // workspace under the same GitHub owner cannot drain this tenant's wallet.
+    // Free trial stays owner-scoped (anti-farm).
+    const useTenantUnits =
+      Boolean(opts.tenantId) &&
+      plan.trialReviewLimit === null &&
+      (plan.includedReviewsPerMonth !== null || plan.reviewsPerMonth !== null);
+    const used = useTenantUnits
+      ? store.countTenantReviewUnits(opts.tenantId!, { sinceMs: MS_PER_30_DAYS })
+      : store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS });
+    const pendingUnits = Math.max(0, pendingReservations) * (opts.deep ? 2 : 1);
+    // Absolute hard ceiling (safety) — even prepaid overage cannot exceed this.
+    // Compare in units so deep reviews cannot sneak past a count-based ceiling.
+    if (
+      plan.reviewsPerMonth !== null &&
+      used + (pendingReservations > 0 ? pendingUnits : 0) > plan.reviewsPerMonth
+    ) {
+      return 'monthly_limit';
+    }
+    // Included allotment exhausted: prepaid wallet required for overage plans.
+    // Plans without overageCentsPerReview hard-stop at included (= reviewsPerMonth).
+    const included = plan.includedReviewsPerMonth;
+    if (
+      included !== null &&
+      plan.overageCentsPerReview !== null &&
+      pendingReservations > 0
+    ) {
+      const overageUnits = Math.max(0, used + pendingUnits - included);
+      if (overageUnits > 0) {
+        const need = plan.overageCentsPerReview * Math.min(pendingUnits, overageUnits);
+        const balance = opts.tenantId ? store.getCreditBalanceCents(opts.tenantId) : 0;
+        if (balance < need) return 'insufficient_credits';
+      }
+    } else if (
+      included !== null &&
+      plan.overageCentsPerReview === null &&
+      used + (pendingReservations > 0 ? pendingUnits : 0) > included
+    ) {
+      return 'monthly_limit';
+    }
+  } else if (plan.maxConcurrentReviews !== null) {
+    // cogsOnly still respects concurrency when the plan defines it.
+    const running = store.countRunningAccountReviews(owner);
+    const projected =
+      Math.max(0, running - Math.max(0, excludedRunningReservations)) + Math.max(0, pendingReservations);
+    if (projected > plan.maxConcurrentReviews) {
+      return 'concurrency_limited';
     }
   }
-  // Prefer trial_exhausted over hourly when the lifetime trial is spent — otherwise a
-  // free account at 10/10 with 2/2 hourly gets "wait ~Xh" instead of "upgrade".
-  if (plan.trialReviewLimit !== null && store.countAccountReviews(owner) >= plan.trialReviewLimit) {
-    return 'trial_exhausted';
-  }
-  if (
-    plan.reviewsPerHour !== null &&
-    store.countAccountReviews(owner, { sinceMs: 3_600_000 }) >= plan.reviewsPerHour
-  ) {
-    return 'rate_limited';
-  }
-  if (
-    plan.reviewsPerMonth !== null &&
-    plan.overageCentsPerReview === null &&
-    store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS }) >= plan.reviewsPerMonth
-  ) {
-    return 'monthly_limit';
-  }
+
   const costLimit = monthlyCogsCapUsd(plan.id);
   const accountCost = costLimit !== null ? store.sumAccountCost(owner, MS_PER_30_DAYS).costUsd : 0;
-  const runningReviews = costLimit !== null ? store.countRunningAccountReviews(owner, MS_PER_30_DAYS) : 0;
+  // Include scan/cmd in-flight so nightly + interactive cannot under-reserve COGS.
+  const runningReviews = costLimit !== null ? store.countRunningCogsReservations(owner, MS_PER_30_DAYS) : 0;
   const reservation = costLimit !== null ? cogsReservationUsd() : 0;
   const projectedReservations =
     Math.max(0, runningReviews - Math.max(0, excludedRunningReservations)) + Math.max(0, pendingReservations);
@@ -941,6 +1000,27 @@ export function accountLimitReason(
     return 'cost_capped';
   }
   return null;
+}
+
+/** USD cents to debit from the prepaid wallet for a review past the included quota. */
+export function prepaidOverageDebitCents(
+  store: WorkerConfig['store'],
+  owner: string,
+  plan: ReturnType<typeof planFeatures>,
+  deep = false,
+  tenantId?: string,
+): number {
+  if (plan.includedReviewsPerMonth === null || plan.overageCentsPerReview === null) return 0;
+  const useTenantUnits = Boolean(tenantId) && plan.trialReviewLimit === null;
+  const used = useTenantUnits
+    ? store.countTenantReviewUnits(tenantId!, { sinceMs: MS_PER_30_DAYS })
+    : store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS });
+  const units = deep ? 2 : 1;
+  // Only the portion past the included allotment is prepaid overage. A deep
+  // review that straddles the included boundary pays for the overage units only.
+  const overageUnits = Math.max(0, used + units - plan.includedReviewsPerMonth);
+  if (overageUnits <= 0) return 0;
+  return plan.overageCentsPerReview * Math.min(units, overageUnits);
 }
 
 function cogsReservationUsd(): number {
@@ -978,7 +1058,7 @@ async function postLimitNudge(
   config: WorkerConfig,
   job: ReviewJobPayload,
   plan: ReturnType<typeof planFeatures>,
-  reason: 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'cost_capped',
+  reason: 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'cost_capped' | 'concurrency_limited' | 'insufficient_credits',
 ): Promise<void> {
   // Skip if we already recorded (and nudged for) this reason on this PR recently.
   // Count includes the skip row just written by the caller — >1 means a prior skip.
@@ -1122,30 +1202,61 @@ export async function processReviewJob(
   let runId: string;
   if (resumed === 'resumed') {
     runId = job.runId!;
-    if (accountLimitReason(config.store, job.owner, plan, 0, 1) === 'cost_capped') {
+    if (
+      accountLimitReason(config.store, job.owner, plan, 0, 1, {
+        tenantId: job.tenantId,
+        deep: Boolean(job.deep),
+      }) === 'cost_capped'
+    ) {
       config.store.completeReviewRun(runId, {
         status: 'skipped',
         skipReason: 'cost_capped',
         durationMs: Date.now() - startedAt,
       });
+      config.store.refundOverageCredits(runId, 'refund: cost_capped on resume');
       await postLimitNudge(config, job, plan, 'cost_capped');
       return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: 'cost_capped' };
     }
   } else if (job.runId && job.resumedAfterRestart) {
     // Shutdown requeued this job with a runId that should reopen via
     // resumeReviewRun. Creating a second reservation would double-charge
-    // trial/hourly quota — abort instead.
+    // trial/hourly quota — abort instead. Refund any prepaid debit held on
+    // the orphaned run so the wallet is not stranded.
     console.warn(
       `[worker] resume unavailable for interrupted run ${job.runId} on ${job.owner}/${job.repo}#${job.pr} — skipping without new reservation`,
     );
+    config.store.refundOverageCredits(job.runId, 'refund: resume_unavailable');
+    config.store.completeReviewRun(job.runId, {
+      status: 'skipped',
+      skipReason: 'resume_unavailable',
+      durationMs: Date.now() - startedAt,
+    });
     return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: 'resume_unavailable' };
   } else {
     const reserved = config.store.tryReserveReviewRun(
-      { ...runBase, deep: Boolean(job.deep), freeTier: isFreeTier },
+      {
+        ...runBase,
+        deep: Boolean(job.deep),
+        freeTier: isFreeTier,
+        // Debit amount is computed INSIDE the IMMEDIATE txn after limitReason
+        // so two workers cannot both see "still included" and skip payment.
+        computeOverageDebit: () =>
+          prepaidOverageDebitCents(
+            config.store,
+            job.owner,
+            plan,
+            Boolean(job.deep),
+            job.tenantId,
+          ),
+      },
       // Even unlimited plans need the monthly COGS safety ceiling. The limit
       // helper returns null for plans with no applicable quota, so every plan
       // can use the same atomic reservation path.
-      () => accountLimitReason(config.store, job.owner, plan, 1),
+      () =>
+        accountLimitReason(config.store, job.owner, plan, 1, 0, {
+          tenantId: job.tenantId,
+          deep: Boolean(job.deep),
+        }),
     );
     if (!reserved.ok) {
       // The global cap is an anti-abuse pause, not a per-user limit — don't nudge
@@ -1155,7 +1266,13 @@ export async function processReviewJob(
           config,
           job,
           plan,
-          reserved.reason as 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'cost_capped',
+          reserved.reason as
+            | 'rate_limited'
+            | 'monthly_limit'
+            | 'trial_exhausted'
+            | 'cost_capped'
+            | 'concurrency_limited'
+            | 'insufficient_credits',
         );
       }
       return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: reserved.reason };
@@ -1172,6 +1289,7 @@ export async function processReviewJob(
     const consumedProviderBudget =
       Boolean(result.skipReason) &&
       Boolean((result.inputTokens ?? 0) > 0 || (result.outputTokens ?? 0) > 0 || (result.costUsd ?? 0) > 0);
+    const deliveredDeep = Boolean(job.deep) && result.deepLensesRan === true;
     config.store.completeReviewRun(runId, {
       status: result.skipReason && !consumedProviderBudget ? 'skipped' : result.skipReason ? 'failed' : 'completed',
       skipReason: result.skipReason,
@@ -1186,32 +1304,40 @@ export async function processReviewJob(
       newFindings: result.newFindings,
       // Correct the row's `deep` flag to what was actually DELIVERED — the
       // scorecard and completedReviewUnitsSince both read this column.
-      deep: Boolean(job.deep) && result.deepLensesRan === true,
+      deep: deliveredDeep,
     });
-    // Metered-overage plans (have an included quota + per-review overage price).
-    // 'review-plus' (unlimited) and 'enterprise'/'free' are excluded — no overage.
-    if (!result.skipReason && (plan.id === 'review' || plan.id === 'verify-lite' || plan.id === 'verify')) {
-      try {
-        // Charge the 2x deep rate ONLY if an extra deep lens actually completed.
-        // They are best-effort, so an all-failed deep run delivers a standard
-        // review — billing double for that is charging for undelivered work.
-        const billedDeep = Boolean(job.deep) && result.deepLensesRan === true;
-        if (job.deep && !billedDeep) {
-          console.warn(`[billing] run ${runId}: deep requested but no extra lens completed — billing at standard rate`);
-        }
-        await reportStripeReviewOverage({ store: config.store, tenantId: job.tenantId, plan: plan.id, runId, deep: billedDeep });
-      } catch (err) {
-        console.error(`[billing] failed to report Stripe overage for run ${runId}:`, err);
-      }
+    // Prepaid overage: refund the wallet debit when the review never spent
+    // provider budget. Completed / failed-with-spend keeps the debit.
+    if (result.skipReason && !consumedProviderBudget) {
+      config.store.refundOverageCredits(runId, `refund: ${result.skipReason}`);
+    } else if (
+      Boolean(job.deep) &&
+      !deliveredDeep &&
+      plan.overageCentsPerReview !== null &&
+      config.store.overageDebitNetCents(runId) > 0
+    ) {
+      // Reserved 2× for deep but lenses did not run — keep at most 1×.
+      config.store.reconcileOverageDebit(
+        runId,
+        plan.overageCentsPerReview,
+        'reconcile: deep lenses did not run',
+      );
     }
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // If we never recorded provider usage on this run, refund the prepaid hold.
+    const spent = config.store
+      .listReviewRunUsage(runId)
+      .some((u) => (u.inputTokens ?? 0) > 0 || (u.outputTokens ?? 0) > 0 || (u.costUsd ?? 0) > 0);
     config.store.completeReviewRun(runId, {
       status: 'failed',
       error: message,
       durationMs: Date.now() - startedAt,
     });
+    if (!spent) {
+      config.store.refundOverageCredits(runId, `refund: throw before spend (${message.slice(0, 80)})`);
+    }
     if (
       config.store.countRecentFailedRuns({
         installationId: job.installationId,
@@ -1559,10 +1685,10 @@ async function executeReview(
     );
     const passCtx = { ...baseCtx, others: passOthers };
 
-    // Conditional discovery lenses (see buildReviewPassAngles): ordinary Verify
-    // PRs get general + deep-dive; removed-behavior and breadth only when the
-    // diff warrants them (or `@orvex deep` / large PR). Cap by plan.reviewPasses
-    // so dual-model still cannot schedule more than two discovery calls.
+    // Multi-model / Verify / Enterprise: full four discovery passes (Luna +
+    // Flash deep-dive + Flash removed-behavior + MiniMax). Dual-model stays at
+    // general + deep-dive. Cap by plan.reviewPasses so dual-model cannot
+    // schedule more than two discovery calls.
     const PASS_ANGLES = buildReviewPassAngles({
       modelTier: plan.modelTier as ModelTier | undefined,
       deep: Boolean(job.deep),
