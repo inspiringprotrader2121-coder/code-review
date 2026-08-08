@@ -87,6 +87,9 @@ test(
     dequeued!.runId = 'run-after-reserve';
     await queue.persistJob!(dequeued!);
 
+    // Lease CAS must still succeed after persistJob rewrites the claim payload.
+    await assert.doesNotReject(() => queue.renewLease!(dequeued!));
+
     const persistedRaw = JSON.stringify(dequeued);
     // Age past PROCESSING_RECOVERY_GRACE_MS and drop the live lease so recovery
     // requeues the persisted payload (including runId).
