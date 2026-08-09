@@ -73,6 +73,95 @@ test('migration ledger is unchanged on repeat boot', () => {
   }
 });
 
+test('lineage migration preserves legacy usage while clearing unprovable links', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-migrations-'));
+  try {
+    const dbPath = path.join(directory, 'store.db');
+    const legacy = new AppDatabase(dbPath, 'legacy-worker');
+    const tenant = legacy.createTenant('legacy-lineage');
+    const runId = legacy.startReviewRun({
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'legacy-lineage',
+      repo: 'api',
+      pr: 1,
+      headSha: 'sha',
+      action: 'manual',
+    });
+    legacy.startReviewRunAttempt({
+      id: 'legacy-child',
+      runId,
+      tenantId: tenant.id,
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      tier: 'deepseek-flash',
+      transport: 'chat',
+      retryIndex: 0,
+      keyIndex: 0,
+      startedAt: new Date().toISOString(),
+    });
+    const otherRunId = legacy.startReviewRun({
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'legacy-lineage',
+      repo: 'api',
+      pr: 2,
+      headSha: 'other-sha',
+      action: 'manual',
+    });
+    legacy.startReviewRunAttempt({
+      id: 'other-run-parent',
+      runId: otherRunId,
+      tenantId: tenant.id,
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      tier: 'deepseek-flash',
+      transport: 'chat',
+      retryIndex: 0,
+      keyIndex: 0,
+      startedAt: new Date().toISOString(),
+    });
+    const usage = legacy.recordReviewRunUsage({
+      runId,
+      tenantId: tenant.id,
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      tier: 'deepseek-flash',
+      inputTokens: 10,
+      outputTokens: 5,
+      inputRatePerM: 1,
+      outputRatePerM: 1,
+      costUsd: 0.000015,
+      tokenSource: 'provider',
+    });
+    assert.ok(usage);
+    const raw = (legacy as unknown as {
+      db: { exec: (sql: string) => void; prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
+    }).db;
+    raw.exec(`
+DROP TRIGGER trg_review_attempt_parent_same_run_insert;
+DROP TRIGGER trg_review_attempt_parent_same_run_update;
+DROP TRIGGER trg_review_usage_attempt_same_run_insert;
+DROP TRIGGER trg_review_usage_attempt_same_run_update;
+`);
+    raw.prepare(`UPDATE review_run_usage SET attempt_id = 'missing-legacy-attempt' WHERE id = ?`).run(usage.id);
+    raw.prepare(`UPDATE review_run_attempts SET parent_attempt_id = 'other-run-parent' WHERE id = 'legacy-child'`).run();
+    raw.prepare(`DELETE FROM orvex_schema_migrations WHERE version = 14`).run();
+    legacy.close();
+
+    const upgraded = new AppDatabase(dbPath, 'upgraded-worker');
+    const retainedUsage = upgraded.listReviewRunUsage(runId);
+    assert.equal(retainedUsage.length, 1);
+    assert.equal(retainedUsage[0]?.costUsd, 0.000015);
+    assert.equal(retainedUsage[0]?.attemptId, undefined);
+    assert.equal(upgraded.listReviewRunAttempts(runId)[0]?.parentAttemptId, undefined);
+    assert.equal(migrationRows(upgraded).length, 14);
+    upgraded.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('a populated pre-ledger database is upgraded without changing its data', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-migrations-'));
   try {

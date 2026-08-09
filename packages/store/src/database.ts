@@ -533,6 +533,11 @@ CREATE TABLE IF NOT EXISTS orvex_schema_migrations (
     for (let index = applied.length; index < migrations.length; index += 1) {
       const migration = migrations[index]!;
       this.db.transaction(() => {
+        // Older binaries recorded opaque usage attempt IDs before durable
+        // attempt rows existed. Preserve their billing data, but do not claim
+        // lineage that cannot be proven. This compatibility repair is atomic
+        // with the first application of the immutable lineage migration.
+        if (migration.version === 14) this.repairLegacyAttemptLineageReferences();
         migration.apply();
         this.db
           .prepare(
@@ -542,6 +547,30 @@ CREATE TABLE IF NOT EXISTS orvex_schema_migrations (
           .run(migration.version, migration.name, checksumFor(migration), new Date().toISOString());
       })();
     }
+  }
+
+  private repairLegacyAttemptLineageReferences(): void {
+    this.db.exec(`
+UPDATE review_run_usage
+SET attempt_id = NULL
+WHERE attempt_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run_attempts attempt
+    WHERE attempt.id = review_run_usage.attempt_id
+      AND attempt.run_id = review_run_usage.run_id
+      AND attempt.tenant_id = review_run_usage.tenant_id
+  );
+
+UPDATE review_run_attempts
+SET parent_attempt_id = NULL
+WHERE parent_attempt_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM review_run_attempts parent
+    WHERE parent.id = review_run_attempts.parent_attempt_id
+      AND parent.run_id = review_run_attempts.run_id
+      AND parent.tenant_id = review_run_attempts.tenant_id
+  );
+`);
   }
 
   private migrateReviewAttemptLineageIntegrity(): void {
