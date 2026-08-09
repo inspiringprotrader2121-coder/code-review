@@ -15,12 +15,14 @@ test('health is live-only while readiness checks both database and queue', async
     'APP_URL',
     'ORVEX_REQUIRE_LOGIN',
     'ORVEX_CODEX_STATUS_FILE',
+    'ORVEX_DEPLOY_DRAIN_PATH',
   ]);
   process.env.STORE_PATH = path.join(dir, 'app.db');
   process.env.PLATFORM_SECRET = 'test-platform-secret';
   process.env.APP_URL = 'https://useorvex.test';
   process.env.ORVEX_REQUIRE_LOGIN = '1';
   process.env.ORVEX_CODEX_STATUS_FILE = path.join(dir, 'missing-codex-status');
+  process.env.ORVEX_DEPLOY_DRAIN_PATH = path.join(dir, 'deploy-drain');
   t.after(() => {
     restoreEnv(previous);
     rmSync(dir, { recursive: true, force: true });
