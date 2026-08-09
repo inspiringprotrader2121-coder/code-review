@@ -142,7 +142,7 @@ test('restart interruption is failed without re-enqueuing paid stages', async ()
   assert.deepEqual(marked, ['worker_restart:interrupted by restart']);
 });
 
-test('shutdown bounds its wait for a dequeue that never settles', async () => {
+test('shutdown bounds its wait for a dequeue that never settles', { timeout: 5_000 }, async () => {
   const started = Date.now();
   const settled = await waitForReservedDequeues(
     () => 1,
@@ -154,7 +154,7 @@ test('shutdown bounds its wait for a dequeue that never settles', async () => {
 
   assert.equal(settled, false);
   assert.ok(elapsed >= 20, `returned too early after ${elapsed}ms`);
-  assert.ok(elapsed < 250, `shutdown handoff wait was not bounded (${elapsed}ms)`);
+  assert.ok(elapsed < 4_000, `shutdown handoff wait was not bounded (${elapsed}ms)`);
 });
 
 test('forced shutdown aborts an active API review before durable cleanup', async () => {

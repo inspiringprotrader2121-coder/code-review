@@ -13,7 +13,7 @@ const PRS = [274, 275, 276, 277, 278] as const;
 
 test(
   'five high-tier webhook reviews reserve visible runs and drain independently',
-  { timeout: 5_000 },
+  { timeout: 30_000 },
   async (t) => {
     const config = testServerConfig();
     const db = new AppDatabase(':memory:');

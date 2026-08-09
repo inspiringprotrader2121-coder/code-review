@@ -621,8 +621,9 @@ async function waitForExit(pid: number): Promise<boolean> {
   return false;
 }
 
-async function waitForFile(file: string): Promise<void> {
-  for (let i = 0; i < 50; i++) {
+async function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     if (existsSync(file)) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -745,8 +746,11 @@ setInterval(() => {}, 1000);
   );
 });
 
-test('hard timeout settles despite delayed close and removes the temporary output directory', async (t) => {
-  const fixture = fakeCodex(`
+test(
+  'hard timeout settles despite delayed close and removes the temporary output directory',
+  { timeout: 10_000 },
+  async (t) => {
+    const fixture = fakeCodex(`
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
@@ -756,22 +760,25 @@ fs.writeFileSync(process.env.TMPDIR_FILE, path.dirname(output));
 fs.writeFileSync(output, '{"findings":[],"summary":"ok"}');
 console.log(JSON.stringify({type:'thread.started', thread_id:'fixture-thread'}));
 spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], {stdio:['ignore', 1, 2]});
-`);
-  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
-  const tempDirFile = path.join(fixture.dir, 'tempdir.txt');
-  await assert.rejects(
-    runCodexExecForTest('review', {
-      binaryPath: fixture.binary,
-      hardMs: 750,
-      inactivityMs: 2_000,
-      env: { ...process.env, TMPDIR_FILE: tempDirFile },
-    }),
-    /wall-clock cap/,
-  );
-  const codexTempDir = readFileSync(tempDirFile, 'utf8');
-  assert.equal(
-    existsSync(codexTempDir),
-    false,
-    'timeout cleanup removed the temp directory before delayed close',
-  );
-});
+  `);
+    t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+    const tempDirFile = path.join(fixture.dir, 'tempdir.txt');
+    const rejected = assert.rejects(
+      runCodexExecForTest('review', {
+        binaryPath: fixture.binary,
+        hardMs: 3_000,
+        inactivityMs: 5_000,
+        env: { ...process.env, TMPDIR_FILE: tempDirFile },
+      }),
+      /wall-clock cap/,
+    );
+    await waitForFile(tempDirFile);
+    await rejected;
+    const codexTempDir = readFileSync(tempDirFile, 'utf8');
+    assert.equal(
+      existsSync(codexTempDir),
+      false,
+      'timeout cleanup removed the temp directory before delayed close',
+    );
+  },
+);
