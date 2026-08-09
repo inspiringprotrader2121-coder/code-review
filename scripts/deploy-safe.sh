@@ -14,6 +14,7 @@ EXCLUDES=(
   --exclude 'node_modules/'
   --exclude 'dist/'
   --exclude 'build/'
+  --exclude '*.tsbuildinfo'
   --exclude '*.pem'
   --exclude '*.key'
   --exclude '*.db'
@@ -287,7 +288,7 @@ rsync -a --delete \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' \
-  --exclude 'build/' --exclude '*.pem' --exclude '*.key' \
+  --exclude 'build/' --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' \
   --exclude '*.db' --exclude '*.db-*' --exclude '*.sqlite' --exclude '*.sqlite3' \
   "$live/" "$stage/"
 # Remove each selected source from the isolated stage before uploading it. This
@@ -437,7 +438,7 @@ rsync -a --delete \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
-  --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
+  --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$live/" "$backup/"
 REMOTE_BACKUP
   then
@@ -463,7 +464,7 @@ rsync -a --delete-delay \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
-  --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
+  --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$stage/" "$live/"
 mv "$live/node_modules" "$backup/node_modules"
 mv "$stage/node_modules" "$live/node_modules"
@@ -520,7 +521,7 @@ rsync -a --delete-delay \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
-  --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
+  --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$backup/" "$live/"
 if [[ -d "$live/node_modules" ]]; then rm -rf "$live/node_modules.failed"; mv "$live/node_modules" "$live/node_modules.failed"; fi
 if [[ -d "$backup/node_modules" ]]; then mv "$backup/node_modules" "$live/node_modules"; fi
