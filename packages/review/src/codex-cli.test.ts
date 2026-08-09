@@ -113,6 +113,7 @@ test('lean Codex prompt omits changedContents when checkout exists', (t) => {
   assert.equal(lean.includes('RELATED_SHOULD_NOT_APPEAR'), false);
   assert.match(lean, /INVESTIGATE the repo/);
   assert.match(lean, /NEVER dump a whole large file/);
+  assert.match(lean, /at most 12 shell\/tool calls/);
   assert.match(lean, /src\/a\.ts/);
   assert.match(lean, /FOCUS_LENS/);
   // Tree capped to 50 paths
@@ -134,6 +135,7 @@ test('slim Codex prompt is shorter and skips rules/tree dump', () => {
   );
   assert.equal(slim.includes('FULL_FILE_BODY'), false);
   assert.match(slim, /slim context/);
+  assert.match(slim, /at most 8 shell\/tool calls/);
   assert.equal(slim.includes('Repository structure'), false);
 });
 

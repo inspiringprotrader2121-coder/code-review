@@ -667,6 +667,9 @@ const LEAN_EXPLORE = [
   '- Read changed files with `sed -n` / `head` ranges — NEVER dump a whole large file',
   '  into the conversation (that blows the context window and fails the review).',
   '- Trace data flow and nearby tests; confirm every finding at file:line.',
+  '- Timebox the investigation to at most 12 shell/tool calls. Prioritize the diff,',
+  '  direct call sites, and targeted noninteractive tests; do not run broad suites.',
+  '- Finish and return the JSON before the worker wall-clock cap.',
   'Return JSON: { "findings": [...], "summary": "..." }.',
   '',
 ].join('\n');
@@ -675,6 +678,7 @@ const SLIM_EXPLORE = [
   '## Agentic review (slim context — prior turn was too large)',
   'Repo is at CWD. Use `rg` and `sed -n` only; do NOT cat whole files.',
   'Focus on concrete P1/P2 bugs in the changed paths below.',
+  'Use at most 8 shell/tool calls and return JSON before the worker wall-clock cap.',
   'Return JSON: { "findings": [...], "summary": "..." }.',
   '',
 ].join('\n');

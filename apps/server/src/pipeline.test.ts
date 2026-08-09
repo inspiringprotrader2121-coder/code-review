@@ -150,8 +150,8 @@ test('high-tier preflight requires allowlisted pinned Codex CLI and never accept
 });
 
 test('provider output ceilings preserve max reasoning while bounding long generations', () => {
-  assert.equal(maxOutputTokensForModel('deepseek-v4-flash', {}), 32_000);
-  assert.equal(maxOutputTokensForModel('MiniMax-M3', {}), 32_000);
+  assert.equal(maxOutputTokensForModel('deepseek-v4-flash', {}), 24_000);
+  assert.equal(maxOutputTokensForModel('MiniMax-M3', {}), 24_000);
   assert.equal(
     maxOutputTokensForModel('deepseek-v4-flash', { ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS: '999999' }),
     64_000,
@@ -572,16 +572,13 @@ test('modelForPass fails closed when pinned CLI Luna cannot run', () => {
   assert.equal(agentic.target.apiKey, '', 'the CLI stub is only selected when codex will actually run');
 });
 
-test('a rate-limited required pass REQUEUES; a genuine failure does not', () => {
-  // queue-runner decides requeue by pattern-matching the thrown message. A
-  // generic "required pass failed" matched nothing, so a review whose Luna pass
-  // was merely rate-limited (while the others succeeded) was silently DROPPED
-  // rather than retried — the most likely failure mode on a throttled tier, and
-  // what lost 4 of 9 PRs in the 2026-07-22 batch.
+test('a timed-out required pass stays transient; a genuine failure does not', () => {
+  // Keep the classification available for an operator-enabled bounded recovery
+  // policy even though automatic whole-review replay is off by default.
   assert.equal(
-    isTransientLlmError('review aborted: 1/2 required model pass(es) failed — rate-limit/transport errors; will retry'),
+    isTransientLlmError('review aborted: 1/2 required review lens(es) completed fewer than 1 sample(s) — required provider call timed out or was temporarily unavailable'),
     true,
-    'a transient cause must requeue the job',
+    'a transient cause must remain distinguishable',
   );
   assert.equal(
     isTransientLlmError('review aborted: 1/2 required model pass(es) failed; no partial review was posted'),

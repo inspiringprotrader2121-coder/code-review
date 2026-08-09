@@ -1862,7 +1862,7 @@ async function executeReview(
       );
       const transientFailures = failedRequiredPasses.filter((outcome) => outcome.transient).length;
       const cause = transientFailures > 0
-        ? ' — rate-limit/transport errors; will retry'
+        ? ' — required provider call timed out or was temporarily unavailable'
         : '; no partial review was posted';
       throw new Error(
         `review aborted: ${failedRequiredLenses.length}/${requiredLensIds.length} required review lens(es) ` +

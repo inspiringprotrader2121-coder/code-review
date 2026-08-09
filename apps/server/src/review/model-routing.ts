@@ -28,10 +28,10 @@ export function maxOutputTokensForModel(
       ? 'ORVEX_MINIMAX_MAX_OUTPUT_TOKENS'
       : undefined;
   if (!key) return undefined;
-  const parsed = Number(env[key] ?? 32_000);
+  const parsed = Number(env[key] ?? 24_000);
   return Number.isFinite(parsed)
     ? Math.min(64_000, Math.max(16_000, Math.floor(parsed)))
-    : 32_000;
+    : 24_000;
 }
 
 export function contextForReviewPass(
