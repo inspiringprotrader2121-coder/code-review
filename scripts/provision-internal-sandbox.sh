@@ -114,7 +114,7 @@ rootlesskit_path() {
 apparmor_allows_rootlesskit() {
   local binary=$1
   command -v aa-status >/dev/null 2>&1 || return 1
-  aa-status --profiled 2>/dev/null | grep -Eq "(^|/)(rootlesskit|$(basename "$binary"))$"
+  aa-status 2>/dev/null | grep -Eq "^[[:space:]]+($(basename "$binary")|rootlesskit)$"
 }
 
 rootless_docker_ready() {

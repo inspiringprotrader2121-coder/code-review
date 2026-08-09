@@ -30,6 +30,10 @@ fi
 rg -q 'require_packaged_apparmor_profile' "$SCRIPT"
 rg -q 'dpkg-query -S' "$SCRIPT"
 rg -q 'apparmor_parser -Q' "$SCRIPT"
+if rg -q 'aa-status --profiled' "$SCRIPT"; then
+  printf 'aa-status --profiled returns a count, not profile names\n' >&2
+  exit 1
+fi
 rg -q 'DOCKER_HOST="unix://\$RUNTIME_DIR/docker.sock"' "$SCRIPT"
 
 printf 'provision-internal-sandbox static tests passed\n'
