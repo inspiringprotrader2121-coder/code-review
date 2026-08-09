@@ -123,6 +123,7 @@ test(
       maxConcurrent: 1,
       pollMs: 1,
       shutdownDrainMs: 100,
+      isDraining: () => false,
       loadConfig: () => ({ store: db, providerDependencies: {} }) as WorkerConfig,
       processReview: async (job) => {
         activeModelCalls++;
