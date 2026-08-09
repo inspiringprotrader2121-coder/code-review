@@ -78,6 +78,45 @@ test(
     let activeModelCalls = 0;
     let peakModelCalls = 0;
 
+    const payload = JSON.stringify({
+      action: 'opened',
+      installation: {
+        id: 417,
+        account: { login: 'phase-zero', type: 'Organization' },
+        repository_selection: 'selected',
+      },
+      repository: {
+        id: 991,
+        name: 'deterministic-review',
+        full_name: 'phase-zero/deterministic-review',
+        private: true,
+        default_branch: 'main',
+        owner: { login: 'phase-zero' },
+      },
+      pull_request: {
+        number: 73,
+        title: 'Characterize the production boundary',
+        state: 'open',
+        draft: false,
+        head: { sha: 'phase-zero-sha' },
+        user: { login: 'author' },
+      },
+      sender: { login: 'author' },
+    });
+
+    const webhook = await app.request('/webhooks/github', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-event': 'pull_request',
+        'x-github-delivery': 'phase-zero-delivery',
+        'x-hub-signature-256': sign(payload),
+      },
+      body: payload,
+    });
+    assert.equal(webhook.status, 200);
+    assert.equal(((await webhook.json()) as { reason: string }).reason, 'enqueued');
+
     const stopWorker = startWorkerLoop(queue, {
       config,
       db,
@@ -123,45 +162,6 @@ test(
       await queue.close();
       db.close();
     });
-
-    const payload = JSON.stringify({
-      action: 'opened',
-      installation: {
-        id: 417,
-        account: { login: 'phase-zero', type: 'Organization' },
-        repository_selection: 'selected',
-      },
-      repository: {
-        id: 991,
-        name: 'deterministic-review',
-        full_name: 'phase-zero/deterministic-review',
-        private: true,
-        default_branch: 'main',
-        owner: { login: 'phase-zero' },
-      },
-      pull_request: {
-        number: 73,
-        title: 'Characterize the production boundary',
-        state: 'open',
-        draft: false,
-        head: { sha: 'phase-zero-sha' },
-        user: { login: 'author' },
-      },
-      sender: { login: 'author' },
-    });
-
-    const webhook = await app.request('/webhooks/github', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-github-event': 'pull_request',
-        'x-github-delivery': 'phase-zero-delivery',
-        'x-hub-signature-256': sign(payload),
-      },
-      body: payload,
-    });
-    assert.equal(webhook.status, 200);
-    assert.equal(((await webhook.json()) as { reason: string }).reason, 'enqueued');
 
     const installation = db.getInstallation(417);
     assert.ok(installation, 'the signed webhook binds an installation before queueing');
