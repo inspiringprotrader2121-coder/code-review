@@ -1,1035 +1,829 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Orvex — AI Code Review That Catches Bugs Before Production</title>
-<meta name="description" content="Orvex reviews GitHub pull requests with deterministic checks, two or four focused AI passes by review track, strict finding verification, finding memory, and autofix. Start with 10 free reviews, no card." />
-<meta name="keywords" content="AI code review, automated pull request review, GitHub PR reviewer, pull request analysis, catch bugs before production" />
-<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
-<meta name="author" content="Orvex" />
-<link rel="canonical" href="https://useorvex.com/" />
-<meta name="theme-color" content="#0a0c10" media="(prefers-color-scheme: dark)" />
-<meta name="theme-color" content="#fbfcfe" media="(prefers-color-scheme: light)" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%233ddc97%22/%3E%3Ctext x=%2216%22 y=%2222%22 font-size=%2222%22 font-family=%22monospace%22 font-weight=%22700%22 text-anchor=%22middle%22 fill=%22%230a0c10%22%3E%C2%B1%3C/text%3E%3C/svg%3E" />
-<meta property="og:type" content="website" />
-<meta property="og:site_name" content="Orvex" />
-<meta property="og:title" content="Orvex — AI Code Review That Catches Bugs Before Production" />
-<meta property="og:description" content="Two or four focused review passes by track, strict finding verification, and autofix for GitHub pull requests. 10 free reviews, no card." />
-<meta property="og:url" content="https://useorvex.com/" />
-<meta property="og:image" content="https://useorvex.com/og-image.png" />
-<meta property="og:image:width" content="1200" />
-<meta property="og:image:height" content="630" />
-<meta property="og:image:alt" content="Orvex catches bugs before production with focused AI code review and strict finding verification." />
-<meta property="og:locale" content="en_US" />
-<meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="Orvex — AI Code Review That Catches Bugs Before Production" />
-<meta name="twitter:description" content="Two or four focused review passes by track with strict finding verification. 10 free reviews, no card." />
-<meta name="twitter:image" content="https://useorvex.com/og-image.png" />
-<meta name="twitter:image:alt" content="Orvex catches bugs before production." />
-<script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@graph": [
-    {
-      "@type": "Organization",
-      "@id": "https://useorvex.com/#organization",
-      "name": "Orvex",
-      "url": "https://useorvex.com/",
-      "logo": "https://useorvex.com/og-image.png",
-      "email": "support@useorvex.com",
-      "description": "Orvex builds an AI code reviewer that catches bugs in GitHub pull requests before they reach production."
-    },
-    {
-      "@type": "WebSite",
-      "@id": "https://useorvex.com/#website",
-      "url": "https://useorvex.com/",
-      "name": "Orvex",
-      "publisher": { "@id": "https://useorvex.com/#organization" },
-      "inLanguage": "en"
-    },
-    {
-      "@type": "SoftwareApplication",
-      "@id": "https://useorvex.com/#software",
-      "name": "Orvex",
-      "applicationCategory": "DeveloperApplication",
-      "applicationSubCategory": "AI Code Review",
-      "operatingSystem": "Web-based, GitHub App",
-      "url": "https://useorvex.com/",
-      "image": "https://useorvex.com/og-image.png",
-      "description": "Orvex reviews enabled GitHub pull requests with deterministic checks, two or four focused AI review passes depending on the review track, strict finding verification, finding memory, and autofix.",
-      "featureList": [
-        "Two or four focused AI review passes depending on the review track",
-        "Deterministic rules before AI analysis",
-        "Verifies each finding before posting to cut false positives",
-        "Tracks and suppresses already-reported findings across pushes",
-        "Reports partial coverage when a complete diff is unavailable",
-        "One-command auto-fix with pre-fix verification",
-        "Config-as-code via .orvex-review.yml"
-      ],
-      "publisher": { "@id": "https://useorvex.com/#organization" },
-      "offers": {
-        "@type": "AggregateOffer",
-        "priceCurrency": "USD",
-        "lowPrice": "0",
-        "highPrice": "99",
-        "offerCount": "5",
-        "offers": [
-          { "@type": "Offer", "name": "Free", "price": "0", "priceCurrency": "USD", "description": "10 lifetime reviews, up to 2 per hour, no card required." },
-          { "@type": "Offer", "name": "Starter", "price": "29", "priceCurrency": "USD", "description": "100 reviews per month at up to 5 per hour." },
-          { "@type": "Offer", "name": "Pro", "price": "69", "priceCurrency": "USD", "description": "500 reviews per month at up to 10 per hour." },
-          { "@type": "Offer", "name": "Verify Lite", "price": "49", "priceCurrency": "USD", "description": "50 reviews per month at up to 5 per hour on the advanced review track." },
-          { "@type": "Offer", "name": "Verify", "price": "99", "priceCurrency": "USD", "description": "120 reviews per month at up to 10 per hour on the advanced review track." }
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orvex — AI Code Review That Catches Bugs Before Production</title>
+    <meta
+      name="description"
+      content="Orvex reviews GitHub pull requests with deterministic checks, two or four focused AI passes by review track, strict finding verification, finding memory, and autofix. Start with 10 free reviews, no card."
+    />
+    <meta
+      name="keywords"
+      content="AI code review, automated pull request review, GitHub PR reviewer, pull request analysis, catch bugs before production"
+    />
+    <meta
+      name="robots"
+      content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"
+    />
+    <meta name="author" content="Orvex" />
+    <link rel="canonical" href="https://useorvex.com/" />
+    <meta name="theme-color" content="#0a0c10" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#fbfcfe" media="(prefers-color-scheme: light)" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%233ddc97%22/%3E%3Ctext x=%2216%22 y=%2222%22 font-size=%2222%22 font-family=%22monospace%22 font-weight=%22700%22 text-anchor=%22middle%22 fill=%22%230a0c10%22%3E%C2%B1%3C/text%3E%3C/svg%3E"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Orvex" />
+    <meta
+      property="og:title"
+      content="Orvex — AI Code Review That Catches Bugs Before Production"
+    />
+    <meta
+      property="og:description"
+      content="Two or four focused review passes by track, strict finding verification, and autofix for GitHub pull requests. 10 free reviews, no card."
+    />
+    <meta property="og:url" content="https://useorvex.com/" />
+    <meta property="og:image" content="https://useorvex.com/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Orvex catches bugs before production with focused AI code review and strict finding verification."
+    />
+    <meta property="og:locale" content="en_US" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Orvex — AI Code Review That Catches Bugs Before Production"
+    />
+    <meta
+      name="twitter:description"
+      content="Two or four focused review passes by track with strict finding verification. 10 free reviews, no card."
+    />
+    <meta name="twitter:image" content="https://useorvex.com/og-image.png" />
+    <meta name="twitter:image:alt" content="Orvex catches bugs before production." />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://useorvex.com/#organization",
+            "name": "Orvex",
+            "url": "https://useorvex.com/",
+            "logo": "https://useorvex.com/og-image.png",
+            "email": "support@useorvex.com",
+            "description": "Orvex builds an AI code reviewer that catches bugs in GitHub pull requests before they reach production."
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://useorvex.com/#website",
+            "url": "https://useorvex.com/",
+            "name": "Orvex",
+            "publisher": { "@id": "https://useorvex.com/#organization" },
+            "inLanguage": "en"
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://useorvex.com/#software",
+            "name": "Orvex",
+            "applicationCategory": "DeveloperApplication",
+            "applicationSubCategory": "AI Code Review",
+            "operatingSystem": "Web-based, GitHub App",
+            "url": "https://useorvex.com/",
+            "image": "https://useorvex.com/og-image.png",
+            "description": "Orvex reviews enabled GitHub pull requests with deterministic checks, two or four focused AI review passes depending on the review track, strict finding verification, finding memory, and autofix.",
+            "featureList": [
+              "Two or four focused AI review passes depending on the review track",
+              "Deterministic rules before AI analysis",
+              "Verifies each finding before posting to cut false positives",
+              "Tracks and suppresses already-reported findings across pushes",
+              "Reports partial coverage when a complete diff is unavailable",
+              "One-command auto-fix with pre-fix verification",
+              "Config-as-code via .orvex-review.yml"
+            ],
+            "publisher": { "@id": "https://useorvex.com/#organization" },
+            "offers": {
+              "@type": "AggregateOffer",
+              "priceCurrency": "USD",
+              "lowPrice": "0",
+              "highPrice": "99",
+              "offerCount": "5",
+              "offers": [
+                {
+                  "@type": "Offer",
+                  "name": "Free",
+                  "price": "0",
+                  "priceCurrency": "USD",
+                  "description": "10 lifetime reviews, up to 2 per hour, no card required."
+                },
+                {
+                  "@type": "Offer",
+                  "name": "Starter",
+                  "price": "29",
+                  "priceCurrency": "USD",
+                  "description": "100 reviews per month at up to 5 per hour."
+                },
+                {
+                  "@type": "Offer",
+                  "name": "Pro",
+                  "price": "69",
+                  "priceCurrency": "USD",
+                  "description": "500 reviews per month at up to 10 per hour."
+                },
+                {
+                  "@type": "Offer",
+                  "name": "Verify Lite",
+                  "price": "49",
+                  "priceCurrency": "USD",
+                  "description": "50 reviews per month at up to 5 per hour on the advanced review track."
+                },
+                {
+                  "@type": "Offer",
+                  "name": "Verify",
+                  "price": "99",
+                  "priceCurrency": "USD",
+                  "description": "120 reviews per month at up to 10 per hour on the advanced review track."
+                }
+              ]
+            }
+          },
+          {
+            "@type": "FAQPage",
+            "@id": "https://useorvex.com/#faq",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "What is Orvex?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Orvex is an AI code reviewer for GitHub. Deterministic checks run first, two or four focused AI review passes (by review track) examine the change and relevant repository context, and candidate findings are merged, deduplicated, and strictly verified before posting."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How much does Orvex cost?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Free includes 10 lifetime reviews at up to 2 per hour. Starter is $29/month for 100 included reviews at up to 5 per hour, then prepaid overage. Pro is $69/month for 500 reviews at up to 10 per hour. Verify Lite is $49/month for 50 included at up to 5 per hour, then prepaid overage. Verify is $99/month for 120 included at up to 10 per hour, then prepaid overage. Every plan also has a hard monthly ceiling."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What counts as a review?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "A completed standard pull-request review uses one review unit. An on-demand deep review uses two units. Skipped reviews and fix or explanation commands do not consume review units. Failed reviews still count toward free-trial, hourly, and monthly caps."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What happens after I use my included reviews?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "On Starter, Verify Lite, and Verify, buy prepaid credits in the dashboard. Reviews continue drawing from that wallet until it is empty or the plan hard monthly ceiling is reached. Free and Pro stop at their hard monthly totals. Hourly and concurrent caps also apply on every plan."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Is there a free trial?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. Orvex gives each GitHub account 10 lifetime reviews with no credit card required, at up to 2 reviews per hour. Creating another workspace does not reset the trial."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Do lower-priced plans get a weaker review pipeline?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. Every plan receives the full pipeline for its review track: deterministic checks, two or four focused review passes, strict finding verification, and autofix. Paid plans also include on-demand deep review. Plans otherwise differ by review track, usage allowance, hourly rate limit, queue priority, and support."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Why does every plan have an hourly limit?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Hourly and concurrent caps prevent accidental review loops and keep processing reliable. Monthly totals cap total spend; hourly caps stop burst abuse."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Is pricing per seat?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. Plans are priced per workspace rather than per developer seat. Only a workspace owner can start or change billing."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How do I cancel or get billing help?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Email support@useorvex.com from the address on your Orvex account and include the workspace name. Cancellation takes effect at the end of the current paid billing period."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What languages and repositories can Orvex review?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Orvex can review text-based GitHub pull-request diffs across common programming languages. Language-specific deterministic checks run where applicable, and supported text diffs receive the focused AI review pipeline."
+                }
+              }
+            ]
+          }
         ]
       }
-    },
-    {
-      "@type": "FAQPage",
-      "@id": "https://useorvex.com/#faq",
-      "mainEntity": [
-        {
-          "@type": "Question",
-          "name": "What is Orvex?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Orvex is an AI code reviewer for GitHub. Deterministic checks run first, two or four focused AI review passes (by review track) examine the change and relevant repository context, and candidate findings are merged, deduplicated, and strictly verified before posting." }
-        },
-        {
-          "@type": "Question",
-          "name": "How much does Orvex cost?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Free includes 10 lifetime reviews at up to 2 per hour. Starter is $29/month for 100 included reviews at up to 5 per hour, then prepaid overage. Pro is $69/month for 500 reviews at up to 10 per hour. Verify Lite is $49/month for 50 included at up to 5 per hour, then prepaid overage. Verify is $99/month for 120 included at up to 10 per hour, then prepaid overage. Every plan also has a hard monthly ceiling." }
-        },
-        {
-          "@type": "Question",
-          "name": "What counts as a review?",
-          "acceptedAnswer": { "@type": "Answer", "text": "A completed standard pull-request review uses one review unit. An on-demand deep review uses two units. Skipped reviews and fix or explanation commands do not consume review units. Failed reviews still count toward free-trial, hourly, and monthly caps." }
-        },
-        {
-          "@type": "Question",
-          "name": "What happens after I use my included reviews?",
-          "acceptedAnswer": { "@type": "Answer", "text": "On Starter, Verify Lite, and Verify, buy prepaid credits in the dashboard. Reviews continue drawing from that wallet until it is empty or the plan hard monthly ceiling is reached. Free and Pro stop at their hard monthly totals. Hourly and concurrent caps also apply on every plan." }
-        },
-        {
-          "@type": "Question",
-          "name": "Is there a free trial?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Yes. Orvex gives each GitHub account 10 lifetime reviews with no credit card required, at up to 2 reviews per hour. Creating another workspace does not reset the trial." }
-        },
-        {
-          "@type": "Question",
-          "name": "Do lower-priced plans get a weaker review pipeline?",
-          "acceptedAnswer": { "@type": "Answer", "text": "No. Every plan receives the full pipeline for its review track: deterministic checks, two or four focused review passes, strict finding verification, and autofix. Paid plans also include on-demand deep review. Plans otherwise differ by review track, usage allowance, hourly rate limit, queue priority, and support." }
-        },
-        {
-          "@type": "Question",
-          "name": "Why does every plan have an hourly limit?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Hourly and concurrent caps prevent accidental review loops and keep processing reliable. Monthly totals cap total spend; hourly caps stop burst abuse." }
-        },
-        {
-          "@type": "Question",
-          "name": "Is pricing per seat?",
-          "acceptedAnswer": { "@type": "Answer", "text": "No. Plans are priced per workspace rather than per developer seat. Only a workspace owner can start or change billing." }
-        },
-        {
-          "@type": "Question",
-          "name": "How do I cancel or get billing help?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Email support@useorvex.com from the address on your Orvex account and include the workspace name. Cancellation takes effect at the end of the current paid billing period." }
-        },
-        {
-          "@type": "Question",
-          "name": "What languages and repositories can Orvex review?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Orvex can review text-based GitHub pull-request diffs across common programming languages. Language-specific deterministic checks run where applicable, and supported text diffs receive the focused AI review pipeline." }
-        }
-      ]
-    }
-  ]
-}
-</script>
-<script>
-  // apply saved theme before paint (no flash); default follows the OS.
-  try {
-    var t = localStorage.getItem('orvex-theme');
-    if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
-  } catch (e) {}
-</script>
-<style>
-  /* ============================================================
-     ORVEX — "SIGNAL" — developer-native terminal landing page
-     Self-contained. System fonts only. Dark-first, both themes.
-     ============================================================ */
-
-  :root {
-    /* type */
-    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Cascadia Code", monospace;
-    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-
-    /* dark tokens (default) */
-    --ground: #0a0c10;
-    --ground-2: #0c0f14;
-    --raised: #111419;
-    --raised-2: #141922;
-    --border: #1a1f27;
-    --border-2: #232a34;
-    --ink: #e8ecf2;
-    --ink-2: #9aa4b2;
-    --ink-muted: #5b6472;
-    --accent: #3ddc97;
-    --accent-ink: #06180f;         /* text on the green button */
-    --accent-soft: rgba(61,220,151,.12);
-    --accent-line: rgba(61,220,151,.34);
-    --danger: #ff5c5c;
-    --danger-soft: rgba(255,92,92,.12);
-    --danger-line: rgba(255,92,92,.34);
-    --shadow: 0 24px 60px -28px rgba(0,0,0,.75);
-    --grid: rgba(255,255,255,.022);
-    color-scheme: dark;
-  }
-
-  @media (prefers-color-scheme: light) {
-    :root {
-      --ground: #fbfcfe;
-      --ground-2: #f4f7fb;
-      --raised: #ffffff;
-      --raised-2: #f6f8fc;
-      --border: #e4e9f1;
-      --border-2: #d5dce7;
-      --ink: #0a0c10;
-      --ink-2: #4b5563;
-      --ink-muted: #8a93a1;
-      --accent: #0e9d63;
-      --accent-ink: #ffffff;
-      --accent-soft: rgba(14,157,99,.10);
-      --accent-line: rgba(14,157,99,.30);
-      --danger: #d6382f;
-      --danger-soft: rgba(214,56,47,.09);
-      --danger-line: rgba(214,56,47,.28);
-      --shadow: 0 24px 55px -30px rgba(20,40,70,.28);
-      --grid: rgba(10,12,16,.028);
-      color-scheme: light;
-    }
-  }
-
-  /* explicit toggle wins over system pref */
-  :root[data-theme="dark"] {
-    --ground: #0a0c10; --ground-2: #0c0f14; --raised: #111419; --raised-2: #141922;
-    --border: #1a1f27; --border-2: #232a34;
-    --ink: #e8ecf2; --ink-2: #9aa4b2; --ink-muted: #5b6472;
-    --accent: #3ddc97; --accent-ink: #06180f;
-    --accent-soft: rgba(61,220,151,.12); --accent-line: rgba(61,220,151,.34);
-    --danger: #ff5c5c; --danger-soft: rgba(255,92,92,.12); --danger-line: rgba(255,92,92,.34);
-    --shadow: 0 24px 60px -28px rgba(0,0,0,.75);
-    --grid: rgba(255,255,255,.022);
-    color-scheme: dark;
-  }
-  :root[data-theme="light"] {
-    --ground: #fbfcfe; --ground-2: #f4f7fb; --raised: #ffffff; --raised-2: #f6f8fc;
-    --border: #e4e9f1; --border-2: #d5dce7;
-    --ink: #0a0c10; --ink-2: #4b5563; --ink-muted: #8a93a1;
-    --accent: #0e9d63; --accent-ink: #ffffff;
-    --accent-soft: rgba(14,157,99,.10); --accent-line: rgba(14,157,99,.30);
-    --danger: #d6382f; --danger-soft: rgba(214,56,47,.09); --danger-line: rgba(214,56,47,.28);
-    --shadow: 0 24px 55px -30px rgba(20,40,70,.28);
-    --grid: rgba(10,12,16,.028);
-    color-scheme: light;
-  }
-
-  * { box-sizing: border-box; }
-
-  body {
-    margin: 0;
-    background: var(--ground);
-    color: var(--ink);
-    font-family: var(--sans);
-    line-height: 1.6;
-    -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    overflow-x: hidden;
-  }
-
-  .num { font-variant-numeric: tabular-nums; }
-  .mono { font-family: var(--mono); }
-
-  ::selection { background: var(--accent-soft); color: var(--ink); }
-
-  a { color: inherit; text-decoration: none; }
-
-  :focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 3px;
-    border-radius: 4px;
-  }
-
-  .wrap { width: 100%; max-width: 1120px; margin: 0 auto; padding: 0 24px; }
-
-  .eyebrow {
-    font-family: var(--mono);
-    font-size: 11.5px;
-    letter-spacing: .22em;
-    text-transform: uppercase;
-    color: var(--ink-muted);
-    margin: 0 0 18px;
-  }
-  .eyebrow .dot { color: var(--accent); }
-
-  /* ---------- NAV ---------- */
-  nav {
-    position: sticky; top: 0; z-index: 50;
-    background: color-mix(in srgb, var(--ground) 82%, transparent);
-    backdrop-filter: blur(14px) saturate(1.2);
-    -webkit-backdrop-filter: blur(14px) saturate(1.2);
-    border-bottom: 1px solid var(--border);
-  }
-  .nav-in {
-    max-width: 1120px; margin: 0 auto; padding: 13px 24px;
-    display: flex; align-items: center; gap: 22px;
-  }
-  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-weight: 600; font-size: 16px; letter-spacing: 0; }
-  .mark {
-    width: 30px; height: 30px; display: grid; place-items: center;
-    border: 1px solid var(--accent-line); border-radius: 8px;
-    background: var(--accent-soft); color: var(--accent);
-    font-size: 17px; font-weight: 700; line-height: 1;
-  }
-  .nav-links { display: flex; gap: 4px; margin-left: 12px; }
-  .nav-links a {
-    font-size: 13.5px; color: var(--ink-2); padding: 7px 12px; border-radius: 7px;
-    transition: color .15s, background .15s;
-  }
-  .nav-links a:hover { color: var(--ink); background: var(--raised); }
-  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-  @media (max-width: 760px) {
-    .nav-in { padding-inline: 16px; gap: 12px; }
-    .nav-links { display: none; }
-  }
-
-  .icon-btn {
-    width: 36px; height: 36px; display: grid; place-items: center;
-    background: var(--raised); border: 1px solid var(--border); border-radius: 8px;
-    color: var(--ink-2); cursor: pointer; font-size: 15px; line-height: 1;
-    transition: color .15s, border-color .15s, background .15s;
-  }
-  .icon-btn:hover { color: var(--ink); border-color: var(--border-2); }
-  .theme-icon-dark { display: none; }
-  :root[data-theme="dark"] .theme-icon-dark, :root:not([data-theme]) .theme-icon-dark { display: inline; }
-  :root[data-theme="dark"] .theme-icon-light, :root:not([data-theme]) .theme-icon-light { display: none; }
-  :root[data-theme="light"] .theme-icon-light { display: inline; }
-  :root[data-theme="light"] .theme-icon-dark { display: none; }
-  @media (prefers-color-scheme: light) {
-    :root:not([data-theme]) .theme-icon-dark { display: none; }
-    :root:not([data-theme]) .theme-icon-light { display: inline; }
-  }
-
-  .btn {
-    font-family: var(--mono); font-size: 13.5px; font-weight: 600;
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 9px 16px; border-radius: 8px; cursor: pointer;
-    border: 1px solid transparent; white-space: nowrap;
-    transition: transform .12s ease, box-shadow .15s, background .15s, border-color .15s;
-  }
-  .btn-primary {
-    background: var(--accent); color: var(--accent-ink);
-    box-shadow: 0 1px 0 rgba(255,255,255,.12) inset, 0 8px 20px -12px rgba(10,12,16,.35);
-  }
-  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 1px 0 rgba(255,255,255,.12) inset, 0 12px 24px -12px rgba(10,12,16,.4); }
-  .btn-ghost { background: transparent; border-color: var(--border-2); color: var(--ink); }
-  .btn-ghost:hover { background: var(--raised); border-color: var(--ink-muted); }
-  .btn-lg { padding: 13px 22px; font-size: 15px; }
-
-  /* ---------- HERO ---------- */
-  header.hero { padding: 74px 0 84px; position: relative; }
-  .hero-grid {
-    display: grid; grid-template-columns: 1.02fr 1.14fr; gap: 56px; align-items: center;
-  }
-  @media (max-width: 940px) { .hero-grid { grid-template-columns: 1fr; gap: 40px; } }
-
-  .badge {
-    display: inline-flex; align-items: center; gap: 8px;
-    font-family: var(--mono); font-size: 12px; color: var(--ink-2);
-    padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
-    background: var(--raised); margin-bottom: 26px;
-  }
-  .badge .live {
-    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
-    outline: 2px solid transparent;
-    animation: pulse 2.4s ease-out infinite;
-  }
-  @keyframes pulse {
-    0% { outline-color: color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 0; }
-    70% { outline-color: transparent; outline-offset: 6px; }
-    100% { outline-color: transparent; outline-offset: 0; }
-  }
-
-  h1.slogan {
-    font-family: var(--mono);
-    font-size: clamp(38px, 6.2vw, 62px);
-    line-height: 1.02;
-    letter-spacing: 0;
-    font-weight: 680;
-    margin: 0 0 24px;
-  }
-  h1.slogan .slogan-copy { word-spacing: -.18em; }
-  h1.slogan .cursor {
-    display: inline-block; width: .58em; height: .92em; margin-left: .06em;
-    transform: translateY(.08em);
-    background: var(--accent);
-    animation: blink 1.05s steps(1) infinite;
-  }
-  @keyframes blink { 0%,50% { opacity: 1; } 50.01%,100% { opacity: 0; } }
-
-  .lede { font-size: 18px; color: var(--ink-2); max-width: 46ch; margin: 0 0 32px; }
-  .lede b { color: var(--ink); font-weight: 600; }
-
-  .cta-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 16px; }
-  .subnote { font-family: var(--mono); font-size: 12.5px; color: var(--ink-muted); }
-  .subnote .ok { color: var(--accent); }
-
-  .trust {
-    margin-top: 34px; padding-top: 24px; border-top: 1px solid var(--border);
-    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px;
-  }
-  .trust-item { display: flex; flex-direction: column; gap: 2px; }
-  .trust-item .n { font-family: var(--mono); font-size: 21px; font-weight: 680; color: var(--ink); letter-spacing: 0; }
-  .trust-item .n .u { color: var(--accent); }
-  .trust-item .l { font-size: 12px; color: var(--ink-muted); }
-
-  /* ---------- REVIEW LOG (hero terminal) ---------- */
-  .term {
-    background: linear-gradient(180deg, var(--raised) 0%, var(--ground-2) 130%);
-    border: 1px solid var(--border-2);
-    border-radius: 14px; overflow: hidden;
-    box-shadow: var(--shadow);
-    font-family: var(--mono);
-  }
-  .term-bar {
-    display: flex; align-items: center; gap: 8px;
-    padding: 11px 14px; border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--raised-2) 70%, transparent);
-  }
-  .dots { display: flex; gap: 6px; }
-  .dots i { width: 11px; height: 11px; border-radius: 50%; background: var(--border-2); display: block; }
-  .term-title { font-size: 12px; color: var(--ink-2); margin-left: 6px; }
-  .term-title .pr { color: var(--accent); }
-  .term-status { margin-left: auto; font-size: 11px; color: var(--ink-muted); display: flex; align-items: center; gap: 6px; }
-  .term-status .s-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-muted); }
-  .term-status.done .s-dot { background: var(--accent); }
-  .term-status.done { color: var(--accent); }
-
-  .log { padding: 16px 18px 20px; font-size: 13px; line-height: 1.85; min-height: 372px; }
-  .line { display: flex; gap: 10px; align-items: flex-start; }
-  .line .gutter { color: var(--ink-muted); user-select: none; white-space: nowrap; flex: none; }
-  .line .body { color: var(--ink-2); }
-  .line .body .k { color: var(--ink); }
-  .ok { color: var(--accent); }
-  .bad { color: var(--danger); }
-  .tag {
-    font-size: 10.5px; padding: 1px 7px; border-radius: 5px; letter-spacing: .04em;
-    border: 1px solid var(--border-2); color: var(--ink-2); vertical-align: middle;
-  }
-  .tag.p1 { color: var(--danger); border-color: var(--danger-line); background: var(--danger-soft); }
-  .tag.layer { color: var(--ink-2); }
-
-  .caught-card {
-    margin-top: 12px; padding: 11px 13px; border-radius: 9px;
-    border: 1px solid var(--accent-line); background: var(--accent-soft);
-    display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink);
-  }
-  .caught-card .big { color: var(--accent); font-weight: 700; }
-
-  /* stream animation: lines revealed one-by-one */
-  .stream .line, .stream .caught-card { opacity: 0; transform: translateY(6px); }
-  .stream.play .line { animation: reveal .38s ease forwards; }
-  .stream.play .caught-card { animation: reveal .5s ease forwards; }
-  .stream.play .line:nth-child(1) { animation-delay: .15s; }
-  .stream.play .line:nth-child(2) { animation-delay: .55s; }
-  .stream.play .line:nth-child(3) { animation-delay: .95s; }
-  .stream.play .line:nth-child(4) { animation-delay: 1.35s; }
-  .stream.play .line:nth-child(5) { animation-delay: 1.75s; }
-  .stream.play .line:nth-child(6) { animation-delay: 2.15s; }
-  .stream.play .line:nth-child(7) { animation-delay: 2.65s; }
-  .stream.play .caught-card { animation-delay: 3.15s; }
-  @keyframes reveal { to { opacity: 1; transform: translateY(0); } }
-
-  /* live-typing caret on the currently streaming region */
-  .caret {
-    display: inline-block; width: 7px; height: 14px; background: var(--accent);
-    transform: translateY(2px); margin-left: 2px;
-    animation: blink 1s steps(1) infinite;
-  }
-  .stream.done .caret { display: none; }
-
-  /* ---------- SECTION SHELL ---------- */
-  section { padding: 82px 0; border-top: 1px solid var(--border); }
-  .sec-head { max-width: 640px; margin-bottom: 44px; }
-  .sec-head h2 {
-    font-family: var(--mono); font-size: clamp(26px, 3.4vw, 34px); letter-spacing: 0;
-    line-height: 1.1; margin: 0 0 14px; font-weight: 660;
-  }
-  .sec-head p { font-size: 17px; color: var(--ink-2); margin: 0; max-width: 54ch; }
-
-  /* ---------- HOW IT WORKS pipeline ---------- */
-  .pipe { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-  @media (max-width: 860px) { .pipe { grid-template-columns: 1fr; } }
-  .step {
-    position: relative; background: var(--raised); border: 1px solid var(--border);
-    border-radius: 13px; padding: 24px 22px; overflow: hidden;
-    transition: border-color .18s, transform .18s;
-  }
-  .step:hover { border-color: var(--border-2); transform: translateY(-2px); }
-  .step::before {
-    content: ""; position: absolute; left: 0; top: 0; height: 100%; width: 2px;
-    background: linear-gradient(var(--accent), transparent);
-  }
-  .step .idx { font-family: var(--mono); font-size: 12px; color: var(--accent); letter-spacing: .1em; }
-  .step h3 { font-family: var(--mono); font-size: 17px; margin: 12px 0 8px; letter-spacing: 0; font-weight: 620; }
-  .step p { font-size: 14.5px; color: var(--ink-2); margin: 0 0 16px; }
-  .step .chip {
-    display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono);
-    font-size: 11.5px; color: var(--ink-2); padding: 5px 10px; border-radius: 7px;
-    border: 1px solid var(--border); background: var(--ground-2);
-  }
-  .step .chip .ok { font-weight: 700; }
-  .flow-arrow { text-align: center; color: var(--ink-muted); font-family: var(--mono); }
-
-  /* ---------- REVIEW SAFEGUARDS ---------- */
-  .safeguard-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-  @media (max-width: 860px) { .safeguard-grid { grid-template-columns: 1fr; } }
-  .safeguard {
-    border: 1px solid var(--border); border-radius: 8px; background: var(--raised);
-    padding: 24px 22px;
-  }
-  .safeguard .signal { font-family: var(--mono); color: var(--accent); font-size: 12px; }
-  .safeguard h3 { font-family: var(--mono); font-size: 17px; margin: 12px 0 8px; }
-  .safeguard p { color: var(--ink-2); font-size: 14.5px; margin: 0; }
-
-  /* ---------- Finding memory thread ---------- */
-  .thread-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 40px; align-items: center; }
-  @media (max-width: 860px) { .thread-grid { grid-template-columns: 1fr; gap: 28px; } }
-  .thread { background: var(--raised); border: 1px solid var(--border); border-radius: 13px; overflow: hidden; box-shadow: var(--shadow); font-family: var(--mono); font-size: 13px; }
-  .push { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
-  .push:last-child { border-bottom: 0; }
-  .push .sha { color: var(--ink-muted); }
-  .push .msg { color: var(--ink-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .push .verdict { font-size: 11.5px; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
-  .verdict.zero { color: var(--accent); border: 1px solid var(--accent-line); background: var(--accent-soft); }
-  .verdict.fix { color: var(--ink-2); border: 1px solid var(--border-2); }
-  .verdict.first { color: var(--danger); border: 1px solid var(--danger-line); background: var(--danger-soft); }
-  .thread-note ul { list-style: none; padding: 0; margin: 20px 0 0; }
-  .thread-note li { display: flex; gap: 12px; font-size: 15px; color: var(--ink-2); margin-bottom: 14px; }
-  .thread-note li .tick { color: var(--accent); font-family: var(--mono); flex: none; }
-  .thread-note li b { color: var(--ink); font-weight: 600; }
-
-  /* ---------- PRICING ---------- */
-  .price-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-  @media (max-width: 1080px) { .price-grid { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 560px) { .price-grid { grid-template-columns: 1fr; } }
-  .plan {
-    display: flex; flex-direction: column;
-    background: var(--raised); border: 1px solid var(--border); border-radius: 8px;
-    padding: 22px 20px; transition: border-color .18s, transform .18s;
-  }
-  .plan:hover { border-color: var(--border-2); transform: translateY(-3px); }
-  .plan.feat { border-color: var(--accent-line); background: linear-gradient(180deg, var(--accent-soft), var(--raised) 42%); position: relative; }
-  .plan.feat::after {
-    content: "FEATURED"; position: absolute; top: -9px; left: 20px;
-    font-family: var(--mono); font-size: 10px; letter-spacing: .14em; color: var(--accent-ink);
-    background: var(--accent); padding: 3px 9px; border-radius: 5px;
-  }
-  .plan .pname { font-family: var(--mono); font-size: 14px; font-weight: 620; letter-spacing: 0; }
-  .plan .price { font-family: var(--mono); margin: 12px 0 2px; display: flex; align-items: baseline; gap: 3px; }
-  .plan .price .amt { font-size: 30px; font-weight: 700; letter-spacing: 0; }
-  .plan .price .per { font-size: 12.5px; color: var(--ink-muted); }
-  .plan.feat .price .amt { color: var(--accent); }
-  .plan .reviews { font-family: var(--mono); font-size: 12px; color: var(--ink-2); margin-bottom: 16px; }
-  .plan ul { list-style: none; padding: 0; margin: 0 0 20px; flex: 1; }
-  .plan li { font-size: 13px; color: var(--ink-2); display: flex; gap: 9px; margin-bottom: 9px; line-height: 1.45; }
-  .plan li .tick { color: var(--accent); flex: none; font-family: var(--mono); }
-  .plan .pbtn {
-    font-family: var(--mono); font-size: 13px; font-weight: 600; text-align: center;
-    padding: 10px; border-radius: 8px; border: 1px solid var(--border-2); color: var(--ink);
-    transition: background .15s, border-color .15s;
-  }
-  .plan .pbtn:hover { background: var(--ground-2); border-color: var(--ink-muted); }
-  .plan.feat .pbtn { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
-  .plan.feat .pbtn:hover { transform: translateY(-1px); box-shadow: 0 10px 22px -12px rgba(10,12,16,.35); }
-  .price-note { text-align: center; font-family: var(--mono); font-size: 12.5px; color: var(--ink-muted); margin-top: 22px; }
-
-  /* ---------- FAQ ---------- */
-  .faq-list { border-top: 1px solid var(--border); }
-  .faq-item { border-bottom: 1px solid var(--border); }
-  .faq-item summary {
-    display: flex; align-items: center; justify-content: space-between; gap: 24px;
-    padding: 20px 0; cursor: pointer; list-style: none;
-    font-family: var(--mono); font-size: 15px; font-weight: 620; color: var(--ink);
-  }
-  .faq-item summary::-webkit-details-marker { display: none; }
-  .faq-item summary::after { content: "+"; color: var(--accent); font-size: 20px; font-weight: 500; flex: none; }
-  .faq-item[open] summary::after { content: "−"; }
-  .faq-item p { max-width: 820px; margin: -4px 0 20px; color: var(--ink-2); font-size: 15px; line-height: 1.7; }
-
-  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  /* Command reference — reuses existing tokens only */
-  .cmd-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  .cmd-table th, .cmd-table td {
-    text-align: left; vertical-align: top;
-    padding: 12px 10px; border-bottom: 1px solid var(--border);
-  }
-  .cmd-table th { color: var(--ink-2); font-weight: 600; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
-  .cmd-table td { color: var(--ink); line-height: 1.5; }
-  .cmd-table code { font-family: var(--mono); font-size: 13px; color: var(--accent); }
-  .cmd-help { max-width: 820px; margin: 28px 0 0; color: var(--ink-2); font-size: 15px; line-height: 1.7; }
-  .cmd-help p { margin: 0 0 12px; }
-
-  /* ---------- FINAL CTA ---------- */
-  .cta-band { border-top: 1px solid var(--border); }
-  .cta-inner {
-    background: linear-gradient(180deg, var(--raised), var(--ground-2));
-    border: 1px solid var(--border-2); border-radius: 18px;
-    padding: 54px 40px; text-align: center; position: relative; overflow: hidden;
-    box-shadow: var(--shadow);
-  }
-  .cta-inner::before {
-    content: ""; position: absolute; inset: 0;
-    background: radial-gradient(600px 200px at 50% 0%, var(--accent-soft), transparent 70%);
-    pointer-events: none;
-  }
-  .cta-inner h2 { font-family: var(--mono); font-size: clamp(26px, 4vw, 40px); letter-spacing: 0; margin: 0 0 14px; font-weight: 680; position: relative; }
-  .cta-inner p { color: var(--ink-2); font-size: 17px; margin: 0 0 28px; position: relative; }
-  .cta-inner .cta-row { justify-content: center; position: relative; }
-
-  /* ---------- FOOTER ---------- */
-  footer { border-top: 1px solid var(--border); padding: 34px 0 44px; }
-  .foot-in { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
-  .foot-in .brand { font-size: 14px; }
-  .foot-links { display: flex; flex-wrap: wrap; gap: 20px; margin-left: auto; }
-  .foot-links a { font-family: var(--mono); font-size: 12.5px; color: var(--ink-muted); transition: color .15s; }
-  .foot-links a:hover { color: var(--ink); }
-  .foot-copy { width: 100%; font-family: var(--mono); font-size: 11.5px; color: var(--ink-muted); margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
-
-  @media (max-width: 940px) {
-    .hero-grid { gap: 0; }
-    .hero .term { display: none; }
-  }
-
-  @media (max-width: 560px) {
-    .wrap { padding-inline: 24px; }
-    header.hero { padding: 34px 0 30px; }
-    .badge { margin-bottom: 18px; }
-    h1.slogan { font-size: 36px; line-height: 1.04; margin-bottom: 16px; }
-    .lede { font-size: 16px; line-height: 1.55; margin-bottom: 18px; }
-    .hero .cta-row { flex-wrap: nowrap; gap: 10px; margin-bottom: 12px; }
-    .hero .btn-lg { padding: 11px 14px; font-size: 13.5px; }
-    .hero .subnote { font-size: 11px; line-height: 1.5; }
-    .trust { margin-top: 18px; padding-top: 14px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-    .trust-item .n { font-size: 18px; }
-    .trust-item .l { font-size: 10.5px; line-height: 1.3; }
-    .cta-inner { padding: 42px 24px; }
-    .cta-inner .cta-row { width: 100%; }
-    .cta-inner .btn { width: 100%; justify-content: center; white-space: normal; }
-  }
-
-  /* ---------- reduced motion: rest state, no motion ---------- */
-  @media (prefers-reduced-motion: reduce) {
-    * { animation: none !important; transition: none !important; }
-    h1.slogan .cursor { opacity: 1; }
-    .stream .line, .stream .caught-card { opacity: 1 !important; transform: none !important; }
-    .caret { display: none !important; }
-    .bar-fill { transition: none !important; }
-  }
-</style>
-</head>
-<body>
-<!-- ============================== NAV ============================== -->
-<nav>
-  <div class="nav-in">
-    <a class="brand" href="#top" aria-label="Orvex home">
-      <span class="mark" aria-hidden="true">±</span>
-      <span>Orvex</span>
-    </a>
-    <div class="nav-links">
-      <a href="#how">How it works</a>
-      <a href="#commands">Commands</a>
-      <a href="#proof">Safeguards</a>
-      <a href="#memory">Memory</a>
-      <a href="#pricing">Pricing</a>
-      <a href="#faq">FAQ</a>
-    </div>
-    <div class="nav-right">
-      <button class="icon-btn" id="themeToggle" type="button" aria-label="Toggle color theme" title="Toggle theme">
-        <span class="theme-icon-dark" aria-hidden="true">☾</span>
-        <span class="theme-icon-light" aria-hidden="true">☀</span>
-      </button>
-      <a class="btn btn-primary" href="/auth/register">Start free</a>
-    </div>
-  </div>
-</nav>
-
-<!-- ============================== HERO ============================== -->
-<header class="hero" id="top">
-  <div class="wrap hero-grid">
-    <div>
-      <span class="badge"><span class="live" aria-hidden="true"></span> GitHub App · reviews every PR</span>
-      <h1 class="slogan"><span class="product-name">Orvex</span><span class="slogan-copy"> catches bugs before production.</span><span class="cursor" aria-hidden="true"></span></h1>
-      <p class="lede">
-        Orvex reviews enabled pull requests when they open and when new commits arrive.
-        <b>Deterministic rules run first</b>, two or four focused <b>AI review passes</b> (by track) examine
-        different failure modes, and a strict verifier checks the evidence before anything is posted.
-      </p>
-      <div class="cta-row">
-        <a class="btn btn-primary btn-lg" href="/auth/register">Start free</a>
-        <a class="btn btn-ghost btn-lg" href="#how">See how it works</a>
-      </div>
-      <div class="subnote"><span class="ok">✓</span> No GitHub token or password pasted · scoped GitHub App · priced per workspace, not per seat</div>
-
-      <div class="trust">
-        <div class="trust-item"><span class="n num">10</span><span class="l">lifetime reviews free</span></div>
-        <div class="trust-item"><span class="n num">2–4</span><span class="l">focused review passes by track</span></div>
-        <div class="trust-item"><span class="n num">8</span><span class="l">inline comments by default</span></div>
-      </div>
-    </div>
-
-    <!-- REVIEW LOG -->
-    <div class="term" role="img" aria-label="Animated review log: a pull request arrives, deterministic rules and focused review passes run, a P1 null-dereference bug is verified, and it is caught before merge.">
-      <div class="term-bar">
-        <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span class="term-title">orvex review · <span class="pr">PR #842</span> retry-queue</span>
-        <span class="term-status" id="termStatus"><span class="s-dot"></span>reviewing</span>
-      </div>
-      <div class="log stream" id="stream">
-        <div class="line"><span class="gutter">➜</span><span class="body"><span class="k">PR #842</span> opened — <span class="k">retry-queue: backoff + jitter</span> · +214 −38</span></div>
-        <div class="line"><span class="gutter num">01</span><span class="body">deterministic rules <span class="ok">✓ pass</span> <span class="tag">0 tokens spent</span></span></div>
-        <div class="line"><span class="gutter num">02</span><span class="body"><span class="tag layer">passes A/B</span> reviewing… correctness, security, contracts</span></div>
-        <div class="line"><span class="gutter num">03</span><span class="body"><span class="tag layer">merge</span> combining evidence and removing duplicates…</span></div>
-        <div class="line"><span class="gutter num">04</span><span class="body"><span class="tag layer">verify</span> checking each finding against source context…</span></div>
-        <div class="line"><span class="gutter">!</span><span class="body"><span class="tag p1">P1</span> <span class="bad">null deref reaches prod on retry path</span> <span class="k">queue.js:118</span></span></div>
-        <div class="line"><span class="gutter">✎</span><span class="body">merged &amp; deduped → <span class="k">1 blocking</span>, 2 notes<span class="caret" aria-hidden="true"></span></span></div>
-        <div class="caught-card"><span class="big">✓ caught before merge</span><span>— the null deref never shipped.</span></div>
-      </div>
-    </div>
-  </div>
-</header>
-
-<!-- ============================== HOW IT WORKS ============================== -->
-<section id="how">
-  <div class="wrap">
-    <div class="sec-head">
-      <p class="eyebrow"><span class="dot">//</span> THE PIPELINE</p>
-      <h2>Two or four passes. One verdict.</h2>
-      <p>Every completed review follows the same route: deterministic checks, focused analysis, then verification. Different layers catch different classes of defect.</p>
-    </div>
-    <div class="pipe">
-      <div class="step">
-        <span class="idx">01 · FIRST</span>
-        <h3>Deterministic rules</h3>
-        <p>Cheap, exact checks run before any LLM token is spent. Config-as-code — your repo sets the rules in <span class="mono">.orvex-review.yml</span>.</p>
-        <span class="chip"><span class="ok">✓</span> 0 tokens · instant</span>
-      </div>
-      <div class="step">
-        <span class="idx">02 · THEN</span>
-        <h3>Focused AI passes</h3>
-        <p>Separate passes inspect correctness, security, reliability, performance, and contract edges. Results are merged and deduplicated.</p>
-        <span class="chip">general · risk · reliability → merged</span>
-      </div>
-      <div class="step">
-        <span class="idx">03 · VERIFY</span>
-        <h3>Checks the evidence</h3>
-        <p>A strict verifier re-checks candidate findings against changed source and relevant context before Orvex posts them.</p>
-        <span class="chip"><span class="ok">✓</span> premise and source checked</span>
-      </div>
-    </div>
-  </div>
-</section>
-
-
-<!-- ============================== COMMANDS ============================== -->
-<section id="commands">
-  <div class="wrap">
-    <div class="sec-head">
-      <p class="eyebrow"><span class="dot">//</span> ON GITHUB</p>
-      <h2>Commands you can run on a PR.</h2>
-      <p>Comment these on any pull request. The same list is in your dashboard after install, and via <span class="mono">@orvex help</span>.</p>
-    </div>
-    <div class="table-scroll">
-      <table class="cmd-table">
-        <thead><tr><th>Command</th><th>Where</th><th>Effect</th></tr></thead>
-        <tbody>
-<!--ORVEX_COMMANDS_ROWS-->
-        </tbody>
-      </table>
-    </div>
-    <div class="cmd-help">
-      <p><strong>How reviews start.</strong> Orvex reviews when a PR opens and, if enabled, on each new push. Turn <span class="mono">Run on each commit</span> on or off per repo in the dashboard. <span class="mono">@orvex review</span> always works.</p>
-      <p><strong>What uses quota.</strong> A standard review uses one unit. <span class="mono">@orvex deep</span> uses two. Skipped reviews, fix commands, and explanations do not consume units; failed reviews still count toward free-trial and hourly caps. Check remaining capacity with <span class="mono">@orvex rate limit</span> without starting a review.</p>
-      <p><strong>One-click fixes.</strong> Tick <span class="mono">Apply this fix</span> on an Orvex finding, or comment <span class="mono">@orvex fix</span> / <span class="mono">@orvex fix all</span> on the PR.</p>
-    </div>
-  </div>
-</section>
-
-<!-- ============================== SAFEGUARDS ============================== -->
-<section id="proof">
-  <div class="wrap">
-    <div class="sec-head">
-      <p class="eyebrow"><span class="dot">//</span> BUILT FOR SIGNAL</p>
-      <h2>Every posted finding has a trail.</h2>
-      <p>Orvex is designed to show what it reviewed, challenge candidate findings, and keep repeated pushes readable.</p>
-    </div>
-    <div class="safeguard-grid">
-      <div class="safeguard">
-        <span class="signal">01 · VERIFY</span>
-        <h3>Candidate findings are challenged</h3>
-        <p>The verifier checks premises against source context and removes findings it can factually refute.</p>
-      </div>
-      <div class="safeguard">
-        <span class="signal">02 · COVERAGE</span>
-        <h3>Partial reviews say so</h3>
-        <p>If GitHub omits a patch or configured file limits leave gaps, the review reports that limitation instead of implying full coverage.</p>
-      </div>
-      <div class="safeguard">
-        <span class="signal">03 · MEMORY</span>
-        <h3>Findings survive the push cycle</h3>
-        <p>Fingerprints and source anchors connect re-reviews, suppress duplicate posts, and identify findings fixed by later commits.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================== FINDING MEMORY ============================== -->
-<section id="memory">
-  <div class="wrap">
-    <div class="sec-head">
-      <p class="eyebrow"><span class="dot">//</span> IT REMEMBERS</p>
-      <h2>Keeps resolved findings quiet.</h2>
-      <p>Orvex tracks what it already reported and replies “Fixed” when a later change removes the anchored issue. Eight inline comments is the workspace default; additional findings stay in the summary.</p>
-    </div>
-    <div class="thread-grid">
-      <div class="thread" aria-label="A pull request thread across three pushes, showing the null deref flagged once, resolved, then zero repeated comments.">
-        <div class="push">
-          <span class="sha num">a1f9c02</span>
-          <span class="msg">retry-queue: backoff + jitter</span>
-          <span class="verdict first">P1 · null deref</span>
+    </script>
+    <link rel="stylesheet" href="/assets/marketing.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <!-- ============================== NAV ============================== -->
+    <nav>
+      <div class="nav-in">
+        <a class="brand" href="#top" aria-label="Orvex home">
+          <span class="mark" aria-hidden="true">±</span>
+          <span>Orvex</span>
+        </a>
+        <div class="nav-links">
+          <a href="#how">How it works</a>
+          <a href="#commands">Commands</a>
+          <a href="#proof">Safeguards</a>
+          <a href="#memory">Memory</a>
+          <a href="#pricing">Pricing</a>
+          <a href="#faq">FAQ</a>
         </div>
-        <div class="push">
-          <span class="sha num">7d2e5b8</span>
-          <span class="msg">guard null on retry path</span>
-          <span class="verdict fix">✓ Fixed — verified</span>
-        </div>
-        <div class="push">
-          <span class="sha num">b93aa10</span>
-          <span class="msg">tidy tests + rename</span>
-          <span class="verdict zero">0 repeated nits</span>
+        <div class="nav-right">
+          <button
+            class="icon-btn"
+            id="themeToggle"
+            type="button"
+            aria-label="Toggle color theme"
+            aria-pressed="false"
+            title="Toggle theme"
+          >
+            <span class="theme-icon-dark" aria-hidden="true">☾</span>
+            <span class="theme-icon-light" aria-hidden="true">☀</span>
+          </button>
+          <a class="btn btn-primary" href="/auth/register">Start free</a>
         </div>
       </div>
-      <div class="thread-note">
-        <ul>
-          <li><span class="tick">✓</span><span>Uses fingerprints and source anchors to <b>suppress duplicate posts</b>.</span></li>
-          <li><span class="tick">✓</span><span>Confirms <b>“Fixed”</b> when the change actually resolves it.</span></li>
-          <li><span class="tick">✓</span><span>Uses <b>8 inline comments by default</b>; overflow remains visible in the summary.</span></li>
-        </ul>
+    </nav>
+
+    <main id="main-content" tabindex="-1">
+      <!-- ============================== HERO ============================== -->
+      <header class="hero" id="top">
+        <div class="wrap hero-grid">
+          <div>
+            <span class="badge"
+              ><span class="live" aria-hidden="true"></span> GitHub App · reviews every PR</span
+            >
+            <h1 class="slogan">
+              <span class="product-name">Orvex</span
+              ><span class="slogan-copy"> catches bugs before production.</span
+              ><span class="cursor" aria-hidden="true"></span>
+            </h1>
+            <p class="lede">
+              Orvex reviews enabled pull requests when they open and when new commits arrive.
+              <b>Deterministic rules run first</b>, two or four focused <b>AI review passes</b> (by
+              track) examine different failure modes, and a strict verifier checks the evidence
+              before anything is posted.
+            </p>
+            <div class="cta-row">
+              <a class="btn btn-primary btn-lg" href="/auth/register">Start free</a>
+              <a class="btn btn-ghost btn-lg" href="#how">See how it works</a>
+            </div>
+            <div class="subnote">
+              <span class="ok">✓</span> No GitHub token or password pasted · scoped GitHub App ·
+              priced per workspace, not per seat
+            </div>
+
+            <div class="trust">
+              <div class="trust-item">
+                <span class="n num">10</span><span class="l">lifetime reviews free</span>
+              </div>
+              <div class="trust-item">
+                <span class="n num">2–4</span><span class="l">focused review passes by track</span>
+              </div>
+              <div class="trust-item">
+                <span class="n num">8</span><span class="l">inline comments by default</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- REVIEW LOG -->
+          <div
+            class="term"
+            role="img"
+            aria-label="Animated review log: a pull request arrives, deterministic rules and focused review passes run, a P1 null-dereference bug is verified, and it is caught before merge."
+          >
+            <div class="term-bar">
+              <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="term-title"
+                >orvex review · <span class="pr">PR #842</span> retry-queue</span
+              >
+              <span class="term-status" id="termStatus"><span class="s-dot"></span>reviewing</span>
+            </div>
+            <div class="log stream" id="stream">
+              <div class="line">
+                <span class="gutter">➜</span
+                ><span class="body"
+                  ><span class="k">PR #842</span> opened —
+                  <span class="k">retry-queue: backoff + jitter</span> · +214 −38</span
+                >
+              </div>
+              <div class="line">
+                <span class="gutter num">01</span
+                ><span class="body"
+                  >deterministic rules <span class="ok">✓ pass</span>
+                  <span class="tag">0 tokens spent</span></span
+                >
+              </div>
+              <div class="line">
+                <span class="gutter num">02</span
+                ><span class="body"
+                  ><span class="tag layer">passes A/B</span> reviewing… correctness, security,
+                  contracts</span
+                >
+              </div>
+              <div class="line">
+                <span class="gutter num">03</span
+                ><span class="body"
+                  ><span class="tag layer">merge</span> combining evidence and removing
+                  duplicates…</span
+                >
+              </div>
+              <div class="line">
+                <span class="gutter num">04</span
+                ><span class="body"
+                  ><span class="tag layer">verify</span> checking each finding against source
+                  context…</span
+                >
+              </div>
+              <div class="line">
+                <span class="gutter">!</span
+                ><span class="body"
+                  ><span class="tag p1">P1</span>
+                  <span class="bad">null deref reaches prod on retry path</span>
+                  <span class="k">queue.js:118</span></span
+                >
+              </div>
+              <div class="line">
+                <span class="gutter">✎</span
+                ><span class="body"
+                  >merged &amp; deduped → <span class="k">1 blocking</span>, 2 notes<span
+                    class="caret"
+                    aria-hidden="true"
+                  ></span
+                ></span>
+              </div>
+              <div class="caught-card">
+                <span class="big">✓ caught before merge</span
+                ><span>— the null deref never shipped.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- ============================== HOW IT WORKS ============================== -->
+      <section id="how">
+        <div class="wrap">
+          <div class="sec-head">
+            <p class="eyebrow"><span class="dot">//</span> THE PIPELINE</p>
+            <h2>Two or four passes. One verdict.</h2>
+            <p>
+              Every completed review follows the same route: deterministic checks, focused analysis,
+              then verification. Different layers catch different classes of defect.
+            </p>
+          </div>
+          <div class="pipe">
+            <div class="step">
+              <span class="idx">01 · FIRST</span>
+              <h3>Deterministic rules</h3>
+              <p>
+                Cheap, exact checks run before any LLM token is spent. Config-as-code — your repo
+                sets the rules in <span class="mono">.orvex-review.yml</span>.
+              </p>
+              <span class="chip"><span class="ok">✓</span> 0 tokens · instant</span>
+            </div>
+            <div class="step">
+              <span class="idx">02 · THEN</span>
+              <h3>Focused AI passes</h3>
+              <p>
+                Separate passes inspect correctness, security, reliability, performance, and
+                contract edges. Results are merged and deduplicated.
+              </p>
+              <span class="chip">general · risk · reliability → merged</span>
+            </div>
+            <div class="step">
+              <span class="idx">03 · VERIFY</span>
+              <h3>Checks the evidence</h3>
+              <p>
+                A strict verifier re-checks candidate findings against changed source and relevant
+                context before Orvex posts them.
+              </p>
+              <span class="chip"><span class="ok">✓</span> premise and source checked</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== COMMANDS ============================== -->
+      <section id="commands">
+        <div class="wrap">
+          <div class="sec-head">
+            <p class="eyebrow"><span class="dot">//</span> ON GITHUB</p>
+            <h2>Commands you can run on a PR.</h2>
+            <p>
+              Comment these on any pull request. The same list is in your dashboard after install,
+              and via <span class="mono">@orvex help</span>.
+            </p>
+          </div>
+          <div class="table-scroll">
+            <table class="cmd-table">
+              <thead>
+                <tr>
+                  <th>Command</th>
+                  <th>Where</th>
+                  <th>Effect</th>
+                </tr>
+              </thead>
+              <tbody>
+                <!--ORVEX_COMMANDS_ROWS-->
+              </tbody>
+            </table>
+          </div>
+          <div class="cmd-help">
+            <p>
+              <strong>How reviews start.</strong> Orvex reviews when a PR opens and, if enabled, on
+              each new push. Turn <span class="mono">Run on each commit</span> on or off per repo in
+              the dashboard. <span class="mono">@orvex review</span> always works.
+            </p>
+            <p>
+              <strong>What uses quota.</strong> A standard review uses one unit.
+              <span class="mono">@orvex deep</span> uses two. Skipped reviews, fix commands, and
+              explanations do not consume units; failed reviews still count toward free-trial and
+              hourly caps. Check remaining capacity with
+              <span class="mono">@orvex rate limit</span> without starting a review.
+            </p>
+            <p>
+              <strong>One-click fixes.</strong> Tick <span class="mono">Apply this fix</span> on an
+              Orvex finding, or comment <span class="mono">@orvex fix</span> /
+              <span class="mono">@orvex fix all</span> on the PR.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== SAFEGUARDS ============================== -->
+      <section id="proof">
+        <div class="wrap">
+          <div class="sec-head">
+            <p class="eyebrow"><span class="dot">//</span> BUILT FOR SIGNAL</p>
+            <h2>Every posted finding has a trail.</h2>
+            <p>
+              Orvex is designed to show what it reviewed, challenge candidate findings, and keep
+              repeated pushes readable.
+            </p>
+          </div>
+          <div class="safeguard-grid">
+            <div class="safeguard">
+              <span class="signal">01 · VERIFY</span>
+              <h3>Candidate findings are challenged</h3>
+              <p>
+                The verifier checks premises against source context and removes findings it can
+                factually refute.
+              </p>
+            </div>
+            <div class="safeguard">
+              <span class="signal">02 · COVERAGE</span>
+              <h3>Partial reviews say so</h3>
+              <p>
+                If GitHub omits a patch or configured file limits leave gaps, the review reports
+                that limitation instead of implying full coverage.
+              </p>
+            </div>
+            <div class="safeguard">
+              <span class="signal">03 · MEMORY</span>
+              <h3>Findings survive the push cycle</h3>
+              <p>
+                Fingerprints and source anchors connect re-reviews, suppress duplicate posts, and
+                identify findings fixed by later commits.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== FINDING MEMORY ============================== -->
+      <section id="memory">
+        <div class="wrap">
+          <div class="sec-head">
+            <p class="eyebrow"><span class="dot">//</span> IT REMEMBERS</p>
+            <h2>Keeps resolved findings quiet.</h2>
+            <p>
+              Orvex tracks what it already reported and replies “Fixed” when a later change removes
+              the anchored issue. Eight inline comments is the workspace default; additional
+              findings stay in the summary.
+            </p>
+          </div>
+          <div class="thread-grid">
+            <div
+              class="thread"
+              aria-label="A pull request thread across three pushes, showing the null deref flagged once, resolved, then zero repeated comments."
+            >
+              <div class="push">
+                <span class="sha num">a1f9c02</span>
+                <span class="msg">retry-queue: backoff + jitter</span>
+                <span class="verdict first">P1 · null deref</span>
+              </div>
+              <div class="push">
+                <span class="sha num">7d2e5b8</span>
+                <span class="msg">guard null on retry path</span>
+                <span class="verdict fix">✓ Fixed — verified</span>
+              </div>
+              <div class="push">
+                <span class="sha num">b93aa10</span>
+                <span class="msg">tidy tests + rename</span>
+                <span class="verdict zero">0 repeated nits</span>
+              </div>
+            </div>
+            <div class="thread-note">
+              <ul>
+                <li>
+                  <span class="tick">✓</span
+                  ><span
+                    >Uses fingerprints and source anchors to <b>suppress duplicate posts</b>.</span
+                  >
+                </li>
+                <li>
+                  <span class="tick">✓</span
+                  ><span>Confirms <b>“Fixed”</b> when the change actually resolves it.</span>
+                </li>
+                <li>
+                  <span class="tick">✓</span
+                  ><span
+                    >Uses <b>8 inline comments by default</b>; overflow remains visible in the
+                    summary.</span
+                  >
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== PRICING ============================== -->
+      <section id="pricing">
+        <div class="wrap">
+          <div class="sec-head">
+            <p class="eyebrow"><span class="dot">//</span> PRICING</p>
+            <h2>Priced per workspace, not per seat.</h2>
+            <p>
+              Start with 10 lifetime reviews and no card. Review and Verify tracks set pass count
+              (two or four); choose by track, volume, and hourly capacity.
+            </p>
+          </div>
+          <div class="price-grid">
+            <div class="plan">
+              <span class="pname">Free</span>
+              <div class="price"><span class="per">$</span><span class="amt num">0</span></div>
+              <div class="reviews num">10 lifetime reviews · 2/hour</div>
+              <ul>
+                <li><span class="tick">✓</span>Full standard review track</li>
+                <li><span class="tick">✓</span>Strict finding verification</li>
+                <li><span class="tick">✓</span>No card required</li>
+              </ul>
+              <a class="pbtn" href="/auth/register">Start free</a>
+            </div>
+
+            <div class="plan">
+              <span class="pname">Starter</span>
+              <div class="price">
+                <span class="per">$</span><span class="amt num">29</span
+                ><span class="per">/mo</span>
+              </div>
+              <div class="reviews num">100/month · 5/hour</div>
+              <ul>
+                <li><span class="tick">✓</span>Then prepaid overage</li>
+                <li><span class="tick">✓</span>Full standard review track</li>
+                <li><span class="tick">✓</span>Deep review on demand</li>
+              </ul>
+              <a class="pbtn" href="/buy/review">Get Starter</a>
+            </div>
+
+            <div class="plan">
+              <span class="pname">Pro</span>
+              <div class="price">
+                <span class="per">$</span><span class="amt num">69</span
+                ><span class="per">/mo</span>
+              </div>
+              <div class="reviews num">500/month · 10/hour</div>
+              <ul>
+                <li><span class="tick">✓</span>Hard monthly total</li>
+                <li><span class="tick">✓</span>Full standard review track</li>
+                <li><span class="tick">✓</span>Deep review on demand</li>
+              </ul>
+              <a class="pbtn" href="/buy/review-plus">Choose Pro</a>
+            </div>
+
+            <div class="plan">
+              <span class="pname">Verify Lite</span>
+              <div class="price">
+                <span class="per">$</span><span class="amt num">49</span
+                ><span class="per">/mo</span>
+              </div>
+              <div class="reviews num">50/month · 5/hour</div>
+              <ul>
+                <li><span class="tick">✓</span>Then prepaid overage</li>
+                <li>
+                  <span class="tick">✓</span><b class="plan-emphasis">Advanced review track</b>
+                </li>
+                <li><span class="tick">✓</span>Deep review on demand</li>
+              </ul>
+              <a class="pbtn" href="/buy/verify-lite">Choose Lite</a>
+            </div>
+
+            <div class="plan feat">
+              <span class="pname">Verify</span>
+              <div class="price">
+                <span class="per">$</span><span class="amt num">99</span
+                ><span class="per">/mo</span>
+              </div>
+              <div class="reviews num">120/month · 10/hour</div>
+              <ul>
+                <li><span class="tick">✓</span>Then prepaid overage</li>
+                <li>
+                  <span class="tick">✓</span><b class="plan-emphasis">Advanced review track</b>
+                </li>
+                <li><span class="tick">✓</span>Deep review on demand</li>
+                <li><span class="tick">✓</span>Higher monthly capacity</li>
+              </ul>
+              <a class="pbtn" href="/buy/verify">Choose Verify</a>
+            </div>
+          </div>
+          <p class="price-note">
+            All prices USD. Every plan includes deterministic checks, two or four focused review
+            passes by track, strict verification, finding memory, and autofix. Paid plans also
+            include on-demand deep review.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============================== FAQ ============================== -->
+      <section id="faq">
+        <div class="wrap">
+          <div class="sec-head">
+            <p class="eyebrow"><span class="dot">//</span> FAQ</p>
+            <h2>Plans, limits, and billing.</h2>
+            <p>The practical details: what consumes usage, monthly totals, and hourly caps.</p>
+          </div>
+          <div class="faq-list">
+            <details class="faq-item" open>
+              <summary>How does an Orvex review work?</summary>
+              <p>
+                When a pull request opens or receives a new push, deterministic checks run first.
+                Two or four focused AI passes (by review track) then inspect correctness, security,
+                reliability, performance, and contract edges. Orvex merges duplicate findings and
+                strictly verifies the evidence before posting.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>What commands can I run on a pull request?</summary>
+              <p>
+                Comment <span class="mono">@orvex help</span> for the full list, or see
+                <a href="#commands">Commands</a>. Common ones:
+                <span class="mono">@orvex review</span>, <span class="mono">@orvex deep</span>,
+                <span class="mono">@orvex fix</span>, <span class="mono">@orvex fix all</span>,
+                <span class="mono">@orvex rate limit</span>, and thread replies like
+                <span class="mono">@orvex explain</span> / <span class="mono">@orvex ignore</span>.
+                After install, the dashboard Settings page lists every command for your workspace.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>What counts as one review?</summary>
+              <p>
+                A completed standard pull-request review uses one review unit. An
+                <span class="mono">@orvex deep</span> review uses two units because it performs
+                additional analysis. Skipped reviews, fix commands, and explanation commands do not
+                consume review units; failed reviews still count toward free-trial, hourly, and
+                monthly caps. A fresh review after a new push counts as a new review.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>What happens when I use my monthly reviews?</summary>
+              <p>
+                On Starter, Verify Lite, and Verify, buy prepaid credits in the Orvex dashboard
+                after the included allotment. Reviews draw from that wallet until it is empty or the
+                hard monthly ceiling is reached. Free stops after 10 lifetime reviews; Pro stops at
+                its hard monthly total. Comment <span class="mono">@orvex rate limit</span> anytime
+                to see remaining capacity.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>Why does every plan have an hourly limit?</summary>
+              <p>
+                Monthly totals cap overall spend. Hourly and concurrent caps prevent accidental
+                review loops and keep processing reliable across every workspace.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>Does the Free allowance reset?</summary>
+              <p>
+                No. Free includes 10 lifetime reviews per GitHub account at up to 2 per hour, with
+                no card required. Creating another workspace or reinstalling the GitHub App does not
+                reset the allowance.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>Do lower-priced plans get a weaker pipeline?</summary>
+              <p>
+                No. Every plan gets the full pipeline for its review track: deterministic checks,
+                two or four focused review passes, strict finding verification, finding memory, and
+                autofix. Paid plans also include on-demand deep review. Plans otherwise differ by
+                review track, monthly allowance, hourly rate limit, queue priority, and support.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>Is pricing per developer seat?</summary>
+              <p>
+                No. Billing is per workspace, not per developer. Only a workspace owner can start or
+                change billing. Workspace members can use the review and dashboard features without
+                purchasing another seat.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>When does the monthly allowance reset?</summary>
+              <p>
+                Included review units use a rolling 30-day window (not calendar billing-period
+                reset). Hourly limits are separate burst controls and continue to apply. Prepaid
+                wallet credits do not expire with the rolling window.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>How do I cancel or get billing help?</summary>
+              <p>
+                Email <a href="mailto:support@useorvex.com">support@useorvex.com</a> from the
+                address on your Orvex account and include the workspace name. Cancellation takes
+                effect at the end of the current paid billing period.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>What languages and repositories can Orvex review?</summary>
+              <p>
+                Orvex can review text-based GitHub pull-request diffs across common programming
+                languages. Language-specific deterministic checks run where applicable, and
+                supported text diffs receive the focused AI review pipeline.
+              </p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================== FINAL CTA ============================== -->
+      <section class="cta-band" id="start">
+        <div class="wrap">
+          <div class="cta-inner">
+            <h2>Ship it. Orvex already read it.</h2>
+            <p>
+              Install the GitHub App and your next pull request gets reviewed — before it merges.
+            </p>
+            <div class="cta-row">
+              <a class="btn btn-primary btn-lg" href="/auth/register"
+                >Start free — 10 reviews, no card</a
+              >
+              <a class="btn btn-ghost btn-lg" href="#pricing">Compare plans</a>
+            </div>
+            <div class="subnote subnote-spaced">
+              <span class="ok">✓</span> Installs scoped: pull_requests read/write, contents
+              read/write · no passwords pasted
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- ============================== FOOTER ============================== -->
+    <footer>
+      <div class="wrap foot-in">
+        <a class="brand" href="#top"
+          ><span class="mark" aria-hidden="true">±</span><span>Orvex</span></a
+        >
+        <div class="foot-links">
+          <a href="#how">How it works</a>
+          <a href="#commands">Commands</a>
+          <a href="#proof">Safeguards</a>
+          <a href="#memory">Memory</a>
+          <a href="#pricing">Pricing</a>
+          <a href="#faq">FAQ</a>
+          <a href="/terms">Terms</a>
+          <a href="/privacy">Privacy</a>
+          <a href="/refunds">Refunds</a>
+          <a href="/auth/register">Start free</a>
+        </div>
+        <div class="foot-copy">
+          Orvex Review — catch bugs before production. Deterministic checks, two or four focused
+          review passes by track, finding memory, and strict finding verification.
+        </div>
       </div>
-    </div>
-  </div>
-</section>
+    </footer>
 
-<!-- ============================== PRICING ============================== -->
-<section id="pricing">
-  <div class="wrap">
-    <div class="sec-head">
-      <p class="eyebrow"><span class="dot">//</span> PRICING</p>
-      <h2>Priced per workspace, not per seat.</h2>
-      <p>Start with 10 lifetime reviews and no card. Review and Verify tracks set pass count (two or four); choose by track, volume, and hourly capacity.</p>
-    </div>
-    <div class="price-grid">
-
-      <div class="plan">
-        <span class="pname">Free</span>
-        <div class="price"><span class="per">$</span><span class="amt num">0</span></div>
-        <div class="reviews num">10 lifetime reviews · 2/hour</div>
-        <ul>
-          <li><span class="tick">✓</span>Full standard review track</li>
-          <li><span class="tick">✓</span>Strict finding verification</li>
-          <li><span class="tick">✓</span>No card required</li>
-        </ul>
-        <a class="pbtn" href="/auth/register">Start free</a>
-      </div>
-
-      <div class="plan">
-        <span class="pname">Starter</span>
-        <div class="price"><span class="per">$</span><span class="amt num">29</span><span class="per">/mo</span></div>
-        <div class="reviews num">100/month · 5/hour</div>
-        <ul>
-          <li><span class="tick">✓</span>Then prepaid overage</li>
-          <li><span class="tick">✓</span>Full standard review track</li>
-          <li><span class="tick">✓</span>Deep review on demand</li>
-        </ul>
-        <a class="pbtn" href="/buy/review">Get Starter</a>
-      </div>
-
-      <div class="plan">
-        <span class="pname">Pro</span>
-        <div class="price"><span class="per">$</span><span class="amt num">69</span><span class="per">/mo</span></div>
-        <div class="reviews num">500/month · 10/hour</div>
-        <ul>
-          <li><span class="tick">✓</span>Hard monthly total</li>
-          <li><span class="tick">✓</span>Full standard review track</li>
-          <li><span class="tick">✓</span>Deep review on demand</li>
-        </ul>
-        <a class="pbtn" href="/buy/review-plus">Choose Pro</a>
-      </div>
-
-      <div class="plan">
-        <span class="pname">Verify Lite</span>
-        <div class="price"><span class="per">$</span><span class="amt num">49</span><span class="per">/mo</span></div>
-        <div class="reviews num">50/month · 5/hour</div>
-        <ul>
-          <li><span class="tick">✓</span>Then prepaid overage</li>
-          <li><span class="tick">✓</span><b style="color:var(--ink)">Advanced review track</b></li>
-          <li><span class="tick">✓</span>Deep review on demand</li>
-        </ul>
-        <a class="pbtn" href="/buy/verify-lite">Choose Lite</a>
-      </div>
-
-      <div class="plan feat">
-        <span class="pname">Verify</span>
-        <div class="price"><span class="per">$</span><span class="amt num">99</span><span class="per">/mo</span></div>
-        <div class="reviews num">120/month · 10/hour</div>
-        <ul>
-          <li><span class="tick">✓</span>Then prepaid overage</li>
-          <li><span class="tick">✓</span><b style="color:var(--ink)">Advanced review track</b></li>
-          <li><span class="tick">✓</span>Deep review on demand</li>
-          <li><span class="tick">✓</span>Higher monthly capacity</li>
-        </ul>
-        <a class="pbtn" href="/buy/verify">Choose Verify</a>
-      </div>
-
-    </div>
-    <p class="price-note">All prices USD. Every plan includes deterministic checks, two or four focused review passes by track, strict verification, finding memory, and autofix. Paid plans also include on-demand deep review.</p>
-  </div>
-</section>
-
-<!-- ============================== FAQ ============================== -->
-<section id="faq">
-  <div class="wrap">
-    <div class="sec-head">
-      <p class="eyebrow"><span class="dot">//</span> FAQ</p>
-      <h2>Plans, limits, and billing.</h2>
-      <p>The practical details: what consumes usage, monthly totals, and hourly caps.</p>
-    </div>
-    <div class="faq-list">
-      <details class="faq-item" open>
-        <summary>How does an Orvex review work?</summary>
-        <p>When a pull request opens or receives a new push, deterministic checks run first. Two or four focused AI passes (by review track) then inspect correctness, security, reliability, performance, and contract edges. Orvex merges duplicate findings and strictly verifies the evidence before posting.</p>
-      </details>
-      <details class="faq-item">
-        <summary>What commands can I run on a pull request?</summary>
-        <p>Comment <span class="mono">@orvex help</span> for the full list, or see <a href="#commands">Commands</a>. Common ones: <span class="mono">@orvex review</span>, <span class="mono">@orvex deep</span>, <span class="mono">@orvex fix</span>, <span class="mono">@orvex fix all</span>, <span class="mono">@orvex rate limit</span>, and thread replies like <span class="mono">@orvex explain</span> / <span class="mono">@orvex ignore</span>. After install, the dashboard Settings page lists every command for your workspace.</p>
-      </details>
-      <details class="faq-item">
-        <summary>What counts as one review?</summary>
-        <p>A completed standard pull-request review uses one review unit. An <span class="mono">@orvex deep</span> review uses two units because it performs additional analysis. Skipped reviews, fix commands, and explanation commands do not consume review units; failed reviews still count toward free-trial, hourly, and monthly caps. A fresh review after a new push counts as a new review.</p>
-      </details>
-      <details class="faq-item">
-        <summary>What happens when I use my monthly reviews?</summary>
-        <p>On Starter, Verify Lite, and Verify, buy prepaid credits in the Orvex dashboard after the included allotment. Reviews draw from that wallet until it is empty or the hard monthly ceiling is reached. Free stops after 10 lifetime reviews; Pro stops at its hard monthly total. Comment <span class="mono">@orvex rate limit</span> anytime to see remaining capacity.</p>
-      </details>
-      <details class="faq-item">
-        <summary>Why does every plan have an hourly limit?</summary>
-        <p>Monthly totals cap overall spend. Hourly and concurrent caps prevent accidental review loops and keep processing reliable across every workspace.</p>
-      </details>
-      <details class="faq-item">
-        <summary>Does the Free allowance reset?</summary>
-        <p>No. Free includes 10 lifetime reviews per GitHub account at up to 2 per hour, with no card required. Creating another workspace or reinstalling the GitHub App does not reset the allowance.</p>
-      </details>
-      <details class="faq-item">
-        <summary>Do lower-priced plans get a weaker pipeline?</summary>
-        <p>No. Every plan gets the full pipeline for its review track: deterministic checks, two or four focused review passes, strict finding verification, finding memory, and autofix. Paid plans also include on-demand deep review. Plans otherwise differ by review track, monthly allowance, hourly rate limit, queue priority, and support.</p>
-      </details>
-      <details class="faq-item">
-        <summary>Is pricing per developer seat?</summary>
-        <p>No. Billing is per workspace, not per developer. Only a workspace owner can start or change billing. Workspace members can use the review and dashboard features without purchasing another seat.</p>
-      </details>
-      <details class="faq-item">
-        <summary>When does the monthly allowance reset?</summary>
-        <p>Included review units use a rolling 30-day window (not calendar billing-period reset). Hourly limits are separate burst controls and continue to apply. Prepaid wallet credits do not expire with the rolling window.</p>
-      </details>
-      <details class="faq-item">
-        <summary>How do I cancel or get billing help?</summary>
-        <p>Email <a href="mailto:support@useorvex.com">support@useorvex.com</a> from the address on your Orvex account and include the workspace name. Cancellation takes effect at the end of the current paid billing period.</p>
-      </details>
-      <details class="faq-item">
-        <summary>What languages and repositories can Orvex review?</summary>
-        <p>Orvex can review text-based GitHub pull-request diffs across common programming languages. Language-specific deterministic checks run where applicable, and supported text diffs receive the focused AI review pipeline.</p>
-      </details>
-    </div>
-  </div>
-</section>
-
-<!-- ============================== FINAL CTA ============================== -->
-<section class="cta-band" id="start">
-  <div class="wrap">
-    <div class="cta-inner">
-      <h2>Ship it. Orvex already read it.</h2>
-      <p>Install the GitHub App and your next pull request gets reviewed — before it merges.</p>
-      <div class="cta-row">
-        <a class="btn btn-primary btn-lg" href="/auth/register">Start free — 10 reviews, no card</a>
-        <a class="btn btn-ghost btn-lg" href="#pricing">Compare plans</a>
-      </div>
-      <div class="subnote" style="margin-top:18px"><span class="ok">✓</span> Installs scoped: pull_requests read/write, contents read/write · no passwords pasted</div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================== FOOTER ============================== -->
-<footer>
-  <div class="wrap foot-in">
-    <a class="brand" href="#top"><span class="mark" aria-hidden="true">±</span><span>Orvex</span></a>
-    <div class="foot-links">
-      <a href="#how">How it works</a>
-      <a href="#commands">Commands</a>
-      <a href="#proof">Safeguards</a>
-      <a href="#memory">Memory</a>
-      <a href="#pricing">Pricing</a>
-      <a href="#faq">FAQ</a>
-      <a href="/terms">Terms</a>
-      <a href="/privacy">Privacy</a>
-      <a href="/refunds">Refunds</a>
-      <a href="/auth/register">Start free</a>
-    </div>
-    <div class="foot-copy">Orvex Review — catch bugs before production. Deterministic checks, two or four focused review passes by track, finding memory, and strict finding verification.</div>
-  </div>
-</footer>
-
-<script>
-(function () {
-  "use strict";
-  var root = document.documentElement;
-  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-  /* ---------- Theme toggle ---------- */
-  var toggle = document.getElementById("themeToggle");
-  function currentTheme() {
-    var set = root.getAttribute("data-theme");
-    if (set) return set;
-    return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
-  }
-  toggle.addEventListener("click", function () {
-    var next = currentTheme() === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", next);
-    try { localStorage.setItem("orvex-theme", next); } catch (e) {}
-  });
-
-  /* ---------- Hero review log: one-time orchestrated stream ---------- */
-  var stream = document.getElementById("stream");
-  var status = document.getElementById("termStatus");
-  function finishStream() {
-    stream.classList.add("done");
-    if (status) { status.classList.add("done"); status.lastChild.nodeValue = "caught"; }
-  }
-  if (reduce) {
-    finishStream();
-  } else {
-    // start playback shortly after load
-    window.setTimeout(function () { stream.classList.add("play"); }, 260);
-    // settle into rest state after the sequence completes (~3.7s + buffer)
-    window.setTimeout(finishStream, 4100);
-  }
-
-})();
-</script>
-</body>
+    <script src="/assets/marketing.js" defer></script>
+  </body>
 </html>

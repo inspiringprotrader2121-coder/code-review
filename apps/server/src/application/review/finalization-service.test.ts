@@ -1,0 +1,58 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { FinalizationService } from './finalization-service.js';
+
+function admittedReview() {
+  const completed: unknown[] = [];
+  const refunds: string[] = [];
+  const store = {
+    completeReviewRun: (_runId: string, patch: unknown) => completed.push(patch),
+    refundOverageCredits: (_runId: string, note?: string) => {
+      refunds.push(note ?? '');
+      return true;
+    },
+    overageDebitNetCents: () => 50,
+    reconcileOverageDebit: () => true,
+    countRecentFailedRuns: () => 2,
+  };
+  return {
+    review: {
+      job: { deep: false, installationId: 1, owner: 'acme', repo: 'api', pr: 1 },
+      config: { store },
+      runId: 'run-1',
+      startedAt: 1,
+      plan: { overageCentsPerReview: 50 },
+    } as never,
+    completed,
+    refunds,
+  };
+}
+
+test('undelivered review result refunds prepaid overage even after provider spend', async () => {
+  const { review, completed, refunds } = admittedReview();
+  const service = new FinalizationService({
+    now: () => 2,
+    postFailureNotice: async () => undefined,
+  });
+  await service.complete(review, {
+    findingCount: 0,
+    newCount: 0,
+    fixedCount: 0,
+    skipReason: 'provider_timeout',
+    inputTokens: 10,
+    outputTokens: 5,
+    costUsd: 0.1,
+  });
+  assert.equal((completed[0] as { status: string }).status, 'failed');
+  assert.equal(refunds.length, 1);
+});
+
+test('thrown provider failure refunds prepaid overage even when usage was recorded', async () => {
+  const { review, refunds } = admittedReview();
+  const service = new FinalizationService({
+    now: () => 2,
+    postFailureNotice: async () => undefined,
+  });
+  await assert.rejects(service.fail(review, new Error('provider failed')), /provider failed/);
+  assert.equal(refunds.length, 1);
+});

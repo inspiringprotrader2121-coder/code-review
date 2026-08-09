@@ -9,12 +9,15 @@ const ALERT_DEDUP_MS = 15 * 60_000;
  * unavailable monitoring service from changing review or billing behavior.
  * The event key is locally deduplicated so a retry loop cannot page repeatedly.
  */
-export async function sendOperationalAlert(input: {
-  event: string;
-  severity: AlertSeverity;
-  message: string;
-}): Promise<boolean> {
-  const url = process.env.ORVEX_ALERT_WEBHOOK_URL?.trim();
+export async function sendOperationalAlert(
+  input: {
+    event: string;
+    severity: AlertSeverity;
+    message: string;
+  },
+  webhookUrl?: string,
+): Promise<boolean> {
+  const url = webhookUrl?.trim();
   if (!url) return false;
   const now = Date.now();
   const previous = recentAlerts.get(input.event);

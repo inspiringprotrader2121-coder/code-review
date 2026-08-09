@@ -18,8 +18,15 @@ test('secondsSinceLastCompletedReview is null when this commit has never complet
 test('detects a just-completed review of the exact same commit (the cooldown trigger)', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
-    action: 'command', status: 'completed', durationMs: 1000,
+    tenantId: tenantId(d),
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 5,
+    headSha: 'sha1',
+    action: 'command',
+    status: 'completed',
+    durationMs: 1000,
   });
   const s = d.secondsSinceLastCompletedReview(1, 'acme', 'api', 5, 'sha1');
   assert.ok(s !== null && s < 5, 'a review that just completed is ~0s ago, not null');
@@ -28,25 +35,46 @@ test('detects a just-completed review of the exact same commit (the cooldown tri
 test('a DIFFERENT sha (a genuine new push) is unaffected — always null for that sha', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
-    action: 'command', status: 'completed', durationMs: 1000,
+    tenantId: tenantId(d),
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 5,
+    headSha: 'sha1',
+    action: 'command',
+    status: 'completed',
+    durationMs: 1000,
   });
   assert.equal(
     d.secondsSinceLastCompletedReview(1, 'acme', 'api', 5, 'sha2'),
     null,
-    'a new commit must never be throttled by an old commit\'s review',
+    "a new commit must never be throttled by an old commit's review",
   );
 });
 
 test('a failed or skipped run does NOT count as "recently reviewed" — cooldown only follows real completions', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
-    action: 'command', status: 'failed', durationMs: 1000,
+    tenantId: tenantId(d),
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 5,
+    headSha: 'sha1',
+    action: 'command',
+    status: 'failed',
+    durationMs: 1000,
   });
   d.recordReviewRun({
-    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
-    action: 'command', status: 'skipped', durationMs: 0,
+    tenantId: tenantId(d),
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 5,
+    headSha: 'sha1',
+    action: 'command',
+    status: 'skipped',
+    durationMs: 0,
   });
   assert.equal(d.secondsSinceLastCompletedReview(1, 'acme', 'api', 5, 'sha1'), null);
 });
@@ -54,8 +82,15 @@ test('a failed or skipped run does NOT count as "recently reviewed" — cooldown
 test('a fix run on the same commit does not count as a "review" for cooldown purposes', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
-    action: 'fix:ready', status: 'completed', durationMs: 1000,
+    tenantId: tenantId(d),
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 5,
+    headSha: 'sha1',
+    action: 'fix:ready',
+    status: 'completed',
+    durationMs: 1000,
   });
   assert.equal(d.secondsSinceLastCompletedReview(1, 'acme', 'api', 5, 'sha1'), null);
 });
@@ -63,10 +98,29 @@ test('a fix run on the same commit does not count as a "review" for cooldown pur
 test('scoped per installation+repo+pr — does not leak across different PRs/repos', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
-    action: 'command', status: 'completed', durationMs: 1000,
+    tenantId: tenantId(d),
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 5,
+    headSha: 'sha1',
+    action: 'command',
+    status: 'completed',
+    durationMs: 1000,
   });
-  assert.equal(d.secondsSinceLastCompletedReview(1, 'acme', 'api', 6, 'sha1'), null, 'different PR');
-  assert.equal(d.secondsSinceLastCompletedReview(1, 'acme', 'web', 5, 'sha1'), null, 'different repo');
-  assert.equal(d.secondsSinceLastCompletedReview(2, 'acme', 'api', 5, 'sha1'), null, 'different installation');
+  assert.equal(
+    d.secondsSinceLastCompletedReview(1, 'acme', 'api', 6, 'sha1'),
+    null,
+    'different PR',
+  );
+  assert.equal(
+    d.secondsSinceLastCompletedReview(1, 'acme', 'web', 5, 'sha1'),
+    null,
+    'different repo',
+  );
+  assert.equal(
+    d.secondsSinceLastCompletedReview(2, 'acme', 'api', 5, 'sha1'),
+    null,
+    'different installation',
+  );
 });

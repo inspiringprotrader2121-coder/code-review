@@ -20,11 +20,19 @@ const run = (over: Partial<ScorecardRun>): ScorecardRun => ({
 
 test('THE A/B CASE: normal first then deep on same commit — deep newFindings are marginal', () => {
   const sc = buildDeepScorecard([
-    run({ newFindings: [{ severity: 'P2', file: 'a.js' }, { severity: 'P3', file: 'b.js' }] }),
+    run({
+      newFindings: [
+        { severity: 'P2', file: 'a.js' },
+        { severity: 'P3', file: 'b.js' },
+      ],
+    }),
     run({
       deep: true,
       costUsd: 0.5,
-      newFindings: [{ severity: 'P1', file: 'mig.sql' }, { severity: 'info', file: 'c.js' }],
+      newFindings: [
+        { severity: 'P1', file: 'mig.sql' },
+        { severity: 'info', file: 'c.js' },
+      ],
     }),
   ]);
   assert.equal(sc.pairs.length, 1);
@@ -54,7 +62,13 @@ test('different commits (or PRs) never pair with each other', () => {
 test('deep adding only P3/info does NOT count toward pairsWhereDeepAddedSevere', () => {
   const sc = buildDeepScorecard([
     run({ newFindings: [{ severity: 'P1', file: 'a.js' }] }),
-    run({ deep: true, newFindings: [{ severity: 'P3', file: 'b.js' }, { severity: 'info', file: 'c.js' }] }),
+    run({
+      deep: true,
+      newFindings: [
+        { severity: 'P3', file: 'b.js' },
+        { severity: 'info', file: 'c.js' },
+      ],
+    }),
   ]);
   assert.equal(sc.pairs.length, 1);
   assert.equal(sc.pairsWhereDeepAddedSevere, 0, 'P3/info marginal is not "more serious bugs"');

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { llmChat, extractJsonLoose } from './llm-client.js';
 import { redactSecrets } from './redact.js';
 import { safePromptData } from './prompt-safety.js';
@@ -38,10 +39,7 @@ const AgentResponseSchema = z.object({
 
 export type AgentResponse = z.infer<typeof AgentResponseSchema>;
 
-const MAX_CTX_CHARS = (() => {
-  const value = Number(process.env.ORVEX_AGENT_CTX_CHARS ?? 240_000);
-  return Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), 2_000_000) : 240_000;
-})();
+const MAX_CTX_CHARS = loadReviewRuntimeConfig().agentContextChars;
 
 /**
  * Free-form `@orvex <instruction>` handler. Given a PR's changed files and any
@@ -60,7 +58,11 @@ export async function runAgent(
   const primary = renderFiles('Changed files in this pull request', files, budget * 0.7);
   const context =
     extraContext && extraContext.length
-      ? renderFiles('Related files for context (do not edit unless asked)', extraContext, budget * 0.3)
+      ? renderFiles(
+          'Related files for context (do not edit unless asked)',
+          extraContext,
+          budget * 0.3,
+        )
       : '';
 
   const user = [
@@ -115,7 +117,8 @@ function renderFiles(heading: string, files: AgentFile[], budget: number): strin
   const parts = [`### ${heading}`];
   let used = 0;
   for (const f of files) {
-    const raw = f.content.length > 48_000 ? `${f.content.slice(0, 48_000)}\n… (truncated)` : f.content;
+    const raw =
+      f.content.length > 48_000 ? `${f.content.slice(0, 48_000)}\n… (truncated)` : f.content;
     const body = redactSecrets(raw); // file contents leave the box — strip secrets
     const block = `\n\`${safePromptData(f.path)}\`:\n\`\`\`\n${safePromptData(body)}\n\`\`\``;
     if (used + block.length > budget) {

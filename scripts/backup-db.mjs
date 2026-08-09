@@ -21,7 +21,10 @@ if (!Number.isFinite(retentionDays) || retentionDays < 1 || retentionDays > 365)
   throw new Error('ORVEX_BACKUP_RETENTION_DAYS must be between 1 and 365');
 }
 fs.mkdirSync(backupDir, { recursive: true, mode: 0o700 });
-const stamp = `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}-${process.pid}-${process.hrtime.bigint().toString().slice(-6)}`;
+const stamp = `${new Date()
+  .toISOString()
+  .replace(/[-:]/g, '')
+  .replace(/\.\d{3}Z$/, 'Z')}-${process.pid}-${process.hrtime.bigint().toString().slice(-6)}`;
 const destination = path.join(backupDir, `velatrix-review-${stamp}.db`);
 const temporary = `${destination}.tmp`;
 
@@ -55,7 +58,9 @@ try {
     // Keep the local snapshot even when the off-site destination is not
     // configured. The cron invocation must still fail loudly for monitoring, but
     // a missing business setting must never erase the only working backup path.
-    console.error(`local backup created at ${destination}, but ORVEX_BACKUP_REMOTE is not configured`);
+    console.error(
+      `local backup created at ${destination}, but ORVEX_BACKUP_REMOTE is not configured`,
+    );
     throw new Error('off-site backup was required but no remote was configured');
   }
 } finally {

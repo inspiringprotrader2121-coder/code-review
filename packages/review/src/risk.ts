@@ -78,24 +78,25 @@ const SIGNAL_RULES: readonly SignalRule[] = [
     id: 'degraded-auth',
     label: 'degraded state reaches a privileged view',
     test: /\b(?:outage|degraded|offline|unavailable|isLoading|loading|catch|error|fallback|retry)\b/i,
-    qualifier: /\b(?:session|auth(?:z|n)?|permission|role|admin|impersonat|redirect|guard|route)\b/i,
+    qualifier:
+      /\b(?:session|auth(?:z|n)?|permission|role|admin|impersonat|redirect|guard|route)\b/i,
     probe:
-      'A session/permission/role lookup can FAIL (network error, 5xx, timeout) rather than return '
-      + 'a definite allow or deny. Trace what the code renders or routes to in that failure state. '
-      + 'If any privileged view, admin index, impersonation path, or protected route is reachable '
-      + 'while the lookup is errored, unknown, or still loading, that is an auth bypass (P1). '
-      + 'Check the deny path and the error path SEPARATELY — they are frequently not the same branch.',
+      'A session/permission/role lookup can FAIL (network error, 5xx, timeout) rather than return ' +
+      'a definite allow or deny. Trace what the code renders or routes to in that failure state. ' +
+      'If any privileged view, admin index, impersonation path, or protected route is reachable ' +
+      'while the lookup is errored, unknown, or still loading, that is an auth bypass (P1). ' +
+      'Check the deny path and the error path SEPARATELY — they are frequently not the same branch.',
   },
   {
     id: 'partial-batch',
     label: 'partial batch failure skips post-loop work',
     test: /Promise\s*\.\s*(?:all|allSettled)|for\s+await|\.map\s*\(\s*async/i,
     probe:
-      'A concurrent batch runs here. Determine what happens when ONE element rejects after siblings '
-      + 'have already committed their writes. Follow the code AFTER the batch: any cleanup, expiry, '
-      + 'revocation, notification, counter update, or state transition that is skipped by the throw '
-      + 'is skipped for records that DID change, and nothing retries them. Name the records left '
-      + 'half-transitioned. `allSettled` without inspecting rejected entries is the same defect.',
+      'A concurrent batch runs here. Determine what happens when ONE element rejects after siblings ' +
+      'have already committed their writes. Follow the code AFTER the batch: any cleanup, expiry, ' +
+      'revocation, notification, counter update, or state transition that is skipped by the throw ' +
+      'is skipped for records that DID change, and nothing retries them. Name the records left ' +
+      'half-transitioned. `allSettled` without inspecting rejected entries is the same defect.',
   },
   {
     id: 'retry-lost-write',
@@ -103,38 +104,40 @@ const SIGNAL_RULES: readonly SignalRule[] = [
     test: /\bidempotenc|already\s+(?:exists|processed|completed|redeemed|applied)|ON\s+CONFLICT|\bupsert|\bretr(?:y|ies|ied)\b|\b(?:completed|existing|duplicate)\b/i,
     // The loose "already done" markers only matter next to a write they can
     // skip, so a bare `existing` in unrelated code cannot claim the probe.
-    qualifier: /\b(?:increment|count|usage|quota|ledger|balance|credit|redeem|charge|insert|update|create|write)\b/i,
+    qualifier:
+      /\b(?:increment|count|usage|quota|ledger|balance|credit|redeem|charge|insert|update|create|write)\b/i,
     probe:
-      'This path can run twice. Find the marker it checks to decide "already done" (an existing row, '
-      + 'a completed count, an idempotency key) and find every write that happens AFTER that marker '
-      + 'is created. If a first attempt can die between writing the marker and finishing those '
-      + 'dependent writes — a counter increment, usage row, quota decrement, ledger entry — the retry '
-      + 'short-circuits and that write is lost permanently. Rate P1 when the lost write enforces a '
-      + 'limit, quota, entitlement, or money.',
+      'This path can run twice. Find the marker it checks to decide "already done" (an existing row, ' +
+      'a completed count, an idempotency key) and find every write that happens AFTER that marker ' +
+      'is created. If a first attempt can die between writing the marker and finishing those ' +
+      'dependent writes — a counter increment, usage row, quota decrement, ledger entry — the retry ' +
+      'short-circuits and that write is lost permanently. Rate P1 when the lost write enforces a ' +
+      'limit, quota, entitlement, or money.',
   },
   {
     id: 'pagination-ceiling',
     label: 'enumeration truncates silently',
     test: /\b(?:offset|cursor|continuation|nextPage|hasMore|page_?size|LIMIT\s+\d|take\s*:|skip\s*:)\b/i,
     probe:
-      'An enumeration is paginated or capped here. Find the hard ceiling — a maximum offset, a row '
-      + 'cap, a maximum page count — and compare it against how the next-page link or cursor is '
-      + 'computed. If the cursor can point past the ceiling, or the last page is emitted without a '
-      + 'truncation marker, the caller receives a PARTIAL result it cannot distinguish from a '
-      + 'complete one. Say what the caller then does with the missing rows: a compliance export, a '
-      + 'deletion, a reconciliation, or a security decision makes this P1.',
+      'An enumeration is paginated or capped here. Find the hard ceiling — a maximum offset, a row ' +
+      'cap, a maximum page count — and compare it against how the next-page link or cursor is ' +
+      'computed. If the cursor can point past the ceiling, or the last page is emitted without a ' +
+      'truncation marker, the caller receives a PARTIAL result it cannot distinguish from a ' +
+      'complete one. Say what the caller then does with the missing rows: a compliance export, a ' +
+      'deletion, a reconciliation, or a security decision makes this P1.',
   },
   {
     id: 'tenant-keying',
     label: 'shared key collides across tenants',
     test: /\b(?:cache|redis|lock|index|registry|map|bucket|namespace)\b/i,
-    qualifier: /\b(?:tenant|panel|slug|username|account|org(?:anisation|anization)?|customer|reseller)\b/i,
+    qualifier:
+      /\b(?:tenant|panel|slug|username|account|org(?:anisation|anization)?|customer|reseller)\b/i,
     probe:
-      'A shared keyspace (cache, Redis index, lock, in-memory map) is written here. Reconstruct the '
-      + 'EXACT key and check whether it includes the tenant/panel/account scope. If two tenants can '
-      + 'produce the same key, one silently overwrites or reads the other: state which caller reads '
-      + 'the key and what wrong record it gets. Check the delete/invalidate path uses the same key '
-      + 'shape as the write path — a mismatch leaves stale entries that outlive the record.',
+      'A shared keyspace (cache, Redis index, lock, in-memory map) is written here. Reconstruct the ' +
+      'EXACT key and check whether it includes the tenant/panel/account scope. If two tenants can ' +
+      'produce the same key, one silently overwrites or reads the other: state which caller reads ' +
+      'the key and what wrong record it gets. Check the delete/invalidate path uses the same key ' +
+      'shape as the write path — a mismatch leaves stale entries that outlive the record.',
   },
   {
     id: 'contract-drift',
@@ -145,22 +148,22 @@ const SIGNAL_RULES: readonly SignalRule[] = [
     test: /\b(?:openapi|swagger|endpoint)\b|\bapi\s+docs?\b|\bpaths?\s*:/i,
     qualifier: /\b(?:GET|POST|PUT|PATCH|DELETE|operationId|requestBody|responses?|components)\b/,
     probe:
-      'A contract surface (OpenAPI/Swagger document, API docs page, typed client, route table) is '
-      + 'touched. Compare EVERY method+path it declares against the handlers that actually exist, in '
-      + 'both directions: a documented endpoint with no handler 404s for integrators who trust the '
-      + 'docs, and a live endpoint missing from the contract is unversioned surface. Also compare '
-      + 'request/response field names and required flags, not just the paths.',
+      'A contract surface (OpenAPI/Swagger document, API docs page, typed client, route table) is ' +
+      'touched. Compare EVERY method+path it declares against the handlers that actually exist, in ' +
+      'both directions: a documented endpoint with no handler 404s for integrators who trust the ' +
+      'docs, and a live endpoint missing from the contract is unversioned surface. Also compare ' +
+      'request/response field names and required flags, not just the paths.',
   },
   {
     id: 'lifecycle-cleanup',
     label: 'resource outlives its owner',
     test: /\b(?:cleanup|expire|expiry|reclaim|revoke|release|dispose|ttl|lease|tempor(?:ary|ies)|unlink|rmdir)\b/i,
     probe:
-      'A resource with a lifetime is created, extended, or released here. Enumerate every exit from '
-      + 'the owning scope — success, each thrown error, early return, timeout, cancellation, process '
-      + 'exit — and check the release runs on ALL of them. Then check the reverse: whether anything '
-      + 'reclaims the resource if the owner dies without running its cleanup at all. Leaked leases, '
-      + 'locks, temp files, and unexpired entitlements accumulate into outages and billing errors.',
+      'A resource with a lifetime is created, extended, or released here. Enumerate every exit from ' +
+      'the owning scope — success, each thrown error, early return, timeout, cancellation, process ' +
+      'exit — and check the release runs on ALL of them. Then check the reverse: whether anything ' +
+      'reclaims the resource if the owner dies without running its cleanup at all. Leaked leases, ' +
+      'locks, temp files, and unexpired entitlements accumulate into outages and billing errors.',
   },
   {
     id: 'schedule-window',
@@ -171,14 +174,15 @@ const SIGNAL_RULES: readonly SignalRule[] = [
     // no "schedule" token in the hunk, so the probe never fired and Greptile's
     // "playback vs listings diverge" finding went unmatched.
     test: /\b(?:schedule[ds]?|window|start_?(?:at|time)|end_?(?:at|time)|expires_?at|valid_?(?:from|until)|availability|isAvailable|withinSchedule|buildAvailability)\b/i,
-    qualifier: /\b(?:select|query|where|filter|list(?:ing)?s?|fetch|rows?|find|playlist|m3u|xmltv|catalog|authorize|playback|stream)\b/i,
+    qualifier:
+      /\b(?:select|query|where|filter|list(?:ing)?s?|fetch|rows?|find|playlist|m3u|xmltv|catalog|authorize|playback|stream)\b/i,
     probe:
-      'A time or state window gates something here. Find EVERY other query, listing, or export that '
-      + 'reads the same records — playback vs listings, authorize vs M3U/XMLTV/catalog, API vs UI, '
-      + 'feed vs detail — and check they apply the identical window. When one path filters and '
-      + 'another does not, users see an entry that fails when opened, or reach content that should '
-      + 'be gated. Name both paths and the record that diverges. A helper applied on ONLY the '
-      + 'authorize/playback path is the classic form of this defect.',
+      'A time or state window gates something here. Find EVERY other query, listing, or export that ' +
+      'reads the same records — playback vs listings, authorize vs M3U/XMLTV/catalog, API vs UI, ' +
+      'feed vs detail — and check they apply the identical window. When one path filters and ' +
+      'another does not, users see an entry that fails when opened, or reach content that should ' +
+      'be gated. Name both paths and the record that diverges. A helper applied on ONLY the ' +
+      'authorize/playback path is the classic form of this defect.',
   },
   {
     id: 'event-fanout',
@@ -188,13 +192,13 @@ const SIGNAL_RULES: readonly SignalRule[] = [
     // No trailing \b after the quoted type — the next char is usually `,`.
     test: /(?:addEventListener\s*\(\s*['"`](?:storage|message)['"`]|\bonstorage\b|\bStorageEvent\b|\bBroadcastChannel\b)/i,
     probe:
-      'An event listener is registered on a SHARED channel (window storage, message, BroadcastChannel). '
-      + 'Check whether it filters on event.key / event.type / channel name before doing work. If it '
-      + 'reacts to EVERY event on that channel — invalidating a cache, re-parsing JSON, setState, '
-      + 'refetch — then unrelated writers (language, theme, other features) trigger unnecessary work '
-      + 'and can race the feature\'s own state. Name the unrelated key/event that would fire it and '
-      + 'the wasted work that follows. Rate P2 when the work is a re-parse or re-render; P1 if it '
-      + 'can clear or overwrite authoritative state for another feature.',
+      'An event listener is registered on a SHARED channel (window storage, message, BroadcastChannel). ' +
+      'Check whether it filters on event.key / event.type / channel name before doing work. If it ' +
+      'reacts to EVERY event on that channel — invalidating a cache, re-parsing JSON, setState, ' +
+      'refetch — then unrelated writers (language, theme, other features) trigger unnecessary work ' +
+      "and can race the feature's own state. Name the unrelated key/event that would fire it and " +
+      'the wasted work that follows. Rate P2 when the work is a re-parse or re-render; P1 if it ' +
+      'can clear or overwrite authoritative state for another feature.',
   },
   {
     id: 'fresh-host-bootstrap',
@@ -203,11 +207,11 @@ const SIGNAL_RULES: readonly SignalRule[] = [
     // the infrastructure nouns are what mark real bootstrap logic.
     test: /\b(?:docker|compose|volume|systemd|nginx|bootstrap|provision)\b/i,
     probe:
-      'This is deployment/bootstrap code. Replay it against a FRESH host where no prior run has '
-      + 'happened: no named volumes, no existing containers, no seeded database, no previous config. '
-      + 'Any precondition check that hard-fails on absence — rather than creating the resource or '
-      + 'treating absence as first-run — blocks every new install while passing on the maintainer\'s '
-      + 'own machine. Distinguish "must already exist" from "must exist after this step".',
+      'This is deployment/bootstrap code. Replay it against a FRESH host where no prior run has ' +
+      'happened: no named volumes, no existing containers, no seeded database, no previous config. ' +
+      'Any precondition check that hard-fails on absence — rather than creating the resource or ' +
+      "treating absence as first-run — blocks every new install while passing on the maintainer's " +
+      'own machine. Distinguish "must already exist" from "must exist after this step".',
   },
 ];
 
@@ -255,25 +259,27 @@ export function detectRiskSignals(files: readonly RiskDiffFile[]): RiskSignal[] 
       hits.set(rule.id, list);
     }
   }
-  return SIGNAL_RULES.filter((rule) => hits.has(rule.id))
-    .map((rule) => {
-      const matched = hits.get(rule.id) ?? [];
-      return {
-        id: rule.id,
-        label: rule.label,
-        files: matched.slice(0, MAX_SIGNAL_FILES),
-        probe: rule.probe,
-        // A rule that fired on EVERY changed file matched a keyword the diff
-        // happens to use everywhere, not a place worth probing. Observed on PR
-        // #240, where two such rules outranked the pagination hypothesis that
-        // pointed straight at the actual defect.
-        generic: changedCount >= 3 && matched.length >= changedCount,
-      };
-    })
-    // Selective hypotheses first, then the ones matching most files. `sort` is
-    // stable, so remaining ties keep the benchmark-derived order above.
-    .sort((a, b) => Number(a.generic) - Number(b.generic) || b.files.length - a.files.length)
-    .map(({ generic: _generic, ...signal }) => signal);
+  return (
+    SIGNAL_RULES.filter((rule) => hits.has(rule.id))
+      .map((rule) => {
+        const matched = hits.get(rule.id) ?? [];
+        return {
+          id: rule.id,
+          label: rule.label,
+          files: matched.slice(0, MAX_SIGNAL_FILES),
+          probe: rule.probe,
+          // A rule that fired on EVERY changed file matched a keyword the diff
+          // happens to use everywhere, not a place worth probing. Observed on PR
+          // #240, where two such rules outranked the pagination hypothesis that
+          // pointed straight at the actual defect.
+          generic: changedCount >= 3 && matched.length >= changedCount,
+        };
+      })
+      // Selective hypotheses first, then the ones matching most files. `sort` is
+      // stable, so remaining ties keep the benchmark-derived order above.
+      .sort((a, b) => Number(a.generic) - Number(b.generic) || b.files.length - a.files.length)
+      .map(({ generic: _generic, ...signal }) => signal)
+  );
 }
 
 /** Render one signal as a focused instruction for a single probe pass. */

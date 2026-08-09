@@ -64,15 +64,18 @@ export function auditDocIssuesOpenOnHead(content: string, filePath: string): boo
 const ISSUE_MESSAGES: Record<string, { message: string; suggestion: string }> = {
   escaped_pipe_in_test_patterns: {
     message: 'Escaped pipe in testPathPatterns — use a fenced bash block instead of a table cell',
-    suggestion: 'Move the testPathPatterns command out of the markdown table into a ```bash fenced block.',
+    suggestion:
+      'Move the testPathPatterns command out of the markdown table into a ```bash fenced block.',
   },
   test_path_patterns_in_table: {
     message: 'testPathPatterns must not appear inside a markdown table row',
-    suggestion: 'Use a short label in the table and put the full command in a fenced code block below.',
+    suggestion:
+      'Use a short label in the table and put the full command in a fenced code block below.',
   },
   unsafe_pipe_in_table_cell: {
     message: 'Unsafe pipe character in markdown table cell with testPathPatterns',
-    suggestion: 'Avoid raw `|` in table cells; use fenced blocks or HTML entity &#124; only when appropriate.',
+    suggestion:
+      'Avoid raw `|` in table cells; use fenced blocks or HTML entity &#124; only when appropriate.',
   },
   wrong_validate_deploy_script: {
     message: 'References validate-deploy-config script which does not exist',
@@ -99,10 +102,7 @@ export interface AuditRuleFinding {
   ruleId: string;
 }
 
-export function auditFindingsFromContent(
-  content: string,
-  filePath: string,
-): AuditRuleFinding[] {
+export function auditFindingsFromContent(content: string, filePath: string): AuditRuleFinding[] {
   const issues = getAuditDocIssues(content, filePath);
   return issues.map((issue) => {
     const meta = ISSUE_MESSAGES[issue] ?? {

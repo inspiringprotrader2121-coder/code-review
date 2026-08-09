@@ -94,12 +94,24 @@ test('repos: re-add after GitHub removal applies autoEnableNewRepos', () => {
 test('pull requests: lifecycle states and counts', () => {
   const db = freshDb();
   const tenant = seedTenant(db);
-  const base = { tenantId: tenant.id, installationId: 100, repoFullName: 'acme/api', author: 'dev', headSha: 'abc' };
+  const base = {
+    tenantId: tenant.id,
+    installationId: 100,
+    repoFullName: 'acme/api',
+    author: 'dev',
+    headSha: 'abc',
+  };
 
   db.upsertPullRequest({ ...base, number: 1, title: 'open one', state: 'open' });
   db.upsertPullRequest({ ...base, number: 2, title: 'merge me', state: 'open' });
   // PR #2 gets merged
-  db.upsertPullRequest({ ...base, number: 2, title: 'merge me', state: 'merged', mergedAt: '2026-07-04T00:00:00Z' });
+  db.upsertPullRequest({
+    ...base,
+    number: 2,
+    title: 'merge me',
+    state: 'merged',
+    mergedAt: '2026-07-04T00:00:00Z',
+  });
   db.upsertPullRequest({ ...base, number: 3, title: 'closed one', state: 'closed' });
 
   const counts = db.getPullRequestCounts(tenant.id);
@@ -173,7 +185,10 @@ test('workspace settings: defaults and update', () => {
   assert.equal(def.autoEnableNewRepos, true);
   assert.equal(def.maxComments, 8);
 
-  const updated = db.updateWorkspaceSettings(tenant.id, { autoEnableNewRepos: false, maxComments: 5 });
+  const updated = db.updateWorkspaceSettings(tenant.id, {
+    autoEnableNewRepos: false,
+    maxComments: 5,
+  });
   assert.equal(updated.autoEnableNewRepos, false);
   assert.equal(updated.maxComments, 5);
   assert.equal(db.getWorkspaceSettings(tenant.id).maxComments, 5);

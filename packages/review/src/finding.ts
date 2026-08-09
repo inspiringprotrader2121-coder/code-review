@@ -82,12 +82,14 @@ export function findingProvenance(finding: ReviewFinding): FindingProvenance[] {
     ...(finding.provenance ?? []),
   ];
   const seen = new Set<string>();
-  return items.filter((item) => {
-    const key = provenanceKey(item);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, MAX_PROVENANCE_PER_FINDING);
+  return items
+    .filter((item) => {
+      const key = provenanceKey(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_PROVENANCE_PER_FINDING);
 }
 
 /** Attach the producing discovery pass to a fresh model finding. */
@@ -111,12 +113,14 @@ export function mergeFindingProvenance(
 ): ReviewFinding {
   const all = [target, ...sources].flatMap(findingProvenance);
   const seen = new Set<string>();
-  target.provenance = all.filter((item) => {
-    const key = provenanceKey(item);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, MAX_PROVENANCE_PER_FINDING);
+  target.provenance = all
+    .filter((item) => {
+      const key = provenanceKey(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_PROVENANCE_PER_FINDING);
   return target;
 }
 

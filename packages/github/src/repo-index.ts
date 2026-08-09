@@ -25,7 +25,8 @@ const CODE_FILE_RE =
 // Anchored deliberately: `docker-compose[^/]*` also matched `docker-compose.env`
 // — the standard `env_file:` secrets file — and `.env.[^/]*example[^/]*` matched
 // `.env.example.bak`. Both would have pulled live credentials into retrieval.
-const INFRA_FILENAME_RE = /(^|\/)(Dockerfile(\.[A-Za-z0-9_-]+)?|docker-compose(\.[A-Za-z0-9_-]+)?\.ya?ml|Makefile|Caddyfile|Procfile|nginx\.conf|\.env\.example)$/i;
+const INFRA_FILENAME_RE =
+  /(^|\/)(Dockerfile(\.[A-Za-z0-9_-]+)?|docker-compose(\.[A-Za-z0-9_-]+)?\.ya?ml|Makefile|Caddyfile|Procfile|nginx\.conf|\.env\.example)$/i;
 const IDENT_RE = /[A-Za-z_][A-Za-z0-9_]{2,}/g;
 
 // Language keywords + ubiquitous names carry no relevance signal — they appear
@@ -35,23 +36,145 @@ const IDENT_RE = /[A-Za-z_][A-Za-z0-9_]{2,}/g;
 // find its textual callers) — without these, every migration "matches" every
 // other migration on SELECT/UPDATE.
 const STOPWORDS = new Set([
-  'const', 'let', 'var', 'function', 'return', 'import', 'export', 'from', 'this',
-  'true', 'false', 'null', 'undefined', 'async', 'await', 'class', 'extends', 'super',
-  'new', 'typeof', 'instanceof', 'void', 'delete', 'yield', 'static', 'public', 'private',
-  'protected', 'readonly', 'type', 'interface', 'enum', 'namespace', 'declare', 'default',
-  'string', 'number', 'boolean', 'object', 'symbol', 'bigint', 'any', 'unknown', 'never',
-  'for', 'while', 'break', 'continue', 'switch', 'case', 'else', 'catch', 'throw', 'finally',
-  'try', 'with', 'and', 'not', 'the', 'that', 'this', 'value', 'data', 'result', 'item',
-  'index', 'name', 'args', 'props', 'params', 'options', 'opts', 'config', 'error', 'err',
-  'self', 'cls', 'def', 'func', 'end', 'nil', 'none', 'true', 'false',
+  'const',
+  'let',
+  'var',
+  'function',
+  'return',
+  'import',
+  'export',
+  'from',
+  'this',
+  'true',
+  'false',
+  'null',
+  'undefined',
+  'async',
+  'await',
+  'class',
+  'extends',
+  'super',
+  'new',
+  'typeof',
+  'instanceof',
+  'void',
+  'delete',
+  'yield',
+  'static',
+  'public',
+  'private',
+  'protected',
+  'readonly',
+  'type',
+  'interface',
+  'enum',
+  'namespace',
+  'declare',
+  'default',
+  'string',
+  'number',
+  'boolean',
+  'object',
+  'symbol',
+  'bigint',
+  'any',
+  'unknown',
+  'never',
+  'for',
+  'while',
+  'break',
+  'continue',
+  'switch',
+  'case',
+  'else',
+  'catch',
+  'throw',
+  'finally',
+  'try',
+  'with',
+  'and',
+  'not',
+  'the',
+  'that',
+  'this',
+  'value',
+  'data',
+  'result',
+  'item',
+  'index',
+  'name',
+  'args',
+  'props',
+  'params',
+  'options',
+  'opts',
+  'config',
+  'error',
+  'err',
+  'self',
+  'cls',
+  'def',
+  'func',
+  'end',
+  'nil',
+  'none',
+  'true',
+  'false',
   // SQL
-  'select', 'insert', 'update', 'create', 'alter', 'drop', 'table', 'column', 'values',
-  'where', 'join', 'left', 'right', 'inner', 'outer', 'group', 'order', 'limit', 'offset',
-  'having', 'union', 'primary', 'foreign', 'references', 'constraint', 'begin', 'commit',
-  'rollback', 'transaction', 'integer', 'text', 'varchar', 'timestamp', 'into', 'set',
+  'select',
+  'insert',
+  'update',
+  'create',
+  'alter',
+  'drop',
+  'table',
+  'column',
+  'values',
+  'where',
+  'join',
+  'left',
+  'right',
+  'inner',
+  'outer',
+  'group',
+  'order',
+  'limit',
+  'offset',
+  'having',
+  'union',
+  'primary',
+  'foreign',
+  'references',
+  'constraint',
+  'begin',
+  'commit',
+  'rollback',
+  'transaction',
+  'integer',
+  'text',
+  'varchar',
+  'timestamp',
+  'into',
+  'set',
   // shell
-  'echo', 'then', 'elif', 'done', 'esac', 'local', 'shift', 'exit', 'eval', 'exec',
-  'source', 'printf', 'grep', 'curl', 'sudo', 'mkdir', 'chmod', 'chown',
+  'echo',
+  'then',
+  'elif',
+  'done',
+  'esac',
+  'local',
+  'shift',
+  'exit',
+  'eval',
+  'exec',
+  'source',
+  'printf',
+  'grep',
+  'curl',
+  'sudo',
+  'mkdir',
+  'chmod',
+  'chown',
 ]);
 
 /** Split camelCase / snake_case / kebab into lowercase subtokens. */
@@ -92,6 +215,8 @@ export interface RetrieveOptions {
   exclude?: Set<string>;
   /** cap identifier scan per file so a giant generated file can't dominate */
   maxScanBytes?: number;
+  /** Restrict retrieval to a known candidate set (for ranked import/caller context). */
+  candidatePaths?: ReadonlySet<string>;
 }
 
 /**
@@ -110,13 +235,19 @@ export function retrieveRelevantFiles(
   const maxFileBytes = opts.maxFileBytes ?? 24_000;
   const maxScanBytes = opts.maxScanBytes ?? 200_000;
   const exclude = opts.exclude ?? new Set<string>();
+  const candidatePaths = opts.candidatePaths;
   const changed = new Set(changedFiles);
 
   // candidate documents = code files that aren't the changed files themselves
   const docs: Array<{ path: string; tokens: Set<string> }> = [];
   const df = new Map<string, number>();
   for (const [path, content] of snapshot) {
-    if ((!CODE_FILE_RE.test(path) && !INFRA_FILENAME_RE.test(path)) || changed.has(path)) continue;
+    if (
+      (!CODE_FILE_RE.test(path) && !INFRA_FILENAME_RE.test(path)) ||
+      changed.has(path) ||
+      (candidatePaths !== undefined && !candidatePaths.has(path))
+    )
+      continue;
     const tokens = tokenize(content.slice(0, maxScanBytes));
     docs.push({ path, tokens });
     for (const t of tokens) df.set(t, (df.get(t) ?? 0) + 1);
@@ -156,7 +287,7 @@ export function retrieveRelevantFiles(
       return { path: d.path, score: score / Math.sqrt(d.tokens.size || 1) };
     })
     .filter((d) => d.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
     .slice(0, k);
 
   return scored.map((s) => {
@@ -165,7 +296,9 @@ export function retrieveRelevantFiles(
       path: s.path,
       score: s.score,
       content:
-        content.length > maxFileBytes ? `${content.slice(0, maxFileBytes)}\n… (truncated)` : content,
+        content.length > maxFileBytes
+          ? `${content.slice(0, maxFileBytes)}\n… (truncated)`
+          : content,
     };
   });
 }

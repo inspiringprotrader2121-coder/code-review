@@ -4,5 +4,11 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts"]
+  "references": [
+    { "path": "../../packages/github" },
+    { "path": "../../packages/queue" },
+    { "path": "../server" }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
 }

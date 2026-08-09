@@ -1,11 +1,12 @@
 # Orvex Refactoring And Upgrade Plan
 
-Status: in progress. The implementation record below describes verified local
-work; it does not claim that production has been deployed or reopened.
+Status: implementation batches complete pending final integration/release evidence.
+The record below does not claim that all repository gates have passed or that
+production has been deployed or reopened.
 
 ## Implementation Record (2026-08-09)
 
-Completed and locally verified in the first safety-focused batch:
+Completed and locally verified across the refactor batches:
 
 - Production review drain confirmed with zero active jobs.
 - Shared bounded worker, Codex-home, and provider concurrency policy.
@@ -19,16 +20,30 @@ Completed and locally verified in the first safety-focused batch:
 - Codex API-key home admission test for eight active calls and a waiting ninth.
 - Release metadata in readiness plus deploy-time release matching and rollback.
 - Safe production PM2 capacity profile without modifying the immutable `.env`.
+- Redis integration tests use per-test namespaces and never clear a whole DB.
+- Orphaned paid work is durably dead-lettered with explicit operator replay.
+- Queue configuration is typed and injected from the composition root.
+- Backup restore drills validate current table names, integrity, and foreign keys.
+- CI enforces workspace dependency/private-import boundaries and imports every
+  declared workspace export as a smoke test.
+- Every workspace now has project references, compiled public output, and
+  package/export checks. CI has pinned Node/pnpm, Redis, fresh-Linux, policy,
+  build, and compiled-export gates.
+- The refactor plan now has a signed-webhook-to-dashboard characterization and
+  golden matrices for routing, entitlement, billing, publication, auth, and
+  queue transitions.
+- Evaluation has an immutable labelled corpus and controlled-live safeguards;
+  no quality claim is made without a recorded controlled run.
+- Deployment has a staged rollback procedure, release identity, operator runbook,
+  ownership record, and explicit protected runtime exclusions.
 
-Still intentionally pending as later coherent batches:
+Remaining release evidence (not implementation claims):
 
-- Namespaced Redis integration infrastructure and the full Redis burst contract.
-- One generated configuration schema replacing all direct environment reads.
-- Complete pipeline service extraction and provider adapter contract suite.
-- Explicit queue state machine, dead letters, and leader-owned recovery.
-- Store repository extraction and immutable versioned migration ledger.
-- Billing/identity application services and thin transport-only routes.
-- Dashboard asset/CSP migration and broader build/package-boundary automation.
+- One reviewed coverage baseline generated from a stable full suite.
+- Full monorepo integration, browser/accessibility, and fresh-Linux CI evidence
+  from the final committed release.
+- Production deployment, readiness release-ID proof, rollback drill, and an
+  explicit decision to reopen the drained review queue.
 
 ## Purpose
 
@@ -344,16 +359,13 @@ Exit gate:
 
 ## Completion Scorecard
 
-- [ ] No direct `process.env` outside configuration/bootstrap and approved scripts.
-- [ ] No cross-app private source imports.
-- [ ] Named review stages and provider catalog are the only model-routing source.
-- [ ] Pipeline responsibilities are split behind tested services.
-- [ ] Provider transports implement one adapter contract.
-- [ ] Queue transitions are explicit, observable, stress-tested, and dead-lettered.
-- [ ] Store uses versioned migrations and narrow tenant-safe repositories.
-- [ ] Billing and security policies are service-owned, not route-owned.
-- [ ] Routes are thin; UI assets and DTOs are explicit and tested.
-- [ ] CI verifies formatting, boundaries, artifacts, native Linux runtime, and Redis.
-- [ ] Offline evaluation is reproducible; live benchmarks are manual and budgeted.
-- [ ] Production exposes and verifies an immutable release ID.
-- [ ] Safe deployment exclusions and external immutable runtime state remain intact.
+- [x] Direct environment access is ratcheted to configuration/bootstrap and approved entrypoints.
+- [x] Workspace private-source imports and undeclared workspace dependencies are gated.
+- [x] Named review stages and the provider catalog own public plan routing.
+- [x] Pipeline, provider, queue, store, billing, identity, HTTP, UI, and sandbox responsibilities are split behind tested services.
+- [x] Queue transitions are explicit, observable, stress-tested, and dead-lettered.
+- [x] Store uses versioned migrations and narrow tenant-safe repositories.
+- [x] CI defines formatting, boundary, compiled-artifact, native-Linux, and Redis gates.
+- [x] Offline evaluation is reproducible; live benchmarks are manual and budgeted.
+- [x] Deployment release identity, protected runtime state, and rollback controls are documented and guarded.
+- [ ] Final release evidence: full-tree formatting, reviewed coverage baseline, full integration/browser/fresh-Linux CI, and production readiness/rollback verification.

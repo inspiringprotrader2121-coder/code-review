@@ -19,11 +19,21 @@ function testTenant(d: AppDatabase): string {
 test('completeReviewRun persists token usage + cost, and sumAccountCost aggregates it', () => {
   const d = db();
   const id = d.startReviewRun({
-    tenantId: testTenant(d), installationId: 1, owner: 'acme', repo: 'api', pr: 1, headSha: 'sha1', action: 'manual',
+    tenantId: testTenant(d),
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 1,
+    headSha: 'sha1',
+    action: 'manual',
   });
   d.completeReviewRun(id, {
-    status: 'completed', durationMs: 1000, findingsNew: 2,
-    inputTokens: 500_000, outputTokens: 100_000, costUsd: 0.27,
+    status: 'completed',
+    durationMs: 1000,
+    findingsNew: 2,
+    inputTokens: 500_000,
+    outputTokens: 100_000,
+    costUsd: 0.27,
   });
   const spend = d.sumAccountCost('acme');
   assert.equal(spend.reviews, 1);
@@ -53,20 +63,32 @@ test('sumAccountCost is owner-scoped (case-insensitive) and windowed', () => {
   const d = db();
   for (const owner of ['acme', 'ACME', 'other']) {
     const id = d.startReviewRun({
-      tenantId: testTenant(d), installationId: 1, owner, repo: 'api', pr: 1, headSha: 's', action: 'manual',
+      tenantId: testTenant(d),
+      installationId: 1,
+      owner,
+      repo: 'api',
+      pr: 1,
+      headSha: 's',
+      action: 'manual',
     });
-    d.completeReviewRun(id, { status: 'completed', durationMs: 1, costUsd: 0.10 });
+    d.completeReviewRun(id, { status: 'completed', durationMs: 1, costUsd: 0.1 });
   }
   const acme = d.sumAccountCost('acme');
   assert.equal(acme.reviews, 2, 'acme + ACME both count');
-  assert.ok(Math.abs(acme.costUsd - 0.20) < 1e-9);
+  assert.ok(Math.abs(acme.costUsd - 0.2) < 1e-9);
   assert.equal(d.sumAccountCost('other').reviews, 1);
 });
 
 test('getWorkspaceStats includes total spend for the window', () => {
   const d = db();
   const id = d.startReviewRun({
-    tenantId: testTenant(d), installationId: 1, owner: 'acme', repo: 'api', pr: 1, headSha: 's', action: 'manual',
+    tenantId: testTenant(d),
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    pr: 1,
+    headSha: 's',
+    action: 'manual',
   });
   d.completeReviewRun(id, { status: 'completed', durationMs: 1, costUsd: 0.5 });
   const stats = d.getWorkspaceStats(testTenant(d));
@@ -90,19 +112,22 @@ test('persists per-model usage and builds operator profitability analytics', () 
     headSha: 'sha42',
     action: 'manual',
   });
-  assert.equal(d.startReviewRunAttempt({
-    id: 'attempt-1',
-    runId,
-    tenantId: tenant.id,
-    provider: 'deepseek',
-    model: 'deepseek-v4-flash',
-    tier: 'deepseek-flash',
-    passName: 'verification',
-    transport: 'responses',
-    retryIndex: 0,
-    keyIndex: 0,
-    startedAt: new Date().toISOString(),
-  }), true);
+  assert.equal(
+    d.startReviewRunAttempt({
+      id: 'attempt-1',
+      runId,
+      tenantId: tenant.id,
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      tier: 'deepseek-flash',
+      passName: 'verification',
+      transport: 'responses',
+      retryIndex: 0,
+      keyIndex: 0,
+      startedAt: new Date().toISOString(),
+    }),
+    true,
+  );
   d.recordReviewRunUsage({
     runId,
     tenantId: tenant.id,
@@ -119,26 +144,32 @@ test('persists per-model usage and builds operator profitability analytics', () 
     attemptId: 'attempt-1',
   });
   d.completeReviewRun(runId, { status: 'completed', durationMs: 1000 });
-  assert.equal(d.recordStripeRevenueEvent({
-    eventId: 'evt_invoice_42',
-    eventType: 'invoice.paid',
-    invoiceId: 'in_42',
-    tenantId: tenant.id,
-    customerId: 'cus_acme',
-    amountCents: 9900,
-    currency: 'usd',
-    occurredAt: '2026-08-05T09:00:00.000Z',
-  }), true);
-  assert.equal(d.recordStripeRevenueEvent({
-    eventId: 'evt_invoice_42',
-    eventType: 'invoice.paid',
-    invoiceId: 'in_42',
-    tenantId: tenant.id,
-    customerId: 'cus_acme',
-    amountCents: 9900,
-    currency: 'usd',
-    occurredAt: '2026-08-05T09:00:00.000Z',
-  }), false);
+  assert.equal(
+    d.recordStripeRevenueEvent({
+      eventId: 'evt_invoice_42',
+      eventType: 'invoice.paid',
+      invoiceId: 'in_42',
+      tenantId: tenant.id,
+      customerId: 'cus_acme',
+      amountCents: 9900,
+      currency: 'usd',
+      occurredAt: '2026-08-05T09:00:00.000Z',
+    }),
+    true,
+  );
+  assert.equal(
+    d.recordStripeRevenueEvent({
+      eventId: 'evt_invoice_42',
+      eventType: 'invoice.paid',
+      invoiceId: 'in_42',
+      tenantId: tenant.id,
+      customerId: 'cus_acme',
+      amountCents: 9900,
+      currency: 'usd',
+      occurredAt: '2026-08-05T09:00:00.000Z',
+    }),
+    false,
+  );
   d.upsertPlatformCost({ category: 'server', amountCents: 1000, note: 'test host' });
 
   const analytics = d.getSuperadminCostAnalytics(
@@ -185,7 +216,10 @@ test('usage ledger rejects unknown runs and cross-tenant attribution', () => {
     tokenSource: 'estimate' as const,
   };
   assert.throws(() => d.recordReviewRunUsage({ ...input, runId: 'missing' }), /unknown review run/);
-  assert.throws(() => d.recordReviewRunUsage({ ...input, tenantId: 'other-tenant' }), /tenant mismatch/);
+  assert.throws(
+    () => d.recordReviewRunUsage({ ...input, tenantId: 'other-tenant' }),
+    /tenant mismatch/,
+  );
 });
 
 test('failed runs retain provider spend from the usage ledger', () => {

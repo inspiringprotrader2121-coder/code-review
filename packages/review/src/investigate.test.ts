@@ -83,6 +83,63 @@ test('read_file redacts secrets even with line-number prefixes', async () => {
   }
 });
 
+test('caller and test lookup tools are noninteractive, checkout-confined, and useful', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-'));
+  try {
+    fs.mkdirSync(path.join(root, 'src'));
+    fs.mkdirSync(path.join(root, 'test'));
+    fs.writeFileSync(
+      path.join(root, 'src', 'widget.ts'),
+      'export function renderWidget() { return 1; }\n',
+    );
+    fs.writeFileSync(
+      path.join(root, 'src', 'consumer.ts'),
+      "import { renderWidget } from './widget';\nrenderWidget();\n",
+    );
+    fs.writeFileSync(
+      path.join(root, 'test', 'widget.test.ts'),
+      "import { renderWidget } from '../src/widget';\nrenderWidget();\n",
+    );
+
+    const callers = await runInvestigateTool(
+      root,
+      { name: 'find_callers', symbol: 'renderWidget', path: 'src' },
+      8_000,
+    );
+    assert.match(callers, /consumer\.ts/);
+    const tests = await runInvestigateTool(
+      root,
+      { name: 'find_tests', path: 'src/widget.ts' },
+      8_000,
+    );
+    assert.match(tests, /widget\.test\.ts/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('grep redacts matching secrets and sensitive paths are refused', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-'));
+  try {
+    fs.writeFileSync(
+      path.join(root, 'config.yml'),
+      'secret_key_base: supersecretvalue1234567890\n',
+    );
+    fs.writeFileSync(path.join(root, '.env'), 'API_KEY=hiddenvalue1234567890\n');
+    const grep = await runInvestigateTool(
+      root,
+      { name: 'grep', pattern: 'secret_key_base' },
+      8_000,
+    );
+    assert.doesNotMatch(grep, /supersecretvalue1234567890/);
+    assert.match(grep, /REDACTED/);
+    const env = await runInvestigateTool(root, { name: 'read_file', path: '.env' }, 8_000);
+    assert.match(env, /sensitive file access is not available/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('extractDeletedSymbols pulls renamed/removed functions from diffs', () => {
   const symbols = extractDeletedSymbols([
     {
@@ -106,7 +163,12 @@ test('extractDeletedSymbols includes fully deleted files', () => {
     {
       filename: 'gone.ts',
       status: 'removed',
-      patch: ['@@ -1,3 +0,0 @@', '-export function guardTenant(row) {', '-  return row.tenantId;', '-}'].join('\n'),
+      patch: [
+        '@@ -1,3 +0,0 @@',
+        '-export function guardTenant(row) {',
+        '-  return row.tenantId;',
+        '-}',
+      ].join('\n'),
     },
   ]);
   assert.ok(symbols.includes('guardTenant'));

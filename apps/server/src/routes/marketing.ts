@@ -144,7 +144,7 @@ const LLMS_TXT = `# Orvex
 - Starter: $29/month — 100 reviews included at up to 5/hour, then prepaid overage at $0.50/review.
 - Pro: $69/month — 500 reviews/month at up to 10/hour.
 - Verify Lite: $49/month — 50 reviews included at up to 5/hour, then prepaid overage at $0.75/review on the advanced review track.
-- Verify: $99/month — 120 reviews included at up to 10/hour, then prepaid overage at $0.75/review on the advanced review track.
+- Verify: $99/month — 120 reviews included at up to 10/hour, then prepaid overage at $1.50/review on the advanced review track.
 A completed standard review uses one unit. An \`@orvex deep\` review uses two.
 Skipped reviews and fix or explanation commands do not consume units. Failed reviews still count toward free-trial, hourly, and monthly caps.
 Overage past the included monthly total requires prepaid wallet credits bought in the dashboard — reviews stop if the wallet is empty.

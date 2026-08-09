@@ -1,37 +1,34 @@
-import { createReviewQueue, type ReviewQueue } from '@orvex-review/queue';
 import {
-  configureLlmProviderCoordinator,
-  type LlmProviderCoordinator,
-} from '@orvex-review/review';
+  createReviewQueue,
+  providerAdmissionFor,
+  type ReviewQueueRuntime,
+} from '@orvex-review/queue';
+import { configureLlmProviderCoordinator, type LlmProviderCoordinator } from '@orvex-review/review';
 import { createAppDatabase, type AppDatabase } from '@orvex-review/store';
 import { createApp } from '../app.js';
-import type { ServerRuntimeConfig } from './config.js';
+import { githubAppConfig, type ServerConfig } from './config.js';
 
 export interface AppServices {
   db: AppDatabase;
-  queue: ReviewQueue;
+  queue: ReviewQueueRuntime;
   app: ReturnType<typeof createApp>;
 }
 
 export interface CompositionFactories {
   db?: AppDatabase;
-  queue?: ReviewQueue;
+  queue?: ReviewQueueRuntime;
   configureProviderCoordinator?: (coordinator?: LlmProviderCoordinator) => void;
 }
 
 export function composeApplication(
-  config: ServerRuntimeConfig,
+  config: ServerConfig,
   factories: CompositionFactories = {},
 ): AppServices {
-  const db = factories.db ?? createAppDatabase();
-  const queue = factories.queue ?? createReviewQueue();
-  const coordinator = (
-    queue.acquireProviderLease
-    && queue.releaseProviderLease
-    && queue.getProviderCooldownMs
-    && queue.setProviderCooldown
-  ) ? queue as LlmProviderCoordinator : undefined;
+  const db = factories.db ?? createAppDatabase(config.store);
+  const queue = factories.queue ?? createReviewQueue(config.queue);
+  const coordinator = providerAdmissionFor(queue) ?? undefined;
   (factories.configureProviderCoordinator ?? configureLlmProviderCoordinator)(coordinator);
-  const app = createApp(queue, { db, codexStatusFile: config.codexStatusFile });
+  const githubConfig = githubAppConfig(config);
+  const app = createApp(queue, { db, config, githubConfig });
   return { db, queue, app };
 }

@@ -34,7 +34,7 @@ export function orvexCommandCatalog(): OrvexCommandDoc[] {
     {
       usage: 'fix',
       effect:
-        "On a PR: apply all ready fixes. On a finding thread: same as `fix this` (that finding only)",
+        'On a PR: apply all ready fixes. On a finding thread: same as `fix this` (that finding only)',
       where: 'either',
     },
     {
@@ -113,11 +113,7 @@ export function whereLabel(where: CommandWhere): string {
 export function formatCommandsMarkdownTable(trigger: string): string {
   const rows = orvexCommandCatalog().map((c) => {
     const where =
-      c.where === 'thread'
-        ? ' (reply on a finding)'
-        : c.where === 'pr'
-          ? ' (PR comment)'
-          : '';
+      c.where === 'thread' ? ' (reply on a finding)' : c.where === 'pr' ? ' (PR comment)' : '';
     return `| \`${trigger} ${c.usage}\`${where} | ${c.effect} |`;
   });
   return ['| Command | Effect |', '| --- | --- |', ...rows].join('\n');

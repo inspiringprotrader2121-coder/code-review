@@ -1,24 +1,37 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { Redis } from 'ioredis';
 import { RedisReviewQueue } from './redis.js';
-import { jobIdempotencyKey, prKey, type ReviewJobPayload } from './types.js';
+import { jobIdempotencyKey, prKey, queueFailure, type ReviewJobPayload } from './types.js';
 
 const redisUrl = process.env.REDIS_TEST_URL;
+
+function testNamespace(): string {
+  return `orvex-review:test:${process.pid}:${randomUUID()}`;
+}
+
+async function clearNamespace(redis: Redis, namespace: string): Promise<void> {
+  let cursor = '0';
+  do {
+    const [next, keys] = await redis.scan(cursor, 'MATCH', `${namespace}:*`, 'COUNT', 200);
+    cursor = next;
+    if (keys.length > 0) await redis.unlink(...keys);
+  } while (cursor !== '0');
+}
 
 test(
   'Redis queue atomically deduplicates, coalesces, and recovers orphaned jobs',
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
+    const namespace = testNamespace();
     t.after(async () => {
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
-    const queue = new RedisReviewQueue(redisUrl!);
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
     let queueClosed = false;
     t.after(async () => {
       if (!queueClosed) await queue.close();
@@ -28,44 +41,62 @@ test(
     const first = job('sha-first', 41, 'opened');
     const pending = job('sha-pending', 41, 'synchronize');
     assert.equal((await queue.enqueue(first)).reason, 'enqueued');
+    assert.equal(await queue.getJobState(jobIdempotencyKey(first)), 'ready');
     const claimedFirst = await queue.dequeue();
     assert.deepEqual(claimedFirst, first);
+    assert.equal(await queue.getJobState(jobIdempotencyKey(first)), 'claimed');
+    assert.equal(await queue.markRunning(claimedFirst!), true);
+    assert.equal(await queue.getJobState(jobIdempotencyKey(first)), 'running');
 
     const coalesced = await queue.enqueue(pending);
     assert.equal(coalesced.accepted, true);
     assert.equal(coalesced.reason, 'coalesced');
 
+    const superseded = job('sha-superseded', 41, 'opened');
+    const latest = job('sha-latest', 41, 'synchronize');
+    await queue.enqueue(superseded);
+    assert.equal(await queue.getJobState(jobIdempotencyKey(superseded)), 'ready');
+    await queue.enqueue(latest);
+    assert.equal(
+      await queue.getJobState(jobIdempotencyKey(superseded)),
+      'cancelled',
+      'coalescing an obsolete automatic review atomically records cancellation',
+    );
+    assert.equal(await queue.getJobState(jobIdempotencyKey(latest)), 'ready');
+
     await queue.markCompleted(claimedFirst!);
-    assert.deepEqual(await queue.releaseLockAndDrain(prKey(first)), pending);
+    assert.equal(await queue.getJobState(jobIdempotencyKey(first)), 'succeeded');
+    assert.deepEqual(await queue.releaseLockAndDrain(prKey(first)), latest);
     assert.equal((await queue.enqueue(first)).reason, 'duplicate');
 
     const orphan = job('sha-orphan', 42, 'opened');
     assert.equal((await queue.enqueue(orphan)).accepted, true);
     const claimedPending = await queue.dequeue();
-    assert.deepEqual(claimedPending, pending);
+    assert.deepEqual(claimedPending, latest);
     await queue.markCompleted(claimedPending!);
-    assert.equal(await queue.releaseLockAndDrain(prKey(pending)), null);
+    assert.equal(await queue.releaseLockAndDrain(prKey(latest)), null);
     const claimedOrphan = await queue.dequeue();
     assert.deepEqual(claimedOrphan, orphan);
-    const [orphanEntry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    const [orphanEntry] = await cleanup.lrange(`${namespace}:processing`, 0, -1);
     assert.ok(orphanEntry);
 
     await queue.close();
     queueClosed = true;
-    await cleanup.del(`orvex-review:inflight:${prKey(orphan)}`);
+    await cleanup.del(`${namespace}:inflight:${prKey(orphan)}`);
     await cleanup.set(
-      `orvex-review:processing-meta:${createHash('sha256').update(orphanEntry!).digest('hex')}`,
+      `${namespace}:processing-meta:${createHash('sha256').update(orphanEntry!).digest('hex')}`,
       String(Date.now() - 60_000),
     );
-    const restarted = new RedisReviewQueue(redisUrl!, { maxResumeAfterRestart: 2 });
+    const restarted = new RedisReviewQueue(redisUrl!, { namespace, maxResumeAfterRestart: 2 });
     let restartedClosed = false;
     t.after(async () => {
       if (!restartedClosed) await restarted.close();
     });
     assert.equal(await restarted.recoverOrphans(), 1);
+    assert.equal(await restarted.getJobState(jobIdempotencyKey(orphan)), 'ready');
     const recoveredOrphan = await restarted.dequeue();
     assert.deepEqual(recoveredOrphan, orphan);
-    await restarted.markFailed(recoveredOrphan!, 'test failure');
+    await restarted.markFailed(recoveredOrphan!, queueFailure('invalid_payload', 'test failure'));
     assert.equal((await restarted.enqueue(orphan)).accepted, true, 'failed jobs can be retried');
     const retriedOrphan = await restarted.dequeue();
     assert.deepEqual(retriedOrphan, orphan);
@@ -80,13 +111,13 @@ test(
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
+    const namespace = testNamespace();
     t.after(async () => {
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
-    const queue = new RedisReviewQueue(redisUrl!);
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
     t.after(async () => {
       await queue.close();
     });
@@ -98,39 +129,39 @@ test(
     dequeued!.runId = 'run-after-reserve';
     await queue.persistJob!(dequeued!);
 
-    const [persistedEntry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    const [persistedEntry] = await cleanup.lrange(`${namespace}:processing`, 0, -1);
     assert.ok(persistedEntry);
     // Age past PROCESSING_RECOVERY_GRACE_MS and drop the live lease so recovery
     // requeues the persisted payload (including runId).
     await cleanup.set(
-      `orvex-review:processing-meta:${createHash('sha256').update(persistedEntry!).digest('hex')}`,
+      `${namespace}:processing-meta:${createHash('sha256').update(persistedEntry!).digest('hex')}`,
       String(Date.now() - 60_000),
     );
-    await cleanup.del(`orvex-review:inflight:${prKey(dequeued!)}`);
+    await cleanup.del(`${namespace}:inflight:${prKey(dequeued!)}`);
 
-    const recovered = new RedisReviewQueue(redisUrl!, { maxResumeAfterRestart: 2 });
+    const recovered = new RedisReviewQueue(redisUrl!, { namespace, maxResumeAfterRestart: 2 });
     t.after(async () => {
       await recovered.close();
     });
     assert.equal(await recovered.recoverOrphans(), 1);
     const again = await recovered.dequeue();
     assert.equal(again?.runId, 'run-after-reserve');
-    await recovered.markFailed(again!, 'done');
+    await recovered.markFailed(again!, queueFailure('invalid_payload', 'done'));
   },
 );
 
 test(
-  'Redis drops an orphaned paid claim by default instead of replaying it',
+  'Redis dead-letters an orphaned paid claim and replays it only by operator decision',
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
-    const owner = new RedisReviewQueue(redisUrl!);
-    const restarted = new RedisReviewQueue(redisUrl!);
+    const namespace = testNamespace();
+    const owner = new RedisReviewQueue(redisUrl!, { namespace });
+    const restarted = new RedisReviewQueue(redisUrl!, { namespace });
     t.after(async () => {
       await owner.close();
       await restarted.close();
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
@@ -138,17 +169,67 @@ test(
     await owner.enqueue(payload);
     const claimed = await owner.dequeue();
     assert.ok(claimed);
-    const [entry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    const [entry] = await cleanup.lrange(`${namespace}:processing`, 0, -1);
     assert.ok(entry);
-    await cleanup.del(`orvex-review:inflight:${prKey(claimed!)}`);
+    await cleanup.del(`${namespace}:inflight:${prKey(claimed!)}`);
     await cleanup.set(
-      `orvex-review:processing-meta:${createHash('sha256').update(entry!).digest('hex')}`,
+      `${namespace}:processing-meta:${createHash('sha256').update(entry!).digest('hex')}`,
       String(Date.now() - 60_000),
     );
 
     assert.equal(await restarted.recoverOrphans(), 0);
-    assert.equal(await cleanup.llen('orvex-review:processing'), 0);
+    assert.equal(await cleanup.llen(`${namespace}:processing`), 0);
     assert.equal(await restarted.dequeue(), null);
+    const [deadLetter] = await restarted.listDeadLetters!();
+    assert.ok(deadLetter);
+    assert.equal(deadLetter.reason, 'resume_limit_exceeded');
+    assert.equal(await restarted.getJobState(jobIdempotencyKey(payload)), 'dead-lettered');
+    assert.deepEqual(deadLetter.job, payload);
+    assert.deepEqual(restarted.drainOperationalEvents!(), [
+      { type: 'dead-lettered', record: deadLetter, source: 'orphan-recovery' },
+    ]);
+    assert.equal(await restarted.replayDeadLetter!(deadLetter.id), true);
+    assert.equal(await restarted.getJobState(jobIdempotencyKey(payload)), 'ready');
+    assert.equal(await restarted.replayDeadLetter!(deadLetter.id), false);
+    const replayed = await restarted.dequeue();
+    assert.deepEqual(replayed, payload);
+    await restarted.markFailed(replayed!, queueFailure('invalid_payload', 'test cleanup'));
+  },
+);
+
+test(
+  'Redis terminal failure is claim-fenced, listed, alerted, and replayed once',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    const namespace = testNamespace();
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
+    t.after(async () => {
+      await queue.close();
+      await clearNamespace(cleanup, namespace);
+      await cleanup.quit();
+    });
+
+    const payload = job('sha-terminal', 101, 'opened');
+    await queue.enqueue(payload);
+    const claimed = await queue.dequeue();
+    assert.ok(claimed);
+    await queue.markRunning(claimed!);
+    assert.equal(
+      await queue.markFailed(claimed!, queueFailure('execution_failed', 'provider exhausted')),
+      true,
+    );
+    const [record] = await queue.listDeadLetters!();
+    assert.ok(record);
+    assert.equal(record.reason, 'execution_failed');
+    assert.equal(record.error, 'provider exhausted');
+    assert.equal(await queue.getJobState(jobIdempotencyKey(payload)), 'dead-lettered');
+    assert.deepEqual(queue.drainOperationalEvents!(), [
+      { type: 'dead-lettered', record, source: 'terminal-failure' },
+    ]);
+    assert.equal(await queue.replayDeadLetter!(record.id), true);
+    assert.equal(await queue.replayDeadLetter!(record.id), false);
+    assert.deepEqual(await queue.dequeue(), payload);
   },
 );
 
@@ -157,13 +238,13 @@ test(
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
+    const namespace = testNamespace();
     t.after(async () => {
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
-    const queue = new RedisReviewQueue(redisUrl!);
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
     t.after(async () => {
       await queue.close();
     });
@@ -178,10 +259,7 @@ test(
     // discarded expensive reviews at publication.
     await queue.renewLease!(dequeued!);
     await queue.markCompleted(dequeued!);
-    await assert.rejects(
-      queue.renewLease!(dequeued!),
-      /lease lost.*claim token missing/i,
-    );
+    await assert.rejects(queue.renewLease!(dequeued!), /lease lost.*claim token missing/i);
   },
 );
 
@@ -190,13 +268,13 @@ test(
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
+    const namespace = testNamespace();
     t.after(async () => {
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
-    const queue = new RedisReviewQueue(redisUrl!);
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
     t.after(async () => {
       await queue.close();
     });
@@ -206,9 +284,9 @@ test(
     const stale = await queue.dequeue();
     assert.ok(stale);
     const raw = JSON.stringify(stale);
-    const lockKey = `orvex-review:inflight:${prKey(stale!)}`;
-    const seenKey = `orvex-review:seen:${jobIdempotencyKey(stale!)}`;
-    const [staleEntry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    const lockKey = `${namespace}:inflight:${prKey(stale!)}`;
+    const seenKey = `${namespace}:seen:${jobIdempotencyKey(stale!)}`;
+    const [staleEntry] = await cleanup.lrange(`${namespace}:processing`, 0, -1);
     assert.ok(staleEntry);
     const currentEntry = `new-owner-token\n${raw}`;
 
@@ -216,17 +294,14 @@ test(
     // durable payload. The old worker still holds its prior token locally, but
     // PROCESSING now belongs to the newer immutable claim.
     await cleanup.set(lockKey, `new-owner-token\n${raw}`, 'EX', 900);
-    await cleanup.lset('orvex-review:processing', 0, currentEntry);
-    await assert.rejects(
-      queue.markCompleted(stale!),
-      /lease lost before completion/,
-    );
+    await cleanup.lset(`${namespace}:processing`, 0, currentEntry);
+    await assert.rejects(queue.markCompleted(stale!), /lease lost before completion/);
 
     assert.match((await cleanup.get(lockKey)) ?? '', /^new-owner-token\n/);
-    assert.deepEqual(await cleanup.lrange('orvex-review:processing', 0, -1), [currentEntry]);
+    assert.deepEqual(await cleanup.lrange(`${namespace}:processing`, 0, -1), [currentEntry]);
     assert.equal(await cleanup.exists(seenKey), 1);
     assert.equal(
-      await cleanup.exists(`orvex-review:done:${jobIdempotencyKey(stale!)}`),
+      await cleanup.exists(`${namespace}:done:${jobIdempotencyKey(stale!)}`),
       0,
       'stale completion cannot write a DONE marker before ownership CAS',
     );
@@ -238,13 +313,13 @@ test(
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
-    const first = new RedisReviewQueue(redisUrl!);
-    const second = new RedisReviewQueue(redisUrl!);
+    const namespace = testNamespace();
+    const first = new RedisReviewQueue(redisUrl!, { namespace });
+    const second = new RedisReviewQueue(redisUrl!, { namespace });
     t.after(async () => {
       await first.close();
       await second.close();
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
@@ -261,7 +336,10 @@ test(
     await second.releaseProviderLease('luna', secondToken);
 
     await first.setProviderCooldown('deepseek', 1_000);
-    assert.ok(await second.getProviderCooldownMs('deepseek') > 0, 'cooldown is visible to peer worker');
+    assert.ok(
+      (await second.getProviderCooldownMs('deepseek')) > 0,
+      'cooldown is visible to peer worker',
+    );
   },
 );
 
@@ -270,11 +348,11 @@ test(
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
-    const workers = Array.from({ length: 8 }, () => new RedisReviewQueue(redisUrl!));
+    const namespace = testNamespace();
+    const workers = Array.from({ length: 8 }, () => new RedisReviewQueue(redisUrl!, { namespace }));
     t.after(async () => {
       await Promise.all(workers.map((worker) => worker.close()));
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
@@ -321,11 +399,11 @@ test(
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
-    const workers = Array.from({ length: 6 }, () => new RedisReviewQueue(redisUrl!));
+    const namespace = testNamespace();
+    const workers = Array.from({ length: 6 }, () => new RedisReviewQueue(redisUrl!, { namespace }));
     t.after(async () => {
       await Promise.all(workers.map((worker) => worker.close()));
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
@@ -356,13 +434,13 @@ test(
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
-    const first = new RedisReviewQueue(redisUrl!);
-    const second = new RedisReviewQueue(redisUrl!);
+    const namespace = testNamespace();
+    const first = new RedisReviewQueue(redisUrl!, { namespace });
+    const second = new RedisReviewQueue(redisUrl!, { namespace });
     t.after(async () => {
       await first.close();
       await second.close();
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
@@ -372,7 +450,7 @@ test(
 
     // Simulate expiry/re-election. A stale owner must not delete the newer
     // leader's lease during its finally block.
-    await cleanup.del('orvex-review:recovery-leader');
+    await cleanup.del(`${namespace}:recovery-leader`);
     const secondToken = await second.acquireRecoveryLease!();
     assert.ok(secondToken);
     await first.releaseRecoveryLease!(firstToken!);
@@ -387,12 +465,12 @@ test(
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
-    const staleWorker = new RedisReviewQueue(redisUrl!);
-    const currentWorker = new RedisReviewQueue(redisUrl!);
+    const namespace = testNamespace();
+    const staleWorker = new RedisReviewQueue(redisUrl!, { namespace });
+    const currentWorker = new RedisReviewQueue(redisUrl!, { namespace });
     t.after(async () => {
       await Promise.all([staleWorker.close(), currentWorker.close()]);
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
@@ -401,13 +479,13 @@ test(
     const staleClaim = await staleWorker.dequeue();
     assert.ok(staleClaim);
 
-    await cleanup.del(`orvex-review:inflight:${prKey(stale)}`);
+    await cleanup.del(`${namespace}:inflight:${prKey(stale)}`);
     const current = job('sha-current-owner', stale.pr, 'synchronize');
     assert.equal((await currentWorker.enqueue(current)).accepted, true);
     const currentClaim = await currentWorker.dequeue();
     assert.deepEqual(currentClaim, current);
 
-    await staleWorker.markFailed(staleClaim!, 'lease lost');
+    await staleWorker.markFailed(staleClaim!, queueFailure('lease_lost', 'lease lost'));
     await currentWorker.markCompleted(currentClaim!);
     assert.equal(await currentWorker.releaseLockAndDrain(prKey(current)), null);
 
@@ -416,51 +494,47 @@ test(
   },
 );
 
-test(
-  'two workers atomically recover an orphan exactly once',
-  { skip: !redisUrl },
-  async (t) => {
-    const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
-    const owner = new RedisReviewQueue(redisUrl!);
-    const payload = job('sha-recovery-race', 81, 'opened');
-    await owner.enqueue(payload);
-    const claimed = await owner.dequeue();
-    assert.ok(claimed);
-    const [processingEntry] = await cleanup.lrange('orvex-review:processing', 0, -1);
-    assert.ok(processingEntry);
-    await owner.close();
-    await cleanup.del(`orvex-review:inflight:${prKey(claimed!)}`);
-    await cleanup.set(
-      `orvex-review:processing-meta:${createHash('sha256').update(processingEntry!).digest('hex')}`,
-      String(Date.now() - 60_000),
-    );
+test('two workers atomically recover an orphan exactly once', { skip: !redisUrl }, async (t) => {
+  const cleanup = new Redis(redisUrl!);
+  const namespace = testNamespace();
+  const owner = new RedisReviewQueue(redisUrl!, { namespace });
+  const payload = job('sha-recovery-race', 81, 'opened');
+  await owner.enqueue(payload);
+  const claimed = await owner.dequeue();
+  assert.ok(claimed);
+  const [processingEntry] = await cleanup.lrange(`${namespace}:processing`, 0, -1);
+  assert.ok(processingEntry);
+  await owner.close();
+  await cleanup.del(`${namespace}:inflight:${prKey(claimed!)}`);
+  await cleanup.set(
+    `${namespace}:processing-meta:${createHash('sha256').update(processingEntry!).digest('hex')}`,
+    String(Date.now() - 60_000),
+  );
 
-    const a = new RedisReviewQueue(redisUrl!, { maxResumeAfterRestart: 2 });
-    const b = new RedisReviewQueue(redisUrl!, { maxResumeAfterRestart: 2 });
-    t.after(async () => {
-      await a.close();
-      await b.close();
-      await cleanup.flushdb();
-      await cleanup.quit();
-    });
-    const recovered = await Promise.all([a.recoverOrphans(), b.recoverOrphans()]);
-    assert.equal(recovered[0]! + recovered[1]!, 1);
-    assert.equal(await cleanup.llen('orvex-review:jobs'), 1);
-    assert.equal(await cleanup.llen('orvex-review:processing'), 0);
-  },
-);
+  const a = new RedisReviewQueue(redisUrl!, { namespace, maxResumeAfterRestart: 2 });
+  const b = new RedisReviewQueue(redisUrl!, { namespace, maxResumeAfterRestart: 2 });
+  t.after(async () => {
+    await a.close();
+    await b.close();
+    await clearNamespace(cleanup, namespace);
+    await cleanup.quit();
+  });
+  const recovered = await Promise.all([a.recoverOrphans(), b.recoverOrphans()]);
+  assert.equal(recovered[0]! + recovered[1]!, 1);
+  assert.equal(await cleanup.llen(`${namespace}:jobs`), 1);
+  assert.equal(await cleanup.llen(`${namespace}:processing`), 0);
+});
 
 test(
   'Redis dequeue honors priority and reports pending depth without a key scan',
   { skip: !redisUrl },
   async (t) => {
     const cleanup = new Redis(redisUrl!);
-    await cleanup.flushdb();
-    const queue = new RedisReviewQueue(redisUrl!);
+    const namespace = testNamespace();
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
     t.after(async () => {
       await queue.close();
-      await cleanup.flushdb();
+      await clearNamespace(cleanup, namespace);
       await cleanup.quit();
     });
 
@@ -473,6 +547,30 @@ test(
     await queue.enqueue({ ...job('high-next', 92, 'synchronize'), priority: 3 });
     assert.equal((await queue.depth!()).waitingOnPr, 1);
     assert.equal((await queue.dequeue())?.headSha, 'low');
+  },
+);
+
+test(
+  'Redis orphan recovery scans processing incrementally instead of blocking on the full list',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    const namespace = testNamespace();
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
+    t.after(async () => {
+      await queue.close();
+      await clearNamespace(cleanup, namespace);
+      await cleanup.quit();
+    });
+
+    const malformed = Array.from({ length: 1_200 }, (_, index) => `malformed-${index}`);
+    await cleanup.rpush(`${namespace}:processing`, ...malformed);
+    await queue.recoverOrphans();
+    assert.equal(await cleanup.llen(`${namespace}:processing`), 700);
+    await queue.recoverOrphans();
+    assert.equal(await cleanup.llen(`${namespace}:processing`), 500);
+    await queue.recoverOrphans();
+    assert.equal(await cleanup.llen(`${namespace}:processing`), 0);
   },
 );
 

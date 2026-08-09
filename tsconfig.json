@@ -1,0 +1,16 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/billing" },
+    { "path": "packages/config" },
+    { "path": "packages/github" },
+    { "path": "packages/rules" },
+    { "path": "packages/store" },
+    { "path": "packages/queue" },
+    { "path": "packages/review" },
+    { "path": "packages/tenants" },
+    { "path": "apps/server" },
+    { "path": "apps/cli" },
+    { "path": "apps/eval" }
+  ]
+}

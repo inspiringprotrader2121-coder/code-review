@@ -45,3 +45,13 @@ test('parses folded and prior finding tables with normalized info severity', () 
     { severity: 'P1', path: 'src/server.ts', line: null, message: 'Existing crash' },
   ]);
 });
+
+test('strict benchmark parsing fails closed on malformed confirmed-table rows', () => {
+  const body = [
+    '| Severity | File | Message |',
+    '| --- | --- | --- |',
+    '| P2 | `src/server.ts:8` | complete row |',
+    '| P1 | no code ticks | malformed row |',
+  ].join('\n');
+  assert.throws(() => parseOrvexFindingTables(body, { strict: true }), /did not parse/);
+});

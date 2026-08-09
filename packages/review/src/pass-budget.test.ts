@@ -1,10 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
-  buildReviewPassAngles,
-  isLargePr,
-  selectRiskProbes,
-} from './pass-budget.js';
+import { buildReviewPassAngles, isLargePr, selectRiskProbes } from './pass-budget.js';
 
 test('isLargePr respects file and patch-char caps', (t) => {
   t.after(() => {
@@ -79,7 +75,9 @@ test('buildReviewPassAngles cannot reduce a multi-model purchase through env dri
       patch: '+const x = 1;\n',
       status: 'modified',
     }));
-    const tags = buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag);
+    const tags = buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map(
+      (a) => a.tag,
+    );
     assert.deepEqual(tags, [
       'general',
       'deep-dive',

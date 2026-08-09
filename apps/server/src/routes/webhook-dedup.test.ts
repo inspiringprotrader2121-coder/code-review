@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import type { ReviewQueue } from '@orvex-review/queue';
+import { testRouteDependencies } from '../bootstrap/test-config.js';
+import { webhookRoutes } from './webhook.js';
 
 test('a failed GitHub delivery is retryable while a successful delivery is deduplicated', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-webhook-dedup-'));
@@ -29,8 +31,7 @@ test('a failed GitHub delivery is retryable while a successful delivery is dedup
   const queue = {
     enqueue: async () => ({ accepted: true, jobId: 'job', reason: 'enqueued' as const }),
   } as unknown as ReviewQueue;
-  const { webhookRoutes } = await import('./webhook.js');
-  const app = webhookRoutes(queue);
+  const app = testWebhookRoutes(queue);
   app.onError((_err, c) => c.json({ error: 'internal server error' }, 500));
 
   const request = (body: string, delivery: string) =>
@@ -61,7 +62,7 @@ test('a failed GitHub delivery is retryable while a successful delivery is dedup
   assert.equal(duplicate.status, 200);
   assert.deepEqual(await duplicate.json(), { ok: true, deduped: true });
 
-  const restarted = webhookRoutes(queue);
+  const restarted = testWebhookRoutes(queue);
   const afterRestart = await restarted.request('/webhooks/github', {
     method: 'POST',
     headers: {
@@ -99,8 +100,7 @@ test('signed webhooks without X-GitHub-Delivery are rejected', async (t) => {
   const queue = {
     enqueue: async () => ({ accepted: true, jobId: 'job', reason: 'enqueued' as const }),
   } as unknown as ReviewQueue;
-  const { webhookRoutes } = await import('./webhook.js');
-  const app = webhookRoutes(queue);
+  const app = testWebhookRoutes(queue);
   const body = '{}';
   const res = await app.request('/webhooks/github', {
     method: 'POST',
@@ -141,8 +141,7 @@ test('signed body replay with a rotated delivery id is deduped by body hash', as
   const queue = {
     enqueue: async () => ({ accepted: true, jobId: 'job', reason: 'enqueued' as const }),
   } as unknown as ReviewQueue;
-  const { webhookRoutes } = await import('./webhook.js');
-  const app = webhookRoutes(queue);
+  const app = testWebhookRoutes(queue);
 
   const body = '{"zen":"design for failure"}';
   const request = (delivery: string) =>
@@ -192,8 +191,7 @@ test('POST /review compares the bearer secret in constant time', async (t) => {
   const queue = {
     enqueue: async () => ({ accepted: true, jobId: 'job', reason: 'enqueued' as const }),
   } as unknown as ReviewQueue;
-  const { webhookRoutes } = await import('./webhook.js');
-  const app = webhookRoutes(queue);
+  const app = testWebhookRoutes(queue);
 
   const wrong = await app.request('/review', {
     method: 'POST',
@@ -218,6 +216,10 @@ test('POST /review compares the bearer secret in constant time', async (t) => {
 
 function sign(body: string): string {
   return `sha256=${createHmac('sha256', 'webhook-test-secret').update(body).digest('hex')}`;
+}
+
+function testWebhookRoutes(queue: ReviewQueue) {
+  return webhookRoutes(queue, testRouteDependencies());
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

@@ -1,0 +1,172 @@
+import { randomUUID } from 'node:crypto';
+
+/**
+ * Distributed admission control for model providers. This is intentionally
+ * separate from durable review-job state: provider saturation must never alter
+ * queue ownership, deduplication, or recovery semantics.
+ */
+export interface ProviderAdmission {
+  acquireProviderLease(provider: string, limit: number, signal?: AbortSignal): Promise<string>;
+  releaseProviderLease(provider: string, token: string): Promise<void>;
+  getProviderCooldownMs(provider: string): Promise<number>;
+  setProviderCooldown(provider: string, durationMs: number): Promise<void>;
+}
+
+/** A queue backend that exposes its independent provider-admission adapter. */
+export interface ProviderAdmissionOwner {
+  readonly providerAdmission: ProviderAdmission;
+}
+
+export function providerAdmissionFor(value: unknown): ProviderAdmission | null {
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'providerAdmission' in value &&
+    isProviderAdmission((value as { providerAdmission?: unknown }).providerAdmission)
+  ) {
+    return (value as ProviderAdmissionOwner).providerAdmission;
+  }
+  return null;
+}
+
+function isProviderAdmission(value: unknown): value is ProviderAdmission {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as ProviderAdmission).acquireProviderLease === 'function' &&
+    typeof (value as ProviderAdmission).releaseProviderLease === 'function' &&
+    typeof (value as ProviderAdmission).getProviderCooldownMs === 'function' &&
+    typeof (value as ProviderAdmission).setProviderCooldown === 'function'
+  );
+}
+
+interface MemoryLease {
+  provider: string;
+  expiresAt: number;
+}
+
+export interface MemoryProviderAdmissionState {
+  leases: Map<string, MemoryLease>;
+  cooldowns: Map<string, number>;
+}
+
+export interface MemoryProviderAdmissionOptions {
+  /** Share this object between queues to model multi-worker coordination. */
+  state?: MemoryProviderAdmissionState;
+  /** Injectable clock makes saturation/cooldown tests deterministic. */
+  now?: () => number;
+  /** Bounded polling interval for test and development backends. */
+  retryDelayMs?: number;
+  /** Maximum wait; defaults to 30 seconds so provider saturation cannot hold a worker forever. */
+  waitMs?: number;
+  leaseTtlMs?: number;
+}
+
+/**
+ * No-I/O implementation used by local development and black-box contracts.
+ * A caller can inject one shared state object into many queues to reproduce
+ * process-level provider caps without a live Redis instance.
+ */
+export class MemoryProviderAdmission implements ProviderAdmission {
+  private readonly state: MemoryProviderAdmissionState;
+  private readonly now: () => number;
+  private readonly retryDelayMs: number;
+  private readonly waitMs: number | undefined;
+  private readonly leaseTtlMs: number;
+
+  constructor(options: MemoryProviderAdmissionOptions = {}) {
+    this.state = options.state ?? { leases: new Map(), cooldowns: new Map() };
+    this.now = options.now ?? Date.now;
+    this.retryDelayMs = Math.max(1, Math.floor(options.retryDelayMs ?? 5));
+    this.waitMs = Math.max(1_000, Math.floor(options.waitMs ?? 30_000));
+    this.leaseTtlMs = Math.max(1, Math.floor(options.leaseTtlMs ?? 960_000));
+  }
+
+  async acquireProviderLease(
+    provider: string,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const normalized = normalizeProvider(provider);
+    const ceiling = Math.max(1, Math.floor(limit));
+    const token = randomUUID();
+    const deadline = this.waitMs === undefined ? undefined : this.now() + this.waitMs;
+    for (;;) {
+      if (signal?.aborted) throw new Error('review cancelled while waiting for provider lease');
+      this.removeExpiredLeases(normalized);
+      if (this.activeLeaseCount(normalized) < ceiling) {
+        this.state.leases.set(token, {
+          provider: normalized,
+          expiresAt: this.now() + this.leaseTtlMs,
+        });
+        return token;
+      }
+      if (deadline !== undefined && this.now() >= deadline) {
+        throw new Error(
+          `429 provider ${normalized} distributed concurrency saturated; retry-after: 1`,
+        );
+      }
+      await waitForAdmission(this.retryDelayMs, signal);
+    }
+  }
+
+  async releaseProviderLease(provider: string, token: string): Promise<void> {
+    const current = this.state.leases.get(token);
+    if (current?.provider === normalizeProvider(provider)) this.state.leases.delete(token);
+  }
+
+  async getProviderCooldownMs(provider: string): Promise<number> {
+    const key = normalizeProvider(provider);
+    const until = this.state.cooldowns.get(key) ?? 0;
+    if (until <= this.now()) {
+      this.state.cooldowns.delete(key);
+      return 0;
+    }
+    return until - this.now();
+  }
+
+  async setProviderCooldown(provider: string, durationMs: number): Promise<void> {
+    const key = normalizeProvider(provider);
+    const until = this.now() + Math.min(300_000, Math.max(250, Math.floor(durationMs)));
+    this.state.cooldowns.set(key, Math.max(this.state.cooldowns.get(key) ?? 0, until));
+  }
+
+  private activeLeaseCount(provider: string): number {
+    let count = 0;
+    for (const lease of this.state.leases.values()) if (lease.provider === provider) count += 1;
+    return count;
+  }
+
+  private removeExpiredLeases(provider: string): void {
+    const now = this.now();
+    for (const [token, lease] of this.state.leases) {
+      if (lease.provider === provider && lease.expiresAt <= now) this.state.leases.delete(token);
+    }
+  }
+}
+
+function normalizeProvider(provider: string): string {
+  const normalized = provider
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized || 'unknown';
+}
+
+function waitForAdmission(durationMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, durationMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new Error('review cancelled while waiting for provider lease'));
+    };
+    function done(): void {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else timer.unref?.();
+  });
+}

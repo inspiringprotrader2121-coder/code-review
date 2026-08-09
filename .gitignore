@@ -58,6 +58,7 @@ Thumbs.db
 !.vscode/extensions.json
 
 # Tooling caches
+.pnpm-store/
 .turbo/
 .cache/
 *.local

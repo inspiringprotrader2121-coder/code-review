@@ -20,9 +20,17 @@ export async function fetchInstallationMeta(
 
   const account = data.account;
   const accountLogin =
-    account && 'login' in account ? account.login : account && 'slug' in account ? account.slug : 'unknown';
+    account && 'login' in account
+      ? account.login
+      : account && 'slug' in account
+        ? account.slug
+        : 'unknown';
   const accountType =
-    account && 'type' in account ? String(account.type) : account && 'slug' in account ? 'Organization' : 'Unknown';
+    account && 'type' in account
+      ? String(account.type)
+      : account && 'slug' in account
+        ? 'Organization'
+        : 'Unknown';
 
   return {
     accountLogin,

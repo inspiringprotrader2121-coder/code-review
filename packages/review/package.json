@@ -5,16 +5,20 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/**/*.test.ts"
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
     "@openai/codex": "0.147.0",
+    "@orvex-review/config": "workspace:*",
     "@orvex-review/rules": "workspace:*",
     "@orvex-review/store": "workspace:*",
     "@anthropic-ai/sdk": "^0.52.0",

@@ -1,0 +1,49 @@
+import type {
+  Clock,
+  ModelAttemptEvent,
+  ModelAttemptOutcome,
+  ProviderAdmission,
+  ProviderDependencies,
+} from '../providers/types.js';
+
+export type LlmAttemptOutcome = ModelAttemptOutcome;
+export type LlmAttemptEvent = ModelAttemptEvent;
+
+/** Structural interface implemented by the Redis queue in production. */
+export interface LlmProviderCoordinator extends ProviderAdmission {}
+
+/** Injectable seams used by provider adapters; legacy callers keep production defaults. */
+export interface LlmClientDependencies
+  extends Pick<
+    ProviderDependencies,
+    'admission' | 'retryPolicy' | 'clock' | 'http' | 'attemptObserver'
+  > {}
+
+export interface LlmClientOptions {
+  apiKey: string;
+  model: string;
+  baseUrl?: string;
+  maxTokens?: number;
+  json?: boolean;
+  thinking?: boolean;
+  api?: 'chat' | 'responses' | 'anthropic';
+  reasoningEffort?: string;
+  temperature?: number;
+  signal?: AbortSignal;
+  onUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    tokenSource?: 'provider' | 'estimate';
+    provider?: string;
+    model?: string;
+    attemptId?: string;
+  }) => void;
+  onAttempt?: (event: LlmAttemptEvent) => void;
+  dependencies?: LlmClientDependencies;
+}
+
+export const systemClock: Clock = {
+  now: () => Date.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer),
+};

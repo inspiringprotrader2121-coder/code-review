@@ -1,57 +1,63 @@
 import { randomUUID } from 'node:crypto';
 import type { LlmTarget, PassTier, WorkerConfig } from './worker-types.js';
 
-function positiveEnvNumber(name: string, fallback: number, max = 1_000_000): number {
-  const raw = process.env[name];
-  const value = raw === undefined || raw.trim() === '' ? fallback : Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.min(value, max) : fallback;
-}
+export type UsageCostPolicy = Record<PassTier, { input: number; output: number }>;
 
-const COST_RATES: Record<PassTier, { input: number; output: number }> = {
-  premium: {
-    input: positiveEnvNumber('ORVEX_COST_INPUT_PER_M', 1.4),
-    output: positiveEnvNumber('ORVEX_COST_OUTPUT_PER_M', 4.4),
-  },
-  standard: {
-    input: positiveEnvNumber('ORVEX_STANDARD_COST_INPUT_PER_M', 0.3),
-    output: positiveEnvNumber('ORVEX_STANDARD_COST_OUTPUT_PER_M', 1.2),
-  },
-  openai: {
-    input: positiveEnvNumber('ORVEX_OPENAI_COST_INPUT_PER_M', 0.2),
-    output: positiveEnvNumber('ORVEX_OPENAI_COST_OUTPUT_PER_M', 1.2),
-  },
-  deepseek: {
-    input: positiveEnvNumber('ORVEX_DEEPSEEK_COST_INPUT_PER_M', 0.435),
-    output: positiveEnvNumber('ORVEX_DEEPSEEK_COST_OUTPUT_PER_M', 0.87),
-  },
-  'deepseek-flash': {
-    input: positiveEnvNumber('ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M', 0.14),
-    output: positiveEnvNumber('ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M', 0.28),
-  },
+export const DEFAULT_USAGE_COST_POLICY: UsageCostPolicy = {
+  premium: { input: 1.4, output: 4.4 },
+  standard: { input: 0.3, output: 1.2 },
+  openai: { input: 0.2, output: 1.2 },
+  deepseek: { input: 0.435, output: 0.87 },
+  'deepseek-flash': { input: 0.14, output: 0.28 },
 };
 
-export function computeCostUsd(inputTokens: number, outputTokens: number, tier: PassTier): number {
+export function createUsageCostPolicy(
+  values: Partial<Record<PassTier, Partial<{ input: number; output: number }>>>,
+): UsageCostPolicy {
+  const positive = (value: number | undefined, fallback: number): number =>
+    Number.isFinite(value) && Number(value) > 0 ? Math.min(Number(value), 1_000_000) : fallback;
+  return Object.fromEntries(
+    (Object.keys(DEFAULT_USAGE_COST_POLICY) as PassTier[]).map((tier) => [
+      tier,
+      {
+        input: positive(values[tier]?.input, DEFAULT_USAGE_COST_POLICY[tier].input),
+        output: positive(values[tier]?.output, DEFAULT_USAGE_COST_POLICY[tier].output),
+      },
+    ]),
+  ) as UsageCostPolicy;
+}
+
+export function computeCostUsd(
+  inputTokens: number,
+  outputTokens: number,
+  tier: PassTier,
+  policy: UsageCostPolicy = DEFAULT_USAGE_COST_POLICY,
+): number {
   const safeInput = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
   const safeOutput = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
-  const rates = COST_RATES[tier];
+  const rates = policy[tier];
   return (safeInput / 1e6) * rates.input + (safeOutput / 1e6) * rates.output;
 }
 
 export function actualPassTier(fallback: PassTier, model: string, provider: string): PassTier {
   const identity = `${provider} ${model}`.toLowerCase();
-  if (identity.includes('deepseek-v4-flash') || identity.includes('deepseek-flash')) return 'deepseek-flash';
+  if (identity.includes('deepseek-v4-flash') || identity.includes('deepseek-flash'))
+    return 'deepseek-flash';
   if (identity.includes('deepseek')) return 'deepseek';
   if (/\b(gpt|luna|codex|openai)\b/.test(identity)) return 'openai';
   if (identity.includes('minimax') || identity.includes('standard')) return 'standard';
-  if (identity.includes('anthropic') || identity.includes('claude') || identity.includes('glm')) return 'premium';
+  if (identity.includes('anthropic') || identity.includes('claude') || identity.includes('glm'))
+    return 'premium';
   return fallback;
 }
 
 export function usageProvider(target: LlmTarget, passName: string): string {
-  if (passName.toLowerCase().includes('codex')) return 'codex-cli';
-  if (target.api === 'anthropic') return 'anthropic';
-  if (!target.baseUrl && target.api !== 'responses' && target.api !== 'chat') return 'anthropic';
-  if (!target.baseUrl) return 'openai';
+  if (target.transport === 'codex-cli' || passName.toLowerCase().includes('codex'))
+    return 'codex-cli';
+  if (target.transport === 'anthropic') return 'anthropic';
+  if (target.transport === 'responses' && !target.baseUrl) return 'openai';
+  if (!target.baseUrl)
+    return target.transport === 'compatible-chat' ? 'openai-compatible' : 'openai';
   try {
     return new URL(target.baseUrl).hostname;
   } catch {
@@ -81,13 +87,16 @@ export function accountUsage(
   target: LlmTarget,
   passName: string,
   usage: UsageEvent,
+  policy: UsageCostPolicy = DEFAULT_USAGE_COST_POLICY,
 ): AccountedUsage {
   const provider = usage.provider ?? usageProvider(target, passName);
   const model = usage.model ?? target.model;
   const tier = actualPassTier(fallbackTier, model, provider);
-  const rates = COST_RATES[tier];
-  const inputTokens = Number.isFinite(usage.inputTokens) && usage.inputTokens > 0 ? usage.inputTokens : 0;
-  const outputTokens = Number.isFinite(usage.outputTokens) && usage.outputTokens > 0 ? usage.outputTokens : 0;
+  const rates = policy[tier];
+  const inputTokens =
+    Number.isFinite(usage.inputTokens) && usage.inputTokens > 0 ? usage.inputTokens : 0;
+  const outputTokens =
+    Number.isFinite(usage.outputTokens) && usage.outputTokens > 0 ? usage.outputTokens : 0;
   return {
     ...usage,
     inputTokens,
@@ -97,7 +106,7 @@ export function accountUsage(
     tier,
     inputRatePerM: rates.input,
     outputRatePerM: rates.output,
-    costUsd: computeCostUsd(inputTokens, outputTokens, tier),
+    costUsd: computeCostUsd(inputTokens, outputTokens, tier, policy),
   };
 }
 
@@ -109,9 +118,10 @@ export function createUsageRecorder(
   target: LlmTarget,
   passName: string,
   attemptId = randomUUID(),
+  policy: UsageCostPolicy = DEFAULT_USAGE_COST_POLICY,
 ): (usage: UsageEvent) => void {
   return (usage) => {
-    const accounted = accountUsage(fallbackTier, target, passName, usage);
+    const accounted = accountUsage(fallbackTier, target, passName, usage, policy);
     config.store.recordReviewRunUsage({
       runId,
       tenantId,
@@ -134,14 +144,17 @@ export type TierUsage = Record<PassTier, { in: number; out: number }>;
 
 export function totalUsage(
   usage: TierUsage,
+  policy: UsageCostPolicy = DEFAULT_USAGE_COST_POLICY,
 ): { inputTokens: number; outputTokens: number; costUsd: number } {
   let inputTokens = 0;
   let outputTokens = 0;
   let costUsd = 0;
-  for (const [tier, item] of Object.entries(usage) as Array<[PassTier, { in: number; out: number }]>) {
+  for (const [tier, item] of Object.entries(usage) as Array<
+    [PassTier, { in: number; out: number }]
+  >) {
     inputTokens += item.in;
     outputTokens += item.out;
-    costUsd += computeCostUsd(item.in, item.out, tier);
+    costUsd += computeCostUsd(item.in, item.out, tier, policy);
   }
   return { inputTokens, outputTokens, costUsd };
 }

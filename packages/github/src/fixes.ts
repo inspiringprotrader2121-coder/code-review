@@ -18,7 +18,9 @@ export async function userCanWrite(
       repo,
       username,
     });
-    return data.permission === 'admin' || data.permission === 'write' || data.permission === 'maintain';
+    return (
+      data.permission === 'admin' || data.permission === 'write' || data.permission === 'maintain'
+    );
   } catch {
     return false;
   }
@@ -42,18 +44,22 @@ export interface PrHeadInfo {
 
 export async function fetchPrHeadInfo(octokit: Octokit, ref: PrRef): Promise<PrHeadInfo> {
   // mergeable is computed asynchronously by GitHub; poll briefly until it settles
-  let data = (await octokit.rest.pulls.get({
-    owner: ref.owner,
-    repo: ref.repo,
-    pull_number: ref.number,
-  })).data;
-  for (let i = 0; i < 3 && data.mergeable === null && data.state === 'open'; i++) {
-    await sleep(1200);
-    data = (await octokit.rest.pulls.get({
+  let data = (
+    await octokit.rest.pulls.get({
       owner: ref.owner,
       repo: ref.repo,
       pull_number: ref.number,
-    })).data;
+    })
+  ).data;
+  for (let i = 0; i < 3 && data.mergeable === null && data.state === 'open'; i++) {
+    await sleep(1200);
+    data = (
+      await octokit.rest.pulls.get({
+        owner: ref.owner,
+        repo: ref.repo,
+        pull_number: ref.number,
+      })
+    ).data;
   }
   const baseFull = `${ref.owner}/${ref.repo}`.toLowerCase();
   const headFull = (data.head.repo?.full_name ?? '').toLowerCase();

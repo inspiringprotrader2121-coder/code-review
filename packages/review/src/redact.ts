@@ -27,7 +27,10 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // AWS access key id.
   { pattern: /\bAKIA[0-9A-Z]{16}\b/g, replacement: 'AKIA[REDACTED]' },
   // JWTs.
-  { pattern: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, replacement: 'eyJ[JWT_REDACTED]' },
+  {
+    pattern: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+    replacement: 'eyJ[JWT_REDACTED]',
+  },
   // key = "value" (quoted).
   {
     pattern:
@@ -118,14 +121,18 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
     // alternation backtracks quadratically: 'a-b_' repeated measured
     // 5kB=41ms / 20kB=669ms / 80kB=9.7s of BLOCKED event loop, and the input is
     // attacker-controlled PR file content. A real directive key is short.
-    pattern: /\b([A-Za-z0-9_-]{0,48}(?:token|secret|apikey|api[_-]key|password|passwd)[A-Za-z0-9_-]{0,24})([ \t]+)([^\s;{}'"]{12,})([ \t]*;)/gi,
+    pattern:
+      /\b([A-Za-z0-9_-]{0,48}(?:token|secret|apikey|api[_-]key|password|passwd)[A-Za-z0-9_-]{0,24})([ \t]+)([^\s;{}'"]{12,})([ \t]*;)/gi,
     replacement: '$1$2[REDACTED]$4',
   },
   // Base64-wrapped PEM (k8s Secret `tls.key`, `ca.crt`): the ASCII-header rule
   // can't see it. `LS0tLS1CRUdJTi` is base64("-----BEGIN").
   // `\s` inside the class made this greedily eat following YAML keys/paragraphs.
   // Match the base64 run itself, optionally continued on further indented lines.
-  { pattern: /\bLS0tLS1CRUdJTi[A-Za-z0-9+/=]{20,}(?:[ \t]*\r?\n[ \t]+[A-Za-z0-9+/=]+)*/g, replacement: '[BASE64_PRIVATE_KEY_REDACTED]' },
+  {
+    pattern: /\bLS0tLS1CRUdJTi[A-Za-z0-9+/=]{20,}(?:[ \t]*\r?\n[ \t]+[A-Za-z0-9+/=]+)*/g,
+    replacement: '[BASE64_PRIVATE_KEY_REDACTED]',
+  },
   // JSON / dict-quoted keys: `"password": "x"`, `'client_secret': 'x'`. The
   // quote between the key and the colon defeats every rule above. Bounded
   // quantifiers only — an unbounded prefix here was a measured ReDoS.
@@ -135,7 +142,10 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
     replacement: '$1$2$1$3$4[REDACTED]$4',
   },
   // Sentry/webhook DSNs carry the key in the URL userinfo.
-  { pattern: /\bhttps?:\/\/[A-Za-z0-9]{16,}@[A-Za-z0-9.-]+\/[0-9]+/g, replacement: '[DSN_REDACTED]' },
+  {
+    pattern: /\bhttps?:\/\/[A-Za-z0-9]{16,}@[A-Za-z0-9.-]+\/[0-9]+/g,
+    replacement: '[DSN_REDACTED]',
+  },
 ];
 
 /**

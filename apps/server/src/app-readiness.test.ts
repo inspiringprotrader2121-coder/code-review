@@ -3,13 +3,17 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import type { ReviewQueue } from '@orvex-review/queue';
-import { AppDatabase, createAppDatabase } from '@orvex-review/store';
+import { AppDatabase } from '@orvex-review/store';
 import { createApp, DEFAULT_RELEASE_FILE } from './app.js';
+import { testServerConfig } from './bootstrap/test-config.js';
 
 test('default release metadata path is rooted at the deployed repository', () => {
+  const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const expectedRepositoryRoot = path.resolve(sourceDirectory, '../../..');
   assert.equal(path.basename(DEFAULT_RELEASE_FILE), 'release.json');
-  assert.equal(path.dirname(DEFAULT_RELEASE_FILE), path.resolve(process.cwd(), '../..'));
+  assert.equal(path.dirname(DEFAULT_RELEASE_FILE), expectedRepositoryRoot);
 });
 
 test('health is live-only while readiness checks both database and queue', async (t) => {
@@ -37,7 +41,9 @@ test('health is live-only while readiness checks both database and queue', async
   const queue = {
     ping: async () => queueUp,
   } as unknown as ReviewQueue;
-  const app = createApp(queue, { releaseFile: path.join(dir, 'missing-release.json') });
+  const config = testServerConfig();
+  const db = new AppDatabase(config.store);
+  const app = createApp(queue, { db, config, releaseFile: path.join(dir, 'missing-release.json') });
 
   const health = await app.request('/health');
   assert.equal(health.status, 200);
@@ -73,43 +79,59 @@ test('health is live-only while readiness checks both database and queue', async
     releaseId: 'unknown',
   });
 
-  createAppDatabase().close();
+  db.close();
 });
 
 test('readiness reports Redis-wide in-flight work from the queue ledger', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-app-global-ready-'));
   const db = new AppDatabase(':memory:');
   const queue = {
-    async ping() { return true; },
-    async depth() { return { queued: 2, waitingOnPr: 1, inFlight: 4, oldestQueuedAt: null }; },
+    async ping() {
+      return true;
+    },
+    async depth() {
+      return { queued: 2, waitingOnPr: 1, inFlight: 4, oldestQueuedAt: null };
+    },
   } as unknown as ReviewQueue;
   t.after(() => {
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const app = createApp(queue, { db, releaseFile: path.join(dir, 'missing-release.json') });
+  const app = createApp(queue, {
+    db,
+    config: testServerConfig(),
+    releaseFile: path.join(dir, 'missing-release.json'),
+  });
   const ready = await app.request('/ready');
   assert.equal(ready.status, 200);
-  assert.equal((await ready.json() as Record<string, unknown>).activeJobs, 4);
+  assert.equal(((await ready.json()) as Record<string, unknown>).activeJobs, 4);
 });
 
 test('readiness fails closed when the queue-wide activity probe cannot be read', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-app-global-ready-fail-'));
   const db = new AppDatabase(':memory:');
   const queue = {
-    async ping() { return true; },
-    async depth() { throw new Error('Redis depth unavailable'); },
+    async ping() {
+      return true;
+    },
+    async depth() {
+      throw new Error('Redis depth unavailable');
+    },
   } as unknown as ReviewQueue;
   t.after(() => {
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const app = createApp(queue, { db, releaseFile: path.join(dir, 'missing-release.json') });
+  const app = createApp(queue, {
+    db,
+    config: testServerConfig(),
+    releaseFile: path.join(dir, 'missing-release.json'),
+  });
   const ready = await app.request('/ready');
   assert.equal(ready.status, 503);
-  assert.equal((await ready.json() as Record<string, unknown>).queue, 'down');
+  assert.equal(((await ready.json()) as Record<string, unknown>).queue, 'down');
 });
 
 test('readiness exposes only a valid release identity from injected metadata', async (t) => {
@@ -122,21 +144,24 @@ test('readiness exposes only a valid release identity from injected metadata', a
     rmSync(dir, { recursive: true, force: true });
   });
 
-  writeFileSync(releaseFile, JSON.stringify({
-    releaseId: 'c9471fdb',
-    buildTimestamp: '2026-08-09T12:00:00.000Z',
-    apiKey: 'must-not-appear-in-readiness',
-  }));
-  const app = createApp(queue, { db, releaseFile });
+  writeFileSync(
+    releaseFile,
+    JSON.stringify({
+      releaseId: 'c9471fdb',
+      buildTimestamp: '2026-08-09T12:00:00.000Z',
+      apiKey: 'must-not-appear-in-readiness',
+    }),
+  );
+  const app = createApp(queue, { db, config: testServerConfig(), releaseFile });
   const ready = await app.request('/ready');
   assert.equal(ready.status, 200);
-  const body = await ready.json() as Record<string, unknown>;
+  const body = (await ready.json()) as Record<string, unknown>;
   assert.equal(body.releaseId, 'c9471fdb');
   assert.equal(JSON.stringify(body).includes('must-not-appear-in-readiness'), false);
 
   writeFileSync(releaseFile, '{not-json');
   const malformed = await app.request('/ready');
-  assert.equal((await malformed.json() as Record<string, unknown>).releaseId, 'unknown');
+  assert.equal(((await malformed.json()) as Record<string, unknown>).releaseId, 'unknown');
 });
 
 function snapshotEnv(keys: string[]): Map<string, string | undefined> {

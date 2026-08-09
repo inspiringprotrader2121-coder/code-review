@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
-import { authDisabled, legacyAuthMode } from '@orvex-review/tenants';
 import { composeApplication } from './bootstrap/composition.js';
 import { isLoopbackHost, loadServerRuntimeConfig } from './bootstrap/config.js';
 import { startApplicationLifecycle } from './bootstrap/lifecycle.js';
@@ -17,13 +16,15 @@ const isLoopbackBind = isLoopbackHost(host);
 // AUTH_DISABLED makes every request the shared `dev` user — never allow that on
 // a non-loopback bind (legacyAuthMode() is false when AUTH_DISABLED=1, so the
 // check below would otherwise miss it).
-if (!isLoopbackBind && authDisabled()) {
+if (!isLoopbackBind && runtime.authDisabled) {
   throw new Error(
     `Refusing to bind ${host}:${port} with AUTH_DISABLED=1 (every request is auto-authed as "dev"). ` +
       `Unset AUTH_DISABLED, or bind to 127.0.0.1 for local bypass.`,
   );
 }
-if (!isLoopbackBind && legacyAuthMode() && !runtime.allowPublicNoLogin) {
+const hasOauth = Boolean(runtime.oauth.github || runtime.oauth.google);
+const legacyNoLogin = !runtime.requireLogin && !hasOauth && !runtime.authDisabled;
+if (!isLoopbackBind && legacyNoLogin && !runtime.allowPublicNoLogin) {
   throw new Error(
     `Refusing to bind ${host}:${port} with NO authentication (legacy no-login mode). ` +
       `Set ORVEX_REQUIRE_LOGIN=1 (or configure GitHub OAuth), bind to 127.0.0.1, ` +
@@ -32,7 +33,7 @@ if (!isLoopbackBind && legacyAuthMode() && !runtime.allowPublicNoLogin) {
 }
 
 const { db: bootDb, queue, app } = composeApplication(runtime);
-const lifecycle = await startApplicationLifecycle(bootDb, queue, runtime.staleRunMs);
+const lifecycle = await startApplicationLifecycle(bootDb, queue, runtime);
 
 console.log(`[server] Orvex Review listening on http://${host}:${port}`);
 

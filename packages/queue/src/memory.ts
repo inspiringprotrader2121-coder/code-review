@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   automaticReviewAlreadyDone,
   draftSkipIdempotencyKey,
@@ -8,13 +9,26 @@ import {
   type MarkCompletedOptions,
   type ReviewJobPayload,
   type ReviewQueue,
+  type DeadLetterRecord,
+  type QueueFailure,
+  type QueueOperationalEvent,
+  shouldDeadLetterFailure,
 } from './types.js';
+import {
+  MemoryProviderAdmission,
+  type MemoryProviderAdmissionOptions,
+  type ProviderAdmission,
+} from './provider-admission.js';
+import { assertJobTransition, type QueueJobState } from './state-machine.js';
 
 /** Add a job to a PR's pending list. A review SUPERSEDES the last queued review
  *  (not merely the last element) — otherwise `[review(sha1), fix]` + review(sha2)
  *  leaves BOTH reviews, and the stale sha1 review later runs against old code.
  *  Commands are always kept distinct. */
-function pushCoalesced(list: ReviewJobPayload[], job: ReviewJobPayload): ReviewJobPayload | undefined {
+function pushCoalesced(
+  list: ReviewJobPayload[],
+  job: ReviewJobPayload,
+): ReviewJobPayload | undefined {
   if ((job.kind ?? 'review') === 'review') {
     const idx = list.map((j) => j.kind ?? 'review').lastIndexOf('review');
     if (idx >= 0) {
@@ -34,13 +48,17 @@ function pushCoalesced(list: ReviewJobPayload[], job: ReviewJobPayload): ReviewJ
 // NaN-guard: a garbage ORVEX_QUEUE_MAX_DEDUP (e.g. "abc") makes `size <= NaN`
 // false forever and trimSet would evict EVERY entry on each write, silently
 // disabling dedup — fall back to the default on any non-positive/non-finite value.
-const MAX_DEDUP_ENTRIES = (() => {
-  const n = Number(process.env.ORVEX_QUEUE_MAX_DEDUP ?? 20_000);
-  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 1_000_000) : 20_000;
-})();
-function trimSet(set: Set<string>): void {
-  if (set.size <= MAX_DEDUP_ENTRIES) return;
-  let drop = set.size - MAX_DEDUP_ENTRIES;
+const DEFAULT_MAX_DEDUP_ENTRIES = 20_000;
+
+function normalizedMaxDedupEntries(value: number | undefined): number {
+  return Number.isFinite(value) && value! > 0
+    ? Math.min(Math.floor(value!), 1_000_000)
+    : DEFAULT_MAX_DEDUP_ENTRIES;
+}
+
+function trimSet(set: Set<string>, maxEntries: number): void {
+  if (set.size <= maxEntries) return;
+  let drop = set.size - maxEntries;
   for (const k of set) {
     set.delete(k);
     if (--drop <= 0) break;
@@ -56,16 +74,63 @@ interface MemoryState {
   // fine, but a fix/ask/resolve command must never be overwritten by a later
   // review (or vice versa).
   pending: Map<string, ReviewJobPayload[]>;
+  states: Map<string, QueueJobState>;
+  deadLetters: DeadLetterRecord[];
+  operationalEvents: QueueOperationalEvent[];
 }
 
 export class MemoryReviewQueue implements ReviewQueue {
+  private readonly maxDedupEntries: number;
+  readonly providerAdmission: ProviderAdmission;
   private state: MemoryState = {
     seen: new Set(),
     completed: new Set(),
     queue: [],
     inFlight: new Map(),
     pending: new Map(),
+    states: new Map(),
+    deadLetters: [],
+    operationalEvents: [],
   };
+
+  constructor(
+    options: {
+      maxDedupEntries?: number;
+      providerAdmission?: ProviderAdmission;
+      memoryProviderAdmission?: MemoryProviderAdmissionOptions;
+    } = {},
+  ) {
+    this.maxDedupEntries = normalizedMaxDedupEntries(options.maxDedupEntries);
+    this.providerAdmission =
+      options.providerAdmission ?? new MemoryProviderAdmission(options.memoryProviderAdmission);
+  }
+
+  /** @deprecated Inject `providerAdmission` separately. */
+  acquireProviderLease(provider: string, limit: number, signal?: AbortSignal): Promise<string> {
+    return this.providerAdmission.acquireProviderLease(provider, limit, signal);
+  }
+
+  /** @deprecated Inject `providerAdmission` separately. */
+  releaseProviderLease(provider: string, token: string): Promise<void> {
+    return this.providerAdmission.releaseProviderLease(provider, token);
+  }
+
+  /** @deprecated Inject `providerAdmission` separately. */
+  getProviderCooldownMs(provider: string): Promise<number> {
+    return this.providerAdmission.getProviderCooldownMs(provider);
+  }
+
+  /** @deprecated Inject `providerAdmission` separately. */
+  setProviderCooldown(provider: string, durationMs: number): Promise<void> {
+    return this.providerAdmission.setProviderCooldown(provider, durationMs);
+  }
+
+  private transition(job: ReviewJobPayload, to: QueueJobState): void {
+    const key = jobIdempotencyKey(job);
+    const from = this.state.states.get(key) ?? 'submitted';
+    if (from !== to) assertJobTransition(from, to);
+    this.state.states.set(key, to);
+  }
 
   async enqueue(job: ReviewJobPayload): Promise<EnqueueResult> {
     const idKey = jobIdempotencyKey(job);
@@ -79,13 +144,15 @@ export class MemoryReviewQueue implements ReviewQueue {
     }
 
     this.state.seen.add(idKey);
-    trimSet(this.state.seen);
+    trimSet(this.state.seen, this.maxDedupEntries);
+    this.transition(job, 'ready');
 
     if (this.state.inFlight.has(pk)) {
       const list = this.state.pending.get(pk) ?? [];
       const superseded = pushCoalesced(list, job);
       if (superseded && superseded.action !== 'command' && superseded.action !== 'manual') {
         this.state.seen.delete(jobIdempotencyKey(superseded));
+        this.transition(superseded, 'cancelled');
       }
       this.state.pending.set(pk, list);
       return { accepted: true, jobId: idKey, reason: 'coalesced' };
@@ -123,12 +190,14 @@ export class MemoryReviewQueue implements ReviewQueue {
         const superseded = pushCoalesced(list, job);
         if (superseded && superseded.action !== 'command' && superseded.action !== 'manual') {
           this.state.seen.delete(jobIdempotencyKey(superseded));
+          this.transition(superseded, 'cancelled');
         }
         this.state.pending.set(pk, list);
         continue;
       }
 
       this.state.inFlight.set(pk, job);
+      this.transition(job, 'claimed');
       return job;
     }
     return null;
@@ -136,9 +205,12 @@ export class MemoryReviewQueue implements ReviewQueue {
 
   async markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<boolean> {
     if (this.state.inFlight.get(prKey(job)) !== job) return false;
+    const state = this.state.states.get(jobIdempotencyKey(job));
+    if (state === 'claimed') this.transition(job, 'running');
+    this.transition(job, 'succeeded');
     if (opts?.draftSkipped) {
       this.state.completed.add(draftSkipIdempotencyKey(job));
-      trimSet(this.state.completed);
+      trimSet(this.state.completed, this.maxDedupEntries);
       this.state.inFlight.delete(prKey(job));
       return true;
     }
@@ -150,16 +222,38 @@ export class MemoryReviewQueue implements ReviewQueue {
     if (idKey !== bare && (job.kind ?? 'review') === 'review') {
       this.state.completed.add(bare);
     }
-    trimSet(this.state.completed);
+    trimSet(this.state.completed, this.maxDedupEntries);
     this.state.inFlight.delete(prKey(job));
     return true;
   }
 
-  async markFailed(job: ReviewJobPayload, _error: string): Promise<boolean> {
+  async markFailed(job: ReviewJobPayload, failure: QueueFailure): Promise<boolean> {
     if (this.state.inFlight.get(prKey(job)) !== job) return false;
+    const state = this.state.states.get(jobIdempotencyKey(job));
+    if (state === 'claimed') this.transition(job, 'running');
     const idKey = jobIdempotencyKey(job);
     this.state.seen.delete(idKey);
     this.state.inFlight.delete(prKey(job));
+    if (shouldDeadLetterFailure(failure)) {
+      this.transition(job, 'dead-lettered');
+      const record: DeadLetterRecord = {
+        id: randomUUID(),
+        job: { ...job },
+        reason: failure.code,
+        failedAt: new Date().toISOString(),
+        attempts: (job.attempts ?? 0) + 1,
+        error: failure.message,
+      };
+      this.state.deadLetters.unshift(record);
+      this.state.deadLetters.length = Math.min(this.state.deadLetters.length, 10_000);
+      this.state.operationalEvents.push({
+        type: 'dead-lettered',
+        record,
+        source: 'terminal-failure',
+      });
+      return true;
+    }
+    this.transition(job, 'failed');
     return true;
   }
 
@@ -178,6 +272,39 @@ export class MemoryReviewQueue implements ReviewQueue {
   async recoverOrphans(): Promise<number> {
     // In-memory state is lost on restart, so there is nothing stale to recover.
     return 0;
+  }
+
+  async markRunning(job: ReviewJobPayload): Promise<boolean> {
+    if (this.state.inFlight.get(prKey(job)) !== job) return false;
+    this.transition(job, 'running');
+    return true;
+  }
+
+  async getJobState(jobId: string): Promise<QueueJobState | null> {
+    return this.state.states.get(jobId) ?? null;
+  }
+
+  async listDeadLetters(limit = 50): Promise<DeadLetterRecord[]> {
+    return this.state.deadLetters.slice(0, Math.min(500, Math.max(1, Math.floor(limit))));
+  }
+
+  async replayDeadLetter(id: string): Promise<boolean> {
+    const index = this.state.deadLetters.findIndex((record) => record.id === id);
+    if (index < 0) return false;
+    const record = this.state.deadLetters[index];
+    if (!record) return false;
+    const idKey = jobIdempotencyKey(record.job);
+    if (this.state.seen.has(idKey)) return false;
+    this.state.deadLetters.splice(index, 1);
+    this.state.seen.add(idKey);
+    trimSet(this.state.seen, this.maxDedupEntries);
+    this.transition(record.job, 'ready');
+    this.state.queue.push(record.job);
+    return true;
+  }
+
+  drainOperationalEvents(): QueueOperationalEvent[] {
+    return this.state.operationalEvents.splice(0);
   }
 
   /** Memory queue already holds the live job object in `inFlight`, so mutations

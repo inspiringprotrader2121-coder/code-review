@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { loadTenantRuntimeConfig, type TenantRuntimeConfig } from './config.js';
 
 export interface InstallStatePayload {
   tenantSlug: string;
@@ -13,7 +14,11 @@ export function signInstallState(payload: InstallStatePayload, secret: string): 
   return `${body}.${sig}`;
 }
 
-export function verifyInstallState(state: string, secret: string, maxAgeMs = 3_600_000): InstallStatePayload | null {
+export function verifyInstallState(
+  state: string,
+  secret: string,
+  maxAgeMs = 3_600_000,
+): InstallStatePayload | null {
   const [body, sig] = state.split('.');
   if (!body || !sig) return null;
 
@@ -37,10 +42,12 @@ export function verifyInstallState(state: string, secret: string, maxAgeMs = 3_6
   return payload;
 }
 
-export function platformSecret(): string {
-  const secret = process.env.PLATFORM_SECRET ?? process.env.GITHUB_WEBHOOK_SECRET;
+export function platformSecret(config: TenantRuntimeConfig = loadTenantRuntimeConfig()): string {
+  const secret = config.platformSecret;
   if (!secret) {
-    throw new Error('PLATFORM_SECRET or GITHUB_WEBHOOK_SECRET is required for install state signing');
+    throw new Error(
+      'PLATFORM_SECRET or GITHUB_WEBHOOK_SECRET is required for install state signing',
+    );
   }
   return secret;
 }

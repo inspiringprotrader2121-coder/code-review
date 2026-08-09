@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { mergeFindings, toStoredFinding, reconcileFixedOnHead, type FileReader } from './merge.js';
 import type { ReviewFinding } from './finding.js';
 
-function finding(file: string, message: string, severity: ReviewFinding['severity'] = 'P1'): ReviewFinding {
+function finding(
+  file: string,
+  message: string,
+  severity: ReviewFinding['severity'] = 'P1',
+): ReviewFinding {
   return {
     file,
     line: 10,
@@ -135,9 +139,17 @@ test('a low-confidence re-detection still counts as seen and prevents false fixe
     reviewedFiles: new Set(['a.ts']),
     priorReviewSha: 'sha1',
   });
-  assert.equal(res.newlyFixed.length, 0, 're-detected below threshold must still block false fixed');
+  assert.equal(
+    res.newlyFixed.length,
+    0,
+    're-detected below threshold must still block false fixed',
+  );
   assert.equal(res.toPost.length, 0, 'an already-open finding is not posted again');
-  assert.equal(res.reviewOnly.length, 0, 'an already-open finding is not duplicated in manual review');
+  assert.equal(
+    res.reviewOnly.length,
+    0,
+    'an already-open finding is not duplicated in manual review',
+  );
 });
 
 test('re-detection upgrades severity/message when incoming ranks higher', () => {
@@ -193,7 +205,12 @@ test('P2-9: incoming duplicates are deduped by fingerprint before posting', () =
 
 // ——— Deterministic fix detection: retire ONLY when the recorded fix is present ———
 
-const anchored = (file: string, originalCode: string, fixedCode?: string, severity: ReviewFinding['severity'] = 'P3'): ReviewFinding => ({
+const anchored = (
+  file: string,
+  originalCode: string,
+  fixedCode?: string,
+  severity: ReviewFinding['severity'] = 'P3',
+): ReviewFinding => ({
   ...finding(file, 'null deref on user', severity),
   ruleId: 'llm.correctness',
   severity,
@@ -202,7 +219,11 @@ const anchored = (file: string, originalCode: string, fixedCode?: string, severi
 });
 
 test('FIX LANDED: P3 original gone AND recorded fixedCode present → marked fixed', async () => {
-  const f = anchored('user.ts', 'const name = user.profile.name;', 'const name = user?.profile?.name ?? "";');
+  const f = anchored(
+    'user.ts',
+    'const name = user.profile.name;',
+    'const name = user?.profile?.name ?? "";',
+  );
   const prior = [toStoredFinding(f, 'sha1')];
   const reader = readerFor({ 'user.ts': 'const name = user?.profile?.name ?? "";' });
   const res = await reconcileFixedOnHead(prior, 'sha2', reader);
@@ -226,10 +247,16 @@ test('FIX LANDED: P1 with original gone AND fixedCode present → marked fixed',
 
 test('INCIDENTAL fixedCode: a P1 is NOT closed when original still present', async () => {
   // fixedCode is coincidentally present; original remains → not fixLanded.
-  const f = anchored('auth.ts', 'const role = req.query.role', 'const role = session.user.role', 'P1');
+  const f = anchored(
+    'auth.ts',
+    'const role = req.query.role',
+    'const role = session.user.role',
+    'P1',
+  );
   const prior = [toStoredFinding(f, 'sha1')];
   const reader = readerFor({
-    'auth.ts': 'const role = session.user.role; // (present for unrelated reasons)\nconst role = req.query.role',
+    'auth.ts':
+      'const role = session.user.role; // (present for unrelated reasons)\nconst role = req.query.role',
   });
   const res = await reconcileFixedOnHead(prior, 'sha2', reader);
   assert.equal(res.newlyFixed.length, 0, 'original still present → not fixed');
@@ -239,12 +266,20 @@ test('INCIDENTAL fixedCode: a P1 is NOT closed when original still present', asy
 test('REGRESSION GUARD: flagged line RENAMED but bug remains (no fixedCode present) → NOT fixed', async () => {
   // This is the P1 the old originalCode-absence-alone check caused: the injectable
   // line is renamed but still injectable; must stay open, not silently retire.
-  const f = anchored('db.ts', 'db.query("... WHERE id = " + userId)', 'db.query("... WHERE id = ?", [userId])');
+  const f = anchored(
+    'db.ts',
+    'db.query("... WHERE id = " + userId)',
+    'db.query("... WHERE id = ?", [userId])',
+  );
   const prior = [toStoredFinding(f, 'sha1')];
   // renamed userId → req.params.id, still concatenated (still injectable). fixedCode NOT present.
   const reader = readerFor({ 'db.ts': 'db.query("... WHERE id = " + req.params.id)' });
   const res = await reconcileFixedOnHead(prior, 'sha2', reader);
-  assert.equal(res.newlyFixed.length, 0, 'an incidental rename must NOT mark a still-open bug fixed');
+  assert.equal(
+    res.newlyFixed.length,
+    0,
+    'an incidental rename must NOT mark a still-open bug fixed',
+  );
   assert.equal(res.stillOpen.length, 1, 'it is carried forward for the model to re-check');
 });
 
@@ -258,20 +293,34 @@ test('NO RECORDED FIX: original gone but finding has no fixedCode → NOT anchor
 });
 
 test('STILL OPEN: flagged snippet still present → stays open even if fixedCode also happens to appear', async () => {
-  const f = anchored('user.ts', 'const name = user.profile.name;', 'const name = user?.profile?.name;');
+  const f = anchored(
+    'user.ts',
+    'const name = user.profile.name;',
+    'const name = user?.profile?.name;',
+  );
   const prior = [toStoredFinding(f, 'sha1')];
-  const reader = readerFor({ 'user.ts': 'const name = user.profile.name; const other = user?.profile?.name;' });
+  const reader = readerFor({
+    'user.ts': 'const name = user.profile.name; const other = user?.profile?.name;',
+  });
   const res = await reconcileFixedOnHead(prior, 'sha2', reader);
   assert.equal(res.newlyFixed.length, 0, 'original still present → not fixed');
   assert.equal(res.stillOpen.length, 1);
 });
 
 test('FILE DELETED still marks fixed; TRANSIENT read error still protects', async () => {
-  const f = anchored('gone.ts', 'const secret = process.env.KEY;', 'const secret = vault.get("KEY");');
+  const f = anchored(
+    'gone.ts',
+    'const secret = process.env.KEY;',
+    'const secret = vault.get("KEY");',
+  );
   const del = await reconcileFixedOnHead([toStoredFinding(f, 'sha1')], 'sha2', readerFor({}));
   assert.equal(del.newlyFixed.length, 1, 'deleted file → fixed');
 
-  const throwing: FileReader = { readFile: async () => { throw new Error('rate limited'); } };
+  const throwing: FileReader = {
+    readFile: async () => {
+      throw new Error('rate limited');
+    },
+  };
   const trans = await reconcileFixedOnHead([toStoredFinding(f, 'sha1')], 'sha2', throwing);
   assert.equal(trans.newlyFixed.length, 0, 'transient error never marks fixed');
   assert.equal(trans.readErrorFps.length, 1);

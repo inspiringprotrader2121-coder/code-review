@@ -34,3 +34,21 @@ test('unsigned is accepted ONLY with the explicit dev override', () => {
   assert.equal(verifyWebhookSignature(cfg(''), '{}', undefined), true);
   delete process.env.ORVEX_ALLOW_UNSIGNED_WEBHOOKS;
 });
+
+test('unsigned webhook override is rejected in production', () => {
+  const previousOverride = process.env.ORVEX_ALLOW_UNSIGNED_WEBHOOKS;
+  const previousEnvironment = process.env.NODE_ENV;
+  process.env.ORVEX_ALLOW_UNSIGNED_WEBHOOKS = '1';
+  process.env.NODE_ENV = 'production';
+  try {
+    assert.throws(
+      () => verifyWebhookSignature(cfg(''), '{}', undefined),
+      /only permitted outside production/,
+    );
+  } finally {
+    if (previousOverride === undefined) delete process.env.ORVEX_ALLOW_UNSIGNED_WEBHOOKS;
+    else process.env.ORVEX_ALLOW_UNSIGNED_WEBHOOKS = previousOverride;
+    if (previousEnvironment === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousEnvironment;
+  }
+});

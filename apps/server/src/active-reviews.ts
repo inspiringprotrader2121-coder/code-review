@@ -128,12 +128,12 @@ export function cancelActiveReviewsForPr(
   for (const entry of entries.values()) {
     const job = entry.job;
     if (
-      (job.kind ?? 'review') !== 'review'
-      || job.installationId !== key.installationId
-      || job.pr !== key.pr
-      || job.owner.toLowerCase() !== key.owner.toLowerCase()
-      || job.repo.toLowerCase() !== key.repo.toLowerCase()
-      || entry.abortController.signal.aborted
+      (job.kind ?? 'review') !== 'review' ||
+      job.installationId !== key.installationId ||
+      job.pr !== key.pr ||
+      job.owner.toLowerCase() !== key.owner.toLowerCase() ||
+      job.repo.toLowerCase() !== key.repo.toLowerCase() ||
+      entry.abortController.signal.aborted
     ) {
       continue;
     }
@@ -179,7 +179,11 @@ export function getActiveReviewCount(): number {
   return entries.size;
 }
 
-function parseMeminfo(): { availableBytes: number; swapTotalBytes: number; swapFreeBytes: number } | null {
+function parseMeminfo(): {
+  availableBytes: number;
+  swapTotalBytes: number;
+  swapFreeBytes: number;
+} | null {
   try {
     const text = readFileSync('/proc/meminfo', 'utf8');
     const get = (key: string): number | null => {
@@ -268,7 +272,11 @@ function diskForPath(target: string): HostResourceSample['disk'] {
   }
 }
 
-function sampleHost(activeCount: number, maxConcurrent: number): HostResourceSample {
+function sampleHost(
+  activeCount: number,
+  maxConcurrent: number,
+  diskPath?: string,
+): HostResourceSample {
   const totalBytes = os.totalmem();
   const freeBytes = os.freemem();
   const meminfo = parseMeminfo();
@@ -277,9 +285,7 @@ function sampleHost(activeCount: number, maxConcurrent: number): HostResourceSam
   const swapUsedBytes = meminfo ? meminfo.swapTotalBytes - meminfo.swapFreeBytes : 0;
   const mu = process.memoryUsage();
   const load = os.loadavg() as [number, number, number];
-  const diskRoot =
-    process.env.ORVEX_MONITOR_DISK_PATH
-    ?? (process.env.STORE_PATH ? path.dirname(process.env.STORE_PATH) : os.tmpdir());
+  const diskRoot = diskPath ?? os.tmpdir();
   return {
     sampledAt: new Date().toISOString(),
     cpuCount: os.cpus().length,
@@ -304,11 +310,15 @@ function sampleHost(activeCount: number, maxConcurrent: number): HostResourceSam
   };
 }
 
-export function sampleActiveReviews(opts?: { maxConcurrent?: number }): ActiveReviewsSnapshot {
+export function sampleActiveReviews(opts?: {
+  maxConcurrent?: number;
+  diskPath?: string;
+}): ActiveReviewsSnapshot {
   const active = listActiveReviewEntries();
   const maxConcurrent = opts?.maxConcurrent ?? 4;
-  const host = sampleHost(active.length, maxConcurrent);
-  const share = active.length > 0 ? Math.floor(host.worker.rssBytes / active.length) : host.worker.rssBytes;
+  const host = sampleHost(active.length, maxConcurrent, opts?.diskPath);
+  const share =
+    active.length > 0 ? Math.floor(host.worker.rssBytes / active.length) : host.worker.rssBytes;
   const reviews: ActiveReviewSample[] = active.map((entry) => {
     const children: Array<{ pid: number; rssBytes: number }> = [];
     let childRssBytes = 0;

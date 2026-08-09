@@ -8,6 +8,8 @@
  * scans, and higher limits. Billing is plan-primary; the expensive execution
  * runs are the natural place to meter/credit overage.
  */
+import { loadTenantRuntimeConfig, type TenantRuntimeConfig } from './config.js';
+import { hasPlanCapability, isCustomContractPlan } from './policy.js';
 
 export type PlanId = 'free' | 'review' | 'review-plus' | 'verify-lite' | 'verify' | 'enterprise';
 
@@ -71,8 +73,7 @@ export interface PlanFeatures {
    * Included reviews per Stripe billing period before overage is billed. For
    * METERED plans (overageCentsPerReview != null) this is the ONLY quota that
    * matters: reviewsPerMonth's hard block is deliberately skipped and usage
-   * above this line is billed as overage (see accountLimitReason +
-   * reportStripeReviewOverage). For NON-metered plans reviewsPerMonth is the
+   * above this line is reserved from the prepaid wallet. For NON-metered plans reviewsPerMonth is the
    * hard ceiling instead.
    */
   includedReviewsPerMonth: number | null;
@@ -88,7 +89,14 @@ export interface PlanFeatures {
    * - 'standard' — MiniMax on every pass. 'premium' — GLM on every pass.
    * - 'hybrid' / 'openai' — legacy single-provider ensembles.
    */
-  modelTier: 'premium' | 'standard' | 'hybrid' | 'openai' | 'codex-hybrid' | 'multi-model' | 'dual-model';
+  modelTier:
+    | 'premium'
+    | 'standard'
+    | 'hybrid'
+    | 'openai'
+    | 'codex-hybrid'
+    | 'multi-model'
+    | 'dual-model';
   /** queue priority when workers are saturated (higher = sooner) */
   priority: number;
 }
@@ -225,7 +233,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     //   pass 3 — DeepSeek v4 Flash (removed-behavior/callers)
     //   pass 4 — MiniMax (perf / completeness / API-contract)
     //   then ONE strict verification on DeepSeek v4 Flash (when candidates exist)
-    // $99/mo — 120 reviews included, then prepaid overage at $0.75/review up to
+    // $99/mo — 120 reviews included, then prepaid overage at $1.50/review up to
     // a 1000/mo hard safety ceiling at 10/hour.
     reviewPasses: 4,
     retrievalTopK: 28,
@@ -241,7 +249,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     maxConcurrentReviews: 3,
     reviewsPerMonth: 1000,
     includedReviewsPerMonth: 120,
-    overageCentsPerReview: 75,
+    overageCentsPerReview: 150,
     modelTier: 'multi-model',
     priority: 3,
   },
@@ -272,23 +280,38 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
 
 /** Plan for a tenant with no explicit plan set — the free trial, so an unknown
  *  or brand-new account never falls through to paid features. Env-overridable. */
-export function defaultPlanId(): PlanId {
-  const env = process.env.ORVEX_DEFAULT_PLAN as PlanId | undefined;
+export function defaultPlanId(config: TenantRuntimeConfig = loadTenantRuntimeConfig()): PlanId {
+  const configuredPlan = config.defaultPlanId;
   // Object.hasOwn, not `in`: 'constructor' in PLANS is TRUE via the prototype
   // chain and would return Object as a "plan".
-  return env && Object.hasOwn(PLANS, env) ? env : 'free';
+  return configuredPlan && Object.hasOwn(PLANS, configuredPlan)
+    ? (configuredPlan as PlanId)
+    : 'free';
 }
 
 /** Resolve a stored plan string (possibly null/unknown) to its feature set. */
-export function planFeatures(plan: string | null | undefined): PlanFeatures {
+export function planFeatures(
+  plan: string | null | undefined,
+  config: TenantRuntimeConfig = loadTenantRuntimeConfig(),
+): PlanFeatures {
   if (plan && Object.hasOwn(PLANS, plan)) return PLANS[plan as PlanId];
-  return PLANS[defaultPlanId()];
+  return PLANS[defaultPlanId(config)];
 }
 
 /** Label safe for customer-facing dashboard and quota messages. */
 export function publicPlanLabel(plan: PlanFeatures): string {
-  return plan.id === 'enterprise' ? 'Custom plan' : plan.label;
+  return isCustomContractPlan(plan) ? 'Custom plan' : plan.label;
 }
+
+/** Named entitlement helpers keep callers out of raw plan feature branches. */
+export const canAutofix = (plan: PlanFeatures): boolean =>
+  hasPlanCapability(plan, 'review:autofix');
+export const canRunDeepReview = (plan: PlanFeatures): boolean =>
+  hasPlanCapability(plan, 'review:deep');
+export const canRunCodeExecution = (plan: PlanFeatures): boolean =>
+  hasPlanCapability(plan, 'review:runtime-verify');
+export const canRunNightlyScans = (plan: PlanFeatures): boolean =>
+  hasPlanCapability(plan, 'review:nightly-scan');
 
 export function isPlanId(v: string): v is PlanId {
   // Object.hasOwn, not `in`: `'constructor' in PLANS` (and other prototype keys)

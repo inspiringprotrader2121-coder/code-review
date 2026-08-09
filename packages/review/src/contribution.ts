@@ -40,7 +40,9 @@ function summarizeBy(
 
   const rows = [...totals.entries()]
     .map(([key, v]) => ({ key, count: v.count, uniqueCount: v.unique }))
-    .sort((a, b) => b.uniqueCount - a.uniqueCount || b.count - a.count || a.key.localeCompare(b.key));
+    .sort(
+      (a, b) => b.uniqueCount - a.uniqueCount || b.count - a.count || a.key.localeCompare(b.key),
+    );
 
   return { total: byFp.size, rows };
 }
@@ -50,9 +52,7 @@ function summarizeBy(
  * Pass the pre-dedupe accumulation when measuring multi-model overlap — after
  * fingerprint union only one tier survives per bug.
  */
-export function summarizeModelContribution(
-  findings: ReviewFinding[],
-): ModelContributionReport {
+export function summarizeModelContribution(findings: ReviewFinding[]): ModelContributionReport {
   const byTier = summarizeBy(findings, (f) => f.sourceTier?.trim() || 'unknown');
   const withPass = findings.filter((f) => f.sourcePass?.trim());
   const byPass = withPass.length

@@ -17,7 +17,10 @@ export interface VerifyResult {
 }
 
 export async function verifyFindingOnHead(
-  finding: Pick<ReviewFinding, 'file' | 'ruleId' | 'message' | 'category' | 'originalCode' | 'fixedCode'> & { severity: string },
+  finding: Pick<
+    ReviewFinding,
+    'file' | 'ruleId' | 'message' | 'category' | 'originalCode' | 'fixedCode'
+  > & { severity: string },
   headSha: string,
   reader: FileReader,
 ): Promise<VerifyResult> {
@@ -66,7 +69,11 @@ function normalizeCode(s: string): string {
  * return false and let mergeFindings' model-recall guard decide — that is what
  * prevents an incidental line edit from false-closing a still-open bug.
  */
-function fixLanded(originalCode: string | undefined, fixedCode: string | undefined, content: string): boolean {
+function fixLanded(
+  originalCode: string | undefined,
+  fixedCode: string | undefined,
+  content: string,
+): boolean {
   const orig = normalizeCode(originalCode ?? '');
   const fixed = normalizeCode(fixedCode ?? '');
   const reliable = (s: string) => s.length >= 12 && /[A-Za-z_][A-Za-z0-9_]{2,}/.test(s);
@@ -181,8 +188,8 @@ export function mergeFindings(
       let carried: StoredFinding = { ...p, lastSeenSha: headSha };
       // Re-detection may upgrade severity/message when the new report ranks higher.
       if (
-        detected
-        && (MERGE_SEV_RANK[detected.severity] ?? 0) > (MERGE_SEV_RANK[p.severity] ?? 0)
+        detected &&
+        (MERGE_SEV_RANK[detected.severity] ?? 0) > (MERGE_SEV_RANK[p.severity] ?? 0)
       ) {
         carried = {
           ...carried,

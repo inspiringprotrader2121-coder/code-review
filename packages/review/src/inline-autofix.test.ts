@@ -1,12 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatInlineFinding, replaceApplyLine, applyCheckboxLine, failedApplyLine } from './format.js';
+import {
+  formatInlineFinding,
+  replaceApplyLine,
+  applyCheckboxLine,
+  failedApplyLine,
+} from './format.js';
 
 test('replaceApplyLine inserts $-sequences literally (no replacement-pattern corruption)', () => {
   const fp = 'v2-a1b2c3d4e5f60718';
   const body = `intro\n${applyCheckboxLine(fp, true)}\noutro`;
   // A failure reason containing `$\`` / `$&` must appear verbatim, not expand.
-  const reason = 'failed: $` and $& and $\' in llm text';
+  const reason = "failed: $` and $& and $' in llm text";
   const out = replaceApplyLine(body, failedApplyLine(fp, reason));
   assert.match(out, /\$`/);
   assert.match(out, /\$&/);
@@ -43,14 +48,22 @@ const free = { canAutofix: false };
 
 test('single-line fix with matching anchored line → INSTANT native suggestion, NOT the slow checkbox', () => {
   const body = formatInlineFinding({ ...base, ...paid });
-  assert.match(body, /```suggestion\nconst x = safe\(\);\n```/, 'native suggestion contains the full reconstructed line');
+  assert.match(
+    body,
+    /```suggestion\nconst x = safe\(\);\n```/,
+    'native suggestion contains the full reconstructed line',
+  );
   assert.match(body, /Apply instantly/i, 'points at the instant Commit-suggestion button');
   assert.doesNotMatch(body, /- \[ \]/, 'no slow apply-checkbox when a safe native button exists');
 });
 
 test('single-line fix with mismatched anchored line → checkbox, not a broken native suggestion (P1-1)', () => {
   const body = formatInlineFinding({ ...mismatchedAnchor, ...paid });
-  assert.doesNotMatch(body, /```suggestion/, 'no native suggestion when anchor does not contain originalCode');
+  assert.doesNotMatch(
+    body,
+    /```suggestion/,
+    'no native suggestion when anchor does not contain originalCode',
+  );
   assert.match(body, /<!--orvex:apply:v2-a1b2c3d4e5f60718-->/, 'falls back to apply-checkbox');
   assert.match(body, /- \[ \]/, 'a tickable checkbox is present');
 });
@@ -71,7 +84,11 @@ test('free trial, single-line fix with matching anchored line: still gets the fr
   const body = formatInlineFinding({ ...base, ...free });
   assert.doesNotMatch(body, /<!--orvex:apply:/, 'no bot apply marker for free tier');
   assert.doesNotMatch(body, /- \[ \]/, 'no checkbox rendered');
-  assert.match(body, /```suggestion/, 'native suggestion is a GitHub feature, available to everyone');
+  assert.match(
+    body,
+    /```suggestion/,
+    'native suggestion is a GitHub feature, available to everyone',
+  );
 });
 
 test('free trial, multi-line fix: no checkbox — an upgrade / apply-by-hand note', () => {

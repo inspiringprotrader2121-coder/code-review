@@ -6,7 +6,11 @@ test('email/password users: create, find, unique email, hasPasswordUsers', () =>
   const db = new AppDatabase(':memory:');
   assert.equal(db.hasPasswordUsers(), false);
 
-  const u = db.upsertPasswordUser({ email: 'A@Example.com', passwordHash: 'scrypt$aa$bb', name: 'Owner' });
+  const u = db.upsertPasswordUser({
+    email: 'A@Example.com',
+    passwordHash: 'scrypt$aa$bb',
+    name: 'Owner',
+  });
   assert.equal(u.email, 'a@example.com');
   assert.ok(u.githubId < 0, 'synthetic negative github id');
   assert.equal(db.hasPasswordUsers(), true);
@@ -72,7 +76,11 @@ test('MFA state is optional, recovery codes are single-use, and challenges expir
   );
   assert.equal(db.getUserSecurity(user.id).totpSecretEncrypted, 'encrypted-secret');
   assert.equal(db.consumeRecoveryCode(user.id, 'hash-one'), true);
-  assert.equal(db.consumeRecoveryCode(user.id, 'hash-one'), false, 'recovery code cannot be reused');
+  assert.equal(
+    db.consumeRecoveryCode(user.id, 'hash-one'),
+    false,
+    'recovery code cannot be reused',
+  );
   assert.deepEqual(db.getUserSecurity(user.id).recoveryCodeHashes, ['hash-two']);
 
   const challenge = db.createMfaChallenge(user.id, '/superadmin');
@@ -109,7 +117,10 @@ test('MFA state is optional, recovery codes are single-use, and challenges expir
   db.clearMfaAttempts(user.id);
 
   for (let i = 0; i < 5; i += 1) {
-    assert.equal(db.consumeAuthAttempt('login:account:test', { windowMs: 60_000, max: 5 }, 1_000).allowed, true);
+    assert.equal(
+      db.consumeAuthAttempt('login:account:test', { windowMs: 60_000, max: 5 }, 1_000).allowed,
+      true,
+    );
   }
   assert.equal(
     db.consumeAuthAttempt('login:account:test', { windowMs: 60_000, max: 5 }, 1_000).allowed,

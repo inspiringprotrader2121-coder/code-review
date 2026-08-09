@@ -12,6 +12,9 @@ importers:
         specifier: 0.147.0
         version: 0.147.0
     devDependencies:
+      prettier:
+        specifier: 3.5.3
+        version: 3.5.3
       tsx:
         specifier: ^4.19.4
         version: 4.22.4
@@ -74,6 +77,12 @@ importers:
       '@hono/node-server':
         specifier: ^1.14.4
         version: 1.19.14(hono@4.12.27)
+      '@orvex-review/billing':
+        specifier: workspace:*
+        version: link:../../packages/billing
+      '@orvex-review/config':
+        specifier: workspace:*
+        version: link:../../packages/config
       '@orvex-review/github':
         specifier: workspace:*
         version: link:../../packages/github
@@ -118,6 +127,34 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/billing:
+    dependencies:
+      '@orvex-review/store':
+        specifier: workspace:*
+        version: link:../store
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.21
+        version: 22.20.0
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.4
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
+  packages/config:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.21
+        version: 22.20.0
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.4
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/github:
     dependencies:
       '@octokit/auth-app':
@@ -126,6 +163,9 @@ importers:
       '@octokit/rest':
         specifier: ^21.1.1
         version: 21.1.1
+      '@orvex-review/config':
+        specifier: workspace:*
+        version: link:../config
       minimatch:
         specifier: ^10.0.1
         version: 10.2.5
@@ -142,6 +182,9 @@ importers:
 
   packages/queue:
     dependencies:
+      '@orvex-review/config':
+        specifier: workspace:*
+        version: link:../config
       ioredis:
         specifier: ^5.6.1
         version: 5.11.1
@@ -164,6 +207,9 @@ importers:
       '@openai/codex':
         specifier: 0.147.0
         version: 0.147.0
+      '@orvex-review/config':
+        specifier: workspace:*
+        version: link:../config
       '@orvex-review/rules':
         specifier: workspace:*
         version: link:../rules
@@ -186,6 +232,9 @@ importers:
 
   packages/rules:
     dependencies:
+      '@orvex-review/config':
+        specifier: workspace:*
+        version: link:../config
       minimatch:
         specifier: ^10.0.1
         version: 10.2.5
@@ -230,6 +279,9 @@ importers:
       '@octokit/rest':
         specifier: ^21.1.1
         version: 21.1.1
+      '@orvex-review/config':
+        specifier: workspace:*
+        version: link:../config
       '@orvex-review/github':
         specifier: workspace:*
         version: link:../github
@@ -789,6 +841,11 @@ packages:
     resolution: {integrity: sha512-8Mf2cbV7x1cXPUILADGI3wuhfqWvtiLA1iclTDbFRZkgRQS0NqsPZphna9V+HyTEadheuPmjaJMsbzKQFOzLug==}
     engines: {node: '>=10'}
     deprecated: No longer maintained. Please contact the author of the relevant native addon; alternatives are available.
+    hasBin: true
+
+  prettier@3.5.3:
+    resolution: {integrity: sha512-QQtaxnoDJeAkDvDKWCLiwIXkTgRhwYDEQCghU9Z6q03iyek/rxRh/2lC3HB7P8sWT2xC/y5JDctPLBIGzHKbhw==}
+    engines: {node: '>=14'}
     hasBin: true
 
   pump@3.0.4:
@@ -1405,6 +1462,8 @@ snapshots:
       simple-get: 4.0.1
       tar-fs: 2.1.5
       tunnel-agent: 0.6.0
+
+  prettier@3.5.3: {}
 
   pump@3.0.4:
     dependencies:

@@ -9,7 +9,8 @@ const require = createRequire(import.meta.url);
 const Database = require('../packages/store/node_modules/better-sqlite3');
 
 const backup = process.env.ORVEX_BACKUP_FILE ?? process.argv[2];
-if (!backup) throw new Error('usage: ORVEX_BACKUP_FILE=/path/backup.db node scripts/restore-db-drill.mjs');
+if (!backup)
+  throw new Error('usage: ORVEX_BACKUP_FILE=/path/backup.db node scripts/restore-db-drill.mjs');
 if (!fs.existsSync(backup)) throw new Error(`backup does not exist: ${backup}`);
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-restore-drill-'));
@@ -21,9 +22,20 @@ try {
   try {
     const integrity = db.pragma('integrity_check', { simple: true });
     if (integrity !== 'ok') throw new Error(`SQLite integrity check failed: ${String(integrity)}`);
-    const required = ['tenants', 'installations', 'review_runs', 'users', 'sessions'];
+    const foreignKeyViolations = db.pragma('foreign_key_check');
+    if (foreignKeyViolations.length > 0) {
+      const first = foreignKeyViolations[0];
+      throw new Error(
+        `SQLite foreign-key check failed: ${foreignKeyViolations.length} violation(s); ` +
+          `first=${String(first.table)} rowid=${String(first.rowid)} parent=${String(first.parent)}`,
+      );
+    }
+    const required = ['tenants', 'github_installations', 'review_runs', 'users', 'sessions'];
     const present = new Set(
-      db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all().map((r) => r.name),
+      db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
+        .all()
+        .map((r) => r.name),
     );
     const missing = required.filter((name) => !present.has(name));
     if (missing.length > 0) {

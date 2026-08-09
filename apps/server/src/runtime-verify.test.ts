@@ -49,18 +49,28 @@ test('a NEW failure (passes at base) is blamed on the PR; pre-existing ones are 
     baseSteps: [step('typecheck', true), step('test', false)],
   };
   const msg = formatRuntimeEvidence(res)!;
-  assert.match(msg, /1 step\(s\) failed\*\* and pass at the base commit — likely introduced by this PR/);
+  assert.match(
+    msg,
+    /1 step\(s\) failed\*\* and pass at the base commit — likely introduced by this PR/,
+  );
   assert.match(msg, /1 more failure\(s\) also fail at base — pre-existing/);
 });
 
 test('returns null when nothing ran', () => {
-  assert.equal(formatRuntimeEvidence({ ran: false, skippedReason: 'no package.json', steps: [] }), null);
+  assert.equal(
+    formatRuntimeEvidence({ ran: false, skippedReason: 'no package.json', steps: [] }),
+    null,
+  );
 });
 
 test('base-vs-head classification marks only failures reproduced by the same base step', () => {
   const head: RuntimeVerifyResult = {
     ran: true,
-    steps: [step('typecheck', false), step('test', false), step('build', true, { preExisting: true })],
+    steps: [
+      step('typecheck', false),
+      step('test', false),
+      step('build', true, { preExisting: true }),
+    ],
   };
   const base: RuntimeVerifyResult = {
     ran: true,
@@ -70,17 +80,29 @@ test('base-vs-head classification marks only failures reproduced by the same bas
   markPreExistingFailures(head, base);
 
   assert.equal(head.steps[0].preExisting, true, 'same step fails on base and head');
-  assert.equal(head.steps[1].preExisting, false, 'head-only failure remains attributable to the PR');
-  assert.equal(head.steps[2].preExisting, false, 'a successful head step can never be pre-existing');
+  assert.equal(
+    head.steps[1].preExisting,
+    false,
+    'head-only failure remains attributable to the PR',
+  );
+  assert.equal(
+    head.steps[2].preExisting,
+    false,
+    'a successful head step can never be pre-existing',
+  );
   assert.equal(head.baseSteps, base.steps);
 });
 
 test('runtime verification forwards cancellation to the sandbox and does not continue after cancellation', async () => {
   const controller = new AbortController();
   const receivedSignals: Array<AbortSignal | undefined> = [];
-  const fetchSnapshot = (async () => new Map([
-    ['package.json', JSON.stringify({ scripts: { typecheck: 'tsc --noEmit', test: 'node --test' } })],
-  ])) as typeof fetchRepoSnapshot;
+  const fetchSnapshot = (async () =>
+    new Map([
+      [
+        'package.json',
+        JSON.stringify({ scripts: { typecheck: 'tsc --noEmit', test: 'node --test' } }),
+      ],
+    ])) as typeof fetchRepoSnapshot;
   const runSandbox = (async (opts) => {
     receivedSignals.push(opts.signal);
     controller.abort('review closed');
@@ -105,7 +127,11 @@ test('runtime verification forwards cancellation to the sandbox and does not con
   });
 
   assert.deepEqual(receivedSignals, [controller.signal]);
-  assert.deepEqual(result, { ran: false, skippedReason: 'runtime verification cancelled', steps: [] });
+  assert.deepEqual(result, {
+    ran: false,
+    skippedReason: 'runtime verification cancelled',
+    steps: [],
+  });
 });
 
 test('runtime verification fails closed before snapshotting when sandbox readiness is unavailable', async () => {
@@ -126,16 +152,18 @@ test('runtime verification fails closed before snapshotting when sandbox readine
   assert.equal(fetched, false);
   assert.deepEqual(result, {
     ran: false,
-    skippedReason: 'sandbox unavailable: internal sandbox runtime or configured image is unavailable',
+    skippedReason:
+      'sandbox unavailable: internal sandbox runtime or configured image is unavailable',
     steps: [],
   });
 });
 
 test('offline dependency cache misses skip runtime evidence instead of blaming the PR', async () => {
-  const fetchSnapshot = (async () => new Map([
-    ['package.json', JSON.stringify({ scripts: { test: 'node --test' } })],
-    ['pnpm-lock.yaml', 'lockfileVersion: 9'],
-  ])) as typeof fetchRepoSnapshot;
+  const fetchSnapshot = (async () =>
+    new Map([
+      ['package.json', JSON.stringify({ scripts: { test: 'node --test' } })],
+      ['pnpm-lock.yaml', 'lockfileVersion: 9'],
+    ])) as typeof fetchRepoSnapshot;
   const result = await runtimeVerify({} as never, 'owner', 'repo', 'head', {
     dependencies: {
       fetchSnapshot,
@@ -159,10 +187,11 @@ test('offline dependency cache misses skip runtime evidence instead of blaming t
 });
 
 test('real install failures remain runtime evidence', async () => {
-  const fetchSnapshot = (async () => new Map([
-    ['package.json', JSON.stringify({ scripts: { test: 'node --test' } })],
-    ['package-lock.json', '{}'],
-  ])) as typeof fetchRepoSnapshot;
+  const fetchSnapshot = (async () =>
+    new Map([
+      ['package.json', JSON.stringify({ scripts: { test: 'node --test' } })],
+      ['package-lock.json', '{}'],
+    ])) as typeof fetchRepoSnapshot;
   const result = await runtimeVerify({} as never, 'owner', 'repo', 'head', {
     dependencies: {
       fetchSnapshot,
@@ -181,4 +210,55 @@ test('real install failures remain runtime evidence', async () => {
   assert.equal(result.ran, true);
   assert.equal(result.steps[0]?.name, 'install');
   assert.equal(result.steps[0]?.ok, false);
+});
+
+test('runtime verification rejects adversarial snapshot paths before invoking Docker', async () => {
+  let calls = 0;
+  const fetchSnapshot = (async () =>
+    new Map([
+      ['package.json', JSON.stringify({ scripts: { test: 'node --test' } })],
+      ['../../host-file', 'attempted escape'],
+    ])) as typeof fetchRepoSnapshot;
+  const result = await runtimeVerify({} as never, 'owner', 'repo', 'head', {
+    dependencies: {
+      fetchSnapshot,
+      runSandbox: (async () => {
+        calls++;
+        throw new Error('sandbox must not start');
+      }) as typeof runInSandbox,
+      checkSandboxRuntimeReadiness: async () => ({ ready: true, image: PINNED_IMAGE }),
+    },
+  });
+  assert.equal(calls, 0);
+  assert.equal(result.ran, false);
+  assert.match(result.skippedReason ?? '', /sandbox snapshot rejected: .*unsafe path/);
+});
+
+test('offline install command strips user config, disables lifecycle scripts, and never enables a network', async () => {
+  const observed: Array<{ command: string; image: string }> = [];
+  const fetchSnapshot = (async () =>
+    new Map([
+      ['package.json', JSON.stringify({ scripts: { test: 'node --test' } })],
+      ['pnpm-lock.yaml', 'lockfileVersion: 9'],
+    ])) as typeof fetchRepoSnapshot;
+  const result = await runtimeVerify({} as never, 'owner', 'repo', 'head', {
+    dependencies: {
+      fetchSnapshot,
+      runSandbox: (async (opts) => {
+        observed.push({ command: opts.command, image: opts.image });
+        return { exitCode: 0, stdout: '', stderr: '', timedOut: false, durationMs: 1 };
+      }) as typeof runInSandbox,
+      checkSandboxRuntimeReadiness: async () => ({ ready: true, image: PINNED_IMAGE }),
+    },
+  });
+  assert.equal(result.ran, true);
+  assert.equal(observed.length, 2);
+  assert.match(observed[0]!.command, /NPM_CONFIG_USERCONFIG=\/dev\/null/);
+  assert.match(observed[0]!.command, /YARN_ENABLE_NETWORK=0/);
+  assert.match(observed[0]!.command, /--offline/);
+  assert.match(observed[0]!.command, /--ignore-scripts/);
+  assert.equal(
+    observed.every((entry) => entry.image === PINNED_IMAGE),
+    true,
+  );
 });

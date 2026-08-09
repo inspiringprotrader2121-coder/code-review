@@ -58,25 +58,39 @@ test('LLM-merged findings require recurrence while one-off candidates remain vis
         line: 16,
         severity: 'P1',
         confidence: 0.9,
-        message: 'On retry failure, the reservation is never released and can exhaust the account quota.',
+        message:
+          'On retry failure, the reservation is never released and can exhaust the account quota.',
       }),
     },
-    { sample: 2, finding: finding({ file: 'src/other.ts', message: 'One-off independent candidate.' }) },
+    {
+      sample: 2,
+      finding: finding({ file: 'src/other.ts', message: 'One-off independent candidate.' }),
+    },
   ];
   const result = await aggregateRepeatedFindings(entries, {
     minOccurrences: 2,
     maxCandidates: 20,
-    mergeWithLlm: async () => JSON.stringify({ clusters: [{ representative: 1, members: [0, 1] }, { representative: 2, members: [2] }] }),
+    mergeWithLlm: async () =>
+      JSON.stringify({
+        clusters: [
+          { representative: 1, members: [0, 1] },
+          { representative: 2, members: [2] },
+        ],
+      }),
   });
 
   assert.equal(result.usedLlmMerge, true);
   assert.equal(result.findings.length, 1);
-  assert.equal(result.findings[0].severity, 'P1', 'a merged cluster preserves the highest supported severity');
+  assert.equal(
+    result.findings[0].severity,
+    'P1',
+    'a merged cluster preserves the highest supported severity',
+  );
   assert.equal(result.reviewOnly.length, 1);
   assert.match(result.reviewOnly[0].reason, /1 of the required 2/);
 });
 
-test('a merger-selected weak anchor cannot inherit another finding\'s severity', async () => {
+test("a merger-selected weak anchor cannot inherit another finding's severity", async () => {
   const entries: RepeatedFinding[] = [
     {
       sample: 0,
@@ -100,7 +114,8 @@ test('a merger-selected weak anchor cannot inherit another finding\'s severity',
   const result = await aggregateRepeatedFindings(entries, {
     minOccurrences: 2,
     maxCandidates: 20,
-    mergeWithLlm: async () => JSON.stringify({ clusters: [{ representative: 0, members: [0, 1] }] }),
+    mergeWithLlm: async () =>
+      JSON.stringify({ clusters: [{ representative: 0, members: [0, 1] }] }),
   });
 
   assert.equal(result.findings.length, 1);
@@ -117,11 +132,16 @@ test('a malformed or cross-file LLM merge cannot erase candidates', async () => 
   const result = await aggregateRepeatedFindings(entries, {
     minOccurrences: 2,
     maxCandidates: 20,
-    mergeWithLlm: async () => JSON.stringify({ clusters: [{ representative: 0, members: [0, 1] }] }),
+    mergeWithLlm: async () =>
+      JSON.stringify({ clusters: [{ representative: 0, members: [0, 1] }] }),
   });
 
   assert.equal(result.usedLlmMerge, true);
-  assert.equal(result.findings.length, 0, 'cross-file candidates must not be merged into a normal finding');
+  assert.equal(
+    result.findings.length,
+    0,
+    'cross-file candidates must not be merged into a normal finding',
+  );
   assert.equal(result.reviewOnly.length, 2, 'every rejected merge member remains visible');
 });
 
@@ -147,7 +167,14 @@ test('an over-merging LLM cannot absorb a distant same-file defect — far membe
   // second defect is neither deleted nor counted as recurrence.
   const entries: RepeatedFinding[] = [
     { sample: 0, finding: finding({ line: 12, message: 'Bug A: reservation leak on retry.' }) },
-    { sample: 1, finding: finding({ line: 480, severity: 'P1', message: 'Bug B: auth check missing on delete.' }) },
+    {
+      sample: 1,
+      finding: finding({
+        line: 480,
+        severity: 'P1',
+        message: 'Bug B: auth check missing on delete.',
+      }),
+    },
   ];
   const merged = await aggregateRepeatedFindings(entries, {
     minOccurrences: 2,
@@ -167,7 +194,13 @@ test('an over-merging LLM cannot absorb a distant same-file defect — far membe
 test('nearby same-defect anchors from different samples still merge into one recurring finding', async () => {
   const entries: RepeatedFinding[] = [
     { sample: 0, finding: finding({ line: 12 }) },
-    { sample: 1, finding: finding({ line: 16, message: 'Reservation is leaked when the retry request fails.' }) },
+    {
+      sample: 1,
+      finding: finding({
+        line: 16,
+        message: 'Reservation is leaked when the retry request fails.',
+      }),
+    },
   ];
   const merged = await aggregateRepeatedFindings(entries, {
     minOccurrences: 2,

@@ -4,18 +4,18 @@ import { sendOperationalAlert } from '../alerts.js';
 import { startNightlyScheduler } from '../nightly.js';
 import { loadWorkerConfig } from '../pipeline.js';
 import { recoverOrphansAsLeader, startWorkerLoop } from '../queue-runner.js';
-import { retryStripeMeterEvents } from '../routes/billing.js';
+import { alertQueueOperationalEvents } from '../application/worker/queue-alerts.js';
 import { prepareSandboxRuntimeForStartup, type SandboxStartupPreparation } from '../sandbox.js';
 import { cleanupAbandonedAgentCheckouts } from '../temp-cleanup.js';
+import type { ServerConfig } from './config.js';
 
 const DAILY_MS = 24 * 3_600_000;
 
 export interface ApplicationLifecycleDependencies {
   cleanupCheckouts?: () => number;
-  retryMeterEvents?: (db: AppDatabase) => Promise<unknown>;
   sendAlert?: typeof sendOperationalAlert;
-  startNightly?: (queue: ReviewQueue) => () => void;
-  startWorker?: (queue: ReviewQueue) => () => Promise<void>;
+  startNightly?: (queue: ReviewQueue, config: ServerConfig) => () => void;
+  startWorker?: (queue: ReviewQueue, config: ServerConfig) => () => Promise<void>;
   prepareSandboxRuntime?: () => Promise<SandboxStartupPreparation>;
   log?: Pick<Console, 'log' | 'error'>;
 }
@@ -27,18 +27,22 @@ export interface ApplicationLifecycle {
 export async function startApplicationLifecycle(
   db: AppDatabase,
   queue: ReviewQueue,
-  staleRunMs: number,
+  config: ServerConfig,
   dependencies: ApplicationLifecycleDependencies = {},
 ): Promise<ApplicationLifecycle> {
   const cleanupCheckouts = dependencies.cleanupCheckouts ?? cleanupAbandonedAgentCheckouts;
-  const retryMeterEvents = dependencies.retryMeterEvents ?? retryStripeMeterEvents;
   const alert = dependencies.sendAlert ?? sendOperationalAlert;
   const log = dependencies.log ?? console;
 
   try {
-    const sandbox = await (dependencies.prepareSandboxRuntime ?? prepareSandboxRuntimeForStartup)();
+    const sandbox = await (
+      dependencies.prepareSandboxRuntime ??
+      (() => prepareSandboxRuntimeForStartup({ runtime: config.sandbox.sandbox }))
+    )();
     if (sandbox.enabled && sandbox.removedContainers > 0) {
-      log.log(`[server] removed ${sandbox.removedContainers} orphaned internal sandbox container(s)`);
+      log.log(
+        `[server] removed ${sandbox.removedContainers} orphaned internal sandbox container(s)`,
+      );
     }
   } catch (err) {
     log.error('[server] internal sandbox startup preparation failed', err);
@@ -57,12 +61,14 @@ export async function startApplicationLifecycle(
   const tempCleanupTimer = setInterval(() => {
     const removed = cleanupCheckouts();
     if (removed > 0) {
-      log.log(`[server] removed ${removed} abandoned agent temp director${removed === 1 ? 'y' : 'ies'}`);
+      log.log(
+        `[server] removed ${removed} abandoned agent temp director${removed === 1 ? 'y' : 'ies'}`,
+      );
     }
   }, DAILY_MS);
   tempCleanupTimer.unref();
 
-  const staleRuns = db.failStaleRunningRuns({ staleAfterMs: staleRunMs });
+  const staleRuns = db.failStaleRunningRuns({ staleAfterMs: config.staleRunMs });
   if (staleRuns > 0) log.log(`[server] cleared ${staleRuns} stale 'running' review row(s)`);
 
   const pruneOnce = (): void => {
@@ -81,16 +87,13 @@ export async function startApplicationLifecycle(
   pruneOnce();
   const pruneTimer = setInterval(pruneOnce, DAILY_MS);
   pruneTimer.unref();
-  const meterRetryTimer = setInterval(() => {
-    retryMeterEvents(db).catch((err) => log.error('[server] Stripe meter retry failed', err));
-  }, 60_000);
-  meterRetryTimer.unref();
 
   try {
     const recovered = await recoverOrphansAsLeader(queue);
     if (recovered !== null && recovered > 0) {
       log.log(`[server] recovered ${recovered} orphaned/pending queue item(s)`);
     }
+    await alertQueueOperationalEvents(queue, config.alerts.webhookUrl, alert);
   } catch (err) {
     log.error('[server] queue recovery failed', err);
     void alert({
@@ -98,19 +101,18 @@ export async function startApplicationLifecycle(
       severity: 'critical',
       message: `Queue recovery failed during startup: ${(err as Error).message}`,
     });
-    clearInterval(meterRetryTimer);
     clearInterval(pruneTimer);
     clearInterval(tempCleanupTimer);
     throw err;
   }
 
-  const loadConfig = () => loadWorkerConfig(db);
+  const loadConfig = () => loadWorkerConfig(db, config);
   const stopWorker = dependencies.startWorker
-    ? dependencies.startWorker(queue)
-    : startWorkerLoop(queue, { loadConfig });
+    ? dependencies.startWorker(queue, config)
+    : startWorkerLoop(queue, { db, loadConfig, config });
   const stopNightly = dependencies.startNightly
-    ? dependencies.startNightly(queue)
-    : startNightlyScheduler(queue, loadConfig);
+    ? dependencies.startNightly(queue, config)
+    : startNightlyScheduler(queue, config, loadConfig);
   let shuttingDown = false;
 
   return {
@@ -119,7 +121,6 @@ export async function startApplicationLifecycle(
       shuttingDown = true;
       log.log('[server] shutting down...');
       stopNightly();
-      clearInterval(meterRetryTimer);
       clearInterval(pruneTimer);
       clearInterval(tempCleanupTimer);
       await stopWorker();

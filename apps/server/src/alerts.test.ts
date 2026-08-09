@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { sendOperationalAlert } from './alerts.js';
+import { testServerConfig } from './bootstrap/test-config.js';
 
 test('operational alerts post a bounded payload and deduplicate repeated events', async (t) => {
   const previousUrl = process.env.ORVEX_ALERT_WEBHOOK_URL;
   process.env.ORVEX_ALERT_WEBHOOK_URL = 'https://alerts.example.test/hook';
+  const config = testServerConfig();
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
   globalThis.fetch = (async (input, init) => {
@@ -18,11 +20,17 @@ test('operational alerts post a bounded payload and deduplicate repeated events'
   });
 
   assert.equal(
-    await sendOperationalAlert({ event: 'test-alert', severity: 'critical', message: 'provider unavailable' }),
+    await sendOperationalAlert(
+      { event: 'test-alert', severity: 'critical', message: 'provider unavailable' },
+      config.alerts.webhookUrl,
+    ),
     true,
   );
   assert.equal(
-    await sendOperationalAlert({ event: 'test-alert', severity: 'critical', message: 'provider unavailable again' }),
+    await sendOperationalAlert(
+      { event: 'test-alert', severity: 'critical', message: 'provider unavailable again' },
+      config.alerts.webhookUrl,
+    ),
     false,
   );
   assert.equal(requests.length, 1);
@@ -34,6 +42,7 @@ test('operational alerts post a bounded payload and deduplicate repeated events'
 test('failed alert delivery is retryable instead of being deduplicated as sent', async (t) => {
   const previousUrl = process.env.ORVEX_ALERT_WEBHOOK_URL;
   process.env.ORVEX_ALERT_WEBHOOK_URL = 'https://alerts.example.test/retry';
+  const config = testServerConfig();
   const originalFetch = globalThis.fetch;
   let attempts = 0;
   globalThis.fetch = (async () => {
@@ -46,8 +55,12 @@ test('failed alert delivery is retryable instead of being deduplicated as sent',
     else process.env.ORVEX_ALERT_WEBHOOK_URL = previousUrl;
   });
 
-  const input = { event: 'retry-alert', severity: 'warning' as const, message: 'temporary failure' };
-  assert.equal(await sendOperationalAlert(input), false);
-  assert.equal(await sendOperationalAlert(input), true);
+  const input = {
+    event: 'retry-alert',
+    severity: 'warning' as const,
+    message: 'temporary failure',
+  };
+  assert.equal(await sendOperationalAlert(input, config.alerts.webhookUrl), false);
+  assert.equal(await sendOperationalAlert(input, config.alerts.webhookUrl), true);
   assert.equal(attempts, 2);
 });

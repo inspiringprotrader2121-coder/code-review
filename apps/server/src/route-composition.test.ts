@@ -3,6 +3,7 @@ import test from 'node:test';
 import { MemoryReviewQueue } from '@orvex-review/queue';
 import { AppDatabase } from '@orvex-review/store';
 import { createApp } from './app.js';
+import { testServerConfig } from './bootstrap/test-config.js';
 
 test('the composition root shares its database with dashboard and API routes', async (t) => {
   const previous = new Map([
@@ -24,7 +25,7 @@ test('the composition root shares its database with dashboard and API routes', a
   const db = new AppDatabase(':memory:');
   t.after(() => db.close());
   db.createTenant('shared-routes');
-  const app = createApp(new MemoryReviewQueue(), { db });
+  const app = createApp(new MemoryReviewQueue(), { db, config: testServerConfig() });
 
   const dashboard = await app.request('/dashboard');
   assert.equal(dashboard.status, 302);

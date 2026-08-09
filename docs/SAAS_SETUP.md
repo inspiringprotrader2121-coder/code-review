@@ -6,25 +6,25 @@ One **GitHub App** powers all customers. Each customer **installs** it on their 
 
 [Create new GitHub App](https://github.com/settings/apps/new) (under your **company** org, not a customer org).
 
-| Field | Value |
-|-------|--------|
-| **Name** | Orvex Review |
-| **Homepage URL** | Your marketing site or `APP_URL` |
-| **Callback URL** | Not used (leave default) |
-| **Setup URL** | `{APP_URL}/auth/github/callback` e.g. `https://api.orvexreview.com/auth/github/callback` |
-| **Webhook URL** | `{APP_URL}/webhooks/github` |
-| **Webhook secret** | Same as `GITHUB_WEBHOOK_SECRET` in `.env` |
-| **Active** | Yes |
+| Field              | Value                                                                                    |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| **Name**           | Orvex Review                                                                             |
+| **Homepage URL**   | Your marketing site or `APP_URL`                                                         |
+| **Callback URL**   | Not used (leave default)                                                                 |
+| **Setup URL**      | `{APP_URL}/auth/github/callback` e.g. `https://api.orvexreview.com/auth/github/callback` |
+| **Webhook URL**    | `{APP_URL}/webhooks/github`                                                              |
+| **Webhook secret** | Same as `GITHUB_WEBHOOK_SECRET` in `.env`                                                |
+| **Active**         | Yes                                                                                      |
 
 ### Permissions
 
-| Permission | Access |
-|------------|--------|
-| Metadata | Read |
-| Contents | Read & write (auto-fix commits) |
-| Pull requests | Read & write |
-| Checks | Read & write (optional, for check runs) |
-| Issues | Read & write (PR comments) |
+| Permission    | Access                                  |
+| ------------- | --------------------------------------- |
+| Metadata      | Read                                    |
+| Contents      | Read & write (auto-fix commits)         |
+| Pull requests | Read & write                            |
+| Checks        | Read & write (optional, for check runs) |
+| Issues        | Read & write (PR comments)              |
 
 ### Events (subscribe)
 
@@ -38,13 +38,13 @@ Uncheck everything else unless you need it.
 
 ### Where to get credentials
 
-| Env var | GitHub App page |
-|---------|-----------------|
-| `GITHUB_APP_ID` | **App ID** (top of settings) |
+| Env var                       | GitHub App page                              |
+| ----------------------------- | -------------------------------------------- |
+| `GITHUB_APP_ID`               | **App ID** (top of settings)                 |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | **Generate a private key** → download `.pem` |
-| `GITHUB_WEBHOOK_SECRET` | **Webhook** → Secret |
-| `GITHUB_APP_SLUG` | URL slug: `github.com/apps/**orvex-review**` |
-| `GITHUB_APP_BOT_LOGIN` | After install: `orvex-review[bot]` |
+| `GITHUB_WEBHOOK_SECRET`       | **Webhook** → Secret                         |
+| `GITHUB_APP_SLUG`             | URL slug: `github.com/apps/**orvex-review**` |
+| `GITHUB_APP_BOT_LOGIN`        | After install: `orvex-review[bot]`           |
 
 ## 2. Platform `.env`
 
@@ -84,11 +84,11 @@ pnpm dev
 
 ## 5. Selling the product
 
-| You store (platform `.env`) | Per customer (database) |
-|-----------------------------|---------------------------|
-| App ID, private key, webhook secret | `tenant_id`, `installation_id` |
-| LLM API keys (or BYOK later) | Workspace slug, settings |
-| `APP_URL`, `PLATFORM_SECRET` | PR review state per installation |
+| You store (platform `.env`)         | Per customer (database)          |
+| ----------------------------------- | -------------------------------- |
+| App ID, private key, webhook secret | `tenant_id`, `installation_id`   |
+| LLM API keys (or BYOK later)        | Workspace slug, settings         |
+| `APP_URL`, `PLATFORM_SECRET`        | PR review state per installation |
 
 Customers never paste GitHub passwords — they **authorize the App** with scoped permissions.
 
@@ -110,9 +110,11 @@ QUEUE_BACKEND=redis
 
 Deploy only with `scripts/deploy-safe.sh --dry-run` followed by
 `scripts/deploy-safe.sh --restart`. The deployment drains active reviews,
-stages the release, runs install/typecheck/test on the staged tree, and uses
-`ecosystem.config.cjs` so PM2 waits longer than the configured drain window
-before killing the worker.
+stages the release, runs the full fresh-Linux policy/typecheck/test/build/import
+gate on the staged tree, and uses `ecosystem.config.cjs` so PM2 waits longer
+than the configured drain window before killing the worker. See the
+[deployment runbook](./DEPLOYMENT_RUNBOOK.md) for the release identifier,
+rollback path, and required evidence.
 
 The repository includes `scripts/backup-db.mjs`, which performs a consistent
 SQLite backup, verifies integrity, keeps a bounded local retention window, and

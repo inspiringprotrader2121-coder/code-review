@@ -11,6 +11,8 @@ import {
   type LlmAttemptEvent,
   type LlmProviderCoordinator,
 } from './llm-client.js';
+import { awaitAnthropicFinalMessage } from './llm/transports.js';
+import type { Clock } from './providers/types.js';
 
 interface CapturedRequest {
   url: string;
@@ -61,7 +63,10 @@ async function withStubbedFetch(
     const [input, init] = args;
     const url = String(input);
     captured.push({ url, body: JSON.parse(String(init?.body ?? '{}')) });
-    return new Response(stream(url), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    return new Response(stream(url), {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
   }) as typeof globalThis.fetch;
   try {
     await run();
@@ -264,8 +269,20 @@ test('provider-specific LLM concurrency hands off slots without exceeding the co
   });
 
   await Promise.all([
-    llmChat('sys', 'one', { apiKey: 'test-key', model: 'm', baseUrl: 'https://example.test/v1', api: 'responses', thinking: false }),
-    llmChat('sys', 'two', { apiKey: 'test-key', model: 'm', baseUrl: 'https://example.test/v1', api: 'responses', thinking: false }),
+    llmChat('sys', 'one', {
+      apiKey: 'test-key',
+      model: 'm',
+      baseUrl: 'https://example.test/v1',
+      api: 'responses',
+      thinking: false,
+    }),
+    llmChat('sys', 'two', {
+      apiKey: 'test-key',
+      model: 'm',
+      baseUrl: 'https://example.test/v1',
+      api: 'responses',
+      thinking: false,
+    }),
   ]);
   assert.equal(maximum, 1);
 });
@@ -285,9 +302,13 @@ test('DeepSeek max-reasoning gate admits eight calls and holds the ninth', async
   let maximum = 0;
   let calls = 0;
   let release!: () => void;
-  const hold = new Promise<void>((resolve) => { release = resolve; });
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   let reachedEight!: () => void;
-  const eightStarted = new Promise<void>((resolve) => { reachedEight = resolve; });
+  const eightStarted = new Promise<void>((resolve) => {
+    reachedEight = resolve;
+  });
   globalThis.fetch = (async () => {
     calls++;
     active++;
@@ -313,7 +334,8 @@ test('DeepSeek max-reasoning gate admits eight calls and holds the ninth', async
     maxTokens: 32_000,
   };
   const requests = Array.from({ length: 9 }, (_, index) =>
-    llmChat('sys', `request-${index}`, target));
+    llmChat('sys', `request-${index}`, target),
+  );
   await eightStarted;
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(calls, 8, 'the ninth call must remain queued behind the provider gate');
@@ -382,20 +404,27 @@ test('a cancelled provider-slot waiter never reaches fetch', async (t) => {
   }) as typeof globalThis.fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
-    if (previousConcurrency === undefined) delete process.env.ORVEX_PROVIDER_CONCURRENCY_EXAMPLE_TEST;
+    if (previousConcurrency === undefined)
+      delete process.env.ORVEX_PROVIDER_CONCURRENCY_EXAMPLE_TEST;
     else process.env.ORVEX_PROVIDER_CONCURRENCY_EXAMPLE_TEST = previousConcurrency;
   });
 
   const firstController = new AbortController();
   const first = llmChat('sys', 'first', {
-    apiKey: 'test-key', model: 'm', baseUrl: 'https://example.test/v1', api: 'responses',
+    apiKey: 'test-key',
+    model: 'm',
+    baseUrl: 'https://example.test/v1',
+    api: 'responses',
     signal: firstController.signal,
   });
   await didStart;
 
   const secondController = new AbortController();
   const second = llmChat('sys', 'second', {
-    apiKey: 'test-key', model: 'm', baseUrl: 'https://example.test/v1', api: 'responses',
+    apiKey: 'test-key',
+    model: 'm',
+    baseUrl: 'https://example.test/v1',
+    api: 'responses',
     signal: secondController.signal,
   });
   secondController.abort();
@@ -449,7 +478,10 @@ for (const api of ['responses', 'chat'] as const) {
       /wall-clock cap/,
     );
     assert.equal(calls, 1);
-    assert.ok(Date.now() - started < 500, 'hard timer settled without waiting for inactivity timeout');
+    assert.ok(
+      Date.now() - started < 500,
+      'hard timer settled without waiting for inactivity timeout',
+    );
   });
 }
 
@@ -505,12 +537,163 @@ test('every actual provider request emits durable retry lineage and retries at m
   assert.equal(finishes[1]!.outcome, 'succeeded');
 });
 
+test('comma-separated API keys share one total provider-attempt ceiling', async () => {
+  const calls: string[] = [];
+  const events: LlmAttemptEvent[] = [];
+  await assert.rejects(
+    llmChat('sys', 'user', {
+      apiKey: 'first-test-key, second-test-key, third-test-key',
+      model: 'bounded-key-rotation-model',
+      baseUrl: 'https://bounded-key-rotation.test/v1',
+      api: 'chat',
+      dependencies: {
+        retryPolicy: { maxAttempts: 99, baseMs: 250, maxWaitMs: 1_000, totalWaitBudgetMs: 5_000 },
+        http: {
+          async fetch(_input, init) {
+            calls.push(String(new Headers(init?.headers).get('Authorization')));
+            return new Response('rate limited', { status: 429 });
+          },
+        },
+      },
+      onAttempt: (event) => events.push(event),
+    }),
+    /429|rate limit/i,
+  );
+  assert.equal(calls.length, 2, 'the hard ceiling covers all keys, not retry rounds per key');
+  assert.equal(new Set(calls).size, 2, 'the bounded retry rotates to one alternate key');
+  assert.equal(events.filter((event) => event.phase === 'started').length, 2);
+  assert.equal(events.filter((event) => event.phase === 'finished').length, 2);
+});
+
+interface TestTimer {
+  ms: number;
+  active: boolean;
+  callback: () => void;
+}
+
+class ManualClock implements Clock {
+  readonly timers: TestTimer[] = [];
+
+  now(): number {
+    return 0;
+  }
+
+  setTimeout(callback: () => void, ms: number): ReturnType<typeof setTimeout> {
+    const timer: TestTimer = { callback, ms, active: true };
+    this.timers.push(timer);
+    return timer as unknown as ReturnType<typeof setTimeout>;
+  }
+
+  clearTimeout(timer: ReturnType<typeof setTimeout>): void {
+    (timer as unknown as TestTimer).active = false;
+  }
+
+  fireNext(): void {
+    const timer = this.timers
+      .filter((candidate) => candidate.active)
+      .sort((a, b) => a.ms - b.ms)[0];
+    assert.ok(timer, 'expected an armed timeout');
+    timer.active = false;
+    timer.callback();
+  }
+
+  get activeTimers(): number {
+    return this.timers.filter((timer) => timer.active).length;
+  }
+}
+
+class FakeAnthropicStream<T> {
+  private readonly activityListeners = new Set<() => void>();
+  private resolveMessage!: (value: T) => void;
+  readonly final = new Promise<T>((resolve) => {
+    this.resolveMessage = resolve;
+  });
+  aborts = 0;
+
+  finalMessage(): Promise<T> {
+    return this.final;
+  }
+
+  abort(): void {
+    this.aborts++;
+  }
+
+  on(_event: 'streamEvent', listener: () => void): void {
+    this.activityListeners.add(listener);
+  }
+
+  off(_event: 'streamEvent', listener: () => void): void {
+    this.activityListeners.delete(listener);
+  }
+
+  emitActivity(): void {
+    for (const listener of this.activityListeners) listener();
+  }
+
+  resolve(value: T): void {
+    this.resolveMessage(value);
+  }
+
+  get listeners(): number {
+    return this.activityListeners.size;
+  }
+}
+
+test('Anthropic inactivity watchdog resets on stream activity and cleans up after a late close', async () => {
+  const clock = new ManualClock();
+  const stream = new FakeAnthropicStream({ ok: true });
+  const pending = awaitAnthropicFinalMessage(stream, {
+    apiKey: 'test-key',
+    model: 'test-model',
+    api: 'anthropic',
+    dependencies: { clock },
+  });
+  assert.equal(stream.listeners, 1);
+  assert.equal(clock.activeTimers, 2);
+
+  stream.emitActivity();
+  assert.equal(
+    clock.activeTimers,
+    2,
+    'activity replaces rather than accumulates inactivity timers',
+  );
+  clock.fireNext();
+  assert.equal(stream.aborts, 1, 'the re-armed inactivity timer aborts a silent stream');
+  stream.resolve({ ok: true });
+
+  await assert.rejects(pending, /anthropic stream stalled/);
+  assert.equal(stream.listeners, 0, 'late completion cannot retain SDK listeners');
+  assert.equal(clock.activeTimers, 0, 'late completion clears both watchdog timers');
+});
+
+test('Anthropic cancellation wins a timeout/close race and clears watchdog resources', async () => {
+  const clock = new ManualClock();
+  const stream = new FakeAnthropicStream({ ok: true });
+  const controller = new AbortController();
+  const pending = awaitAnthropicFinalMessage(stream, {
+    apiKey: 'test-key',
+    model: 'test-model',
+    api: 'anthropic',
+    signal: controller.signal,
+    dependencies: { clock },
+  });
+  controller.abort('review-cancelled');
+  stream.resolve({ ok: true });
+
+  await assert.rejects(pending, ReviewCancelledError);
+  assert.equal(stream.aborts, 1);
+  assert.equal(stream.listeners, 0);
+  assert.equal(clock.activeTimers, 0);
+});
+
 test('provider cooldowns delay only reviews that require that provider', async (t) => {
   const previousRetries = process.env.ORVEX_RATELIMIT_MAX_RETRIES;
   process.env.ORVEX_RATELIMIT_MAX_RETRIES = '1';
   const cooldowns = new Map<string, number>();
   const coordinator: LlmProviderCoordinator = {
-    async acquireProviderLease() { return 'lease'; },
+    async acquireProviderLease() {
+      return 'lease';
+    },
     async releaseProviderLease() {},
     async getProviderCooldownMs(provider) {
       return Math.max(0, (cooldowns.get(provider) ?? 0) - Date.now());
@@ -569,7 +752,9 @@ test('cancellation during a distributed lease wait is recorded as cancelled', as
       });
     },
     async releaseProviderLease() {},
-    async getProviderCooldownMs() { return 0; },
+    async getProviderCooldownMs() {
+      return 0;
+    },
     async setProviderCooldown() {},
   };
   configureLlmProviderCoordinator(coordinator);
@@ -607,8 +792,12 @@ test('a distributed lease waiter rechecks cooldown before starting paid work', a
   let cooldownReads = 0;
   let releases = 0;
   const coordinator: LlmProviderCoordinator = {
-    async acquireProviderLease() { return 'waiter-lease'; },
-    async releaseProviderLease() { releases++; },
+    async acquireProviderLease() {
+      return 'waiter-lease';
+    },
+    async releaseProviderLease() {
+      releases++;
+    },
     async getProviderCooldownMs() {
       cooldownReads++;
       return cooldownReads === 1 ? 0 : 250;
@@ -653,13 +842,14 @@ test('200 synthetic review arrivals obey worker and provider backpressure', asyn
 
   const active = new Map<string, number>();
   const peaks = new Map<string, number>();
-  const providerCall = (provider: string) => withProviderCallSlot(provider, async () => {
-    const current = (active.get(provider) ?? 0) + 1;
-    active.set(provider, current);
-    peaks.set(provider, Math.max(peaks.get(provider) ?? 0, current));
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    active.set(provider, Math.max(0, (active.get(provider) ?? 1) - 1));
-  });
+  const providerCall = (provider: string) =>
+    withProviderCallSlot(provider, async () => {
+      const current = (active.get(provider) ?? 0) + 1;
+      active.set(provider, current);
+      peaks.set(provider, Math.max(peaks.get(provider) ?? 0, current));
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active.set(provider, Math.max(0, (active.get(provider) ?? 1) - 1));
+    });
 
   await setProviderCooldown('luna', 250);
   let nextJob = 0;
@@ -675,11 +865,11 @@ test('200 synthetic review arrivals obey worker and provider backpressure', asyn
       activeReviews++;
       peakReviews = Math.max(peakReviews, activeReviews);
       try {
-        const providers = jobs[index] === 'high'
-          ? ['luna', 'deepseek', 'minimax']
-          : ['deepseek', 'minimax'];
+        const providers =
+          jobs[index] === 'high' ? ['luna', 'deepseek', 'minimax'] : ['deepseek', 'minimax'];
         await waitForProviderAvailability(providers);
-        if (providers.includes('luna')) firstLunaStartedAt = Math.min(firstLunaStartedAt, Date.now());
+        if (providers.includes('luna'))
+          firstLunaStartedAt = Math.min(firstLunaStartedAt, Date.now());
         await Promise.all(providers.map(providerCall));
         if (jobs[index] === 'low') firstLowCompletedAt = Math.min(firstLowCompletedAt, Date.now());
       } finally {
@@ -694,17 +884,45 @@ test('200 synthetic review arrivals obey worker and provider backpressure', asyn
   assert.equal(peaks.get('luna'), 1);
   assert.equal(peaks.get('deepseek'), 1);
   assert.equal(peaks.get('minimax'), 2);
-  assert.ok(firstLowCompletedAt < firstLunaStartedAt, 'Luna cooldown must not block lower-tier provider work');
+  assert.ok(
+    firstLowCompletedAt < firstLunaStartedAt,
+    'Luna cooldown must not block lower-tier provider work',
+  );
 });
 
 test('a review cancelled during provider admission starts no paid calls', async () => {
   const controller = new AbortController();
   await setProviderCooldown('queued-cancel-provider', 250);
   let calls = 0;
-  const pending = waitForProviderAvailability(['queued-cancel-provider'], controller.signal)
-    .then(() => { calls++; });
+  const pending = waitForProviderAvailability(['queued-cancel-provider'], controller.signal).then(
+    () => {
+      calls++;
+    },
+  );
   setTimeout(() => controller.abort(), 10);
 
   await assert.rejects(pending, ReviewCancelledError);
   assert.equal(calls, 0);
+});
+
+test('provider cooldown admission has an independent bounded wait', async () => {
+  const coordinator: LlmProviderCoordinator = {
+    async acquireProviderLease() {
+      return 'unused';
+    },
+    async releaseProviderLease() {},
+    async getProviderCooldownMs() {
+      return 60_000;
+    },
+    async setProviderCooldown() {},
+  };
+  const started = Date.now();
+  await assert.rejects(
+    waitForProviderAvailability(['saturated-provider'], undefined, coordinator, 10),
+    /admission timed out/i,
+  );
+  assert.ok(
+    Date.now() - started < 250,
+    'cooldown admission does not occupy a worker slot long-term',
+  );
 });

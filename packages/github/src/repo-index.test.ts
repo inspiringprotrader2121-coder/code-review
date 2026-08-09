@@ -8,7 +8,8 @@ function snap(files: Record<string, string>): Map<string, string> {
 
 test('ranks a file sharing distinctive identifiers above an unrelated one', () => {
   const snapshot = snap({
-    'src/changed.ts': 'export function resolveInstallationToken(id) { return signJwtForInstallation(id); }',
+    'src/changed.ts':
+      'export function resolveInstallationToken(id) { return signJwtForInstallation(id); }',
     'src/auth.ts': 'export function signJwtForInstallation(id) { return jwt(id); }', // shares a rare identifier
     'src/unrelated.ts': 'export function renderInvoicePdf(order) { return pdf(order); }',
   });
@@ -40,7 +41,10 @@ test('respects k and clips file content to maxFileBytes', () => {
   });
   const out = retrieveRelevantFiles(snapshot, ['src/changed.ts'], { k: 2, maxFileBytes: 100 });
   assert.equal(out.length, 2);
-  assert.ok(out.every((f) => f.content.length <= 100 + 20), 'content clipped to ~maxFileBytes');
+  assert.ok(
+    out.every((f) => f.content.length <= 100 + 20),
+    'content clipped to ~maxFileBytes',
+  );
 });
 
 test('returns nothing when the change shares no identifiers with the repo', () => {
@@ -59,21 +63,30 @@ test('ignores non-code files', () => {
     'src/a.ts': 'billingCycle()',
   });
   const out = retrieveRelevantFiles(snapshot, ['src/changed.ts'], { k: 5 });
-  assert.ok(out.every((f) => f.path.endsWith('.ts')), 'only code files are candidates');
+  assert.ok(
+    out.every((f) => f.path.endsWith('.ts')),
+    'only code files are candidates',
+  );
 });
 
 test('length normalization: a giant file cannot dominate by sheer token count', () => {
   const rareToken = 'quixoticBillingReconciler';
   // A huge file that happens to mention the rare token once, buried in thousands
   // of unrelated identifiers, vs a small file whose whole content IS about it.
-  const giant = `${rareToken}();\n` + Array.from({ length: 3000 }, (_, i) => `const unrelatedThing${i} = ${i};`).join('\n');
+  const giant =
+    `${rareToken}();\n` +
+    Array.from({ length: 3000 }, (_, i) => `const unrelatedThing${i} = ${i};`).join('\n');
   const snapshot = snap({
     'src/changed.ts': `function ${rareToken}() {}`,
     'src/giant.ts': giant,
     'src/focused.ts': `export function call${rareToken[0].toUpperCase()}${rareToken.slice(1)}() { return ${rareToken}(); }`,
   });
   const out = retrieveRelevantFiles(snapshot, ['src/changed.ts'], { k: 5 });
-  assert.equal(out[0].path, 'src/focused.ts', 'the small highly-relevant file outranks the giant incidental match');
+  assert.equal(
+    out[0].path,
+    'src/focused.ts',
+    'the small highly-relevant file outranks the giant incidental match',
+  );
 });
 
 test('a changed file MISSING from the snapshot falls back to path-derived query tokens', () => {
@@ -84,7 +97,11 @@ test('a changed file MISSING from the snapshot falls back to path-derived query 
     'src/unrelated.ts': 'export function renderLandingPage() { return 1; }',
   });
   const out = retrieveRelevantFiles(snapshot, ['src/billing/invoice.ts'], { k: 5 });
-  assert.equal(out[0]?.path, 'src/billing/invoiceEmail.ts', 'path tokens (billing/invoice) find the sibling file');
+  assert.equal(
+    out[0]?.path,
+    'src/billing/invoiceEmail.ts',
+    'path tokens (billing/invoice) find the sibling file',
+  );
 });
 
 test('SQL/shell keywords are stopwords — keyword overlap alone scores nothing', () => {
@@ -105,20 +122,26 @@ test('infra/config files are retrieval candidates (compose/k8s/nginx/Dockerfile)
   // Benchmark PRs 161-170: most missed P1s were infra bugs whose evidence lived
   // in a SIBLING manifest. These must rank as candidates, not be gated out.
   const snapshot = snap({
-    'docker-compose.yml': 'services:\n  api:\n    environment:\n      RUN_STARTUP_MIGRATIONS: "false"\n',
+    'docker-compose.yml':
+      'services:\n  api:\n    environment:\n      RUN_STARTUP_MIGRATIONS: "false"\n',
     'k8s/backend-deployment.yaml': 'env:\n  - name: RUN_STARTUP_MIGRATIONS\n    value: "false"\n',
     'frontend/nginx.conf': 'map $http_x_real_ip $client_ip { default $remote_addr; }\n',
-    'Dockerfile': 'FROM node:22\nENV RUN_STARTUP_MIGRATIONS=false\n',
+    Dockerfile: 'FROM node:22\nENV RUN_STARTUP_MIGRATIONS=false\n',
     'src/unrelated.ts': 'export function renderInvoicePdf(order) { return pdf(order); }',
   });
   const withChanged = new Map(snapshot);
-  withChanged.set('scripts/sync-production.sh', 'wait_for_scheduler\nexport RUN_STARTUP_MIGRATIONS=false\n');
+  withChanged.set(
+    'scripts/sync-production.sh',
+    'wait_for_scheduler\nexport RUN_STARTUP_MIGRATIONS=false\n',
+  );
   const out = retrieveRelevantFiles(withChanged, ['scripts/sync-production.sh'], { k: 10 });
   // the yaml/conf/Dockerfile candidates are eligible (nginx.conf shares no
   // identifiers with the query so it may not rank — eligibility is what matters)
   const paths = out.map((f) => f.path);
   assert.ok(
-    paths.includes('docker-compose.yml') || paths.includes('k8s/backend-deployment.yaml') || paths.includes('Dockerfile'),
+    paths.includes('docker-compose.yml') ||
+      paths.includes('k8s/backend-deployment.yaml') ||
+      paths.includes('Dockerfile'),
     `expected infra files among candidates, got: ${paths.join(', ')}`,
   );
 });

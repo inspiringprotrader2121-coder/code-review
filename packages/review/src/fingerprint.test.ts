@@ -30,10 +30,7 @@ describe('fingerprintFinding', () => {
   });
 
   it('normalizes message casing', () => {
-    assert.equal(
-      normalizeMessage('Hello  World!'),
-      normalizeMessage('hello world'),
-    );
+    assert.equal(normalizeMessage('Hello  World!'), normalizeMessage('hello world'));
   });
 
   it('includes category in the stem so same-message different categories differ', () => {

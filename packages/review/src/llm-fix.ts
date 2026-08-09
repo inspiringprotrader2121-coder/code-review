@@ -72,7 +72,10 @@ export async function generateFixWithLlm(
 
   const related = (input.relatedFiles ?? [])
     .slice(0, 12)
-    .map((r) => `### ${safePromptData(r.path)} (repo context only, do NOT edit)\n\`\`\`\n${safePromptData(redactSecrets(r.content.slice(0, 24_000)))}\n\`\`\``)
+    .map(
+      (r) =>
+        `### ${safePromptData(r.path)} (repo context only, do NOT edit)\n\`\`\`\n${safePromptData(redactSecrets(r.content.slice(0, 24_000)))}\n\`\`\``,
+    )
     .join('\n');
 
   const user = [

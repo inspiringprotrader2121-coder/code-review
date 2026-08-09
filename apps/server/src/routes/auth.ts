@@ -1,21 +1,25 @@
-import { Hono, type Context } from 'hono';
-import { loadGitHubConfigFromEnv } from '@orvex-review/github';
-import { createAppDatabase, type AppDatabase } from '@orvex-review/store';
+import { Hono } from 'hono';
+import type { GitHubAppConfig } from '@orvex-review/github';
+import type {
+  IdentityRepository,
+  MaintenanceRepository,
+  TenancyRepository,
+} from '@orvex-review/store';
 import {
-  TenantService,
+  type TenantServiceStore,
   WorkspaceAccessError,
-  legacyAuthMode,
   verifyInstallState,
-  platformSecret,
 } from '@orvex-review/tenants';
 import {
   consumeGitHubInstallProof,
   loginRedirect,
   peekGitHubInstallProof,
   recentGitHubAccessToken,
-  sessionUser,
 } from './session.js';
 import { escapeHtml, onboardingSteps, pageShell } from './pages.js';
+import { AuthorizationService, RequestSecurity } from '../application/identity/index.js';
+import { ConnectService } from '../application/onboarding/connect-service.js';
+import type { ServerConfig } from '../bootstrap/config.js';
 
 /**
  * True only while NO login exists at all (no OAuth, no forced email/password
@@ -25,21 +29,37 @@ import { escapeHtml, onboardingSteps, pageShell } from './pages.js';
  * login is in use and /connect must require a session — otherwise an
  * unauthenticated visitor could keep binding workspaces post-auth-migration.
  */
-function legacyConnectMode(hasPasswordUsers: boolean): boolean {
-  return legacyAuthMode(hasPasswordUsers);
+export interface AuthRouteDependencies {
+  db: TenantServiceStore &
+    Pick<IdentityRepository, 'getSessionUser' | 'hasPasswordUsers' | 'upsertUserFromGitHub'> &
+    Pick<TenancyRepository, 'getWorkspacesForUser'> &
+    Pick<MaintenanceRepository, 'countDistinctAccountsFromIp' | 'recordAbuseSignal'>;
+  config: Pick<
+    ServerConfig,
+    'appUrl' | 'authDisabled' | 'identity' | 'oauth' | 'platformSecret' | 'requireLogin'
+  >;
+  githubConfig?: GitHubAppConfig;
 }
 
-export function authRoutes(db: AppDatabase = createAppDatabase()) {
+export function authRoutes(dependencies: AuthRouteDependencies) {
+  const { db, config } = dependencies;
   const app = new Hono();
-  const tenants = new TenantService(db);
+  const connect = new ConnectService(db, config);
+  const tenants = connect.tenants;
+  const authorization = new AuthorizationService(db, config);
+  const requestSecurity = new RequestSecurity({
+    appUrl: config.appUrl,
+    platformSecret: '',
+    trustedProxyIps: config.identity.trustedProxyIps,
+  });
 
   // Old entry points (marketing links, GitHub App homepage) → connect flow.
   app.get('/start', (c) => c.redirect('/connect'));
   app.post('/start', (c) => c.redirect('/connect', 303));
 
   app.get('/connect', (c) => {
-    const user = sessionUser(c, db);
-    if (!user && legacyConnectMode(db.hasPasswordUsers())) {
+    const user = authorization.authenticatedUser(c);
+    if (!user && connect.legacyMode()) {
       return c.html(
         pageShell(
           'Sign-in required',
@@ -72,9 +92,7 @@ export function authRoutes(db: AppDatabase = createAppDatabase()) {
            .join('')}</ul>`
       : '';
 
-    const errorBanner = error
-      ? `<div class="banner error">${escapeHtml(error)}</div>`
-      : '';
+    const errorBanner = error ? `<div class="banner error">${escapeHtml(error)}</div>` : '';
 
     const suggestedSlug = user.login.toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
@@ -104,19 +122,21 @@ export function authRoutes(db: AppDatabase = createAppDatabase()) {
   });
 
   app.get('/auth/github/install', (c) => {
-    const user = sessionUser(c, db);
+    const user = authorization.authenticatedUser(c);
     const tenantSlug = c.req.query('tenant');
     const name = c.req.query('name') ?? undefined;
     if (!tenantSlug) {
       return c.redirect('/connect');
     }
 
-    if (!user && legacyConnectMode(db.hasPasswordUsers())) {
-      return c.redirect('/connect?error=GitHub%20sign-in%20is%20required%20before%20connecting%20an%20installation');
+    if (!user && connect.legacyMode()) {
+      return c.redirect(
+        '/connect?error=GitHub%20sign-in%20is%20required%20before%20connecting%20an%20installation',
+      );
     }
     if (!user) return loginRedirect(c, fullPath(c.req.url));
 
-    const proof = recentGitHubAccessToken(user.id) ?? peekGitHubInstallProof(c, user.id);
+    const proof = recentGitHubAccessToken(user.id) ?? peekGitHubInstallProof(c, user.id, config);
     if (!proof) {
       const next = `/auth/github/install?tenant=${encodeURIComponent(tenantSlug)}${name ? `&name=${encodeURIComponent(name)}` : ''}`;
       return c.redirect(`/auth/github/prove?next=${encodeURIComponent(next)}`);
@@ -127,17 +147,19 @@ export function authRoutes(db: AppDatabase = createAppDatabase()) {
       return c.redirect(installUrl);
     } catch (err) {
       if (err instanceof WorkspaceAccessError) {
-        return c.redirect(`/connect?error=${encodeURIComponent(err.message + ' — pick a different slug.')}`);
+        return c.redirect(
+          `/connect?error=${encodeURIComponent(err.message + ' — pick a different slug.')}`,
+        );
       }
       throw err;
     }
   });
 
   app.get('/auth/github/callback', async (c) => {
-    const user = sessionUser(c, db);
-    const ip = clientIp(c);
+    const user = authorization.authenticatedUser(c);
+    const ip = requestSecurity.clientIp(c);
 
-    if (!user && legacyConnectMode(db.hasPasswordUsers())) {
+    if (!user && connect.legacyMode()) {
       return c.html(
         pageShell(
           'Sign-in required',
@@ -172,7 +194,7 @@ export function authRoutes(db: AppDatabase = createAppDatabase()) {
 
     let tenantSlug: string;
     if (state) {
-      const payload = verifyInstallState(state, platformSecret());
+      const payload = verifyInstallState(state, config.platformSecret);
       if (!payload) {
         return c.html(
           pageShell(
@@ -204,7 +226,7 @@ export function authRoutes(db: AppDatabase = createAppDatabase()) {
       tenantSlug = user.login.toLowerCase();
     }
 
-    const block = ipAbuseBlockMessage(db, ip);
+    const block = connect.installationAllowedFromIp(ip);
     if (block) return c.html(signupPausedPage(block), 429);
     try {
       // Ensures membership; claims/creates the slug for this user if needed.
@@ -212,10 +234,10 @@ export function authRoutes(db: AppDatabase = createAppDatabase()) {
       const { tenant, installation } = await tenants.completeInstallCallback(
         installationId,
         tenantSlug,
-        loadGitHubConfigFromEnv(),
-        recentGitHubAccessToken(user.id) ?? consumeGitHubInstallProof(c, user.id),
+        dependencies.githubConfig ?? missingGitHubConfig(),
+        recentGitHubAccessToken(user.id) ?? consumeGitHubInstallProof(c, user.id, config),
       );
-      recordInstallSignal(db, ip, installation.accountLogin, tenant.slug);
+      connect.recordInstallation(ip, installation.accountLogin, tenant.slug);
 
       return c.html(
         pageShell(
@@ -263,7 +285,7 @@ export function authRoutes(db: AppDatabase = createAppDatabase()) {
 
   // Legacy endpoint, now membership-guarded. Prefer /api/workspaces/:slug/*.
   app.get('/api/tenants/:slug', (c) => {
-    const user = sessionUser(c, db);
+    const user = authorization.authenticatedUser(c);
     if (!user) return c.json({ error: 'not signed in' }, 401);
     try {
       const status = tenants.getTenantStatusForUser(c.req.param('slug'), user.id);
@@ -294,57 +316,8 @@ function fullPath(url: string): string {
   return `${u.pathname}${u.search}`;
 }
 
-// ——— IP-based anti-abuse (secondary signal to the per-account trial cap) ———
-// IP is a weak signal (shared NAT, VPNs). Default is ON for free-trial farming
-// defense; set ORVEX_IP_ABUSE_BLOCK=0 to log-only. Blocks when an IP has
-// connected more than ORVEX_IP_MAX_ACCOUNTS_PER_DAY distinct accounts in 24h.
-const configuredIpAccountLimit = Number(process.env.ORVEX_IP_MAX_ACCOUNTS_PER_DAY ?? 5);
-const IP_ACCOUNT_LIMIT =
-  Number.isFinite(configuredIpAccountLimit) && configuredIpAccountLimit >= 1
-    ? Math.min(Math.floor(configuredIpAccountLimit), 10_000)
-    : 5;
-const IP_ABUSE_BLOCK = process.env.ORVEX_IP_ABUSE_BLOCK !== '0';
-const DAY_MS = 24 * 3600_000;
-
-/** Best-effort client IP behind the nginx proxy (first X-Forwarded-For hop). */
-function clientIp(c: Context): string {
-  // Prefer X-Real-IP: nginx sets it to the actual TCP peer and OVERWRITES any
-  // client-supplied value, so it can't be forged. Otherwise use the RIGHT-most
-  // X-Forwarded-For entry — the hop the trusted proxy appended — NOT the
-  // left-most, which the client fully controls (the old code trusted that, so a
-  // trial-farmer could rotate a fake IP per signup and never be counted).
-  const realIp = c.req.header('x-real-ip');
-  if (realIp?.trim()) return realIp.trim();
-  const xff = c.req.header('x-forwarded-for');
-  if (xff) {
-    const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
-    if (parts.length > 0) return parts[parts.length - 1]!;
-  }
-  return 'unknown';
-}
-
-/** When hard-blocking is enabled, refuse a new account from an IP that has
- *  onboarded too many distinct accounts. Returns a message, or null to allow. */
-function ipAbuseBlockMessage(db: AppDatabase, ip: string): string | null {
-  if (!IP_ABUSE_BLOCK) return null;
-  if (db.countDistinctAccountsFromIp(ip, DAY_MS) >= IP_ACCOUNT_LIMIT) {
-    return 'Too many workspaces have been created from your network recently. If this is a mistake, email support@useorvex.com.';
-  }
-  return null;
-}
-
-/** Log the install signal and warn if this IP looks like a trial farm. Fully
- *  best-effort — anti-abuse bookkeeping must never break onboarding. */
-function recordInstallSignal(db: AppDatabase, ip: string, accountLogin: string, tenantSlug: string): void {
-  try {
-    db.recordAbuseSignal({ ip, accountLogin, tenantSlug, kind: 'install' });
-    const n = db.countDistinctAccountsFromIp(ip, DAY_MS);
-    if (n > IP_ACCOUNT_LIMIT) {
-      console.warn(`[abuse] IP ${ip} onboarded ${n} distinct GitHub accounts in 24h (latest: ${accountLogin} / ${tenantSlug})`);
-    }
-  } catch (err) {
-    console.warn('[abuse] failed to record install signal:', err);
-  }
+function missingGitHubConfig(): GitHubAppConfig {
+  throw new Error('GitHub App is not configured');
 }
 
 function signupPausedPage(message: string): string {

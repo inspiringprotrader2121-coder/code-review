@@ -73,10 +73,15 @@ export function severityOf(body: string): Sev | null {
   const head = stripMarkup(body)
     .trim()
     .slice(0, 120)
-    .replace(/(?<![A-Za-z0-9])(?:not|n't|no|non-?)\s+(critical|high|major|medium|minor|low|info)(?![A-Za-z0-9])/gi, '');
+    .replace(
+      /(?<![A-Za-z0-9])(?:not|n't|no|non-?)\s+(critical|high|major|medium|minor|low|info)(?![A-Za-z0-9])/gi,
+      '',
+    );
   if (word('critical').test(head) || /🛑/.test(head)) return 'P1';
-  if (word('high|major').test(head) || /action required|potential issue|🐞|⚠️/i.test(head)) return 'P2';
-  if (word('medium|minor|nitpick|optional|suggestion').test(head) || /edge case|💡/i.test(head)) return 'P3';
+  if (word('high|major').test(head) || /action required|potential issue|🐞|⚠️/i.test(head))
+    return 'P2';
+  if (word('medium|minor|nitpick|optional|suggestion').test(head) || /edge case|💡/i.test(head))
+    return 'P3';
   if (word('low|info').test(head) || /note:/i.test(head)) return 'info';
   return null;
 }
@@ -123,4 +128,6 @@ export function sameClusterLine(
  *    bypassed" or "already reviewed by middleware" was silently dropped.
  */
 export const isOrvexStatusComment = (body: string): boolean =>
-  /^\s*(?:[🔄✅⏳]|\*\*Applying|\*\*Fix applied|## Orvex Review|already reviewed|safety limit)/i.test(body.trim());
+  /^\s*(?:[🔄✅⏳]|\*\*Applying|\*\*Fix applied|## Orvex Review|already reviewed|safety limit)/i.test(
+    body.trim(),
+  );

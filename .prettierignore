@@ -1,0 +1,28 @@
+.git/
+node_modules/
+dist/
+build/
+.data/
+coverage/
+docs/CONFIGURATION.md
+*.min.*
+pnpm-lock.yaml
+*.pem
+*.key
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# User-maintained project notes, instructions, and design prototypes are outside
+# the production formatter boundary. Keep their existing intentional layout.
+AGENTS.md
+CLAUDE.md
+AUDIT_FINDINGS.md
+PLAN.md
+ROADMAP.md
+design-concepts/
+examples/
+rules/orvex-rules.md
+tools/capture-chatgpt-session.mjs
+pnpm-workspace.yaml

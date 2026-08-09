@@ -9,11 +9,7 @@ export function parseRepoSlug(slug: string): { owner: string; repo: string } {
   return { owner, repo };
 }
 
-export function isRepoAllowed(
-  owner: string,
-  repo: string,
-  allowedRepo?: string,
-): boolean {
+export function isRepoAllowed(owner: string, repo: string, allowedRepo?: string): boolean {
   if (!allowedRepo) return true;
   const slug = `${owner}/${repo}`;
   return slug.toLowerCase() === allowedRepo.toLowerCase();
@@ -38,10 +34,7 @@ export function shouldSkipPr(
   return null;
 }
 
-export async function fetchPullRequest(
-  octokit: Octokit,
-  ref: PrRef,
-): Promise<PullRequestMeta> {
+export async function fetchPullRequest(octokit: Octokit, ref: PrRef): Promise<PullRequestMeta> {
   const { data } = await octokit.rest.pulls.get({
     owner: ref.owner,
     repo: ref.repo,
@@ -72,11 +65,7 @@ export async function isPrStillOpen(octokit: Octokit, ref: PrRef): Promise<boole
   return data.state === 'open';
 }
 
-export async function postPrComment(
-  octokit: Octokit,
-  ref: PrRef,
-  body: string,
-): Promise<number> {
+export async function postPrComment(octokit: Octokit, ref: PrRef, body: string): Promise<number> {
   const { data } = await octokit.rest.issues.createComment({
     owner: ref.owner,
     repo: ref.repo,

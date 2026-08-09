@@ -6,6 +6,7 @@ import path from 'node:path';
 import { assertWorkdirWithinQuota, measureWorkdirBytes } from './sandbox.js';
 import { isVerificationEnabled } from './verify-gate.js';
 import { formatRuntimeEvidence, type RuntimeVerifyResult } from './runtime-verify.js';
+import { testServerConfig } from './bootstrap/test-config.js';
 
 test('assertWorkdirWithinQuota fails when workdir exceeds the budget', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-quota-'));
@@ -20,40 +21,32 @@ test('assertWorkdirWithinQuota fails when workdir exceeds the budget', () => {
 });
 
 test('isVerificationEnabled cannot be disabled by environment in production', () => {
-  const prev = {
-    verify: process.env.ORVEX_VERIFY,
-    force: process.env.ORVEX_VERIFY_FORCE_OFF,
-    node: process.env.NODE_ENV,
-    orvex: process.env.ORVEX_ENV,
-  };
-  try {
-    process.env.ORVEX_VERIFY = '0';
-    delete process.env.ORVEX_VERIFY_FORCE_OFF;
-    process.env.NODE_ENV = 'production';
-    delete process.env.ORVEX_ENV;
-    assert.equal(isVerificationEnabled(), true);
-
-    process.env.ORVEX_VERIFY_FORCE_OFF = '1';
-    assert.equal(isVerificationEnabled(), true);
-
-    delete process.env.NODE_ENV;
-    delete process.env.ORVEX_ENV;
-    delete process.env.ORVEX_VERIFY_FORCE_OFF;
-    assert.equal(isVerificationEnabled(), false);
-
-    delete process.env.ORVEX_VERIFY;
-    assert.equal(isVerificationEnabled(), true);
-  } finally {
-    for (const [k, v] of Object.entries({
-      ORVEX_VERIFY: prev.verify,
-      ORVEX_VERIFY_FORCE_OFF: prev.force,
-      NODE_ENV: prev.node,
-      ORVEX_ENV: prev.orvex,
-    })) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  }
+  const durableStore = path.join(os.tmpdir(), 'orvex-verify-config-test.db');
+  assert.equal(
+    isVerificationEnabled(
+      testServerConfig({
+        NODE_ENV: 'production',
+        ORVEX_ENV: 'production',
+        STORE_PATH: durableStore,
+        ORVEX_VERIFY: '0',
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    isVerificationEnabled(
+      testServerConfig({
+        NODE_ENV: 'production',
+        ORVEX_ENV: 'production',
+        STORE_PATH: durableStore,
+        ORVEX_VERIFY: '0',
+        ORVEX_VERIFY_FORCE_OFF: '1',
+      }),
+    ),
+    true,
+  );
+  assert.equal(isVerificationEnabled(testServerConfig({ ORVEX_VERIFY: '0' })), false);
+  assert.equal(isVerificationEnabled(testServerConfig({ ORVEX_VERIFY: undefined })), true);
 });
 
 test('formatRuntimeEvidence escapes backticks in fenced output', () => {

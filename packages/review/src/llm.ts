@@ -1,3 +1,4 @@
+import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch, redactSecrets } from './redact.js';
 import {
@@ -8,6 +9,7 @@ import {
   type LlmAttemptEvent,
 } from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
+import type { ModelRunner, ModelTarget, TextModelRunRequest } from './providers/types.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 
 /**
@@ -69,6 +71,13 @@ export interface LlmReviewOptions {
     attemptId?: string;
   }) => void;
   onAttempt?: (event: LlmAttemptEvent) => void;
+  /**
+   * Explicit provider path. Server workers supply this for public plans so
+   * transport is selected by a resolved stage target rather than by URL/api
+   * inference. The fields above remain the single legacy ingress shape.
+   */
+  runner?: ModelRunner<TextModelRunRequest>;
+  target?: ModelTarget;
 }
 
 export async function runLlmReview(
@@ -79,7 +88,8 @@ export async function runLlmReview(
   if (reviewable.length === 0) {
     return {
       findings: [],
-      summary: 'No reviewable text diff in this PR (binary, lockfiles, or generated paths skipped).',
+      summary:
+        'No reviewable text diff in this PR (binary, lockfiles, or generated paths skipped).',
     };
   }
 
@@ -108,8 +118,23 @@ export async function runLlmReview(
   const system = loadOrvexRules();
   const user = buildUserPrompt(redactedFiles, context);
 
-  const call = (thinking: boolean, temperature = opts.temperature) =>
-    llmChat(system, user, {
+  const call = (thinking: boolean, temperature = opts.temperature) => {
+    if (opts.runner && opts.target) {
+      return opts.runner.run({
+        system,
+        user,
+        target: opts.target,
+        json: true,
+        thinking,
+        temperature,
+        signal: opts.signal,
+        onUsage: opts.onUsage,
+        onAttempt: opts.onAttempt,
+      });
+    }
+    // The old option shape remains only for non-migrated callers. Public plan
+    // stages use the explicit runner/target branch above.
+    return llmChat(system, user, {
       apiKey: opts.apiKey,
       model: opts.model,
       baseUrl: opts.baseUrl,
@@ -125,6 +150,7 @@ export async function runLlmReview(
       onUsage: opts.onUsage,
       onAttempt: opts.onAttempt,
     });
+  };
 
   // Production review targets are configured at max effort.
   const reviewThinking = true;
@@ -150,18 +176,16 @@ export async function runLlmReview(
 
   // Generous backstop against a runaway model, not a quality gate — the rules
   // prompt and the noise/verification passes control real finding volume.
-  const configuredMaxFindings = Number(process.env.ORVEX_MAX_FINDINGS ?? 25);
-  const maxFindings =
-    Number.isFinite(configuredMaxFindings) && configuredMaxFindings > 0
-      ? Math.min(Math.floor(configuredMaxFindings), 1_000)
-      : 25;
+  const maxFindings = loadReviewRuntimeConfig().maxFindings;
   // Sort by severity BEFORE the cap so a runaway response keeps the most-severe
   // findings (the old prefix-slice could drop a P1 while keeping info), and LOG
   // any drop so a capped finding is never silently lost.
   const rank = (s: string): number => (s === 'P1' ? 0 : s === 'P2' ? 1 : s === 'P3' ? 2 : 3);
   const sorted = [...parsed.findings].sort((a, b) => rank(a.severity) - rank(b.severity));
   if (sorted.length > maxFindings) {
-    console.warn(`[llm] capping ${sorted.length} findings to ${maxFindings}; ${sorted.length - maxFindings} lowest-severity dropped`);
+    console.warn(
+      `[llm] capping ${sorted.length} findings to ${maxFindings}; ${sorted.length - maxFindings} lowest-severity dropped`,
+    );
   }
   return {
     ...parsed,
@@ -177,18 +201,43 @@ export async function runLlmReview(
 // is a real finding the product exists to surface, not a nitpick. low/minor/
 // trivial map to `info`; medium/moderate map to P3.
 const SEVERITY_MAP: Record<string, 'P1' | 'P2' | 'P3' | 'info'> = {
-  p1: 'P1', critical: 'P1', blocker: 'P1', severe: 'P1', error: 'P1',
-  p2: 'P2', high: 'P2', major: 'P2', warning: 'P2', warn: 'P2',
-  p3: 'P3', medium: 'P3', moderate: 'P3', mid: 'P3',
-  info: 'info', informational: 'info', note: 'info', nit: 'info', nitpick: 'info',
-  suggestion: 'info', low: 'info', minor: 'info', trivial: 'info', small: 'info',
+  p1: 'P1',
+  critical: 'P1',
+  blocker: 'P1',
+  severe: 'P1',
+  error: 'P1',
+  p2: 'P2',
+  high: 'P2',
+  major: 'P2',
+  warning: 'P2',
+  warn: 'P2',
+  p3: 'P3',
+  medium: 'P3',
+  moderate: 'P3',
+  mid: 'P3',
+  info: 'info',
+  informational: 'info',
+  note: 'info',
+  nit: 'info',
+  nitpick: 'info',
+  suggestion: 'info',
+  low: 'info',
+  minor: 'info',
+  trivial: 'info',
+  small: 'info',
 };
 
 function coerceSeverity(v: unknown): 'P1' | 'P2' | 'P3' | 'info' {
   // Unknown/empty severity → `info`, NOT P3. P3 now means MEDIUM (a real bug), so
   // an unrecognized word ("style", "cosmetic", "") is more likely noise than a
   // medium bug — fail toward nitpick, not toward asserting a real finding.
-  return SEVERITY_MAP[String(v ?? '').toLowerCase().trim()] ?? 'info';
+  return (
+    SEVERITY_MAP[
+      String(v ?? '')
+        .toLowerCase()
+        .trim()
+    ] ?? 'info'
+  );
 }
 
 /** Reduce a category to a short kebab slug (≤3 words); default 'general'. */
@@ -233,14 +282,34 @@ export function normalizeLlmResponse(json: unknown): unknown {
     .map((raw) => {
       if (!raw || typeof raw !== 'object') return null;
       const f = raw as Record<string, unknown>;
-      const message = pickString(f, 'message', 'description', 'detail', 'title', 'issue', 'problem', 'summary', 'comment');
+      const message = pickString(
+        f,
+        'message',
+        'description',
+        'detail',
+        'title',
+        'issue',
+        'problem',
+        'summary',
+        'comment',
+      );
       const file = pickString(f, 'file', 'path', 'filename', 'filePath', 'file_path');
       if (!message || !file) return null;
 
       const lineRaw = f.line ?? f.line_number ?? f.lineNumber ?? f.startLine;
-      const line = typeof lineRaw === 'number' ? lineRaw : Number.isFinite(Number(lineRaw)) ? Number(lineRaw) : undefined;
+      const line =
+        typeof lineRaw === 'number'
+          ? lineRaw
+          : Number.isFinite(Number(lineRaw))
+            ? Number(lineRaw)
+            : undefined;
       const confRaw = f.confidence ?? f.score;
-      const confidence = typeof confRaw === 'number' ? confRaw : Number.isFinite(Number(confRaw)) ? Number(confRaw) : 0.7;
+      const confidence =
+        typeof confRaw === 'number'
+          ? confRaw
+          : Number.isFinite(Number(confRaw))
+            ? Number(confRaw)
+            : 0.7;
 
       return {
         file,
@@ -262,7 +331,9 @@ export function normalizeLlmResponse(json: unknown): unknown {
   return { findings, summary: pickString(root, 'summary', 'overview') };
 }
 
-export function llmFindingsToReviewFindings(findings: LlmReviewResponse['findings']): ReviewFinding[] {
+export function llmFindingsToReviewFindings(
+  findings: LlmReviewResponse['findings'],
+): ReviewFinding[] {
   return findings.map((f) => ({
     file: f.file,
     line: f.line,

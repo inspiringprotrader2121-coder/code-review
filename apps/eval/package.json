@@ -3,11 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "orvex-eval": "./dist/run.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "eval": "tsx src/run.ts",
-    "bench": "tsx src/bench/bench.ts",
-    "test": "node --import tsx --test src/*.test.ts src/**/*.test.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -b",
+    "eval": "node --enable-source-maps dist/run.js",
+    "bench": "node --enable-source-maps dist/bench/bench.js",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
     "@octokit/rest": "^21.1.1",
@@ -15,5 +22,9 @@
     "@orvex-review/review": "workspace:*",
     "@orvex-review/rules": "workspace:*"
   },
-  "devDependencies": { "@types/node": "^22.15.21", "tsx": "^4.19.4", "typescript": "^5.8.3" }
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
 }

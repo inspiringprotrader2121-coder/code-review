@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeEmail, isDisposableEmail, looksLikeEmail } from './email-identity.js';
+import { loadTenantRuntimeConfig } from './config.js';
 
 test('gmail aliases collapse to one identity (dots + tags + googlemail)', () => {
   const canon = 'johndoe@gmail.com';
@@ -49,15 +50,37 @@ test('looksLikeEmail rejects obvious garbage', () => {
 });
 
 test('isDisposableEmail matches SUBDOMAINS of disposable providers', () => {
-  assert.equal(isDisposableEmail('x@abc.mailinator.com'), true, 'per-user subdomain of a disposable provider');
+  assert.equal(
+    isDisposableEmail('x@abc.mailinator.com'),
+    true,
+    'per-user subdomain of a disposable provider',
+  );
   assert.equal(isDisposableEmail('x@deep.sub.yopmail.com'), true);
-  assert.equal(isDisposableEmail('dev@notmailinator.com'), false, 'suffix-only resemblance is not a match');
-  assert.equal(isDisposableEmail('dev@mailinator.com.evil.com'), false, 'disposable as a subdomain of an attacker domain is NOT a match');
+  assert.equal(
+    isDisposableEmail('dev@notmailinator.com'),
+    false,
+    'suffix-only resemblance is not a match',
+  );
+  assert.equal(
+    isDisposableEmail('dev@mailinator.com.evil.com'),
+    false,
+    'disposable as a subdomain of an attacker domain is NOT a match',
+  );
 });
 
 test('isDisposableEmail handles the empty-local / no-domain edges', () => {
-  assert.equal(isDisposableEmail('@mailinator.com'), false, 'no local part — not a parseable email');
+  assert.equal(
+    isDisposableEmail('@mailinator.com'),
+    false,
+    'no local part — not a parseable email',
+  );
   assert.equal(isDisposableEmail('x@'), false, 'no domain');
   assert.equal(isDisposableEmail('mailinator.com'), false, 'no @ at all');
   assert.equal(isDisposableEmail(''), false);
+});
+
+test('extra disposable domains are injected through the tenant runtime config', () => {
+  const config = loadTenantRuntimeConfig({ ORVEX_EXTRA_DISPOSABLE_DOMAINS: 'temp.example' });
+  assert.equal(isDisposableEmail('person@temp.example', config), true);
+  assert.equal(isDisposableEmail('person@sub.temp.example', config), true);
 });

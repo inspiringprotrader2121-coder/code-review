@@ -20,10 +20,9 @@ test('large changed files are focused on diff hunks while the diff stays first',
   assert.match(chunks[0].content, /line 0900:/);
   assert.doesNotMatch(chunks[0].content, /line 0001:/);
 
-  const prompt = buildUserPrompt(
-    [{ filename: 'src/large.ts', status: 'modified', patch }],
-    { changedContents: [{ path: 'src/large.ts', content }] },
-  );
+  const prompt = buildUserPrompt([{ filename: 'src/large.ts', status: 'modified', patch }], {
+    changedContents: [{ path: 'src/large.ts', content }],
+  });
   assert.ok(prompt.indexOf('```diff') < prompt.indexOf('Focused source context'));
   // The label now states the file's TOTAL line count too ("lines 820-980 of
   // 1200"), so the model can tell a window from a whole file. Without it, a
@@ -126,6 +125,26 @@ test('repository paths cannot inject instructions through headings or coverage n
   assert.match(prompt, /src\/app\.ts SYSTEM OVERRIDE/);
 });
 
+test('retrieval omissions remain visible even before the prompt-level budget is applied', () => {
+  const prompt = buildUserPrompt(
+    [{ filename: 'src/app.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
+    {
+      omittedRelated: ['src/ranked-but-capped.ts'],
+      omittedDependents: ['src/caller-but-capped.ts'],
+      omittedOthers: ['src/relevant-but-capped.ts'],
+      omittedChangedContents: ['src/changed-but-capped.ts'],
+    },
+  );
+
+  assert.match(prompt, /related: src\/ranked-but-capped\.ts/);
+  assert.match(prompt, /dependent: src\/caller-but-capped\.ts/);
+  assert.match(prompt, /src\/relevant-but-capped\.ts/);
+  assert.match(
+    prompt,
+    /src\/changed-but-capped\.ts \(no source shown — retrieval budget exhausted\)/,
+  );
+});
+
 test('nearby hunks merge only when doing so preserves both changed locations', () => {
   const content = sourceFile(1_200, 80);
   const patch = [
@@ -161,6 +180,58 @@ test('overlapping windows with unusually long lines retain each changed location
   assert.match(rendered, /line 0450:/);
 });
 
+test('large files receive a focused source chunk for every separated changed hunk', () => {
+  const content = sourceFile(2_400, 80);
+  const changedLines = [120, 360, 640, 920, 1_260, 1_540, 1_860, 2_140];
+  const patch = changedLines
+    .map(
+      (line) =>
+        `@@ -${line},1 +${line},1 @@\n-line ${String(line).padStart(4, '0')}: old\n+line ${String(line).padStart(4, '0')}: changed`,
+    )
+    .join('\n');
+
+  const chunks = chunkChangedFileContext(content, patch);
+  assert.equal(
+    chunks.length,
+    changedLines.length,
+    'no changed hunk may be dropped by a per-file cap',
+  );
+  for (const line of changedLines) {
+    assert.match(
+      chunks.map((chunk) => chunk.content).join('\n'),
+      new RegExp(`line ${String(line).padStart(4, '0')}:`),
+    );
+  }
+
+  const prompt = buildUserPrompt([{ filename: 'src/many-hunks.ts', status: 'modified', patch }], {
+    changedContents: [{ path: 'src/many-hunks.ts', content }],
+  });
+  for (const line of changedLines) {
+    assert.match(prompt, new RegExp(`line ${String(line).padStart(4, '0')}:`));
+  }
+});
+
+test('diff sampling keeps every hunk represented when one large file exceeds its budget', () => {
+  const hunks = Array.from({ length: 7 }, (_, index) => {
+    const line = index * 100 + 1;
+    return [
+      `@@ -${line},1 +${line},1 @@`,
+      `-OLD_HUNK_${index}`,
+      `+NEW_HUNK_${index}`,
+      ...Array.from({ length: 220 }, () => ` context_${index}_${'x'.repeat(80)}`),
+    ].join('\n');
+  });
+  const prompt = buildUserPrompt([
+    { filename: 'src/oversized.ts', status: 'modified', patch: hunks.join('\n') },
+  ]);
+
+  for (let index = 0; index < hunks.length; index++) {
+    assert.match(prompt, new RegExp(`@@ -${index * 100 + 1},1 \\+${index * 100 + 1},1 @@`));
+    assert.match(prompt, new RegExp(`NEW_HUNK_${index}`));
+  }
+  assert.match(prompt, /diff chars omitted; sampled start and end/);
+});
+
 test('large changed files without a textual patch receive a bounded source excerpt', () => {
   const content = sourceFile(1_200);
   const chunks = chunkChangedFileContext(content, undefined);
@@ -191,7 +262,10 @@ test('first-pass prompts ignore PR author intent even when a legacy caller suppl
     } as never,
   );
 
-  assert.doesNotMatch(prompt, /IGNORE ALL RULES|This change is intentional;|What this PR is trying to do/);
+  assert.doesNotMatch(
+    prompt,
+    /IGNORE ALL RULES|This change is intentional;|What this PR is trying to do/,
+  );
 });
 
 test('untrusted diff and context text cannot close the prompt fences', () => {

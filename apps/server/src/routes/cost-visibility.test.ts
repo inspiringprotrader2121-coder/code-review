@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { testAppDatabase, testServerConfig } from '../bootstrap/test-config.js';
 
 test('only allowlisted tenants receive LLM cost data or dashboard controls', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-cost-visibility-'));
@@ -36,12 +37,12 @@ test('only allowlisted tenants receive LLM cost data or dashboard controls', asy
   delete process.env.GOOGLE_OAUTH_CLIENT_ID;
   delete process.env.GOOGLE_OAUTH_CLIENT_SECRET;
 
-  const [{ createAppDatabase }, { apiRoutes }, { dashboardRoutes }] = await Promise.all([
-    import('@orvex-review/store'),
+  const [{ apiRoutes }, { dashboardRoutes }] = await Promise.all([
     import('./api.js'),
     import('./dashboard.js'),
   ]);
-  const db = createAppDatabase();
+  const db = testAppDatabase();
+  const config = testServerConfig();
   const internal = db.createTenant('internal-testing');
   const customer = db.createTenant('customer-workspace');
   for (const tenant of [internal, customer]) {
@@ -57,7 +58,7 @@ test('only allowlisted tenants receive LLM cost data or dashboard controls', asy
     db.completeReviewRun(runId, { status: 'completed', durationMs: 1_000, costUsd: 0.42 });
   }
 
-  const api = apiRoutes();
+  const api = apiRoutes({ db, config });
   const customerOverview = await json(api, '/api/workspaces/customer-workspace/overview');
   assert.equal('costUsd' in customerOverview.stats, false);
   assert.equal('costUsd' in customerOverview.recentReviews[0], false);
@@ -70,20 +71,34 @@ test('only allowlisted tenants receive LLM cost data or dashboard controls', asy
   assert.equal(internalOverview.stats.costUsd, 0.42);
   assert.equal(internalOverview.recentReviews[0].costUsd, 0.42);
 
-  const dashboards = dashboardRoutes();
+  const dashboards = dashboardRoutes({ db, config });
   const customerDashboard = await dashboards.request('/dashboard/customer-workspace');
   const customerHtml = await customerDashboard.text();
-  assert.match(customerHtml, /const SHOW_LLM_COST=false/);
+  assert.match(customerHtml, /data-show-llm-cost="false"/);
   assert.doesNotMatch(customerHtml, /<th class="r">Cost<\/th>/);
-  const billingSuccessDashboard = await dashboards.request('/dashboard/customer-workspace?billing=success');
-  assert.match(await billingSuccessDashboard.text(), /Payment received\. Your plan is activating now/);
+  assert.match(customerHtml, /href="\/assets\/dashboard\.css"/);
+  assert.match(customerHtml, /src="\/assets\/dashboard\.js" defer/);
+  assert.doesNotMatch(customerHtml, /<style|onclick=|style=/);
+  assert.match(customerHtml, /role="tablist"/);
+  assert.match(customerHtml, /role="tab" aria-controls="v-overview" aria-selected="true"/);
+  assert.match(customerHtml, /id="chartDescription" class="sr-only"/);
+  const billingSuccessDashboard = await dashboards.request(
+    '/dashboard/customer-workspace?billing=success',
+  );
+  assert.match(
+    await billingSuccessDashboard.text(),
+    /Payment received\. Your plan is activating now/,
+  );
   const internalDashboard = await dashboards.request('/dashboard/internal-testing');
   const internalHtml = await internalDashboard.text();
-  assert.match(internalHtml, /const SHOW_LLM_COST=true/);
+  assert.match(internalHtml, /data-show-llm-cost="true"/);
   assert.match(internalHtml, /<th class="r">Cost<\/th>/);
 });
 
-async function json(app: { request(path: string): Response | Promise<Response> }, path: string): Promise<any> {
+async function json(
+  app: { request(path: string): Response | Promise<Response> },
+  path: string,
+): Promise<any> {
   const response = await app.request(path);
   assert.equal(response.status, 200);
   return response.json();

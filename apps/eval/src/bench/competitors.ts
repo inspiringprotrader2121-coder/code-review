@@ -46,7 +46,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Octokit } from '@octokit/rest';
 import { createBenchmarkOctokit } from './github-auth.js';
 import { parseOrvexFindingTables } from './orvex-table.js';
-import { severityOf, worseSev, sameClusterLine , isOrvexStatusComment } from './severity.js';
+import { severityOf, worseSev, sameClusterLine, isOrvexStatusComment } from './severity.js';
 import { sameDefectText } from '@orvex-review/review';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
@@ -114,7 +114,12 @@ export function coderabbitState(body: string): CodeRabbitState {
   ) {
     return 'rate_limited';
   }
-  if (/review skipped|no new commits to review|no review (needed|required)|skipped due to|nothing to review|review was skipped/i.test(body)) return 'skipped';
+  if (
+    /review skipped|no new commits to review|no review (needed|required)|skipped due to|nothing to review|review was skipped/i.test(
+      body,
+    )
+  )
+    return 'skipped';
   return 'reviewed';
 }
 
@@ -170,7 +175,7 @@ function dedupeRepeats(findings: Finding[]): Finding[] {
 
 /** Pull confirmed findings out of an Orvex review-summary body. */
 function parseOrvexTable(pr: number, body: string): Finding[] {
-  return parseOrvexFindingTables(body).map((finding) => ({
+  return parseOrvexFindingTables(body, { strict: true }).map((finding) => ({
     pr,
     bot: 'orvex',
     path: finding.path,
@@ -212,9 +217,24 @@ async function collect(octokit: Octokit) {
 
   for (const pr of prNums) {
     const [rc, ic, rv] = await Promise.all([
-      octokit.paginate(octokit.rest.pulls.listReviewComments, { owner: OWNER, repo: REPO, pull_number: pr, per_page: 100 }),
-      octokit.paginate(octokit.rest.issues.listComments, { owner: OWNER, repo: REPO, issue_number: pr, per_page: 100 }),
-      octokit.paginate(octokit.rest.pulls.listReviews, { owner: OWNER, repo: REPO, pull_number: pr, per_page: 100 }),
+      octokit.paginate(octokit.rest.pulls.listReviewComments, {
+        owner: OWNER,
+        repo: REPO,
+        pull_number: pr,
+        per_page: 100,
+      }),
+      octokit.paginate(octokit.rest.issues.listComments, {
+        owner: OWNER,
+        repo: REPO,
+        issue_number: pr,
+        per_page: 100,
+      }),
+      octokit.paginate(octokit.rest.pulls.listReviews, {
+        owner: OWNER,
+        repo: REPO,
+        pull_number: pr,
+        per_page: 100,
+      }),
     ]);
 
     // A tool "reviewed" a PR if it posted ANY review/comment on it — even with
@@ -281,8 +301,7 @@ async function collect(octokit: Octokit) {
       if (bot === 'coderabbit') {
         crState = mergeCoderabbitState(crState, coderabbitState(c.body ?? ''));
         if (crState === 'reviewed') crReviewed = true;
-      }
-      else appeared.add(bot);
+      } else appeared.add(bot);
     }
 
     for (const bot of appeared) if (bot !== 'coderabbit') mark(bot, pr);
@@ -400,8 +419,22 @@ function clusterize(findings: Finding[]): Cluster[] {
   return clusters;
 }
 
-interface Split { both: number; compOnly: number; orvexOnly: number; total: number; }
-interface Pairwise { competitor: string; prs: number[]; all: Split; actionable: Split; both: number; compOnly: number; orvexOnly: number; total: number; }
+interface Split {
+  both: number;
+  compOnly: number;
+  orvexOnly: number;
+  total: number;
+}
+interface Pairwise {
+  competitor: string;
+  prs: number[];
+  all: Split;
+  actionable: Split;
+  both: number;
+  compOnly: number;
+  orvexOnly: number;
+  total: number;
+}
 /** Actionable WITHIN a specific head-to-head: only the two tools being compared
  *  may contribute severity — never the fused cross-tool `sev`. */
 const isActionableFor = (c: Cluster, bot: string) => {
@@ -417,104 +450,184 @@ function splitOf(bot: string, cls: Cluster[]): Split {
   };
 }
 function pairwise(bot: string, prs: number[], clusters: Cluster[]): Pairwise {
-  const cls = clusters.filter((c) => prs.includes(c.pr) && (c.bots.has('orvex') || c.bots.has(bot)));
+  const cls = clusters.filter(
+    (c) => prs.includes(c.pr) && (c.bots.has('orvex') || c.bots.has(bot)),
+  );
   const all = splitOf(bot, cls);
-  const actionable = splitOf(bot, cls.filter((c) => isActionableFor(c, bot)));
+  const actionable = splitOf(
+    bot,
+    cls.filter((c) => isActionableFor(c, bot)),
+  );
   return { competitor: bot, prs, all, actionable, ...all };
 }
 
 interface Snapshot {
+  schemaVersion: 2;
+  measurement: {
+    kind: 'competitor-coverage';
+    headline: 'anchored-inline-only';
+    orvexTableParser: 'strict-confirmed-v1';
+  };
   batch: string;
   range: string;
   prLo: number;
   prHi: number;
   prNums: number[];
   runAt: string;
-  /** Legacy: Pairwise[]. New: { all, anchored }. */
-  pairwise: Pairwise[] | { all: Pairwise[]; anchored: Pairwise[] };
+  pairwise: { all: Pairwise[]; anchored: Pairwise[] };
   availability?: Record<string, { reviewed: number[]; rateLimited: number[]; skipped: number[] }>;
 }
 
 function snapshotPairwiseRows(s: Snapshot, prefer: 'anchored' | 'all' = 'anchored'): Pairwise[] {
-  if (Array.isArray(s.pairwise)) return s.pairwise;
   if (prefer === 'anchored' && s.pairwise.anchored?.length) return s.pairwise.anchored;
   return s.pairwise.all ?? [];
 }
 
+export function isComparableSnapshot(value: unknown): value is Snapshot {
+  const snapshot = value as Partial<Snapshot> | null;
+  return Boolean(
+    snapshot &&
+      snapshot.schemaVersion === 2 &&
+      snapshot.measurement?.kind === 'competitor-coverage' &&
+      snapshot.measurement.headline === 'anchored-inline-only' &&
+      snapshot.measurement.orvexTableParser === 'strict-confirmed-v1' &&
+      !Array.isArray(snapshot.pairwise) &&
+      Array.isArray(snapshot.pairwise?.anchored) &&
+      Array.isArray(snapshot.pairwise?.all) &&
+      Array.isArray(snapshot.prNums),
+  );
+}
+
 function combine() {
   let files: string[] = [];
-  try { files = readdirSync(RESULTS_DIR).filter((f) => f.endsWith('.json')); } catch { /* none */ }
-  if (files.length === 0) { console.log('No saved snapshots in', RESULTS_DIR); return; }
+  try {
+    files = readdirSync(RESULTS_DIR).filter((f) => f.endsWith('.json'));
+  } catch {
+    /* none */
+  }
+  if (files.length === 0) {
+    console.log('No saved snapshots in', RESULTS_DIR);
+    return;
+  }
 
   // 1) Load every snapshot; group by PR-range; keep only the LATEST per range
   //    (so re-runs of the same range never double-count).
   const byRange = new Map<string, Snapshot>();
-  const legacy: string[] = [];
+  const quarantined: string[] = [];
   for (const file of files) {
     let s: Snapshot;
-    try { s = JSON.parse(readFileSync(path.join(RESULTS_DIR, file), 'utf8')) as Snapshot; } catch { continue; }
-    if (!s.range || !Array.isArray(s.prNums)) { legacy.push(file); continue; } // pre-hygiene file — skip, don't silently sum
+    try {
+      s = JSON.parse(readFileSync(path.join(RESULTS_DIR, file), 'utf8')) as Snapshot;
+    } catch {
+      continue;
+    }
+    if (!isComparableSnapshot(s)) {
+      quarantined.push(file);
+      continue;
+    }
     const prev = byRange.get(s.range);
     if (!prev || (s.runAt ?? '') > (prev.runAt ?? '')) byRange.set(s.range, s);
   }
   const chosen = [...byRange.values()];
-  if (legacy.length) console.log(`⚠️  Ignoring ${legacy.length} legacy/overwritable snapshot(s) without range metadata: ${legacy.join(', ')}`);
-  if (chosen.length === 0) { console.log('No hygiene-compliant snapshots to combine (re-run the benchmark to produce timestamped ones).'); return; }
+  if (quarantined.length)
+    console.log(
+      `⚠️  Quarantined ${quarantined.length} incomparable snapshot(s): ${quarantined.join(', ')}`,
+    );
+  if (chosen.length === 0) {
+    console.log(
+      'No comparable v2 snapshots to combine; re-run the benchmark with explicit provenance.',
+    );
+    return;
+  }
 
   // 2) REJECT overlapping ranges — a PR covered by two ranges would be counted
   //    twice. This is the exact integrity bug that made the combined total wrong.
   const seenPr = new Map<number, string>();
   const overlaps: string[] = [];
-  for (const s of chosen) for (const pr of s.prNums) {
-    if (seenPr.has(pr) && seenPr.get(pr) !== s.range) overlaps.push(`PR#${pr} in both ${seenPr.get(pr)} and ${s.range}`);
-    else seenPr.set(pr, s.range);
-  }
+  for (const s of chosen)
+    for (const pr of s.prNums) {
+      if (seenPr.has(pr) && seenPr.get(pr) !== s.range)
+        overlaps.push(`PR#${pr} in both ${seenPr.get(pr)} and ${s.range}`);
+      else seenPr.set(pr, s.range);
+    }
   if (overlaps.length) {
-    console.error(`\n❌ REFUSING to combine — overlapping PR ranges double-count:\n  ${overlaps.slice(0, 8).join('\n  ')}`);
-    console.error('  Fix: keep non-overlapping ranges (delete the redundant snapshot range and re-run).');
+    console.error(
+      `\n❌ REFUSING to combine — overlapping PR ranges double-count:\n  ${overlaps.slice(0, 8).join('\n  ')}`,
+    );
+    console.error(
+      '  Fix: keep non-overlapping ranges (delete the redundant snapshot range and re-run).',
+    );
     process.exitCode = 1;
     return;
   }
 
-  const add = (a: Split, b: Split) => { a.both += b.both; a.compOnly += b.compOnly; a.orvexOnly += b.orvexOnly; a.total += b.total; };
+  const add = (a: Split, b: Split) => {
+    a.both += b.both;
+    a.compOnly += b.compOnly;
+    a.orvexOnly += b.orvexOnly;
+    a.total += b.total;
+  };
   const zero = (): Split => ({ both: 0, compOnly: 0, orvexOnly: 0, total: 0 });
   const totals: Record<string, { all: Split; actionable: Split }> = {};
   const prsByComp: Record<string, Set<number>> = {};
   for (const s of chosen) {
     for (const p of snapshotPairwiseRows(s, 'anchored')) {
       const t = (totals[p.competitor] ??= { all: zero(), actionable: zero() });
-      add(t.all, p.all); add(t.actionable, p.actionable);
-      (prsByComp[p.competitor] ??= new Set());
+      add(t.all, p.all);
+      add(t.actionable, p.actionable);
+      prsByComp[p.competitor] ??= new Set();
       for (const pr of p.prs) prsByComp[p.competitor].add(pr);
     }
   }
-  console.log(`\nCOMBINED across ${chosen.length} range(s) [ANCHORED]: ${chosen.map((s) => `${s.range} (run ${s.runAt?.slice(0, 16)})`).join(', ')}\n`);
+  console.log(
+    `\nCOMBINED across ${chosen.length} range(s) [ANCHORED]: ${chosen.map((s) => `${s.range} (run ${s.runAt?.slice(0, 16)})`).join(', ')}\n`,
+  );
   for (const c of COMPETITORS) {
-    const t = totals[c]; if (!t) continue;
+    const t = totals[c];
+    if (!t) continue;
     console.log(`Orvex vs ${c.padEnd(11)} — ${prsByComp[c].size} PRs`);
-    console.log(`   ALL   both ${t.all.both} · ${c}-only(Orvex missed) ${t.all.compOnly} · Orvex-only ${t.all.orvexOnly}`);
-    console.log(`   BUGS  both ${t.actionable.both} · ${c}-only(Orvex missed) ${t.actionable.compOnly} · Orvex-only ${t.actionable.orvexOnly}`);
+    console.log(
+      `   ALL   both ${t.all.both} · ${c}-only(Orvex missed) ${t.all.compOnly} · Orvex-only ${t.all.orvexOnly}`,
+    );
+    console.log(
+      `   BUGS  both ${t.actionable.both} · ${c}-only(Orvex missed) ${t.actionable.compOnly} · Orvex-only ${t.actionable.orvexOnly}`,
+    );
   }
   console.log('');
 }
 
 async function main() {
-  if (process.argv.includes('--combine')) { combine(); return; }
+  if (process.argv.includes('--combine')) {
+    combine();
+    return;
+  }
 
   const octokit = await createBenchmarkOctokit(OWNER, REPO);
 
-  const { prNums, findings, reviewedPrs, rateLimitedPrs, skippedPrs, seenLogins, orvexReviewedAt, orvexEraPrs } =
-    await collect(octokit);
+  const {
+    prNums,
+    findings,
+    reviewedPrs,
+    rateLimitedPrs,
+    skippedPrs,
+    seenLogins,
+    orvexReviewedAt,
+    orvexEraPrs,
+  } = await collect(octokit);
   const clusters = clusterize(findings);
 
   // Restrict every head-to-head to PRs the selected Orvex era actually
   // reviewed; scoring a PR it never saw would read as a competitor win.
-  const eraPrs = (prs: number[]) => (ORVEX_ERA_FILTERED ? prs.filter((pr) => orvexEraPrs.has(pr)) : prs);
+  const eraPrs = (prs: number[]) =>
+    ORVEX_ERA_FILTERED ? prs.filter((pr) => orvexEraPrs.has(pr)) : prs;
 
   console.log(`\nCompetitor benchmark — ${OWNER}/${REPO} PRs #${PR_LO}–#${PR_HI}\n`);
   if (ORVEX_ERA_FILTERED) {
     const era = [...orvexEraPrs].sort((a, z) => a - z);
-    const window = [ORVEX_SINCE ? `at/after ${ORVEX_SINCE}` : null, ORVEX_UNTIL ? `before ${ORVEX_UNTIL}` : null]
+    const window = [
+      ORVEX_SINCE ? `at/after ${ORVEX_SINCE}` : null,
+      ORVEX_UNTIL ? `before ${ORVEX_UNTIL}` : null,
+    ]
       .filter(Boolean)
       .join(' and ');
     console.log(`Orvex era filter: findings from reviews ${window}`);
@@ -563,10 +676,14 @@ async function main() {
   const crLimited = [...(rateLimitedPrs.coderabbit ?? [])].sort((a, z) => a - z);
   const crSkipped = [...(skippedPrs.coderabbit ?? [])].sort((a, z) => a - z);
   if (crLimited.length > 0) {
-    console.log(`  coderabbit rate-limited ${crLimited.length}/${prNums.length}  [${crLimited.join(', ')}]`);
+    console.log(
+      `  coderabbit rate-limited ${crLimited.length}/${prNums.length}  [${crLimited.join(', ')}]`,
+    );
   }
   if (crSkipped.length > 0) {
-    console.log(`  coderabbit skipped     ${crSkipped.length}/${prNums.length}  [${crSkipped.join(', ')}]`);
+    console.log(
+      `  coderabbit skipped     ${crSkipped.length}/${prNums.length}  [${crSkipped.join(', ')}]`,
+    );
   }
 
   // Compare each competitor ONLY on the PRs it demonstrably reviewed — comparing
@@ -595,22 +712,38 @@ async function main() {
     const anchored = pairwise(c, prs, anchoredClusters);
     results.push(p);
     console.log(`\n=== Orvex vs ${c} — ${prs.length} PRs [${prs.join(', ')}] ===`);
-    console.log(`  ANCHORED (compare) both ${anchored.all.both} · ${c}-only(ORVEX MISSED) ${anchored.all.compOnly} · Orvex-only ${anchored.all.orvexOnly} · total ${anchored.all.total}`);
-    console.log(`  ANCHORED P1/P2     both ${anchored.actionable.both} · ${c}-only(ORVEX MISSED) ${anchored.actionable.compOnly} · Orvex-only ${anchored.actionable.orvexOnly} · total ${anchored.actionable.total}`);
-    console.log(`  ALL findings       both ${p.all.both} · ${c}-only(ORVEX MISSED) ${p.all.compOnly} · Orvex-only ${p.all.orvexOnly} · total ${p.all.total}   [Orvex-favourable: includes table-only rows]`);
-    console.log(`  P1/P2 only (bugs)  both ${p.actionable.both} · ${c}-only(ORVEX MISSED) ${p.actionable.compOnly} · Orvex-only ${p.actionable.orvexOnly} · total ${p.actionable.total}   [same caveat]`);
+    console.log(
+      `  ANCHORED (compare) both ${anchored.all.both} · ${c}-only(ORVEX MISSED) ${anchored.all.compOnly} · Orvex-only ${anchored.all.orvexOnly} · total ${anchored.all.total}`,
+    );
+    console.log(
+      `  ANCHORED P1/P2     both ${anchored.actionable.both} · ${c}-only(ORVEX MISSED) ${anchored.actionable.compOnly} · Orvex-only ${anchored.actionable.orvexOnly} · total ${anchored.actionable.total}`,
+    );
+    console.log(
+      `  ALL findings       both ${p.all.both} · ${c}-only(ORVEX MISSED) ${p.all.compOnly} · Orvex-only ${p.all.orvexOnly} · total ${p.all.total}   [Orvex-favourable: includes table-only rows]`,
+    );
+    console.log(
+      `  P1/P2 only (bugs)  both ${p.actionable.both} · ${c}-only(ORVEX MISSED) ${p.actionable.compOnly} · Orvex-only ${p.actionable.orvexOnly} · total ${p.actionable.total}   [same caveat]`,
+    );
     if (anchored.all.total === 0 && p.all.total > 0) {
-      console.log(`  ⚠ ${c} posts no line-anchored comments on these PRs — it CANNOT score above zero here.`);
+      console.log(
+        `  ⚠ ${c} posts no line-anchored comments on these PRs — it CANNOT score above zero here.`,
+      );
       console.log(`    Its numbers are a measurement artifact, not a capability result.`);
     }
   }
 
   // fine-tuning gold: what Orvex missed that a competitor caught
   console.log('\n──────── ORVEX MISSED (a competitor flagged, Orvex did not) ────────');
-  const missed = clusters.filter((c) => !c.bots.has('orvex') && [...c.bots].some((b) => (COMPETITORS as readonly string[]).includes(b)));
+  const missed = clusters.filter(
+    (c) =>
+      !c.bots.has('orvex') &&
+      [...c.bots].some((b) => (COMPETITORS as readonly string[]).includes(b)),
+  );
   if (missed.length === 0) console.log('  (none)');
   for (const m of missed.sort((a, b) => a.pr - b.pr)) {
-    console.log(`  PR#${m.pr} ${m.path ?? '?'}:${m.line ?? '?'} [${[...m.bots].join(',')}] ${m.sev ?? ''} — ${m.excerpt}`);
+    console.log(
+      `  PR#${m.pr} ${m.path ?? '?'}:${m.line ?? '?'} [${[...m.bots].join(',')}] ${m.sev ?? ''} — ${m.excerpt}`,
+    );
   }
 
   // Audit surface for the text matcher. A wrong merge here invents a "both
@@ -645,13 +778,21 @@ async function main() {
     // different measurements of one population, never two batches to add up —
     // sharing a range key would let combine() silently pick whichever era ran
     // last. Distinct keys make its overlap guard reject the sum outright.
-    const era = ORVEX_ERA_FILTERED ? `@${(ORVEX_SINCE || 'start').slice(0, 10)}_${(ORVEX_UNTIL || 'now').slice(0, 10)}` : '';
+    const era = ORVEX_ERA_FILTERED
+      ? `@${(ORVEX_SINCE || 'start').slice(0, 10)}_${(ORVEX_UNTIL || 'now').slice(0, 10)}`
+      : '';
     const range = `${PR_LO}-${PR_HI}${era}`;
     const fname = `${OWNER}_${REPO}_${range.replace(/[^\w.@-]/g, '_')}__${stamp}.json`;
     writeFileSync(
       path.join(RESULTS_DIR, fname),
       JSON.stringify(
         {
+          schemaVersion: 2,
+          measurement: {
+            kind: 'competitor-coverage',
+            headline: 'anchored-inline-only',
+            orvexTableParser: 'strict-confirmed-v1',
+          },
           batch: `${OWNER}_${REPO}_${range}`,
           range,
           prLo: PR_LO,
@@ -686,8 +827,12 @@ async function main() {
         2,
       ),
     );
-    console.log(`\nSaved immutable snapshot → results/${fname}  (run with --combine to sum latest-per-range)`);
-  } catch (e) { console.warn('could not save batch:', (e as Error).message); }
+    console.log(
+      `\nSaved immutable snapshot → results/${fname}  (run with --combine to sum latest-per-range)`,
+    );
+  } catch (e) {
+    console.warn('could not save batch:', (e as Error).message);
+  }
 
   console.log('\nlogins seen:', [...seenLogins].join(', '));
   console.log('CAVEAT: coverage, not correctness. CodeRabbit posts prose-only summaries (no');
@@ -696,5 +841,10 @@ async function main() {
 
 const entrypoint = process.argv[1];
 if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
-  main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+  main()
+    .then(() => process.exit(0))
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
 }

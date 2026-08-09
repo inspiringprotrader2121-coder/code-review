@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sourceFiles": 687,
+  "minimum": {
+    "lines": 71.4,
+    "functions": 56.1,
+    "branches": 76.1
+  }
+}

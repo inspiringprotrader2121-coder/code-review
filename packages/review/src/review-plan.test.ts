@@ -16,7 +16,12 @@ test('high-tier plan is four required reviewers followed by Flash verification',
       [
         { id: 'luna-agentic', model: 'luna', kind: 'discovery', required: true },
         { id: 'flash-deep-dive', model: 'deepseek-flash', kind: 'discovery', required: true },
-        { id: 'flash-removed-behavior', model: 'deepseek-flash', kind: 'discovery', required: true },
+        {
+          id: 'flash-removed-behavior',
+          model: 'deepseek-flash',
+          kind: 'discovery',
+          required: true,
+        },
         { id: 'minimax-breadth', model: 'minimax', kind: 'discovery', required: true },
         { id: 'flash-verification', model: 'deepseek-flash', kind: 'verification', required: true },
       ],
@@ -29,11 +34,7 @@ test('lower-tier plan is MiniMax and Flash followed by Flash verification', () =
   assert.ok(plan);
   assert.deepEqual(
     [...plan.discovery, plan.verification].map((stage) => `${stage.kind}:${stage.modelSlot}`),
-    [
-      'discovery:minimax',
-      'discovery:deepseek-flash',
-      'verification:deepseek-flash',
-    ],
+    ['discovery:minimax', 'discovery:deepseek-flash', 'verification:deepseek-flash'],
   );
 });
 

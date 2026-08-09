@@ -4,7 +4,15 @@ import { marketingRoutes } from './marketing.js';
 
 test('public marketing explains every plan and does not disclose review providers or model counts', async () => {
   const app = marketingRoutes();
-  const [homeResponse, pricingResponse, privacyResponse, termsResponse, refundsResponse, llmsResponse, robotsResponse] = await Promise.all([
+  const [
+    homeResponse,
+    pricingResponse,
+    privacyResponse,
+    termsResponse,
+    refundsResponse,
+    llmsResponse,
+    robotsResponse,
+  ] = await Promise.all([
     app.request('/'),
     app.request('/pricing'),
     app.request('/privacy'),
@@ -29,6 +37,10 @@ test('public marketing explains every plan and does not disclose review provider
   const refunds = await refundsResponse.text();
   const llms = await llmsResponse.text();
   const robots = await robotsResponse.text();
+  const normalizedHome = home.replace(/\s+/g, ' ');
+  const normalizedPrivacy = privacy.replace(/\s+/g, ' ');
+  const normalizedTerms = terms.replace(/\s+/g, ' ');
+  const normalizedRefunds = refunds.replace(/\s+/g, ' ');
   const publicContent = `${home}\n${privacy}\n${terms}\n${refunds}\n${llms}`;
   assert.doesNotMatch(
     publicContent,
@@ -51,7 +63,7 @@ test('public marketing explains every plan and does not disclose review provider
     'An <span class="mono">@orvex deep</span> review uses two units',
     'Only a workspace owner can start or change billing',
   ]) {
-    assert.match(home, new RegExp(escapeRegExp(expected)));
+    assert.match(normalizedHome, new RegExp(escapeRegExp(expected)));
   }
   assert.match(home, /id="faq"/);
   assert.equal((home.match(/class="faq-item"/g) ?? []).length, 11);
@@ -59,32 +71,60 @@ test('public marketing explains every plan and does not disclose review provider
   assert.match(home, /@orvex rate limit/);
   assert.match(home, /@orvex ignore &lt;file&gt;:&lt;line&gt;/);
   assert.match(home, /What commands can I run on a pull request/);
-  assert.match(home, /Every plan includes deterministic checks, two or four focused review passes by track, strict verification, finding memory, and autofix/);
-  assert.match(home, /Paid plans also include on-demand deep review/);
+  assert.match(
+    normalizedHome,
+    /Every plan includes deterministic checks, two or four focused review passes by track, strict verification, finding memory, and autofix/,
+  );
+  assert.match(normalizedHome, /Paid plans also include on-demand deep review/);
   assert.doesNotMatch(home, /Every plan keeps the same review depth/i);
   assert.doesNotMatch(home, /Every plan gets three focused review passes/i);
   for (const legalPath of ['/terms', '/privacy', '/refunds']) {
     assert.match(home, new RegExp(`href="${escapeRegExp(legalPath)}"`));
   }
   assert.match(llms, /Every plan receives deterministic checks, source verification, and autofix/);
-  assert.match(llms, /Plans otherwise differ by review track, pass count, allowance, hourly capacity/);
+  assert.match(
+    llms,
+    /Plans otherwise differ by review track, pass count, allowance, hourly capacity/,
+  );
   assert.doesNotMatch(llms, /same three-pass depth/i);
-  assert.match(privacy, /contracted third-party AI inference providers/);
-  assert.match(privacy, /temporary filesystem snapshot/);
-  assert.match(privacy, /standard API review requests contain the diff and selected\s+excerpts/i);
-  assert.match(terms, /support@useorvex\.com/);
-  assert.match(refunds, /support@useorvex\.com/);
+  assert.match(normalizedPrivacy, /contracted third-party AI inference providers/);
+  assert.match(normalizedPrivacy, /temporary filesystem snapshot/);
+  assert.match(
+    normalizedPrivacy,
+    /standard API review requests contain the diff and selected excerpts/i,
+  );
+  assert.match(normalizedTerms, /support@useorvex\.com/);
+  assert.match(normalizedRefunds, /support@useorvex\.com/);
   assert.doesNotMatch(`${terms}\n${refunds}`, /cancel at any time from the dashboard/i);
 
   assert.equal((robots.match(/^User-agent:/gm) ?? []).length, 1);
-  for (const privateRoute of ['/dashboard', '/auth', '/api', '/superadmin', '/connect', '/settings', '/buy', '/webhooks']) {
+  for (const privateRoute of [
+    '/dashboard',
+    '/auth',
+    '/api',
+    '/superadmin',
+    '/connect',
+    '/settings',
+    '/buy',
+    '/webhooks',
+  ]) {
     assert.match(robots, new RegExp(`Disallow: ${escapeRegExp(privateRoute)}`));
   }
 
-  const structuredData = home.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)?.[1];
+  const structuredData = home.match(
+    /<script type="application\/ld\+json">([\s\S]*?)<\/script>/,
+  )?.[1];
   assert.ok(structuredData, 'marketing page includes JSON-LD');
   const parsed = JSON.parse(structuredData) as { '@graph'?: unknown[] };
   assert.ok(Array.isArray(parsed['@graph']));
+  for (const page of [home, privacy, terms, refunds]) {
+    assert.doesNotMatch(page, /<style|style=/);
+  }
+  assert.match(home, /href="\/assets\/marketing\.css"/);
+  assert.match(home, /src="\/assets\/marketing\.js" defer/);
+  for (const page of [privacy, terms, refunds]) {
+    assert.match(page, /href="\/assets\/legal\.css"/);
+  }
 });
 
 function escapeRegExp(value: string): string {

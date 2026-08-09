@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { createAppAuth } from '@octokit/auth-app';
 import { Octokit } from '@octokit/rest';
+import { loadGitHubRuntimeConfig } from '@orvex-review/config';
 import type { GitHubAppConfig } from './types.js';
 
 export function createInstallationOctokit(
@@ -37,14 +38,10 @@ export async function getInstallationIdForRepo(
   return data.id;
 }
 
-export function loadGitHubConfigFromEnv(): GitHubAppConfig {
-  const appId = process.env.GITHUB_APP_ID;
-  const privateKeyPath = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
-  const privateKeyInline = process.env.GITHUB_APP_PRIVATE_KEY;
-  const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET ?? '';
-  const botLogin = process.env.GITHUB_APP_BOT_LOGIN ?? 'orvex-review[bot]';
-  const allowedRepo = process.env.GITHUB_ALLOWED_REPO;
-  const appSlug = process.env.GITHUB_APP_SLUG;
+export function loadGitHubConfigFromEnv(env?: NodeJS.ProcessEnv): GitHubAppConfig {
+  const runtime = loadGitHubRuntimeConfig(env);
+  const { appId, privateKeyPath, privateKeyInline, webhookSecret, botLogin, allowedRepo, appSlug } =
+    runtime;
 
   if (!appId) {
     throw new Error('GITHUB_APP_ID is required');

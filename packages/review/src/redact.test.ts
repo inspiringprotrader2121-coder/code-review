@@ -20,7 +20,10 @@ function assertNoBacktrackingBlowup(build: (size: number) => string): void {
   const started = process.hrtime.bigint();
   redactSecrets(input);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
-  assert.ok(ms < 2_000, `200kB took ${ms.toFixed(0)}ms — catastrophic backtracking (healthy is ~20-50ms)`);
+  assert.ok(
+    ms < 2_000,
+    `200kB took ${ms.toFixed(0)}ms — catastrophic backtracking (healthy is ~20-50ms)`,
+  );
 }
 
 test('redacts unquoted KEY=value (the common .env / CI leak)', () => {
@@ -48,7 +51,9 @@ test('P1 regression: PREFIXED SCREAMING_SNAKE env secrets are redacted (the \\b 
 test('redacts connection-string passwords and Slack webhook URLs', () => {
   const db = redactSecrets('DATABASE_URL=postgres://admin:s3cretP4ss@db.host:5432/app');
   assert.doesNotMatch(db, /s3cretP4ss/);
-  const slack = redactSecrets('https://hooks.slack.com/services/T00000000/B11111111/aBcDeFgHiJkLmNoP');
+  const slack = redactSecrets(
+    'https://hooks.slack.com/services/T00000000/B11111111/aBcDeFgHiJkLmNoP',
+  );
   assert.doesNotMatch(slack, /aBcDeFgHiJkLmNoP/);
 });
 
@@ -124,7 +129,11 @@ test('infra/config credential shapes are redacted (retrieval now pulls these fil
     ['sentry dsn', 'SENTRY_DSN=https://9f8e7d6c5b4a3f2e1d0c9b8a@o12345.ingest.sentry.io/1234'],
   ];
   for (const [label, raw] of leaks) {
-    assert.match(redactSecrets(raw), /REDACTED/, `${label} must be redacted before reaching an LLM`);
+    assert.match(
+      redactSecrets(raw),
+      /REDACTED/,
+      `${label} must be redacted before reaching an LLM`,
+    );
   }
 });
 
@@ -174,7 +183,8 @@ test('k8s env secrets are redacted inside DIFFS, not just whole files', () => {
 });
 
 test('base64 PEM redaction does not swallow neighbouring keys', () => {
-  const manifest = 'kind: Secret\ndata:\n  tls.key: LS0tLS1CRUdJTiBQUklWQVRF\n  replicas: 3\n  imageTag: v1.2.3';
+  const manifest =
+    'kind: Secret\ndata:\n  tls.key: LS0tLS1CRUdJTiBQUklWQVRF\n  replicas: 3\n  imageTag: v1.2.3';
   const out = redactSecrets(manifest);
   assert.match(out, /replicas: 3/, 'following lines must survive');
   assert.match(out, /imageTag: v1\.2\.3/);
@@ -192,7 +202,9 @@ test('a PEM key TRUNCATED by context clipping is still redacted', () => {
   assert.doesNotMatch(redactSecrets(truncated), /SECRETKEYMATERIAL/, 'no key material may survive');
   // PGP armor says "PRIVATE KEY BLOCK", which the old pattern did not match.
   assert.match(
-    redactSecrets('-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBGF3x\n-----END PGP PRIVATE KEY BLOCK-----'),
+    redactSecrets(
+      '-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBGF3x\n-----END PGP PRIVATE KEY BLOCK-----',
+    ),
     /PRIVATE_KEY_REDACTED/,
   );
 });

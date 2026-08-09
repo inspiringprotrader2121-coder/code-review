@@ -1,4 +1,5 @@
 import { DEEP_DIVE_FOCUS, THIRD_ANGLE_FOCUS } from './lenses.js';
+import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { compileReviewPlan, type ReviewStage } from './review-plan.js';
 
 /**
@@ -8,8 +9,8 @@ import { compileReviewPlan, type ReviewStage } from './review-plan.js';
  * Entry tiers stay at 1. Override with ORVEX_RISK_PROBES.
  */
 export function maxRiskProbes(plan: { modelTier?: string }): number {
-  const override = Number(process.env.ORVEX_RISK_PROBES);
-  if (Number.isFinite(override) && override >= 0) return Math.min(4, Math.floor(override));
+  const override = loadReviewRuntimeConfig().riskProbes;
+  if (override !== undefined) return override;
   return plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model' ? 2 : 1;
 }
 
@@ -28,8 +29,7 @@ export function selectRiskProbes<T extends { files: readonly string[] }>(
   if (budget === 1 || signals.length === 1) return [signals[0]!];
   const top = signals[0]!;
   const second = signals[1]!;
-  const ratioRaw = Number(process.env.ORVEX_RISK_PROBE_SELECTIVITY ?? 2);
-  const ratio = Number.isFinite(ratioRaw) && ratioRaw >= 1.5 ? ratioRaw : 2;
+  const ratio = loadReviewRuntimeConfig().riskProbeSelectivity;
   const topNarrow = top.files.length > 0 && top.files.length <= 2;
   const muchNarrower = top.files.length > 0 && second.files.length >= top.files.length * ratio;
   if (topNarrow || muchNarrower) return signals.slice(0, Math.min(budget, 2));
@@ -46,11 +46,9 @@ export function selectRiskProbes<T extends { files: readonly string[] }>(
 export function isLargePr(
   files: ReadonlyArray<{ filename?: string; patch?: string | null }>,
 ): boolean {
-  const fileCap = Number(process.env.ORVEX_LARGE_PR_FILES ?? 40);
-  const maxFiles = Number.isFinite(fileCap) && fileCap > 0 ? Math.floor(fileCap) : 40;
+  const maxFiles = loadReviewRuntimeConfig().largePrFiles;
   if (files.length >= maxFiles) return true;
-  const charCap = Number(process.env.ORVEX_LARGE_PR_PATCH_CHARS ?? 150_000);
-  const maxChars = Number.isFinite(charCap) && charCap > 0 ? Math.floor(charCap) : 150_000;
+  const maxChars = loadReviewRuntimeConfig().largePrPatchChars;
   let chars = 0;
   for (const f of files) {
     chars += f.patch?.length ?? 0;
@@ -69,10 +67,10 @@ export function hasDeleteOrRename(
 ): boolean {
   return files.some(
     (f) =>
-      f.status === 'removed'
-      || f.status === 'renamed'
-      || Boolean(f.previous_filename)
-      || Boolean(f.previousFilename),
+      f.status === 'removed' ||
+      f.status === 'renamed' ||
+      Boolean(f.previous_filename) ||
+      Boolean(f.previousFilename),
   );
 }
 
@@ -130,11 +128,10 @@ export function buildReviewPassAngles(opts: {
     }));
   }
 
-  const breadthMode = (process.env.ORVEX_BREADTH_ON ?? 'deep-or-large').trim().toLowerCase();
+  const breadthMode = loadReviewRuntimeConfig().breadthMode;
   const large = isLargePr(opts.files);
   const wantBreadth =
-    breadthMode === 'always'
-    || (breadthMode !== 'never' && (Boolean(opts.deep) || large));
+    breadthMode === 'always' || (breadthMode !== 'never' && (Boolean(opts.deep) || large));
 
   const angles: PassAngle[] = [
     { tag: 'general', modelIdx: 0 },

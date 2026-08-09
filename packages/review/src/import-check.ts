@@ -33,7 +33,17 @@ interface NamedImport {
 const DYNAMIC_EXPORT_RE =
   /module\.exports\s*=\s*require\s*\(|Object\.assign\s*\(\s*(?:module\.)?exports|export\s*\*\s*from|export\s*\*\s*as\s+[A-Za-z_$][\w$]*\s+from|export\s*\{[^}]*\}\s*from|__exportStar|module\.exports\s*=\s*[A-Za-z_$][\w$]*\s*;?\s*$/m;
 
-const RESOLVE_SUFFIXES = ['', '.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs', '/index.js', '/index.ts'];
+const RESOLVE_SUFFIXES = [
+  '',
+  '.js',
+  '.ts',
+  '.tsx',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '/index.js',
+  '/index.ts',
+];
 
 /** posix-join a relative specifier onto the importing file's directory. */
 function resolveRelative(fromPath: string, spec: string): string {
@@ -63,8 +73,16 @@ export function extractNamedImports(rawContent: string): NamedImport[] {
     if (m[1]) continue; // type-only imports vanish at runtime
     const line = lineOfIndex(content, m.index ?? 0);
     for (const entry of m[2].split(',')) {
-      const name = entry.trim().split(/\s+as\s+/)[0]?.trim();
-      if (name && /^[A-Za-z_$][\w$]*$/.test(name) && name !== 'type' && !entry.trim().startsWith('type ')) {
+      const name = entry
+        .trim()
+        .split(/\s+as\s+/)[0]
+        ?.trim();
+      if (
+        name &&
+        /^[A-Za-z_$][\w$]*$/.test(name) &&
+        name !== 'type' &&
+        !entry.trim().startsWith('type ')
+      ) {
         imports.push({ name, spec: m[3], line });
       }
     }
@@ -100,12 +118,14 @@ export function extractNamedImports(rawContent: string): NamedImport[] {
  * parser drop that export and fire a false "not exported" P1 — real bug.)
  */
 function stripComments(src: string): string {
-  return src
-    // blank out block comments but KEEP their newlines, so reported line
-    // numbers (extractNamedImports) don't shift under a multi-line comment.
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    // line comments to EOL; `[^\n]*` keeps the newline. Skip `://`.
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  return (
+    src
+      // blank out block comments but KEEP their newlines, so reported line
+      // numbers (extractNamedImports) don't shift under a multi-line comment.
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+      // line comments to EOL; `[^\n]*` keeps the newline. Skip `://`.
+      .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+  );
 }
 
 export function enumerateExports(rawContent: string): Set<string> | null {

@@ -1,7 +1,12 @@
 export type { Finding, LlmReviewResponse, ReviewableFile } from './types.js';
 export { FindingSchema, LlmReviewResponseSchema } from './types.js';
 export { redactSecrets, redactPatch } from './redact.js';
-export { loadOrvexRules, buildUserPrompt, fileRulesFor, type ReviewPromptContext } from './prompt.js';
+export {
+  loadOrvexRules,
+  buildUserPrompt,
+  fileRulesFor,
+  type ReviewPromptContext,
+} from './prompt.js';
 export {
   runLlmReview,
   llmFindingsToReviewFindings,
@@ -112,6 +117,8 @@ export {
   runInvestigateReview,
   resolveUnderRoot,
   isSafeGrepPattern,
+  isSafeGlob,
+  runInvestigateTool,
   extractDeletedSymbols,
   type InvestigateOptions,
 } from './investigate.js';
@@ -166,9 +173,38 @@ export {
   type LlmAttemptEvent,
   type LlmAttemptOutcome,
   type LlmProviderCoordinator,
+  type LlmClientDependencies,
 } from './llm-client.js';
 export {
+  CodexCliRunner,
+  ResponsesRunner,
+  CompatibleChatRunner,
+  AnthropicRunner,
+  type CodexCliRunRequest,
+} from './providers/runners.js';
+export { assertAttemptLifecycle } from './providers/contract.js';
+export type {
+  AttemptObserver,
+  Clock,
+  CodexContainerRequest,
+  CodexContainerResult,
+  CodexContainerRuntime,
+  HttpTransport,
+  ModelAttemptEvent,
+  ModelAttemptOutcome,
+  ModelAttemptTransport,
+  ModelRunner,
+  ModelTarget,
+  ModelTransport,
+  ProcessSpawner,
+  ProviderAdmission,
+  ProviderDependencies,
+  RetryPolicy,
+  TextModelRunRequest,
+} from './providers/types.js';
+export {
   aggregateRepeatedFindings,
+  createReviewAggregationConfig,
   fitReviewAggregationToBudget,
   readReviewAggregationConfig,
   type EffectiveReviewAggregation,
@@ -176,7 +212,12 @@ export {
   type RepeatedFindingAggregation,
   type ReviewAggregationConfig,
 } from './aggregation.js';
-export { DEEP_DIVE_FOCUS, THIRD_ANGLE_FOCUS, REMOVED_BEHAVIOR_FOCUS, RISK_HUNT_FOCUS } from './lenses.js';
+export {
+  DEEP_DIVE_FOCUS,
+  THIRD_ANGLE_FOCUS,
+  REMOVED_BEHAVIOR_FOCUS,
+  RISK_HUNT_FOCUS,
+} from './lenses.js';
 export {
   maxRiskProbes,
   selectRiskProbes,

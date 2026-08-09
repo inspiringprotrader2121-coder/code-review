@@ -3,10 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "orvex-review": "./dist/review.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "review": "tsx src/review.ts"
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "review": "node --enable-source-maps dist/review.js"
   },
   "dependencies": {
     "@orvex-review/github": "workspace:*",

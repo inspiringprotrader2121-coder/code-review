@@ -14,7 +14,9 @@ test('same-provider key rotation uses rate-limit/quota errors specifically', () 
   assert.ok(isRateLimitOrQuotaError('LLM request failed (429): rate_limit_error'));
   assert.ok(isRateLimitOrQuotaError('Token Plan usage limit reached (2056)'));
   assert.ok(isRateLimitOrQuotaError('insufficient quota'));
-  assert.ok(isRateLimitOrQuotaError('LLM request failed (402): This request requires more credits'));
+  assert.ok(
+    isRateLimitOrQuotaError('LLM request failed (402): This request requires more credits'),
+  );
 });
 
 test('a plain network blip is transient but does not trigger key rotation', () => {
@@ -49,7 +51,10 @@ test('uses a funded-provider-friendly 64k output ceiling by default', (t) => {
 
 test('parseRetryAfterMs extracts the provider retry-after hint', () => {
   // The exact OpenAI TPM 429 that dropped reviews in the batch run.
-  assert.equal(parseRetryAfterMs('Rate limit reached ... Please try again in 49.174s. Visit'), 49_174);
+  assert.equal(
+    parseRetryAfterMs('Rate limit reached ... Please try again in 49.174s. Visit'),
+    49_174,
+  );
   assert.equal(parseRetryAfterMs('try again in 6.015s'), 6_015);
   assert.equal(parseRetryAfterMs('try again in 120ms'), 120);
   assert.equal(parseRetryAfterMs('retry-after: 30'), 30_000);
@@ -59,12 +64,20 @@ test('parseRetryAfterMs extracts the provider retry-after hint', () => {
 
 test('isRetryableRateLimit: waits on recoverable limits, fails fast on hard quota', () => {
   // Recoverable — waiting clears these.
-  assert.equal(isRetryableRateLimit('Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 200000'), true);
+  assert.equal(
+    isRetryableRateLimit(
+      'Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 200000',
+    ),
+    true,
+  );
   assert.equal(isRetryableRateLimit('LLM request failed (429): too many requests'), true);
   assert.equal(isRetryableRateLimit('LLM request failed (529): overloaded'), true);
   assert.equal(isRetryableRateLimit('Please try again in 6s'), true);
   // NOT recoverable by waiting — a credit top-up is required; must fail fast.
-  assert.equal(isRetryableRateLimit('LLM request failed (402): requires more credits, insufficient balance'), false);
+  assert.equal(
+    isRetryableRateLimit('LLM request failed (402): requires more credits, insufficient balance'),
+    false,
+  );
   // Not a rate limit at all.
   assert.equal(isRetryableRateLimit('terminated'), false);
   assert.equal(isRetryableRateLimit('LLM request failed (400): bad request'), false);
@@ -79,7 +92,9 @@ test('isOversizedModelRequest: fail-fast, never sleep-retry as TPM', () => {
   assert.equal(isRetryableRateLimit('context_length_exceeded: max 128000'), false);
   // A real TPM line must still retry (raise TPM later; do not change that path).
   assert.equal(
-    isRetryableRateLimit('Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 200000'),
+    isRetryableRateLimit(
+      'Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 200000',
+    ),
     true,
   );
 });
@@ -116,7 +131,11 @@ test('all permanent 4xx statuses are non-transient; retry-later statuses remain 
     );
   }
   for (const status of [408, 425, 429]) {
-    assert.equal(isTransientLlmError(`LLM request failed (${status})`), true, `${status} should be retried`);
+    assert.equal(
+      isTransientLlmError(`LLM request failed (${status})`),
+      true,
+      `${status} should be retried`,
+    );
   }
   assert.equal(isTransientLlmError('Request failed with status code 415'), false);
   assert.equal(
@@ -151,10 +170,18 @@ test('NaN env vars cannot defeat retry bounds (infinite-loop guard)', () => {
 test('hard quota is never retried, however the provider dresses it', () => {
   // OpenAI ships insufficient_quota as HTTP 429 — retrying it waits forever on
   // every review. And a 402 inside a message body must not mask a real 429.
-  assert.equal(isRetryableRateLimit('LLM request failed (429): insufficient_quota, please check billing'), false);
-  assert.equal(isRetryableRateLimit('You exceeded your current quota, please check your plan'), false);
   assert.equal(
-    isRetryableRateLimit('LLM request failed (429): used 402 of 500 credits this minute; rate limit'),
+    isRetryableRateLimit('LLM request failed (429): insufficient_quota, please check billing'),
+    false,
+  );
+  assert.equal(
+    isRetryableRateLimit('You exceeded your current quota, please check your plan'),
+    false,
+  );
+  assert.equal(
+    isRetryableRateLimit(
+      'LLM request failed (429): used 402 of 500 credits this minute; rate limit',
+    ),
     true,
     'an unrelated 402 in the body must not misclassify a recoverable 429',
   );

@@ -3,7 +3,8 @@ import type { Octokit } from '@octokit/rest';
 function isNotFoundError(err: unknown): boolean {
   if (err && typeof err === 'object') {
     if ('status' in err && err.status === 404) return true;
-    if ('message' in err && typeof err.message === 'string' && /\b404\b/.test(err.message)) return true;
+    if ('message' in err && typeof err.message === 'string' && /\b404\b/.test(err.message))
+      return true;
   }
   return false;
 }

@@ -19,7 +19,10 @@ test('installation proof requires organization admin membership, not visibility 
     return Response.json({ state: 'active', role: 'member' });
   };
   assert.equal(
-    await userCanAccessInstallation('token', 42, { accountLogin: 'acme', accountType: 'Organization' }),
+    await userCanAccessInstallation('token', 42, {
+      accountLogin: 'acme',
+      accountType: 'Organization',
+    }),
     false,
   );
   assert.deepEqual(calls, [
@@ -39,7 +42,10 @@ test('installation proof requires organization admin membership, not visibility 
     return Response.json({ state: 'active', role: 'admin' });
   };
   assert.equal(
-    await userCanAccessInstallation('token', 42, { accountLogin: 'acme', accountType: 'Organization' }),
+    await userCanAccessInstallation('token', 42, {
+      accountLogin: 'acme',
+      accountType: 'Organization',
+    }),
     true,
   );
 });

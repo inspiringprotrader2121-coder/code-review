@@ -16,9 +16,9 @@ Orvex.
 [`scripts/provision-internal-sandbox.sh`](../scripts/provision-internal-sandbox.sh)
 has two deliberately separate modes:
 
-| Command | Privilege | Effect |
-| --- | --- | --- |
-| `--check` | Any user | Read-only preflight. No package, service, AppArmor, user, Docker, or environment changes. |
+| Command   | Privilege | Effect                                                                                                      |
+| --------- | --------- | ----------------------------------------------------------------------------------------------------------- |
+| `--check` | Any user  | Read-only preflight. No package, service, AppArmor, user, Docker, or environment changes.                   |
 | `--apply` | Root only | Installs documented rootless Docker prerequisites, configures the service account, and verifies the result. |
 
 The script targets the `orvex` account by default. Use `--user NAME` only for a

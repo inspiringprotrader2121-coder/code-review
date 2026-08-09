@@ -35,14 +35,7 @@ test('handles single-line hunk headers (implicit count of 1) and pure additions'
 });
 
 test('reversing twice returns the original body (round-trip)', () => {
-  const original = [
-    '@@ -1,4 +1,4 @@',
-    ' a',
-    '-b',
-    '+B',
-    ' c',
-    ' d',
-  ].join('\n');
+  const original = ['@@ -1,4 +1,4 @@', ' a', '-b', '+B', ' c', ' d'].join('\n');
   const once = reversePatch(original).patch;
   const twice = reversePatch(once).patch;
   assert.equal(twice, original);

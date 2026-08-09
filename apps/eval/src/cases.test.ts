@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CASES, evaluationCorpusFingerprint, evaluationCorpusLabelCounts } from './cases.js';
+import {
+  CASES,
+  EXPECTED_GOLD_LABEL_COUNTS,
+  evaluationCorpusFingerprint,
+  evaluationCorpusLabelCounts,
+} from './cases.js';
 
 test('every evaluation label is pinned to one immutable commit', () => {
   const names = new Set<string>();
@@ -12,19 +17,54 @@ test('every evaluation label is pinned to one immutable commit', () => {
     assert.equal(names.has(c.name), false, `${c.name} must be unique`);
     names.add(c.name);
     assert.ok(
-      (c.shouldFlag?.length ?? 0) + (c.shouldFlagSevere?.length ?? 0) + (c.shouldNotFlag?.length ?? 0) > 0,
+      (c.shouldFlag?.length ?? 0) +
+        (c.shouldFlagSevere?.length ?? 0) +
+        (c.shouldNotFlag?.length ?? 0) >
+        0,
       `${c.name} must have a real positive or negative label`,
     );
     assert.ok(c.note?.trim(), `${c.name} must retain its hand-verification note`);
+    assert.match(
+      c.evidence.path,
+      /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$)).+/,
+      `${c.name} must have a repository-relative evidence path`,
+    );
+    assert.ok(
+      Number.isSafeInteger(c.evidence.line) && c.evidence.line >= 1,
+      `${c.name} must pin an evidence line`,
+    );
+    assert.equal(
+      c.evidence.sha,
+      c.sha,
+      `${c.name} must pin the evidence to its immutable reviewed SHA`,
+    );
+    assert.equal(c.evidence.provenance, 'hand-verified-immutable-source');
+    const positiveLabels = (c.shouldFlag?.length ?? 0) + (c.shouldFlagSevere?.length ?? 0);
+    if (positiveLabels > 0) {
+      assert.notEqual(
+        c.evidence.reviewOutcome,
+        'false-positive',
+        `${c.name} must not turn a negative witness into a positive label`,
+      );
+    } else {
+      assert.equal(
+        c.evidence.reviewOutcome,
+        'false-positive',
+        `${c.name} must document why its negative label is negative`,
+      );
+    }
   }
 });
 
 test('the evaluation corpus has a stable, labelled snapshot identity', () => {
   const fingerprint = evaluationCorpusFingerprint();
   assert.match(fingerprint, /^[a-f0-9]{64}$/);
-  assert.equal(fingerprint, evaluationCorpusFingerprint(), 'the same labels must produce the same digest');
+  assert.equal(
+    fingerprint,
+    evaluationCorpusFingerprint(),
+    'the same labels must produce the same digest',
+  );
 
   const labels = evaluationCorpusLabelCounts();
-  assert.ok(labels.positive > 0, 'the corpus needs at least one real-bug label');
-  assert.ok(labels.negative > 0, 'the corpus needs at least one false-positive label');
+  assert.deepEqual(labels, EXPECTED_GOLD_LABEL_COUNTS);
 });

@@ -30,18 +30,9 @@ const SELF_NEGATING = [
 ];
 
 /** Whole-message / phrase hedges — NOT bare substrings like "nitpick" inside a real scenario. */
-const SELF_NEGATING_PHRASES = [
-  /\bnitpick\b/,
-  /\bfor completeness\b/,
-];
+const SELF_NEGATING_PHRASES = [/\bnitpick\b/, /\bfor completeness\b/];
 
-const HEDGE_OPENERS = [
-  'you might want to',
-  'it would be nice',
-  'as a minor',
-  'minor:',
-  'nit:',
-];
+const HEDGE_OPENERS = ['you might want to', 'it would be nice', 'as a minor', 'minor:', 'nit:'];
 
 function lower(s: string): string {
   return s.toLowerCase();
@@ -89,8 +80,8 @@ export function dropSelfNegatingFindings(findings: ReviewFinding[]): {
     }
     const msg = lower(f.message);
     const negates =
-      SELF_NEGATING.some((p) => msg.includes(p))
-      || SELF_NEGATING_PHRASES.some((re) => re.test(msg));
+      SELF_NEGATING.some((p) => msg.includes(p)) ||
+      SELF_NEGATING_PHRASES.some((re) => re.test(msg));
     // Hedge openers only drop `info` — a P3 that starts with "Consider …" often
     // describes a real medium defect and must reach the author/verifier.
     const opensAsHedge = f.severity === 'info' && HEDGE_OPENERS.some((p) => msg.startsWith(p));

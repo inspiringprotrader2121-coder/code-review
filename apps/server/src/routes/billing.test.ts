@@ -4,8 +4,17 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { AppDatabase, createAppDatabase } from '@orvex-review/store';
-import { billingRoutes, reportStripeReviewOverage, isCurrentSubscription, verifyStripeSignature } from './billing.js';
+import { AppDatabase } from '@orvex-review/store';
+import {
+  billingRoutes as createBillingRoutes,
+  isCurrentSubscription as isCurrentSubscriptionWithConfig,
+  verifyStripeSignature as verifyStripeSignatureWithConfig,
+} from './billing.js';
+import {
+  testAppDatabase,
+  testRouteDependencies,
+  testServerConfig,
+} from '../bootstrap/test-config.js';
 
 test('verifies Stripe webhook signatures', () => {
   const body = JSON.stringify({ id: 'evt_test', type: 'checkout.session.completed' });
@@ -22,166 +31,6 @@ test('verifies Stripe webhook signatures', () => {
   const old = String(Math.floor(Date.now() / 1000) - 10_000);
   const oldDigest = createHmac('sha256', secret).update(`${old}.${body}`).digest('hex');
   assert.equal(verifyStripeSignature(body, `t=${old},v1=${oldDigest}`, secret), false);
-});
-
-test('reports only completed reviews above the included quota as Stripe overage', async (t) => {
-  const db = new AppDatabase(':memory:');
-  const tenant = db.createTenant('acme', 'Acme');
-  db.setTenantBilling(tenant.id, {
-    stripeCustomerId: 'cus_test',
-    stripeCurrentPeriodStart: '2026-07-01T00:00:00.000Z',
-  });
-  // Seed exactly the included quota (Starter = 100); the next completed review
-  // is the first overage.
-  let includedRunId = '';
-  for (let i = 0; i < 100; i += 1) {
-    includedRunId = db.recordReviewRun({
-      tenantId: tenant.id,
-      installationId: 1,
-      owner: 'acme',
-      repo: 'api',
-      pr: i + 1,
-      headSha: `sha${i}`,
-      action: 'synchronize',
-      status: 'completed',
-      durationMs: 1000,
-      createdAt: '2026-07-02T00:00:00.000Z',
-    }).id;
-  }
-
-  const originalFetch = globalThis.fetch;
-  const originalSecret = process.env.STRIPE_SECRET_KEY;
-  process.env.STRIPE_SECRET_KEY = 'sk_test';
-  let calls = 0;
-  globalThis.fetch = async (_url, init) => {
-    calls += 1;
-    const body = new URLSearchParams(String(init?.body));
-    assert.equal(body.get('event_name'), 'orvex_review_overage');
-    assert.equal(body.get('payload[stripe_customer_id]'), 'cus_test');
-    assert.equal(body.get('payload[value]'), '1');
-    return Response.json({ object: 'billing.meter_event' });
-  };
-  t.after(() => {
-    globalThis.fetch = originalFetch;
-    if (originalSecret === undefined) delete process.env.STRIPE_SECRET_KEY;
-    else process.env.STRIPE_SECRET_KEY = originalSecret;
-  });
-
-  assert.equal(
-    await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: 'review', runId: includedRunId }),
-    'included',
-  );
-
-  const overageRun = db.recordReviewRun({
-    tenantId: tenant.id,
-    installationId: 1,
-    owner: 'acme',
-    repo: 'api',
-    pr: 100,
-    headSha: 'sha100',
-    action: 'synchronize',
-    status: 'completed',
-    durationMs: 1000,
-    createdAt: '2026-07-03T00:00:00.000Z',
-  });
-  assert.equal(
-    await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: 'review', runId: overageRun.id }),
-    'reported',
-  );
-  assert.equal(calls, 1);
-});
-
-test('missing Stripe credentials still enqueue a durable overage outbox row', async (t) => {
-  const db = new AppDatabase(':memory:');
-  const tenant = db.createTenant('pending-meter');
-  db.setTenantBilling(tenant.id, {
-    stripeCustomerId: 'cus_pending',
-    stripeCurrentPeriodStart: '2026-07-01T00:00:00.000Z',
-  });
-  const previousSecret = process.env.STRIPE_SECRET_KEY;
-  delete process.env.STRIPE_SECRET_KEY;
-  t.after(() => {
-    if (previousSecret === undefined) delete process.env.STRIPE_SECRET_KEY;
-    else process.env.STRIPE_SECRET_KEY = previousSecret;
-  });
-  let lastRun = '';
-  for (let i = 0; i < 100; i += 1) {
-    lastRun = db.recordReviewRun({
-      tenantId: tenant.id,
-      installationId: 1,
-      owner: 'pending-meter',
-      repo: 'api',
-      pr: i + 1,
-      headSha: `pending-${i}`,
-      action: 'synchronize',
-      status: 'completed',
-      durationMs: 1,
-      createdAt: '2026-07-02T00:00:00.000Z',
-    }).id;
-  }
-  lastRun = db.recordReviewRun({
-    tenantId: tenant.id,
-    installationId: 1,
-    owner: 'pending-meter',
-    repo: 'api',
-    pr: 101,
-    headSha: 'pending-overage',
-    action: 'synchronize',
-    status: 'completed',
-    durationMs: 1,
-    createdAt: '2026-07-03T00:00:00.000Z',
-  }).id;
-  assert.equal(
-    await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: 'review', runId: lastRun }),
-    'pending',
-  );
-  assert.equal(db.getStripeMeterEvent(lastRun)?.status, 'pending');
-});
-
-test('a deep review bills as 2 units — and only the units above the included line', async (t) => {
-  const db = new AppDatabase(':memory:');
-  const tenant = db.createTenant('acme', 'Acme');
-  db.setTenantBilling(tenant.id, {
-    stripeCustomerId: 'cus_test',
-    stripeCurrentPeriodStart: '2026-07-01T00:00:00.000Z',
-  });
-  // Verify Lite includes 50 units. Seed 49 normal reviews → 49 units used, 1 left.
-  for (let i = 0; i < 49; i += 1) {
-    db.recordReviewRun({
-      tenantId: tenant.id, installationId: 1, owner: 'acme', repo: 'api', pr: i + 1,
-      headSha: `sha${i}`, action: 'command', status: 'completed', durationMs: 1000,
-      createdAt: '2026-07-02T00:00:00.000Z',
-    });
-  }
-
-  process.env.STRIPE_SECRET_KEY = 'sk_test';
-  process.env.STRIPE_METER_EVENT_VERIFY_LITE = 'orvex_verify_lite_overage';
-  let reportedValue: string | null = null;
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, init) => {
-    const body = new URLSearchParams(String(init?.body));
-    reportedValue = body.get('payload[value]');
-    assert.equal(body.get('event_name'), 'orvex_verify_lite_overage');
-    return Response.json({ object: 'billing.meter_event' });
-  };
-  t.after(() => {
-    globalThis.fetch = originalFetch;
-    delete process.env.STRIPE_SECRET_KEY;
-    delete process.env.STRIPE_METER_EVENT_VERIFY_LITE;
-  });
-
-  // A DEEP review now runs: 49 + 2 = 51 units, included is 50 → exactly 1 unit
-  // lands above the line (unit 50 was included, unit 51 is the only overage).
-  const deepRun = db.recordReviewRun({
-    tenantId: tenant.id, installationId: 1, owner: 'acme', repo: 'api', pr: 500,
-    headSha: 'shaDeep', action: 'command', status: 'completed', durationMs: 1000,
-    deep: true, createdAt: '2026-07-03T00:00:00.000Z',
-  });
-  const result = await reportStripeReviewOverage({
-    store: db, tenantId: tenant.id, plan: 'verify-lite', runId: deepRun.id, deep: true,
-  });
-  assert.equal(result, 'reported');
-  assert.equal(reportedValue, '1', 'deep review straddling the quota line bills only the 1 unit over it');
 });
 
 test('isCurrentSubscription guards deleted/updated events against superseded subs', () => {
@@ -222,7 +71,7 @@ test('checkout completion restores paid access, seeds the billing period, and de
   process.env.STRIPE_SECRET_KEY = 'sk_test';
   process.env.APP_URL = 'https://example.test';
 
-  const db = createAppDatabase();
+  const db = testAppDatabase();
   const tenant = db.createTenant('dunning-workspace');
   db.setTenantPlan(tenant.id, 'review');
   db.setTenantBilling(tenant.id, {
@@ -296,7 +145,7 @@ test('subscription.created does not repoint an existing subscription before chec
   process.env.PLATFORM_SECRET = 'test-platform-secret';
   process.env.STRIPE_WEBHOOK_SECRET = 'whsec_created';
 
-  const db = createAppDatabase();
+  const db = testAppDatabase();
   const tenant = db.createTenant('created-race');
   db.setTenantBilling(tenant.id, {
     stripeCustomerId: 'cus_old',
@@ -335,7 +184,7 @@ test('invoice payments become durable revenue events and webhook retries do not 
   process.env.PLATFORM_SECRET = 'test-platform-secret';
   process.env.STRIPE_WEBHOOK_SECRET = 'whsec_revenue';
 
-  const db = createAppDatabase();
+  const db = testAppDatabase();
   const tenant = db.createTenant('revenue-workspace');
   db.setTenantBilling(tenant.id, { stripeCustomerId: 'cus_revenue' });
   const created = Math.floor(Date.now() / 1000);
@@ -370,81 +219,25 @@ test('invoice payments become durable revenue events and webhook retries do not 
   );
   assert.equal(analytics.overview.actualRevenueUsd, 99);
   assert.equal((await request()).status, 200);
-  assert.equal(db.getSuperadminCostAnalytics(
-    new Date((created - 60) * 1000).toISOString(),
-    new Date((created + 60) * 1000).toISOString(),
-  ).overview.actualRevenueUsd, 99);
-});
-
-test('quota exhaustion meters each metered plan but never the unlimited plan', async (t) => {
-  const db = new AppDatabase(':memory:');
-  const originalFetch = globalThis.fetch;
-  const originalSecret = process.env.STRIPE_SECRET_KEY;
-  process.env.STRIPE_SECRET_KEY = 'sk_test_no_network';
-  const events: Array<{ name: string | null; value: string | null; idempotency: string | null }> = [];
-  globalThis.fetch = async (_url, init) => {
-    const body = new URLSearchParams(String(init?.body));
-    events.push({
-      name: body.get('event_name'),
-      value: body.get('payload[value]'),
-      idempotency: new Headers(init?.headers).get('Idempotency-Key'),
-    });
-    return Response.json({ object: 'billing.meter_event' });
-  };
-  t.after(() => {
-    globalThis.fetch = originalFetch;
-    if (originalSecret === undefined) delete process.env.STRIPE_SECRET_KEY;
-    else process.env.STRIPE_SECRET_KEY = originalSecret;
-  });
-
-  const metered = [
-    { plan: 'review' as const, included: 100, event: 'orvex_review_overage' },
-    { plan: 'verify-lite' as const, included: 50, event: 'orvex_verify_lite_overage' },
-    { plan: 'verify' as const, included: 120, event: 'orvex_verify_overage' },
-  ];
-  for (const item of metered) {
-    const tenant = db.createTenant(`quota-${item.plan}`);
-    db.setTenantBilling(tenant.id, {
-      stripeCustomerId: `cus_${item.plan}`,
-      stripeCurrentPeriodStart: '2026-07-01T00:00:00.000Z',
-    });
-    let includedRunId = '';
-    for (let i = 0; i < item.included; i += 1) {
-      includedRunId = recordReview(db, tenant.id, i, 'completed');
-    }
-    recordReview(db, tenant.id, item.included + 10_000, 'failed');
-    assert.equal(
-      await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: item.plan, runId: includedRunId }),
-      'included',
-    );
-
-    const overageRunId = recordReview(db, tenant.id, item.included, 'completed');
-    assert.equal(
-      await reportStripeReviewOverage({ store: db, tenantId: tenant.id, plan: item.plan, runId: overageRunId }),
-      'reported',
-    );
-  }
-
-  const unlimited = db.createTenant('quota-review-plus');
-  db.setTenantBilling(unlimited.id, { stripeCustomerId: 'cus_review_plus' });
-  const unlimitedRunId = recordReview(db, unlimited.id, 1, 'completed');
   assert.equal(
-    await reportStripeReviewOverage({ store: db, tenantId: unlimited.id, plan: 'review-plus', runId: unlimitedRunId }),
-    'included',
+    db.getSuperadminCostAnalytics(
+      new Date((created - 60) * 1000).toISOString(),
+      new Date((created + 60) * 1000).toISOString(),
+    ).overview.actualRevenueUsd,
+    99,
   );
-  assert.equal(events.length, metered.length);
-  for (const [index, item] of metered.entries()) {
-    assert.equal(events[index]?.name, item.event);
-    assert.equal(events[index]?.value, '1');
-    assert.match(events[index]?.idempotency ?? '', /^review_run_/);
-  }
 });
 
 test('billing checkout is owner-only and throttled without contacting Stripe', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-billing-auth-'));
   const previous = snapshotEnv([
-    'STORE_PATH', 'PLATFORM_SECRET', 'APP_URL', 'ORVEX_REQUIRE_LOGIN', 'STRIPE_SECRET_KEY',
-    'STRIPE_PRICE_REVIEW', 'STRIPE_PRICE_REVIEW_OVERAGE',
+    'STORE_PATH',
+    'PLATFORM_SECRET',
+    'APP_URL',
+    'ORVEX_REQUIRE_LOGIN',
+    'STRIPE_SECRET_KEY',
+    'STRIPE_PRICE_REVIEW',
+    'STRIPE_PRICE_REVIEW_OVERAGE',
   ]);
   t.after(() => {
     restoreEnv(previous);
@@ -458,11 +251,14 @@ test('billing checkout is owner-only and throttled without contacting Stripe', a
   process.env.STRIPE_PRICE_REVIEW = 'price_test_review';
   process.env.STRIPE_PRICE_REVIEW_OVERAGE = 'price_test_review_overage';
 
-  const db = createAppDatabase();
+  const db = testAppDatabase();
   const tenant = db.createTenant('billing-auth');
   const owner = db.createPasswordUser({ email: 'owner@example.test', passwordHash: 'unused' })!;
   const member = db.createPasswordUser({ email: 'member@example.test', passwordHash: 'unused' })!;
-  const outsider = db.createPasswordUser({ email: 'outsider@example.test', passwordHash: 'unused' })!;
+  const outsider = db.createPasswordUser({
+    email: 'outsider@example.test',
+    passwordHash: 'unused',
+  })!;
   db.addWorkspaceMember(tenant.id, owner.id, 'owner');
   db.addWorkspaceMember(tenant.id, member.id, 'member');
   const ownerCookie = `orvex_session=${db.createSession(owner.id).id}`;
@@ -474,18 +270,21 @@ test('billing checkout is owner-only and throttled without contacting Stripe', a
     stripeCalls += 1;
     return Response.json({ url: 'https://checkout.stripe.test/session' });
   };
-  t.after(() => { globalThis.fetch = originalFetch; });
-  const app = billingRoutes();
-  const request = (cookie: string | undefined, ip: string) => app.request('/api/workspaces/billing-auth/billing/checkout', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-real-ip': ip,
-      origin: 'https://example.test',
-      ...(cookie ? { cookie } : {}),
-    },
-    body: JSON.stringify({ plan: 'review' }),
+  t.after(() => {
+    globalThis.fetch = originalFetch;
   });
+  const app = billingRoutes();
+  const request = (cookie: string | undefined, ip: string) =>
+    app.request('/api/workspaces/billing-auth/billing/checkout', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-real-ip': ip,
+        origin: 'https://example.test',
+        ...(cookie ? { cookie } : {}),
+      },
+      body: JSON.stringify({ plan: 'review' }),
+    });
 
   assert.equal((await request(undefined, '192.0.2.60')).status, 401);
   assert.equal((await request(outsiderCookie, '192.0.2.61')).status, 403);
@@ -494,14 +293,20 @@ test('billing checkout is owner-only and throttled without contacting Stripe', a
 
   const checkout = await request(ownerCookie, '192.0.2.63');
   assert.equal(checkout.status, 200);
-  const checkoutBody = await checkout.json() as { url?: string };
+  const checkoutBody = (await checkout.json()) as { url?: string };
   assert.equal(checkoutBody.url, 'https://checkout.stripe.test/session');
   assert.equal(stripeCalls, 1);
 
-  for (let i = 0; i < 12; i += 1) {
-    assert.equal((await request(ownerCookie, '192.0.2.64')).status, 200, `allowed checkout ${i + 1}`);
+  // Hono's Fetch test transport has no socket peer, so the spoofed X-Real-IP
+  // values must not create independent checkout buckets.
+  for (let i = 0; i < 11; i += 1) {
+    assert.equal(
+      (await request(ownerCookie, `192.0.2.${64 + i}`)).status,
+      200,
+      `allowed checkout ${i + 1}`,
+    );
   }
-  const limited = await request(ownerCookie, '192.0.2.64');
+  const limited = await request(ownerCookie, '198.51.100.1');
   assert.equal(limited.status, 429);
   assert.ok(Number(limited.headers.get('retry-after')) >= 1);
 });
@@ -509,8 +314,13 @@ test('billing checkout is owner-only and throttled without contacting Stripe', a
 test('marketing checkout resumes after login and requires an explicit workspace when an owner has several', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-billing-picker-'));
   const previous = snapshotEnv([
-    'STORE_PATH', 'PLATFORM_SECRET', 'APP_URL', 'ORVEX_REQUIRE_LOGIN', 'STRIPE_SECRET_KEY',
-    'STRIPE_PRICE_REVIEW', 'STRIPE_PRICE_REVIEW_OVERAGE',
+    'STORE_PATH',
+    'PLATFORM_SECRET',
+    'APP_URL',
+    'ORVEX_REQUIRE_LOGIN',
+    'STRIPE_SECRET_KEY',
+    'STRIPE_PRICE_REVIEW',
+    'STRIPE_PRICE_REVIEW_OVERAGE',
   ]);
   t.after(() => {
     restoreEnv(previous);
@@ -524,7 +334,7 @@ test('marketing checkout resumes after login and requires an explicit workspace 
   process.env.STRIPE_PRICE_REVIEW = 'price_test_review';
   process.env.STRIPE_PRICE_REVIEW_OVERAGE = 'price_test_review_overage';
 
-  const db = createAppDatabase();
+  const db = testAppDatabase();
   const first = db.createTenant('first-workspace', 'First workspace');
   const second = db.createTenant('second-workspace', 'Second workspace');
   const owner = db.createPasswordUser({ email: 'picker@example.test', passwordHash: 'unused' })!;
@@ -546,7 +356,9 @@ test('marketing checkout resumes after login and requires an explicit workspace 
     selectedTenant = body.get('metadata[tenant_slug]');
     return Response.json({ url: 'https://checkout.stripe.test/session' });
   };
-  t.after(() => { globalThis.fetch = originalFetch; });
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
 
   const picker = await app.request('/buy/review', {
     headers: { cookie, 'x-real-ip': '192.0.2.81' },
@@ -564,19 +376,20 @@ test('marketing checkout resumes after login and requires an explicit workspace 
   assert.equal(selectedTenant, 'second-workspace');
 });
 
-function recordReview(db: AppDatabase, tenantId: string, n: number, status: 'completed' | 'failed'): string {
-  return db.recordReviewRun({
-    tenantId,
-    installationId: 1,
-    owner: tenantId,
-    repo: 'api',
-    pr: n + 1,
-    headSha: `sha-${n}`,
-    action: 'synchronize',
-    status,
-    durationMs: 1000,
-    createdAt: new Date(Date.parse('2026-07-02T00:00:00.000Z') + n * 1000).toISOString(),
-  }).id;
+function billingRoutes() {
+  return createBillingRoutes(testRouteDependencies());
+}
+
+function isCurrentSubscription(
+  db: AppDatabase,
+  tenantId: string,
+  subscriptionId: string | undefined,
+) {
+  return isCurrentSubscriptionWithConfig(db, tenantId, subscriptionId, testServerConfig());
+}
+
+function verifyStripeSignature(rawBody: string, signature: string | undefined, secret: string) {
+  return verifyStripeSignatureWithConfig(rawBody, signature, secret, testServerConfig());
 }
 
 function snapshotEnv(keys: string[]): Map<string, string | undefined> {

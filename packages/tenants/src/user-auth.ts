@@ -1,9 +1,11 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import {
+  loadTenantRuntimeConfig,
+  type TenantOAuthConfig,
+  type TenantRuntimeConfig,
+} from './config.js';
 
-export interface OAuthConfig {
-  clientId: string;
-  clientSecret: string;
-}
+export type OAuthConfig = TenantOAuthConfig;
 
 export type OAuthProvider = 'github' | 'google';
 
@@ -12,23 +14,21 @@ export type OAuthProvider = 'github' | 'google';
  * app settings page). Returns null when not configured — routes should fall
  * back to a clear setup error, or the AUTH_DISABLED=1 dev bypass.
  */
-export function loadOAuthConfigFromEnv(): OAuthConfig | null {
-  const clientId = process.env.GITHUB_OAUTH_CLIENT_ID;
-  const clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return null;
-  return { clientId, clientSecret };
+export function loadOAuthConfigFromEnv(
+  config: TenantRuntimeConfig = loadTenantRuntimeConfig(),
+): OAuthConfig | null {
+  return config.githubOAuth;
 }
 
 /** Google OpenID Connect credentials from Google Auth Platform. */
-export function loadGoogleOAuthConfigFromEnv(): OAuthConfig | null {
-  const clientId = process.env.GOOGLE_OAUTH_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return null;
-  return { clientId, clientSecret };
+export function loadGoogleOAuthConfigFromEnv(
+  config: TenantRuntimeConfig = loadTenantRuntimeConfig(),
+): OAuthConfig | null {
+  return config.googleOAuth;
 }
 
-export function authDisabled(): boolean {
-  return process.env.AUTH_DISABLED === '1';
+export function authDisabled(config: TenantRuntimeConfig = loadTenantRuntimeConfig()): boolean {
+  return config.authDisabled;
 }
 
 /**
@@ -36,16 +36,19 @@ export function authDisabled(): boolean {
  * source of truth for whether unauthenticated read/connect access is allowed —
  * previously copy-pasted across three route files.
  */
-export function legacyAuthMode(hasPasswordUsers = false): boolean {
+export function legacyAuthMode(
+  hasPasswordUsers = false,
+  config: TenantRuntimeConfig = loadTenantRuntimeConfig(),
+): boolean {
   // ORVEX_REQUIRE_LOGIN forces auth on even without GitHub OAuth (email/password mode)
-  if (process.env.ORVEX_REQUIRE_LOGIN === '1') return false;
+  if (config.requireLogin) return false;
   // If ANY email/password account exists, login is in use — auth is NOT legacy.
   // Security-critical route guards MUST pass db.hasPasswordUsers() here: without
   // it, running password auth (but no OAuth and no ORVEX_REQUIRE_LOGIN) left every
   // guard wide open — unauthenticated cross-tenant read/write. Callers that omit
   // it (e.g. a cosmetic dashboard redirect) keep the historical behavior.
   if (hasPasswordUsers) return false;
-  return !loadOAuthConfigFromEnv() && !loadGoogleOAuthConfigFromEnv() && !authDisabled();
+  return !config.githubOAuth && !config.googleOAuth && !config.authDisabled;
 }
 
 export interface OAuthStatePayload {
@@ -89,8 +92,12 @@ export function verifyOAuthState(
     payload.purpose !== 'login' &&
     payload.purpose !== 'install-proof' &&
     payload.purpose !== 'mfa-proof'
-  ) return null;
-  if ((payload.purpose === 'install-proof' || payload.purpose === 'mfa-proof') && typeof payload.userId !== 'string') {
+  )
+    return null;
+  if (
+    (payload.purpose === 'install-proof' || payload.purpose === 'mfa-proof') &&
+    typeof payload.userId !== 'string'
+  ) {
     return null;
   }
   return payload;
@@ -107,7 +114,11 @@ export function buildAuthorizeUrl(config: OAuthConfig, redirectUri: string, stat
   return url.toString();
 }
 
-export function buildGoogleAuthorizeUrl(config: OAuthConfig, redirectUri: string, state: string): string {
+export function buildGoogleAuthorizeUrl(
+  config: OAuthConfig,
+  redirectUri: string,
+  state: string,
+): string {
   const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   url.searchParams.set('client_id', config.clientId);
   url.searchParams.set('redirect_uri', redirectUri);
@@ -127,7 +138,11 @@ export interface GitHubOAuthUser {
   accessToken?: string;
 }
 
-async function fetchWithTimeout(input: string, init: RequestInit, timeoutMs = 15_000): Promise<Response> {
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit,
+  timeoutMs = 15_000,
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -208,8 +223,9 @@ async function verifiedGitHubEmail(accessToken: string): Promise<string | undefi
     primary?: boolean;
     verified?: boolean;
   }>;
-  const verified = emails.find((email) => email.primary && email.verified)
-    ?? emails.find((email) => email.verified);
+  const verified =
+    emails.find((email) => email.primary && email.verified) ??
+    emails.find((email) => email.verified);
   return verified?.email?.trim().toLowerCase();
 }
 

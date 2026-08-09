@@ -1,0 +1,2520 @@
+{
+  "version": 1,
+  "title": "Orvex production configuration",
+  "sections": [
+    {
+      "name": "Platform",
+      "description": "One GitHub App serves all customers; each customer installs it on its organisation.",
+      "variables": [
+        {
+          "name": "GITHUB_APP_ID",
+          "example": "",
+          "type": "string",
+          "range": "GitHub App numeric ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "GitHub App identifier.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GITHUB_APP_PRIVATE_KEY_PATH",
+          "example": "./orvex-review.pem",
+          "type": "path",
+          "range": "readable PEM path",
+          "secret": false,
+          "redaction": "path",
+          "description": "Path to the GitHub App private key. Keep the key outside source control.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GITHUB_APP_PRIVATE_KEY",
+          "example": "",
+          "type": "string",
+          "range": "PEM value",
+          "secret": true,
+          "redaction": "secret",
+          "enabled": false,
+          "description": "Inline GitHub App private key compatibility option. Prefer GITHUB_APP_PRIVATE_KEY_PATH.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GITHUB_WEBHOOK_SECRET",
+          "example": "",
+          "type": "string",
+          "range": "GitHub webhook signing secret",
+          "secret": true,
+          "redaction": "secret",
+          "description": "GitHub webhook signing secret; also a legacy local-only PLATFORM_SECRET fallback.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_WEBHOOK_BODY_DEDUP_TTL_MS",
+          "example": "7200000",
+          "type": "integer",
+          "range": "1..604800000 ms; default 7200000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "How long a processed GitHub body hash blocks rotated-delivery replay. Delivery-ID dedupe remains permanent until normal retention.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GITHUB_APP_SLUG",
+          "example": "orvex-review",
+          "type": "string",
+          "range": "GitHub App slug; default orvex-review",
+          "secret": false,
+          "redaction": "none",
+          "description": "GitHub App slug used by install and OAuth flows.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GITHUB_APP_BOT_LOGIN",
+          "example": "orvex-review[bot]",
+          "type": "string",
+          "range": "GitHub login; default orvex-review[bot]",
+          "secret": false,
+          "redaction": "none",
+          "description": "GitHub bot login used to identify Orvex comments.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_ALLOW_UNSIGNED_WEBHOOKS",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Allow unsigned GitHub webhooks only for controlled local development.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GITHUB_ALLOWED_REPO",
+          "example": "Velatrixcloud/Velatrix-Cloud",
+          "type": "owner/repository",
+          "range": "optional single repository",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Legacy single-repository development mode. Do not set for SaaS.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "PLATFORM_SECRET",
+          "example": "",
+          "type": "string",
+          "range": "at least 32 UTF-8 bytes in production or public binds",
+          "secret": true,
+          "redaction": "secret",
+          "description": "High-entropy signing key for sessions, OAuth state, CSRF, and MFA. It is mandatory for production and explicit public binds; GITHUB_WEBHOOK_SECRET is only a local compatibility fallback.",
+          "deprecatedAliases": ["GITHUB_WEBHOOK_SECRET"]
+        },
+        {
+          "name": "APP_URL",
+          "example": "http://localhost:8787",
+          "type": "URL",
+          "range": "absolute public URL",
+          "secret": false,
+          "redaction": "none",
+          "description": "Public service URL for callbacks and the connect UI.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "PORT",
+          "example": "8787",
+          "type": "integer",
+          "range": "1..65535; default 8787",
+          "secret": false,
+          "redaction": "none",
+          "description": "HTTP listening port.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "HOST",
+          "example": "127.0.0.1",
+          "type": "string",
+          "range": "host/IP; default 127.0.0.1",
+          "secret": false,
+          "redaction": "none",
+          "description": "HTTP listening host. Use a public bind only with a high-entropy PLATFORM_SECRET.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "NODE_ENV",
+          "example": "",
+          "type": "enum",
+          "range": "production or development",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Node runtime environment. Production selects durable queue/storage safeguards.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_ENV",
+          "example": "production",
+          "type": "enum",
+          "range": "production or development",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Compatibility production-mode selector.",
+          "deprecatedAliases": ["NODE_ENV"]
+        },
+        {
+          "name": "ORVEX_LLM_COST_VISIBLE_TENANTS",
+          "example": "",
+          "type": "csv",
+          "range": "workspace slugs",
+          "secret": false,
+          "redaction": "none",
+          "description": "Comma-separated workspaces allowed to view internal LLM spend. Empty hides it from every tenant.",
+          "deprecatedAliases": []
+        }
+      ]
+    },
+    {
+      "name": "Identity and browser security",
+      "description": "Email/password authentication is always available; GitHub and Google are optional account-linking providers.",
+      "variables": [
+        {
+          "name": "GITHUB_OAUTH_CLIENT_ID",
+          "example": "",
+          "type": "string",
+          "range": "OAuth client ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "GitHub OAuth client ID. Callback is {APP_URL}/auth/oauth/callback.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GITHUB_OAUTH_CLIENT_SECRET",
+          "example": "",
+          "type": "string",
+          "range": "OAuth client secret",
+          "secret": true,
+          "redaction": "secret",
+          "description": "GitHub OAuth client secret.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GOOGLE_OAUTH_CLIENT_ID",
+          "example": "",
+          "type": "string",
+          "range": "OAuth client ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "Google OAuth web-client ID. Redirect URI is {APP_URL}/auth/google/callback.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "GOOGLE_OAUTH_CLIENT_SECRET",
+          "example": "",
+          "type": "string",
+          "range": "OAuth client secret",
+          "secret": true,
+          "redaction": "secret",
+          "description": "Google OAuth client secret.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "AUTH_DISABLED",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Local development only: bypass OAuth and sign in as a fake development user.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_ALLOW_PUBLIC_NOLOGIN",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Allow public no-login operation where the server explicitly supports it.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REQUIRE_LOGIN",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Require an authenticated account for supported product flows.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_TRUSTED_PROXY_IPS",
+          "example": "127.0.0.1,::1",
+          "type": "csv",
+          "range": "exact socket peer IP addresses; default empty",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Explicit reverse-proxy socket addresses allowed to supply X-Real-IP and X-Forwarded-For. Leave empty unless the proxy is known and controlled.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEFAULT_PLAN",
+          "example": "free",
+          "type": "plan",
+          "range": "known plan ID; default free",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Default tenant plan for newly created tenant records.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_EXTRA_DISPOSABLE_DOMAINS",
+          "example": "",
+          "type": "csv",
+          "range": "lowercase domains",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Additional email domains rejected during registration.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_IP_MAX_ACCOUNTS_PER_DAY",
+          "example": "5",
+          "type": "integer",
+          "range": "1..10000; default 5",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Daily account-creation cap per IP address.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_IP_ABUSE_BLOCK",
+          "example": "0",
+          "type": "boolean",
+          "range": "0 disables; default enabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Disable IP abuse blocking only for controlled local diagnostics.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REGISTER_RATE_WINDOW_MS",
+          "example": "3600000",
+          "type": "integer",
+          "range": "1000..86400000 ms; default 3600000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Registration rate-limit window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REGISTER_RATE_IP_MAX",
+          "example": "10",
+          "type": "integer",
+          "range": "1..10000; default 10",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum registrations per IP per window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REGISTER_RATE_EMAIL_MAX",
+          "example": "3",
+          "type": "integer",
+          "range": "1..10000; default 3",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum registrations per email per window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LOGIN_RATE_WINDOW_MS",
+          "example": "900000",
+          "type": "integer",
+          "range": "1000..86400000 ms; default 900000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Login rate-limit window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LOGIN_RATE_IP_MAX",
+          "example": "20",
+          "type": "integer",
+          "range": "1..10000; default 20",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum login attempts per IP per window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LOGIN_RATE_ACCOUNT_MAX",
+          "example": "5",
+          "type": "integer",
+          "range": "1..10000; default 5",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum login attempts per account per window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MFA_RATE_WINDOW_MS",
+          "example": "600000",
+          "type": "integer",
+          "range": "1000..86400000 ms; default 600000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "MFA rate-limit window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MFA_RATE_IP_MAX",
+          "example": "20",
+          "type": "integer",
+          "range": "1..10000; default 20",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum MFA attempts per IP per window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MFA_RATE_MAX",
+          "example": "5",
+          "type": "integer",
+          "range": "1..10000; default 5",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum MFA attempts per account per window.",
+          "deprecatedAliases": []
+        }
+      ]
+    },
+    {
+      "name": "Stripe billing",
+      "description": "Stripe controls subscriptions and prepaid credit purchase. Prices are deployment configuration, not plan semantics.",
+      "variables": [
+        {
+          "name": "STRIPE_SECRET_KEY",
+          "example": "",
+          "type": "string",
+          "range": "Stripe secret key",
+          "secret": true,
+          "redaction": "secret",
+          "description": "Stripe server API key.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_PUBLISHABLE_KEY",
+          "example": "",
+          "type": "string",
+          "range": "Stripe publishable key",
+          "secret": false,
+          "redaction": "none",
+          "description": "Stripe publishable key for browser-facing payment configuration.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_WEBHOOK_SECRET",
+          "example": "",
+          "type": "string",
+          "range": "Stripe signing secret",
+          "secret": true,
+          "redaction": "secret",
+          "description": "Primary Stripe webhook signing secret.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_WEBHOOK_SECRET_2",
+          "example": "",
+          "type": "string",
+          "range": "Stripe signing secret",
+          "secret": true,
+          "redaction": "secret",
+          "enabled": false,
+          "description": "Secondary Stripe webhook signing secret during key rotation.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_WEBHOOK_TOLERANCE_S",
+          "example": "300",
+          "type": "integer",
+          "range": "0..3600 seconds; default 300",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Accepted Stripe webhook timestamp tolerance.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_PRICE_REVIEW",
+          "example": "",
+          "type": "string",
+          "range": "Stripe recurring price ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "Starter subscription price: 100 included reviews then prepaid $0.50 overage, hard ceiling 1000.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_PRICE_REVIEW_PLUS",
+          "example": "",
+          "type": "string",
+          "range": "Stripe recurring price ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "Pro subscription price: 500 reviews per month, hard cap, no prepaid overage.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_PRICE_VERIFY_LITE",
+          "example": "",
+          "type": "string",
+          "range": "Stripe recurring price ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "Verify Lite subscription price: 50 included reviews then prepaid $0.75 overage, hard ceiling 500.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_PRICE_VERIFY",
+          "example": "",
+          "type": "string",
+          "range": "Stripe recurring price ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "Verify subscription price: 120 included reviews then prepaid $0.75 overage, hard ceiling 1000.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_METER_EVENT_REVIEW",
+          "example": "orvex_review_overage",
+          "type": "string",
+          "range": "Stripe meter event name",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Legacy metered billing name. Prepaid wallet billing is the normal path.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_METER_EVENT_VERIFY_LITE",
+          "example": "orvex_verify_lite_overage",
+          "type": "string",
+          "range": "Stripe meter event name",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Legacy Verify Lite metered billing name.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "STRIPE_METER_EVENT_VERIFY",
+          "example": "orvex_verify_overage",
+          "type": "string",
+          "range": "Stripe meter event name",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Legacy Verify metered billing name.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CREDIT_PACKS_CENTS",
+          "example": "1000,2500,5000,10000",
+          "type": "csv-integers",
+          "range": "100..1000000 cents; default 1000,2500,5000,10000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Prepaid credit-pack sizes offered in the dashboard.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CHECKOUT_RATE_WINDOW_MS",
+          "example": "600000",
+          "type": "integer",
+          "range": "1000..86400000 ms; default 600000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Checkout rate-limit window.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CHECKOUT_RATE_MAX",
+          "example": "12",
+          "type": "integer",
+          "range": "1..10000; default 12",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum checkout starts per rate-limit window.",
+          "deprecatedAliases": []
+        }
+      ]
+    },
+    {
+      "name": "Review providers and pricing",
+      "description": "Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenticated Luna through the pinned Codex CLI at maximum reasoning effort.",
+      "variables": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "example": "",
+          "type": "string",
+          "range": "legacy provider API key",
+          "secret": true,
+          "redaction": "secret",
+          "enabled": false,
+          "description": "Legacy premium-provider fallback credential; public MiniMax plans still require MiniMax.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ANTHROPIC_MODEL",
+          "example": "claude-sonnet-4-20250514",
+          "type": "string",
+          "range": "legacy provider model ID",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Legacy premium-provider fallback model identifier.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "MINIMAX_API_KEY",
+          "example": "",
+          "type": "string",
+          "range": "provider API key",
+          "secret": true,
+          "redaction": "secret",
+          "description": "MiniMax platform API key.",
+          "deprecatedAliases": ["ORVEX_STANDARD_API_KEY"]
+        },
+        {
+          "name": "MINIMAX_BASE_URL",
+          "example": "https://api.minimax.io/anthropic",
+          "type": "URL",
+          "range": "Anthropic-compatible API URL",
+          "secret": false,
+          "redaction": "none",
+          "description": "MiniMax Anthropic-compatible streaming API URL.",
+          "deprecatedAliases": ["ORVEX_STANDARD_BASE_URL"]
+        },
+        {
+          "name": "MINIMAX_MODEL",
+          "example": "MiniMax-M3",
+          "type": "string",
+          "range": "provider model ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "MiniMax model identifier.",
+          "deprecatedAliases": ["ORVEX_STANDARD_MODEL"]
+        },
+        {
+          "name": "MINIMAX_API",
+          "example": "anthropic",
+          "type": "enum",
+          "range": "anthropic",
+          "secret": false,
+          "redaction": "none",
+          "description": "MiniMax transport shape; reasoning blocks are preserved.",
+          "deprecatedAliases": ["ORVEX_STANDARD_API"]
+        },
+        {
+          "name": "ORVEX_STANDARD_API_KEY",
+          "example": "",
+          "type": "string",
+          "range": "provider API key",
+          "secret": true,
+          "redaction": "secret",
+          "description": "Active standard reviewer API key compatibility setting.",
+          "deprecatedAliases": ["MINIMAX_API_KEY"]
+        },
+        {
+          "name": "ORVEX_STANDARD_BASE_URL",
+          "example": "https://api.minimax.io/anthropic",
+          "type": "URL",
+          "range": "Anthropic-compatible API URL",
+          "secret": false,
+          "redaction": "none",
+          "description": "Active standard reviewer endpoint compatibility setting.",
+          "deprecatedAliases": ["MINIMAX_BASE_URL"]
+        },
+        {
+          "name": "ORVEX_STANDARD_MODEL",
+          "example": "MiniMax-M3",
+          "type": "string",
+          "range": "provider model ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "Active standard reviewer model compatibility setting.",
+          "deprecatedAliases": ["MINIMAX_MODEL"]
+        },
+        {
+          "name": "ORVEX_STANDARD_API",
+          "example": "anthropic",
+          "type": "enum",
+          "range": "anthropic",
+          "secret": false,
+          "redaction": "none",
+          "description": "Active standard reviewer transport compatibility setting.",
+          "deprecatedAliases": ["MINIMAX_API"]
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_API_KEY",
+          "example": "",
+          "type": "string",
+          "range": "provider API key",
+          "secret": true,
+          "redaction": "secret",
+          "enabled": false,
+          "description": "DeepSeek v4 Pro/Flash shared API key.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_BASE_URL",
+          "example": "https://api.deepseek.com",
+          "type": "URL",
+          "range": "HTTPS provider base URL",
+          "secret": false,
+          "redaction": "connection",
+          "enabled": false,
+          "description": "DeepSeek endpoint; public Flash stages retain the fixed model and max-reasoning contract.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_MODEL",
+          "example": "deepseek-v4-pro",
+          "type": "string",
+          "range": "provider model ID",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "DeepSeek v4 Pro model identifier.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_EFFORT",
+          "example": "max",
+          "type": "enum",
+          "range": "max",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "DeepSeek v4 Pro reasoning effort. Production must remain maximum.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_FLASH_MODEL",
+          "example": "deepseek-v4-flash",
+          "type": "string",
+          "range": "provider model ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek Flash model for reviewer and fixed verifier stages.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_FLASH_EFFORT",
+          "example": "max",
+          "type": "enum",
+          "range": "max",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek Flash reasoning effort. Production must remain maximum.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_OPENAI_API_KEY",
+          "example": "",
+          "type": "string",
+          "range": "OpenAI API key",
+          "secret": true,
+          "redaction": "secret",
+          "description": "OpenAI API key used through the isolated Luna broker/CLI flow.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_OPENAI_BASE_URL",
+          "example": "https://api.openai.com/v1",
+          "type": "URL",
+          "range": "OpenAI /v1 endpoint",
+          "secret": false,
+          "redaction": "none",
+          "description": "OpenAI endpoint for explicit diagnostics and evaluation; it must not substitute for Luna CLI stages.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_OPENAI_MODEL",
+          "example": "gpt-5.6-luna",
+          "type": "string",
+          "range": "pinned Luna model ID",
+          "secret": false,
+          "redaction": "none",
+          "description": "Pinned Luna model identifier.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_OPENAI_API",
+          "example": "responses",
+          "type": "enum",
+          "range": "responses",
+          "secret": false,
+          "redaction": "none",
+          "description": "OpenAI API shape used by explicit diagnostics/evaluation.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_OPENAI_REASONING_EFFORT",
+          "example": "max",
+          "type": "enum",
+          "range": "max",
+          "secret": false,
+          "redaction": "none",
+          "description": "Luna reasoning effort. Production must remain maximum.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LLM_MAX_TOTAL_MS",
+          "example": "300000",
+          "type": "integer",
+          "range": "30000..300000 ms; default 300000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Hard budget for a provider attempt. Hard timeouts are not retried.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS",
+          "example": "20000",
+          "type": "integer",
+          "range": "positive tokens; unset disables",
+          "secret": false,
+          "redaction": "none",
+          "description": "Anthropic-compatible provider thinking-token budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_OPENAI_COST_INPUT_PER_M",
+          "example": "0.2",
+          "type": "number",
+          "range": "USD / 1M input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "OpenAI input cost used in metering. Keep current with provider pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_OPENAI_COST_OUTPUT_PER_M",
+          "example": "1.2",
+          "type": "number",
+          "range": "USD / 1M output tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "OpenAI output cost used in metering. Keep current with provider pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M",
+          "example": "0.14",
+          "type": "number",
+          "range": "USD / 1M input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek Flash input pricing, verified 2026-08-01.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M",
+          "example": "0.28",
+          "type": "number",
+          "range": "USD / 1M output tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek Flash output pricing, verified 2026-08-01.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_COST_INPUT_PER_M",
+          "example": "1.4",
+          "type": "number",
+          "range": "USD / 1M input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "Legacy premium-route input pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_COST_OUTPUT_PER_M",
+          "example": "4.4",
+          "type": "number",
+          "range": "USD / 1M output tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "Legacy premium-route output pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_STANDARD_COST_INPUT_PER_M",
+          "example": "0.3",
+          "type": "number",
+          "range": "USD / 1M input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "MiniMax standard-route input pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_STANDARD_COST_OUTPUT_PER_M",
+          "example": "1.2",
+          "type": "number",
+          "range": "USD / 1M output tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "MiniMax standard-route output pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_COST_INPUT_PER_M",
+          "example": "0.435",
+          "type": "number",
+          "range": "USD / 1M input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek Pro input pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_COST_OUTPUT_PER_M",
+          "example": "0.87",
+          "type": "number",
+          "range": "USD / 1M output tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek Pro output pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "MOONSHOT_API_KEY",
+          "example": "",
+          "type": "string",
+          "range": "provider API key",
+          "secret": true,
+          "redaction": "secret",
+          "enabled": false,
+          "description": "Reserved future multi-model provider key; not wired.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ZHIPU_API_KEY",
+          "example": "",
+          "type": "string",
+          "range": "provider API key",
+          "secret": true,
+          "redaction": "secret",
+          "enabled": false,
+          "description": "Reserved future multi-model provider key; not wired.",
+          "deprecatedAliases": []
+        }
+      ]
+    },
+    {
+      "name": "Storage, queue, and operations",
+      "description": "Production uses durable storage outside the checkout and Redis with a namespaced queue. deploy-safe never modifies the immutable server environment file.",
+      "variables": [
+        {
+          "name": "STORE_PATH",
+          "example": "./.data/orvex-review.db",
+          "type": "path",
+          "range": "absolute outside checkout in production",
+          "secret": false,
+          "redaction": "path",
+          "description": "SQLite path. The relative example is local development only; production must use /home/orvex/orvex-data/velatrix-review.db or another absolute external path.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REQUIRE_DURABLE_STORAGE",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; production enables automatically",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Require an absolute durable database path outside the checkout.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_WORKER_ID",
+          "example": "",
+          "type": "string",
+          "range": "worker identity; default process PID",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Stable worker identity suffix for durable ownership/leases.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CHECKOUT_ROOT",
+          "example": "",
+          "type": "path",
+          "range": "absolute or relative root; default current directory",
+          "secret": false,
+          "redaction": "path",
+          "enabled": false,
+          "description": "Root under which temporary review checkouts may be created.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "QUEUE_BACKEND",
+          "example": "memory",
+          "type": "enum",
+          "range": "memory or redis; production defaults redis",
+          "secret": false,
+          "redaction": "none",
+          "description": "Queue implementation. Production requires Redis unless explicitly allowed for an emergency local case.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "REDIS_URL",
+          "example": "redis://127.0.0.1:6379",
+          "type": "URL",
+          "range": "Redis connection URL",
+          "secret": false,
+          "redaction": "connection",
+          "description": "Redis connection URL. It may contain credentials and is redacted in documentation/logs.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_ALLOW_MEMORY_QUEUE",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Explicit emergency allowance for memory queue in production. Avoid in normal deployments.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_QUEUE_NAMESPACE",
+          "example": "orvex-review",
+          "type": "string",
+          "range": "Redis key prefix; default orvex-review",
+          "secret": false,
+          "redaction": "none",
+          "description": "Namespace for queue keys on shared Redis. Tests use a unique namespace and never FLUSHDB.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_QUEUE_MAX_DEDUP",
+          "example": "20000",
+          "type": "integer",
+          "range": "1..1000000; default 20000",
+          "secret": false,
+          "redaction": "none",
+          "description": "In-memory development queue deduplication bound.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_RESUME_AFTER_RESTART",
+          "example": "0",
+          "type": "integer",
+          "range": "0..10; default 0",
+          "secret": false,
+          "redaction": "none",
+          "description": "Orphan review resume cap. Keep zero until durable per-stage checkpoints exist.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_JOB_RETRIES",
+          "example": "0",
+          "type": "integer",
+          "range": "0..1; default 0",
+          "secret": false,
+          "redaction": "none",
+          "description": "Automatic whole-review retry count. Keep zero because a failed ensemble can already have incurred most of its cost.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_PROVIDER_LEASE_WAIT_MS",
+          "example": "30000",
+          "type": "integer",
+          "range": "1000..3600000 ms; default 30000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Bounded provider-slot wait. Saturation fails transiently after this interval instead of holding every worker indefinitely.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SHUTDOWN_DRAIN_MS",
+          "example": "960000",
+          "type": "integer",
+          "range": "1000..86400000 ms; default 240000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Graceful shutdown drain. It must exceed ORVEX_LLM_MAX_TOTAL_MS to avoid mid-flight requeues.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SHUTDOWN_CANCEL_MS",
+          "example": "10000",
+          "type": "integer",
+          "range": "100..60000 ms; default 10000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Graceful shutdown cancellation grace period.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_CONCURRENT_REVIEWS",
+          "example": "8",
+          "type": "integer",
+          "range": "1..100; default 8",
+          "secret": false,
+          "redaction": "none",
+          "description": "Authoritative whole-review concurrency ceiling.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_APIKEY_CONCURRENCY",
+          "example": "8",
+          "type": "integer",
+          "range": "1..32; default worker concurrency",
+          "secret": false,
+          "redaction": "none",
+          "description": "API-key-authenticated Codex/Luna concurrency cap. It cannot raise the whole-review limit.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_PROVIDER_CONCURRENCY_<PROVIDER>",
+          "example": "8",
+          "type": "integer-template",
+          "range": "provider in LUNA, DEEPSEEK, MINIMAX; 1..32; defaults to the applicable worker/Codex limit",
+          "secret": false,
+          "redaction": "none",
+          "render": false,
+          "allowedValues": ["LUNA", "DEEPSEEK", "MINIMAX"],
+          "description": "Bounded provider-specific concurrency family. Supported instances are LUNA, DEEPSEEK, and MINIMAX; arbitrary names are rejected by schema drift checks.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_PROVIDER_CONCURRENCY_LUNA",
+          "example": "8",
+          "type": "integer",
+          "range": "1..32; default applicable worker/Codex limit",
+          "secret": false,
+          "redaction": "none",
+          "description": "Luna provider-stage concurrency cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK",
+          "example": "8",
+          "type": "integer",
+          "range": "1..32; default applicable worker/Codex limit",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek provider-stage concurrency cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_PROVIDER_CONCURRENCY_MINIMAX",
+          "example": "8",
+          "type": "integer",
+          "range": "1..32; default applicable worker/Codex limit",
+          "secret": false,
+          "redaction": "none",
+          "description": "MiniMax provider-stage concurrency cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MONTHLY_COGS_CAP_USD",
+          "example": "250",
+          "type": "number",
+          "range": "positive USD; default 250",
+          "secret": false,
+          "redaction": "none",
+          "description": "Monthly spend circuit breaker for non-custom plans.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_RUNNING_STALE_MS",
+          "example": "900000",
+          "type": "integer",
+          "range": "60000..86400000 ms; default 900000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Durable heartbeat staleness threshold before startup recovery interrupts a row.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LEASE_RENEW_MS",
+          "example": "300000",
+          "type": "integer",
+          "range": "10000..300000 ms; default 300000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Review-lease renewal cadence. Keep it well below the queue lease TTL.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_AGENT_ARCHIVE_MAX_BYTES",
+          "example": "150000000",
+          "type": "integer",
+          "range": "positive bytes",
+          "secret": false,
+          "redaction": "none",
+          "description": "Maximum compressed agent checkout size accepted before extraction.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FREE_TIER_DAILY_CAP",
+          "example": "300",
+          "type": "integer",
+          "range": "0..1000000; default 300",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Daily free-tier review admission cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_COGS_RESERVATION_USD",
+          "example": "5",
+          "type": "number",
+          "range": "positive USD; default 5",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Reserved review cost used by admission before provider work begins.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_STATUS_FILE",
+          "example": "/home/orvex/orvex-data/codex-auth-status",
+          "type": "path",
+          "range": "status path",
+          "secret": false,
+          "redaction": "path",
+          "enabled": false,
+          "description": "Codex authentication status file used by readiness reporting.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEPLOY_DRAIN_PATH",
+          "example": "/home/orvex/orvex-data/deploy-drain",
+          "type": "path",
+          "range": "drain marker path",
+          "secret": false,
+          "redaction": "path",
+          "enabled": false,
+          "description": "Deployment drain-marker file outside the checkout.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MONITOR_DISK_PATH",
+          "example": "",
+          "type": "path",
+          "range": "optional monitored path",
+          "secret": false,
+          "redaction": "path",
+          "enabled": false,
+          "description": "Optional disk path for operational monitoring.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_ALERT_WEBHOOK_URL",
+          "example": "",
+          "type": "URL",
+          "range": "operator webhook URL",
+          "secret": true,
+          "redaction": "connection",
+          "description": "Operator-owned alert webhook for queue, billing, and database failures.",
+          "deprecatedAliases": []
+        }
+      ]
+    },
+    {
+      "name": "Review execution and prompt budgets",
+      "description": "Limits bound time, spend, and context. Production verification remains on; max reasoning is enforced for Luna and DeepSeek.",
+      "variables": [
+        {
+          "name": "MAX_FILE_BYTES",
+          "example": "300000",
+          "type": "integer",
+          "range": "positive bytes",
+          "secret": false,
+          "redaction": "none",
+          "description": "Legacy per-file review limit.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "MAX_FILES",
+          "example": "150",
+          "type": "integer",
+          "range": "positive files",
+          "secret": false,
+          "redaction": "none",
+          "description": "Legacy maximum changed-file count.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "MAX_LLM_TOKENS",
+          "example": "50000",
+          "type": "integer",
+          "range": "positive tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "Legacy LLM token ceiling.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LLM_TIMEOUT_MS",
+          "example": "240000",
+          "type": "integer",
+          "range": "1000..900000 ms; default 240000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Per-call timeout protecting the per-PR lock from hung calls.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_RESPONSES_TIMEOUT_MS",
+          "example": "900000",
+          "type": "integer",
+          "range": "1000..900000 ms; default 900000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Responses API hard timeout.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_TEST_SHORT_TIMEOUTS",
+          "example": "1",
+          "type": "boolean",
+          "range": "test-only flag",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Shorten timeout bounds only in tests.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_OUTPUT_TOKENS",
+          "example": "64000",
+          "type": "integer",
+          "range": "positive tokens; default 64000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum LLM output token request.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_OUTPUT_TOKENS_CAP",
+          "example": "64000",
+          "type": "integer",
+          "range": "1..1000000; default 64000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Hard cap for maximum LLM output tokens.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_FINDINGS",
+          "example": "25",
+          "type": "integer",
+          "range": "1..1000; default 25",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum findings retained per review pass.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_AGENT_CTX_CHARS",
+          "example": "240000",
+          "type": "integer",
+          "range": "1..2000000 chars; default 240000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Agent review context budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_TRIGGER",
+          "example": "@orvex",
+          "type": "string",
+          "range": "GitHub comment trigger; default @orvex",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Manual review command trigger.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_INLINE_EVIDENCE_GATE",
+          "example": "0",
+          "type": "boolean",
+          "range": "0 disables; default enabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Disable inline evidence gating only for controlled experimentation.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEP_CONTEXT",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Feed repository tree and imported files to the model.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_RISK_HUNT",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Optional additive Flash risk hunt for high-risk diffs. Normal plans retain their advertised reviewer count when unset.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_INVESTIGATE",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Enable the optional high-tier investigation pass after fixed public-plan reviewers are scheduled.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_INVESTIGATE_TIER",
+          "example": "deepseek-flash",
+          "type": "enum",
+          "range": "deepseek-flash, deepseek, openai, or standard; default deepseek-flash",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "allowedValues": ["deepseek-flash", "deepseek", "openai", "standard"],
+          "description": "Explicit provider slot for the optional investigation pass; it never changes public-plan routing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_VERIFY",
+          "example": "1",
+          "type": "boolean",
+          "range": "0 disables only locally; production always enables",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Skeptical final verification stage. Production does not permit disabling it.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_VERIFY_FILE_CHARS",
+          "example": "32000",
+          "type": "integer",
+          "range": "positive chars; default 32000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Verifier per-file context budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_VERIFY_TOTAL_CHARS",
+          "example": "96000",
+          "type": "integer",
+          "range": "positive chars; default 96000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Verifier total context budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_VERIFY_BATCH_SIZE",
+          "example": "3",
+          "type": "integer",
+          "range": "positive; default 3",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Verifier candidate batch size.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_VERIFY_CONCURRENCY",
+          "example": "3",
+          "type": "integer",
+          "range": "1..8; default 3",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Verifier concurrency.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_RISK_PROBES",
+          "example": "",
+          "type": "integer",
+          "range": "0..4; unset disables",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Optional number of additional risk probes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_RISK_PROBE_SELECTIVITY",
+          "example": "2",
+          "type": "number",
+          "range": ">=1.5; default 2",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Risk-probe selection threshold.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LARGE_PR_FILES",
+          "example": "40",
+          "type": "integer",
+          "range": "positive; default 40",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Changed-file count classifying a large PR.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LARGE_PR_PATCH_CHARS",
+          "example": "150000",
+          "type": "integer",
+          "range": "positive chars; default 150000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Patch size classifying a large PR.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_BREADTH_ON",
+          "example": "deep-or-large",
+          "type": "string",
+          "range": "review breadth mode; default deep-or-large",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Condition selecting breadth/removed-behaviour review lenses.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_INVESTIGATE_MAX_STEPS",
+          "example": "8",
+          "type": "integer",
+          "range": "1..20; default 8",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum investigation-tool steps.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_INVESTIGATE_TOOL_CHARS",
+          "example": "24000",
+          "type": "integer",
+          "range": "2000..80000 chars; default 24000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Investigation-tool output budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_INVESTIGATE_FILE_BYTES",
+          "example": "250000",
+          "type": "integer",
+          "range": "positive bytes; default 250000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Largest file eligible for investigation.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REVIEW_AGGREGATION_RUNS",
+          "example": "1",
+          "type": "integer",
+          "range": "1 or measured 5..10 samples; default 1",
+          "secret": false,
+          "redaction": "none",
+          "description": "Repeated-review aggregation count. Enable 5-10 only after measuring the pinned evaluation corpus.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REVIEW_AGGREGATION_MIN_OCCURRENCES",
+          "example": "2",
+          "type": "integer",
+          "range": "positive; default 2",
+          "secret": false,
+          "redaction": "none",
+          "description": "Minimum repeated-run recurrence before a finding is kept.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REVIEW_AGGREGATION_TEMPERATURE",
+          "example": "0.2",
+          "type": "number",
+          "range": "0..1; default 0.2",
+          "secret": false,
+          "redaction": "none",
+          "description": "Repeated-run sampling temperature.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REVIEW_AGGREGATION_MAX_CANDIDATES",
+          "example": "120",
+          "type": "integer",
+          "range": "10..250; default 120",
+          "secret": false,
+          "redaction": "none",
+          "description": "Maximum candidates sent to aggregation.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_INLINE_PER_PR",
+          "example": "20",
+          "type": "integer",
+          "range": "positive comments",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Lifetime inline-comment cap per PR; remaining findings go to the summary.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_UNANCHORED_COMMENTS",
+          "example": "3",
+          "type": "integer",
+          "range": "0..50; default 3",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum summary-only comments for findings without a safe diff anchor.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_ABORT_POLL_MS",
+          "example": "5000",
+          "type": "integer",
+          "range": "1000..900000 ms; default 5000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Durable ownership and pull-request cancellation poll cadence.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REVIEW_MAX_CALLS",
+          "example": "28",
+          "type": "integer",
+          "range": "1..100; default 28",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Hard per-review provider-call budget including optional work.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REVIEW_CONCURRENCY",
+          "example": "3",
+          "type": "integer",
+          "range": "1..64; default 3",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum concurrent stages inside one review after provider admission.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SWEEP_FILE_CHARS",
+          "example": "10000",
+          "type": "integer",
+          "range": "1..200000 chars; default 10000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Per-file context cap for optional repository sweeps.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REVIEW_COOLDOWN_S",
+          "example": "120",
+          "type": "integer",
+          "range": "0..86400 seconds; default 120",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Duplicate-review cooldown per pull-request head.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_REQUEST_CHANGES",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default advisory",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Use GitHub REQUEST_CHANGES for open P1 findings.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FAIL_CHECK_ON_P1",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default advisory",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Fail the GitHub check run when P1 findings remain open.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "CHECK_RUNS_ENABLED",
+          "example": "0",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "description": "Enable GitHub check-run publishing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "SEMGREP_DISABLED",
+          "example": "0",
+          "type": "boolean",
+          "range": "1 disables; default enabled",
+          "secret": false,
+          "redaction": "none",
+          "description": "Disable Semgrep integration.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "REVIEW_API_SECRET",
+          "example": "",
+          "type": "string",
+          "range": "random bearer secret",
+          "secret": true,
+          "redaction": "secret",
+          "description": "Protects POST /review. Do not reuse as an admin secret.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_ADMIN_SECRET",
+          "example": "",
+          "type": "string",
+          "range": "random bearer secret",
+          "secret": true,
+          "redaction": "secret",
+          "description": "Separate credential for privileged plan and super-admin automation. There is no PLATFORM_SECRET fallback.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_NIGHTLY_SCANS",
+          "example": "1",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Enable scheduled nightly scanning.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_NIGHTLY_LOOKBACK_DAYS",
+          "example": "1",
+          "type": "integer",
+          "range": "1..30; default 1",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Nightly scan lookback period.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_NIGHTLY_HOUR",
+          "example": "3",
+          "type": "integer",
+          "range": "0..23; default 3",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Nightly scan hour.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_NIGHTLY_MAX_SCANS_PER_TENANT",
+          "example": "25",
+          "type": "integer",
+          "range": "1..500; default 25",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum nightly scans per tenant/day.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_COMMANDS_PER_HOUR",
+          "example": "60",
+          "type": "integer",
+          "range": "1..10000; default 60",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Autofix command rate cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_FIX_RUNS_PER_DAY",
+          "example": "30",
+          "type": "integer",
+          "range": "1..10000; default 30",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum autofix runs per day.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_FIX_TARGETS",
+          "example": "25",
+          "type": "integer",
+          "range": "1..500; default 25",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum autofix targets per run.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CTX_SOURCE",
+          "example": "100",
+          "type": "integer",
+          "range": "1..10000; default 100",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Autofix source-file context cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CTX_RELATED",
+          "example": "30",
+          "type": "integer",
+          "range": "0..10000; default 30",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Autofix related-file context cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CTX_DEPENDENTS",
+          "example": "20",
+          "type": "integer",
+          "range": "0..10000; default 20",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Autofix dependent-file context cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CTX_FILE_BYTES",
+          "example": "32000",
+          "type": "integer",
+          "range": "1..10000000 bytes; default 32000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Autofix per-file context byte cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CTX_OTHERS",
+          "example": "20",
+          "type": "integer",
+          "range": "0..10000; default 20",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Autofix other-file context cap.",
+          "deprecatedAliases": []
+        }
+      ]
+    },
+    {
+      "name": "Codex CLI and sandbox",
+      "description": "Agentic Luna execution is restricted to named trusted repositories, API-key authentication, and the internal runtime boundary. The code pins model and maximum reasoning effort.",
+      "variables": [
+        {
+          "name": "ORVEX_CODEX_CLI",
+          "example": "0",
+          "type": "boolean",
+          "range": "1 enables; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "description": "Enable the restricted Codex CLI agentic pass.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_CLI_REPOS",
+          "example": "",
+          "type": "csv",
+          "range": "explicit owner/repo names",
+          "secret": false,
+          "redaction": "none",
+          "description": "Trusted repositories allowed to run the Codex CLI. Wildcards are refused.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_HOME",
+          "example": "/home/orvex/.codex-apikey",
+          "type": "path",
+          "range": "API-key-authenticated home",
+          "secret": false,
+          "redaction": "path",
+          "enabled": false,
+          "description": "Dedicated API-key Codex home. OAuth homes are refused in production.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_HOMES",
+          "example": "",
+          "type": "csv-paths",
+          "range": "dedicated Codex homes",
+          "secret": true,
+          "redaction": "path",
+          "enabled": false,
+          "description": "Optional bounded set of dedicated Codex homes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_PROXIES",
+          "example": "",
+          "type": "csv-URLs",
+          "range": "approved proxies",
+          "secret": true,
+          "redaction": "connection",
+          "enabled": false,
+          "description": "Optional bounded set of approved Codex proxies.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_PROXY",
+          "example": "",
+          "type": "URL",
+          "range": "approved proxy URL",
+          "secret": true,
+          "redaction": "connection",
+          "enabled": false,
+          "description": "Single approved Codex proxy compatibility setting.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_CLI_PATH",
+          "example": "",
+          "type": "path",
+          "range": "pinned project-local CLI path",
+          "secret": false,
+          "redaction": "path",
+          "enabled": false,
+          "description": "Pinned local Codex CLI executable. Unpinned global binaries are refused.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_TIMEOUT_MS",
+          "example": "300000",
+          "type": "integer",
+          "range": "60000..300000 ms; default 300000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Wall-clock cap for one agentic pass.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_INACTIVITY_TIMEOUT_MS",
+          "example": "180000",
+          "type": "integer",
+          "range": "30000..ORVEX_CODEX_TIMEOUT_MS; default 180000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Stdout/stderr silence cap for one agentic pass.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS",
+          "example": "60000",
+          "type": "integer",
+          "range": "milliseconds; default 60000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Codex rate-limit retry maximum wait.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_RATELIMIT_TOTAL_WAIT_MS",
+          "example": "60000",
+          "type": "integer",
+          "range": "milliseconds; default 60000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Codex rate-limit total sleep budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_USAGE_FLOOR_INPUT",
+          "example": "50000",
+          "type": "integer",
+          "range": "positive tokens; default 50000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Conservative input-token floor for Codex usage accounting.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_USAGE_FLOOR_OUTPUT",
+          "example": "5000",
+          "type": "integer",
+          "range": "positive tokens; default 5000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Conservative output-token floor for Codex usage accounting.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_MAX_DIFF_CHARS",
+          "example": "60000",
+          "type": "integer",
+          "range": "positive chars; default 60000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Codex opening-turn diff budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_MAX_PROMPT_CHARS",
+          "example": "100000",
+          "type": "integer",
+          "range": "positive chars; default 100000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Codex opening-turn prompt budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_MAX_TREE_PATHS",
+          "example": "400",
+          "type": "integer",
+          "range": "positive; default 400",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Codex repository-tree path budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_SLIM_DIFF_CHARS",
+          "example": "30000",
+          "type": "integer",
+          "range": "positive chars; default 30000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Slim retry diff budget after a request-too-large error.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_SLIM_PROMPT_CHARS",
+          "example": "50000",
+          "type": "integer",
+          "range": "positive chars; default 50000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Slim retry prompt budget after a request-too-large error.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SANDBOX_WORKDIR_MAX_BYTES",
+          "example": "4294967296",
+          "type": "integer",
+          "range": "positive bytes; default 4 GiB",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Runtime-verification /work disk budget checked after install and between steps.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SANDBOX_SLOT_WAIT_MS",
+          "example": "600000",
+          "type": "integer",
+          "range": "milliseconds; default 600000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum wait for an internal sandbox slot.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SANDBOX_STEP_TIMEOUT_MS",
+          "example": "240000",
+          "type": "integer",
+          "range": "positive milliseconds; default 240000; maximum 900000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum duration of one internal runtime-verification step.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SANDBOX_INSTALL_TIMEOUT_MS",
+          "example": "600000",
+          "type": "integer",
+          "range": "positive milliseconds; default 600000; maximum 900000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum dependency-install duration in an internal runtime-verification sandbox.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "DOCKER_HOST",
+          "example": "unix:///run/user/<orvex-uid>/docker.sock",
+          "type": "URL",
+          "range": "rootless local Unix socket only",
+          "secret": false,
+          "redaction": "connection",
+          "enabled": false,
+          "description": "Rootless Docker socket for the internal runtime sandbox. Never use a rootful socket or remote Docker context.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "DOCKER_CONTEXT",
+          "example": "",
+          "type": "string",
+          "range": "local rootless Docker context only; default unset",
+          "secret": false,
+          "redaction": "connection",
+          "enabled": false,
+          "description": "Optional Docker context for the internal sandbox. Keep it unset unless the rootless local context is explicitly required.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODE_EXECUTION",
+          "example": "0",
+          "type": "boolean",
+          "range": "1 enables after preflight; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Enable runtime execution only after the rootless-host preflight passes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_CONTAINER_RUNTIME",
+          "example": "0",
+          "type": "boolean",
+          "range": "1 enables after internal egress preflight; default disabled",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Run agentic Codex only inside the rootless internal sandbox with the dedicated egress broker.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_SANDBOXES",
+          "example": "4",
+          "type": "integer",
+          "range": "positive; default 4; maximum 64",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Maximum concurrent internal sandbox containers.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SANDBOX_IMAGE",
+          "example": "sha256:<64-hex-local-image-id>",
+          "type": "image digest",
+          "range": "locally loaded immutable digest",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Mandatory immutable internal sandbox image. It must be preloaded into the rootless daemon.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CODEX_EGRESS_BROKER_IMAGE",
+          "example": "sha256:<64-hex-local-image-id>",
+          "type": "image digest",
+          "range": "locally loaded immutable digest",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Mandatory immutable image for the internal Codex-to-OpenAI egress broker when container runtime is enabled.",
+          "deprecatedAliases": []
+        }
+      ]
+    },
+    {
+      "name": "Retries and focused prompt limits",
+      "description": "These values bound retry delays and supporting context. The diff remains first and is fairly sampled only on oversized PRs.",
+      "variables": [
+        {
+          "name": "ORVEX_RATELIMIT_MAX_RETRIES",
+          "example": "2",
+          "type": "integer",
+          "range": "non-negative; default 2",
+          "secret": false,
+          "redaction": "none",
+          "description": "Maximum recoverable provider rate-limit retry rounds.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_RATELIMIT_MAX_WAIT_MS",
+          "example": "60000",
+          "type": "integer",
+          "range": "milliseconds; default 60000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Maximum per-rate-limit retry sleep.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_RATELIMIT_BASE_MS",
+          "example": "2000",
+          "type": "integer",
+          "range": "milliseconds; default 2000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Base retry-backoff duration.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_RATELIMIT_TOTAL_WAIT_MS",
+          "example": "60000",
+          "type": "integer",
+          "range": "milliseconds; default 60000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Total retry sleep budget per provider call.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_DIFF_CHARS",
+          "example": "96000",
+          "type": "integer",
+          "range": "positive chars; default 96000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Primary diff context budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_CHANGED_CHARS",
+          "example": "64000",
+          "type": "integer",
+          "range": "positive chars; default 64000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Changed-file supporting context budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_RELATED_CHARS",
+          "example": "24000",
+          "type": "integer",
+          "range": "positive chars; default 24000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Related-file context budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_OTHER_CHARS",
+          "example": "8000",
+          "type": "integer",
+          "range": "positive chars; default 8000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Other supporting context budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_TREE_PATHS",
+          "example": "400",
+          "type": "integer",
+          "range": "positive paths; default 400",
+          "secret": false,
+          "redaction": "none",
+          "description": "Repository-tree path budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FULL_CHANGED_FILE_CHARS",
+          "example": "12000",
+          "type": "integer",
+          "range": "positive chars; default 12000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Full changed-file context budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_CHANGED_CONTEXT_LINES",
+          "example": "32",
+          "type": "integer",
+          "range": "positive lines; default 32",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Changed-line surrounding context.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_CHANGED_CHUNKS_PER_FILE",
+          "example": "4",
+          "type": "integer",
+          "range": "positive chunks; default 4",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Changed chunks retained per file.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MAX_CHANGED_CHUNK_CHARS",
+          "example": "12000",
+          "type": "integer",
+          "range": "positive chars; default 12000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Changed chunk length budget.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS",
+          "example": "24000",
+          "type": "integer",
+          "range": "positive tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek completion token cap while maintaining maximum reasoning effort.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MINIMAX_MAX_OUTPUT_TOKENS",
+          "example": "24000",
+          "type": "integer",
+          "range": "positive tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "MiniMax completion token cap.",
+          "deprecatedAliases": []
+        }
+      ]
+    },
+    {
+      "name": "Inherited child-process environment",
+      "description": "These are copied only when already present into the tightly allowlisted environment of approved local tools. They are operating-system values, not Orvex configuration, so they are documented but not rendered into .env.example.",
+      "variables": [
+        {
+          "name": "PATH",
+          "example": "",
+          "type": "path",
+          "range": "inherited OS search path",
+          "secret": false,
+          "redaction": "path",
+          "render": false,
+          "description": "Executable search path passed to allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "HOME",
+          "example": "",
+          "type": "path",
+          "range": "inherited OS home directory",
+          "secret": false,
+          "redaction": "path",
+          "render": false,
+          "description": "Home directory inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "USER",
+          "example": "",
+          "type": "string",
+          "range": "inherited OS user",
+          "secret": false,
+          "redaction": "none",
+          "render": false,
+          "description": "User name inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "LOGNAME",
+          "example": "",
+          "type": "string",
+          "range": "inherited OS login",
+          "secret": false,
+          "redaction": "none",
+          "render": false,
+          "description": "Login name inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "LANG",
+          "example": "",
+          "type": "string",
+          "range": "inherited locale",
+          "secret": false,
+          "redaction": "none",
+          "render": false,
+          "description": "Locale inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "LC_ALL",
+          "example": "",
+          "type": "string",
+          "range": "inherited locale override",
+          "secret": false,
+          "redaction": "none",
+          "render": false,
+          "description": "Locale override inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "LC_CTYPE",
+          "example": "",
+          "type": "string",
+          "range": "inherited locale category",
+          "secret": false,
+          "redaction": "none",
+          "render": false,
+          "description": "Character-type locale inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "TERM",
+          "example": "",
+          "type": "string",
+          "range": "inherited terminal type",
+          "secret": false,
+          "redaction": "none",
+          "render": false,
+          "description": "Terminal type inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "TMPDIR",
+          "example": "",
+          "type": "path",
+          "range": "inherited temporary directory",
+          "secret": false,
+          "redaction": "path",
+          "render": false,
+          "description": "Temporary directory inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "SHELL",
+          "example": "",
+          "type": "path",
+          "range": "inherited shell path",
+          "secret": false,
+          "redaction": "path",
+          "render": false,
+          "description": "Shell path inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "SSL_CERT_FILE",
+          "example": "",
+          "type": "path",
+          "range": "inherited certificate bundle",
+          "secret": false,
+          "redaction": "path",
+          "render": false,
+          "description": "TLS certificate bundle inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "SSL_CERT_DIR",
+          "example": "",
+          "type": "path",
+          "range": "inherited certificate directory",
+          "secret": false,
+          "redaction": "path",
+          "render": false,
+          "description": "TLS certificate directory inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "NODE_EXTRA_CA_CERTS",
+          "example": "",
+          "type": "path",
+          "range": "inherited additional certificate bundle",
+          "secret": false,
+          "redaction": "path",
+          "render": false,
+          "description": "Additional TLS certificates inherited by allowlisted child processes.",
+          "deprecatedAliases": []
+        }
+      ]
+    }
+  ]
+}

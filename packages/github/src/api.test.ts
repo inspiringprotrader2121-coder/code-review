@@ -18,14 +18,20 @@ function pr(overrides: Partial<PullRequestMeta> = {}): PullRequestMeta {
 }
 
 test('a closed PR is skipped — the real incident: backlog jobs burning a full deep review on a PR closed before it ran', () => {
-  assert.equal(shouldSkipPr(pr({ state: 'closed' }), { botLogin: 'orvex-review[bot]' }), 'PR is closed');
+  assert.equal(
+    shouldSkipPr(pr({ state: 'closed' }), { botLogin: 'orvex-review[bot]' }),
+    'PR is closed',
+  );
 });
 
 test('a merged PR (GitHub reports state=closed for merged PRs too) is skipped the same way', () => {
   // GitHub's REST API has no separate "merged" state — merged PRs are state='closed'
   // with merged_at set; PullRequestMeta only tracks `state`, so this is covered
   // by the same check.
-  assert.equal(shouldSkipPr(pr({ state: 'closed' }), { botLogin: 'orvex-review[bot]' }), 'PR is closed');
+  assert.equal(
+    shouldSkipPr(pr({ state: 'closed' }), { botLogin: 'orvex-review[bot]' }),
+    'PR is closed',
+  );
 });
 
 test('an open PR is never skipped for being closed', () => {

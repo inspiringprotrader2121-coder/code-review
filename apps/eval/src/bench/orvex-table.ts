@@ -12,6 +12,12 @@ export interface OrvexTableFinding {
   message: string;
 }
 
+export interface OrvexTableParseOptions {
+  /** Benchmark scoring must fail closed rather than silently undercount a
+   * malformed confirmed-finding table. Display-only callers may opt out. */
+  strict?: boolean;
+}
+
 // Leading whitespace tolerated: GFM allows up to 3 spaces before a table, and
 // the strict `^\|` form silently returned ZERO findings for an indented table.
 const FINDING_HEADER = /^ {0,3}\|\s*Severity\s*\|\s*File\s*\|\s*Message\s*\|\s*$/i;
@@ -68,7 +74,10 @@ export function parseOrvexFileRef(ref: string): { path: string | null; line: num
   return { path: ref.trim() || null, line: null };
 }
 
-export function parseOrvexFindingTables(body: string): OrvexTableFinding[] {
+export function parseOrvexFindingTables(
+  body: string,
+  options: OrvexTableParseOptions = {},
+): OrvexTableFinding[] {
   const findings: OrvexTableFinding[] = [];
   const skipped: string[] = [];
   let inFindingTable = false;
@@ -110,11 +119,12 @@ export function parseOrvexFindingTables(body: string): OrvexTableFinding[] {
       continue;
     }
     const { path, line: lineNumber } = parseOrvexFileRef(row[2]);
-    const severity = row[1].toUpperCase() === 'P0'
-      ? 'P1'
-      : row[1].toLowerCase() === 'info'
-        ? 'info'
-        : row[1].toUpperCase() as 'P1' | 'P2' | 'P3';
+    const severity =
+      row[1].toUpperCase() === 'P0'
+        ? 'P1'
+        : row[1].toLowerCase() === 'info'
+          ? 'info'
+          : (row[1].toUpperCase() as 'P1' | 'P2' | 'P3');
     findings.push({
       path,
       line: lineNumber,
@@ -124,10 +134,9 @@ export function parseOrvexFindingTables(body: string): OrvexTableFinding[] {
   }
 
   if (skipped.length > 0) {
-    console.warn(
-      `[orvex-table] ${skipped.length} table row(s) did not parse and were skipped — ` +
-        `finding counts are UNDERSTATED: ${skipped.join(' ⏎ ')}`,
-    );
+    const detail = `[orvex-table] ${skipped.length} confirmed-finding table row(s) did not parse: ${skipped.join(' ⏎ ')}`;
+    if (options.strict) throw new Error(detail);
+    console.warn(`${detail}; finding counts are understated`);
   }
   return findings;
 }

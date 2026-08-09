@@ -15,7 +15,10 @@ test('P0 folds into P1 (top of our taxonomy)', () => {
 test('free-text severity words do NOT count — only the label region', () => {
   assert.equal(severityOf('This helper is not critical to the flow, but...'), null);
   assert.equal(severityOf('Consider whether this Bug matters. '.padStart(200, 'x ')), null);
-  assert.equal(severityOf('A long explanation of why calling this a bug would be wrong '.padEnd(200, 'y')), null);
+  assert.equal(
+    severityOf('A long explanation of why calling this a bug would be wrong '.padEnd(200, 'y')),
+    null,
+  );
 });
 
 test('label-region keywords parse (High/Medium/Low mapping)', () => {
@@ -28,7 +31,15 @@ test('label-region keywords parse (High/Medium/Low mapping)', () => {
 });
 
 test('a "Severity: X" label parses even mid-body', () => {
-  assert.equal(severityOf('Some intro text. Severity: High. More text that is long enough to pass the head window '.padEnd(200, '.')), 'P2');
+  assert.equal(
+    severityOf(
+      'Some intro text. Severity: High. More text that is long enough to pass the head window '.padEnd(
+        200,
+        '.',
+      ),
+    ),
+    'P2',
+  );
 });
 
 test('sevRank / worseSev max-fold', () => {
@@ -63,10 +74,15 @@ test('badge/table markup does not burn the 120-char head window', () => {
   // taken on the RAW body, so the severity word fell outside it and the
   // finding was recorded as `unrated` and dropped from the actionable split.
   assert.equal(
-    severityOf('<img src="https://img.shields.io/badge/critical-red.svg" alt="badge"><br/><b>Critical:</b> unbounded loop'),
+    severityOf(
+      '<img src="https://img.shields.io/badge/critical-red.svg" alt="badge"><br/><b>Critical:</b> unbounded loop',
+    ),
     'P1',
   );
-  assert.equal(severityOf('<table><tr><td>badge</td></tr></table>\n\nHigh severity: fix it.'), 'P2');
+  assert.equal(
+    severityOf('<table><tr><td>badge</td></tr></table>\n\nHigh severity: fix it.'),
+    'P2',
+  );
 });
 
 test('negated severity words are still stripped after markup removal', () => {

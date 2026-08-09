@@ -6,20 +6,45 @@ import { normalizeLlmResponse, REVIEW_INCOMPLETE_SUMMARY, runLlmReview } from '.
 test('normalizeLlmResponse maps MiniMax severity vocabulary to P-levels', () => {
   const raw = {
     findings: [
-      { file: 'a.ts', line: 1, severity: 'critical', category: 'security', message: 'rce', confidence: 0.9 },
+      {
+        file: 'a.ts',
+        line: 1,
+        severity: 'critical',
+        category: 'security',
+        message: 'rce',
+        confidence: 0.9,
+      },
       { file: 'b.ts', line: 2, severity: 'high', category: 'bug', message: 'npe', confidence: 0.8 },
-      { file: 'c.ts', line: 3, severity: 'medium', category: 'style', message: 'nit', confidence: 0.7 },
+      {
+        file: 'c.ts',
+        line: 3,
+        severity: 'medium',
+        category: 'style',
+        message: 'nit',
+        confidence: 0.7,
+      },
       { file: 'd.ts', severity: 'info', category: 'note', message: 'fyi', confidence: 0.6 },
     ],
   };
   const parsed = LlmReviewResponseSchema.parse(normalizeLlmResponse(raw));
-  assert.deepEqual(parsed.findings.map((f) => f.severity), ['P1', 'P2', 'P3', 'info']);
+  assert.deepEqual(
+    parsed.findings.map((f) => f.severity),
+    ['P1', 'P2', 'P3', 'info'],
+  );
 });
 
 test('normalizeLlmResponse accepts alternate field names', () => {
   const raw = {
     issues: [
-      { path: 'x.ts', line_number: 5, priority: 'blocker', type: 'security', description: 'bad', score: 0.95, fix: 'do this' },
+      {
+        path: 'x.ts',
+        line_number: 5,
+        priority: 'blocker',
+        type: 'security',
+        description: 'bad',
+        score: 0.95,
+        fix: 'do this',
+      },
     ],
   };
   const parsed = LlmReviewResponseSchema.parse(normalizeLlmResponse(raw));
@@ -63,10 +88,14 @@ test('an invalid discovery response is not replayed as another paid call', async
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: 'not valid json' } }] })}\n\n`),
+          encoder.encode(
+            `data: ${JSON.stringify({ choices: [{ delta: { content: 'not valid json' } }] })}\n\n`,
+          ),
         );
         controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`),
+          encoder.encode(
+            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+          ),
         );
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         controller.close();

@@ -9,8 +9,18 @@
  *   ORVEX_INSTALL_ID=144378482 BENCH_PR_LO=129 BENCH_PR_HI=138 tsx src/bench/severity-check.ts
  */
 import { createBenchmarkOctokit } from './github-auth.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { parseOrvexFindingTables } from './orvex-table.js';
-import { severityOf, sevRank as rank, isBugSev as isBug, isNitSev as isNit, sameClusterLine , isOrvexStatusComment } from './severity.js';
+import {
+  severityOf,
+  sevRank as rank,
+  isBugSev as isBug,
+  isNitSev as isNit,
+  sameClusterLine,
+  isOrvexStatusComment,
+} from './severity.js';
+import { requireLiveCaseLimit, requireLiveEvaluationControls } from '../live-controls.js';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
 const REPO = process.env.BENCH_REPO ?? 'Velatrix-Cloud';
@@ -18,52 +28,116 @@ const PR_LO = Number(process.env.BENCH_PR_LO ?? 129);
 const PR_HI = Number(process.env.BENCH_PR_HI ?? 138);
 
 const LOGIN_MAP: Record<string, string> = {
-  'orvex-review[bot]': 'orvex', 'chatgpt-codex-connector[bot]': 'codex', 'chatgpt-codex-connector': 'codex',
-  'qodo-code-review[bot]': 'qodo', 'coderabbitai[bot]': 'coderabbit', 'gitar-bot[bot]': 'gitar', 'greptile-apps[bot]': 'greptile',
+  'orvex-review[bot]': 'orvex',
+  'chatgpt-codex-connector[bot]': 'codex',
+  'chatgpt-codex-connector': 'codex',
+  'qodo-code-review[bot]': 'qodo',
+  'coderabbitai[bot]': 'coderabbit',
+  'gitar-bot[bot]': 'gitar',
+  'greptile-apps[bot]': 'greptile',
 };
-const botOf = (l: string) => LOGIN_MAP[l] ?? (/gitar/i.test(l) ? 'gitar' : /greptile/i.test(l) ? 'greptile' : /qodo/i.test(l) ? 'qodo' : /coderabbit/i.test(l) ? 'coderabbit' : null);
+const botOf = (l: string) =>
+  LOGIN_MAP[l] ??
+  (/gitar/i.test(l)
+    ? 'gitar'
+    : /greptile/i.test(l)
+      ? 'greptile'
+      : /qodo/i.test(l)
+        ? 'qodo'
+        : /coderabbit/i.test(l)
+          ? 'coderabbit'
+          : null);
 const isOrvexStatus = (b: string) => isOrvexStatusComment(b);
 
 /** Anchored severity parse (label region, not free text) — shared module. */
 const sevOf = severityOf;
 
-interface F { pr: number; bot: string; path: string | null; line: number | null; sev: string | null; text: string; }
+interface F {
+  pr: number;
+  bot: string;
+  path: string | null;
+  line: number | null;
+  sev: string | null;
+  text: string;
+}
 
 async function main() {
+  const controls = requireLiveEvaluationControls();
+  requireLiveCaseLimit(PR_HI - PR_LO + 1);
   const octokit = await createBenchmarkOctokit(OWNER, REPO);
   const findings: F[] = [];
 
   for (let pr = PR_LO; pr <= PR_HI; pr++) {
     const [rc, rv] = await Promise.all([
-      octokit.paginate(octokit.rest.pulls.listReviewComments, { owner: OWNER, repo: REPO, pull_number: pr, per_page: 100 }),
-      octokit.paginate(octokit.rest.pulls.listReviews, { owner: OWNER, repo: REPO, pull_number: pr, per_page: 100 }),
+      octokit.paginate(octokit.rest.pulls.listReviewComments, {
+        owner: OWNER,
+        repo: REPO,
+        pull_number: pr,
+        per_page: 100,
+      }),
+      octokit.paginate(octokit.rest.pulls.listReviews, {
+        owner: OWNER,
+        repo: REPO,
+        pull_number: pr,
+        per_page: 100,
+      }),
     ]);
     for (const c of rc) {
       const bot = botOf(c.user?.login ?? '');
       if (!bot) continue;
       const body = c.body ?? '';
       if (bot === 'orvex' && isOrvexStatus(body)) continue;
-      findings.push({ pr, bot, path: c.path ?? null, line: c.line ?? c.original_line ?? null, sev: sevOf(body), text: body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 120) });
+      findings.push({
+        pr,
+        bot,
+        path: c.path ?? null,
+        line: c.line ?? c.original_line ?? null,
+        sev: sevOf(body),
+        text: body
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .slice(0, 120),
+      });
     }
     // Orvex severities live in its confirmed summary tables + collapsed nitpicks section.
     for (const r of rv) {
       if (botOf(r.user?.login ?? '') !== 'orvex') continue;
-      for (const finding of parseOrvexFindingTables(r.body ?? '')) {
-        findings.push({ pr, bot: 'orvex', path: finding.path, line: finding.line, sev: finding.severity, text: finding.message.slice(0, 120) });
+      for (const finding of parseOrvexFindingTables(r.body ?? '', { strict: true })) {
+        findings.push({
+          pr,
+          bot: 'orvex',
+          path: finding.path,
+          line: finding.line,
+          sev: finding.severity,
+          text: finding.message.slice(0, 120),
+        });
       }
     }
   }
 
   // cluster by pr+file+line(±5); unanchored (null-line) findings only cluster
   // within the SAME bot — cross-tool null==null merged unrelated defects.
-  interface C { pr: number; path: string | null; line: number | null; orvex: F | null; comps: F[]; }
+  interface C {
+    pr: number;
+    path: string | null;
+    line: number | null;
+    orvex: F | null;
+    comps: F[];
+  }
   const clusters: C[] = [];
   for (const f of findings) {
-    const sameBot = (c: C) => (f.bot === 'orvex' ? c.orvex !== null : c.comps.some((x) => x.bot === f.bot));
-    let hit = clusters.find((c) => c.pr === f.pr && c.path === f.path && sameClusterLine(c.line, f.line, sameBot(c)));
-    if (!hit) { hit = { pr: f.pr, path: f.path, line: f.line, orvex: null, comps: [] }; clusters.push(hit); }
-    if (f.bot === 'orvex') { if (!hit.orvex || rank(f.sev) > rank(hit.orvex.sev)) hit.orvex = f; }
-    else hit.comps.push(f);
+    const sameBot = (c: C) =>
+      f.bot === 'orvex' ? c.orvex !== null : c.comps.some((x) => x.bot === f.bot);
+    let hit = clusters.find(
+      (c) => c.pr === f.pr && c.path === f.path && sameClusterLine(c.line, f.line, sameBot(c)),
+    );
+    if (!hit) {
+      hit = { pr: f.pr, path: f.path, line: f.line, orvex: null, comps: [] };
+      clusters.push(hit);
+    }
+    if (f.bot === 'orvex') {
+      if (!hit.orvex || rank(f.sev) > rank(hit.orvex.sev)) hit.orvex = f;
+    } else hit.comps.push(f);
   }
 
   // Orvex severity distribution
@@ -73,10 +147,18 @@ async function main() {
   const nitRate = orvexTotal ? Math.round(((dist.P3 + dist.info) / orvexTotal) * 100) : 0;
 
   console.log(`\nSeverity-integrity audit — ${OWNER}/${REPO} #${PR_LO}-#${PR_HI}\n`);
-  console.log(`Orvex severity DISTRIBUTION: P1=${dist.P1} P2=${dist.P2} P3=${dist.P3} info=${dist.info} unknown=${dist.unknown}`);
-  console.log(`  → P3+info share = ${nitRate}% of findings. NOTE: this is a distribution, NOT a noise/annoyance`);
-  console.log(`     rate — P3/info are already COLLAPSED out of inline comments (filter.ts), shown folded in`);
-  console.log(`     the summary. Whether they're USEFUL vs noise needs real signals (ignored / reaction /`);
+  console.log(
+    `Orvex severity DISTRIBUTION: P1=${dist.P1} P2=${dist.P2} P3=${dist.P3} info=${dist.info} unknown=${dist.unknown}`,
+  );
+  console.log(
+    `  → P3+info share = ${nitRate}% of findings. NOTE: this is a distribution, NOT a noise/annoyance`,
+  );
+  console.log(
+    `     rate — P3/info are already COLLAPSED out of inline comments (filter.ts), shown folded in`,
+  );
+  console.log(
+    `     the summary. Whether they're USEFUL vs noise needs real signals (ignored / reaction /`,
+  );
   console.log(`     accepted-fix / code-changed), not this count.\n`);
 
   const compBug = (c: C) => c.comps.filter((x) => isBug(x.sev));
@@ -84,26 +166,75 @@ async function main() {
 
   // 1) UNDER-SEVERITY: Orvex nitpicked (P3/info) something ≥1 competitor called a bug (P1/P2)
   const under = clusters.filter((c) => c.orvex && isNit(c.orvex.sev) && compBug(c).length > 0);
-  console.log(`──────── ⚠️ UNDER-SEVERITY: Orvex NITPICKED a bug a competitor flagged P1/P2 (${under.length}) ────────`);
-  if (!under.length) console.log('  ✅ none — Orvex is not burying competitor-confirmed bugs in nitpicks');
+  console.log(
+    `──────── ⚠️ UNDER-SEVERITY: Orvex NITPICKED a bug a competitor flagged P1/P2 (${under.length}) ────────`,
+  );
+  if (!under.length)
+    console.log('  ✅ none — Orvex is not burying competitor-confirmed bugs in nitpicks');
   for (const c of under.sort((a, b) => a.pr - b.pr)) {
-    const who = compBug(c).map((x) => `${x.bot}:${x.sev}`).join(',');
-    console.log(`  #${c.pr} ${c.path}:${c.line} — Orvex ${c.orvex!.sev} vs [${who}] :: ${c.orvex!.text}`);
+    const who = compBug(c)
+      .map((x) => `${x.bot}:${x.sev}`)
+      .join(',');
+    console.log(
+      `  #${c.pr} ${c.path}:${c.line} — Orvex ${c.orvex!.sev} vs [${who}] :: ${c.orvex!.text}`,
+    );
   }
 
   // 2) OVER-SEVERITY: Orvex P1/P2 where EVERY competitor who flagged it rated P3/info (crying wolf on severity)
-  const over = clusters.filter((c) => c.orvex && isBug(c.orvex.sev) && c.comps.length > 0 && compMax(c) <= 1);
-  console.log(`\n──────── ⚠️ OVER-SEVERITY: Orvex rated P1/P2 but all competitors nitpicked it (${over.length}) ────────`);
+  const over = clusters.filter(
+    (c) => c.orvex && isBug(c.orvex.sev) && c.comps.length > 0 && compMax(c) <= 1,
+  );
+  console.log(
+    `\n──────── ⚠️ OVER-SEVERITY: Orvex rated P1/P2 but all competitors nitpicked it (${over.length}) ────────`,
+  );
   if (!over.length) console.log('  ✅ none — Orvex is not inflating nitpicks into bugs');
   for (const c of over.sort((a, b) => a.pr - b.pr)) {
     const who = c.comps.map((x) => `${x.bot}:${x.sev ?? '?'}`).join(',');
-    console.log(`  #${c.pr} ${c.path}:${c.line} — Orvex ${c.orvex!.sev} vs [${who}] :: ${c.orvex!.text}`);
+    console.log(
+      `  #${c.pr} ${c.path}:${c.line} — Orvex ${c.orvex!.sev} vs [${who}] :: ${c.orvex!.text}`,
+    );
   }
 
   // 3) agreement sanity: Orvex bug + a competitor bug at the same spot
-  const agree = clusters.filter((c) => c.orvex && isBug(c.orvex.sev) && compBug(c).length > 0).length;
-  console.log(`\n──────── AGREEMENT: Orvex P1/P2 corroborated by a competitor P1/P2: ${agree} ────────`);
-  console.log('\n(Coverage/who-caught-what is competitors.ts; this audit is specifically about Orvex severity bucketing.)');
+  const agree = clusters.filter(
+    (c) => c.orvex && isBug(c.orvex.sev) && compBug(c).length > 0,
+  ).length;
+  console.log(
+    `\n──────── AGREEMENT: Orvex P1/P2 corroborated by a competitor P1/P2: ${agree} ────────`,
+  );
+  console.log(
+    '\n(Coverage/who-caught-what is competitors.ts; this audit is specifically about Orvex severity bucketing.)',
+  );
+  mkdirSync(path.dirname(controls.resultFile), { recursive: true });
+  writeFileSync(
+    controls.resultFile,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        kind: 'orvex-severity-audit',
+        createdAt: new Date().toISOString(),
+        prRange: [PR_LO, PR_HI],
+        declaredBudgetUsd: controls.declaredBudgetUsd,
+        maxRequests: controls.maxRequests,
+        usedRequests: 0,
+        operations: [],
+        qualityClaimEligible: false,
+        note: 'GitHub metadata audit only; it makes no provider requests and produces no precision or recall metric.',
+      },
+      null,
+      2,
+    )}\n`,
+    { encoding: 'utf8', flag: 'wx' },
+  );
+  console.log(`provenance record: ${controls.resultFile}`);
 }
 
-main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+const entrypoint = process.argv[1];
+if (entrypoint && import.meta.url === new URL(`file://${entrypoint}`).href) {
+  main()
+    .then(() => process.exit(0))
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
+}

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { planFeatures, publicPlanLabel, PLANS, isPlanId, defaultPlanId } from './plans.js';
+import { loadTenantRuntimeConfig } from './config.js';
 
 test('model tiers: volume plans use the dual-model track; Verify plans and Enterprise use multi-model', () => {
   assert.equal(planFeatures('free').modelTier, 'dual-model');
@@ -12,7 +13,14 @@ test('model tiers: volume plans use the dual-model track; Verify plans and Enter
 });
 
 test('each plan uses its configured pass count with shared retrieval and strict verification', () => {
-  for (const p of ['free', 'review', 'review-plus', 'verify-lite', 'verify', 'enterprise'] as const) {
+  for (const p of [
+    'free',
+    'review',
+    'review-plus',
+    'verify-lite',
+    'verify',
+    'enterprise',
+  ] as const) {
     const expected = planFeatures(p).modelTier === 'multi-model' ? 4 : 2;
     assert.equal(planFeatures(p).reviewPasses, expected, `${p} runs its full pipeline`);
     assert.equal(planFeatures(p).retrievalTopK, 28, `${p} gets the same retrieval depth`);
@@ -23,7 +31,14 @@ test('each plan uses its configured pass count with shared retrieval and strict 
 });
 
 test('every plan shares autofix and runtime-verification capability', () => {
-  for (const p of ['free', 'review', 'review-plus', 'verify-lite', 'verify', 'enterprise'] as const) {
+  for (const p of [
+    'free',
+    'review',
+    'review-plus',
+    'verify-lite',
+    'verify',
+    'enterprise',
+  ] as const) {
     assert.equal(planFeatures(p).autofix, true, `${p} gets autofix`);
     assert.equal(planFeatures(p).codeExecution, true, `${p} gets sandbox code execution`);
   }
@@ -42,7 +57,11 @@ test('nightly scans are the ONE deliberate exception: paid tiers only, never the
   // Unlike every other feature, scheduled scans are NOT counted against
   // trialReviewLimit or any other cap — an unbounded daily job per repo,
   // forever. Enabling that for an unpaid account would be a real cost bug.
-  assert.equal(planFeatures('free').nightlyScans, false, 'free trial excluded — unbounded-cost risk');
+  assert.equal(
+    planFeatures('free').nightlyScans,
+    false,
+    'free trial excluded — unbounded-cost risk',
+  );
   assert.equal(planFeatures('review').nightlyScans, true);
   assert.equal(planFeatures('review-plus').nightlyScans, true);
   assert.equal(planFeatures('verify-lite').nightlyScans, true);
@@ -78,9 +97,13 @@ test('pricing structure: Starter/Verify use included + prepaid overage; Pro/Ente
   assert.equal(planFeatures('verify-lite').overageCentsPerReview, 75);
   assert.equal(planFeatures('verify').includedReviewsPerMonth, 120);
   assert.equal(planFeatures('verify').reviewsPerMonth, 1000);
-  assert.equal(planFeatures('verify').overageCentsPerReview, 75);
+  assert.equal(planFeatures('verify').overageCentsPerReview, 150);
   for (const id of ['review', 'review-plus', 'verify-lite', 'verify', 'enterprise'] as const) {
-    assert.notEqual(planFeatures(id).reviewsPerMonth, null, `${id} must have a monthly safety ceiling`);
+    assert.notEqual(
+      planFeatures(id).reviewsPerMonth,
+      null,
+      `${id} must have a monthly safety ceiling`,
+    );
   }
   assert.equal(planFeatures('enterprise').reviewsPerMonth, 2000);
   assert.equal(planFeatures('free').reviewsPerHour, 2);
@@ -130,7 +153,10 @@ test('isPlanId guards billing input', () => {
 test('priority increases with tier (queue fairness)', () => {
   assert.ok(PLANS.verify.priority > PLANS.review.priority);
   assert.ok(PLANS.enterprise.priority > PLANS.verify.priority);
-  assert.ok(PLANS['verify-lite'].priority >= PLANS.review.priority, 'premium track prioritized over entry dual-model');
+  assert.ok(
+    PLANS['verify-lite'].priority >= PLANS.review.priority,
+    'premium track prioritized over entry dual-model',
+  );
 });
 
 test('enterprise remains supported internally but is not exposed by customer-facing labels', () => {
@@ -142,12 +168,8 @@ test('prototype keys are NOT plans (Object.hasOwn, not `in`)', () => {
   for (const bad of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
     assert.equal(planFeatures(bad).id, 'free', `${bad} must fall through to the free plan`);
   }
-  const prev = process.env.ORVEX_DEFAULT_PLAN;
-  process.env.ORVEX_DEFAULT_PLAN = 'constructor';
-  try {
-    assert.equal(defaultPlanId(), 'free');
-  } finally {
-    if (prev === undefined) delete process.env.ORVEX_DEFAULT_PLAN;
-    else process.env.ORVEX_DEFAULT_PLAN = prev;
-  }
+  assert.equal(
+    defaultPlanId(loadTenantRuntimeConfig({ ORVEX_DEFAULT_PLAN: 'constructor' })),
+    'free',
+  );
 });

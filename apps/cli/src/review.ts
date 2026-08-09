@@ -8,7 +8,13 @@ import {
   getInstallationIdForRepo,
   parseRepoSlug,
 } from '@orvex-review/github';
-import { enqueueManualReview, startWorkerLoop } from '@orvex-review/server/queue-runner';
+import {
+  enqueueManualReview,
+  bindWorkerRuntime,
+  createWorkerDatabase,
+  loadServerRuntimeConfig,
+  startWorkerLoop,
+} from '@orvex-review/server/queue-runner';
 import { loadWorkerConfig, processReviewJob } from '@orvex-review/server/worker';
 
 const { values, positionals } = parseArgs({
@@ -42,8 +48,10 @@ if (!values.pr || Number.isNaN(prNumber)) {
 const { owner, repo } = parseRepoSlug(values.repo!);
 
 async function main() {
+  const runtime = loadServerRuntimeConfig();
+  const db = createWorkerDatabase(runtime);
   if (values.sync) {
-    const config = loadWorkerConfig();
+    const config = bindWorkerRuntime(loadWorkerConfig(db), runtime);
     const installationId = await getInstallationIdForRepo(config.github, owner, repo);
     const installation = config.store.getInstallation(installationId);
     if (!installation || installation.suspendedAt) {
@@ -68,9 +76,9 @@ async function main() {
     return;
   }
 
-  const queue = createReviewQueue();
-  const stop = startWorkerLoop(queue);
-  const job = await enqueueManualReview(queue, { owner, repo, pr: prNumber });
+  const queue = createReviewQueue(runtime.queue);
+  const stop = startWorkerLoop(queue, { config: runtime, db });
+  const job = await enqueueManualReview(queue, { owner, repo, pr: prNumber }, db);
   console.log(`Enqueued ${owner}/${repo}#${prNumber} @ ${job.headSha.slice(0, 7)}`);
 
   const deadline = Date.now() + 180_000;
@@ -79,6 +87,7 @@ async function main() {
   }
   await stop();
   await queue.close();
+  db.close();
 }
 
 main().catch((err) => {

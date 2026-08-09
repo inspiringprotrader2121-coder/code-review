@@ -11,23 +11,24 @@ import {
   hashPassword,
   hashRecoveryCode,
 } from '@orvex-review/tenants';
+import { testAppDatabase, testServerConfig } from '../bootstrap/test-config.js';
 
 test('password login requires optional MFA and a super-admin session unlocks the admin page', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-mfa-route-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   process.env.STORE_PATH = path.join(dir, 'app.db');
-  process.env.PLATFORM_SECRET = 'test-platform-secret-that-is-not-used-in-production';
   process.env.APP_URL = 'https://example.test';
   process.env.ORVEX_REQUIRE_LOGIN = '1';
   const password = 'Test-only-password-42!';
 
-  const [{ createAppDatabase }, { sessionRoutes }, { superadminRoutes }, { securityRoutes }] = await Promise.all([
-    import('@orvex-review/store'),
+  const [{ sessionRoutes }, { superadminRoutes }, { securityRoutes }] = await Promise.all([
     import('./session.js'),
     import('./superadmin.js'),
     import('./security.js'),
   ]);
-  const db = createAppDatabase();
+  const config = testServerConfig();
+  const db = testAppDatabase();
+  const routeDependencies = { db, config };
   const user = db.upsertPasswordUser({
     email: 'admin@example.test',
     passwordHash: hashPassword(password),
@@ -35,13 +36,13 @@ test('password login requires optional MFA and a super-admin session unlocks the
   const secret = generateTotpSecret();
   const recoveryCode = 'ABCD-EF01-2345-6789';
   const disableRecoveryCode = '9876-5432-10FE-DCBA';
-  db.setPendingTotpSecret(user.id, encryptTotpSecret(secret, process.env.PLATFORM_SECRET));
+  db.setPendingTotpSecret(user.id, encryptTotpSecret(secret, config.platformSecret));
   db.enableTotp(user.id, [
-    hashRecoveryCode(user.id, recoveryCode, process.env.PLATFORM_SECRET),
-    hashRecoveryCode(user.id, disableRecoveryCode, process.env.PLATFORM_SECRET),
+    hashRecoveryCode(user.id, recoveryCode, config.platformSecret),
+    hashRecoveryCode(user.id, disableRecoveryCode, config.platformSecret),
   ]);
 
-  const sessions = sessionRoutes();
+  const sessions = sessionRoutes(routeDependencies);
   const csrfDenied = await sessions.request('/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-real-ip': '192.0.2.10' },
@@ -51,7 +52,10 @@ test('password login requires optional MFA and a super-admin session unlocks the
   const passwordResponse = await submitLogin(sessions, password, '192.0.2.10', '/superadmin');
   assert.equal(passwordResponse.status, 302);
   assert.equal(passwordResponse.headers.get('location'), '/auth/2fa');
-  const challengeCookie = cookiePair(passwordResponse.headers.get('set-cookie'), 'orvex_mfa_challenge');
+  const challengeCookie = cookiePair(
+    passwordResponse.headers.get('set-cookie'),
+    'orvex_mfa_challenge',
+  );
   assert.ok(challengeCookie);
   assert.doesNotMatch(passwordResponse.headers.get('set-cookie') ?? '', /orvex_session=/);
 
@@ -68,9 +72,13 @@ test('password login requires optional MFA and a super-admin session unlocks the
   assert.equal(mfaResponse.headers.get('location'), '/superadmin');
   let activeSessionCookie = cookiePair(mfaResponse.headers.get('set-cookie'), 'orvex_session');
   assert.ok(activeSessionCookie);
-  assert.equal(db.getUserSecurity(user.id).recoveryCodeHashes.length, 1, 'recovery code was consumed');
+  assert.equal(
+    db.getUserSecurity(user.id).recoveryCodeHashes.length,
+    1,
+    'recovery code was consumed',
+  );
 
-  const admin = superadminRoutes();
+  const admin = superadminRoutes(routeDependencies);
   const denied = await admin.request('/superadmin', { headers: { cookie: activeSessionCookie } });
   assert.equal(denied.status, 403);
   db.setUserSuperAdmin(user.id, true);
@@ -78,12 +86,18 @@ test('password login requires optional MFA and a super-admin session unlocks the
   assert.equal(allowed.status, 200);
   assert.match(await allowed.text(), /Super Admin/);
 
-  const security = securityRoutes();
-  const settings = await security.request('/settings/security', { headers: { cookie: activeSessionCookie } });
+  const security = securityRoutes(routeDependencies);
+  const settings = await security.request('/settings/security', {
+    headers: { cookie: activeSessionCookie },
+  });
   assert.equal(settings.status, 200);
   const settingsHtml = await settings.text();
   assert.match(settingsHtml, /two-factor authentication is enabled/i);
-  assert.match(settingsHtml, /id="regen-password"/, 'recovery-code regeneration requires the current password');
+  assert.match(
+    settingsHtml,
+    /id="regen-password"/,
+    'recovery-code regeneration requires the current password',
+  );
   const csrf = settingsHtml.match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf);
 
@@ -104,7 +118,9 @@ test('password login requires optional MFA and a super-admin session unlocks the
   assert.ok(activeSessionCookie, 'disabling MFA rotates the current session');
   assert.equal(db.getSessionUser(sessionBeforeDisable), null);
 
-  const disabledSettings = await security.request('/settings/security', { headers: { cookie: activeSessionCookie } });
+  const disabledSettings = await security.request('/settings/security', {
+    headers: { cookie: activeSessionCookie },
+  });
   const disabledHtml = await disabledSettings.text();
   const setupCsrf = disabledHtml.match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(setupCsrf);
@@ -127,7 +143,11 @@ test('password login requires optional MFA and a super-admin session unlocks the
   });
   assert.equal(start.status, 302);
   assert.equal(start.headers.get('location'), '/settings/security/totp/setup');
-  assert.equal(db.getUserSecurity(user.id).totpEnabled, false, 'starting enrollment does not enable MFA');
+  assert.equal(
+    db.getUserSecurity(user.id).totpEnabled,
+    false,
+    'starting enrollment does not enable MFA',
+  );
 
   const getStartWithPending = await security.request('/settings/security/totp/start', {
     headers: { cookie: activeSessionCookie },
@@ -136,7 +156,9 @@ test('password login requires optional MFA and a super-admin session unlocks the
   assert.equal(getStartWithPending.headers.get('location'), '/settings/security/totp/setup');
   const pendingAfterGet = db.getUserSecurity(user.id).totpSecretEncrypted;
   assert.ok(pendingAfterGet);
-  const setup = await security.request('/settings/security/totp/setup', { headers: { cookie: activeSessionCookie } });
+  const setup = await security.request('/settings/security/totp/setup', {
+    headers: { cookie: activeSessionCookie },
+  });
   assert.equal(setup.status, 200);
   const setupHtml = await setup.text();
   assert.match(setupHtml, /data:image\/png;base64,/);
@@ -146,7 +168,7 @@ test('password login requires optional MFA and a super-admin session unlocks the
   assert.ok(verifyCsrf);
   const pendingEncrypted = db.getUserSecurity(user.id).totpSecretEncrypted;
   const pendingSecret = pendingEncrypted
-    ? decryptTotpSecret(pendingEncrypted, process.env.PLATFORM_SECRET)
+    ? decryptTotpSecret(pendingEncrypted, config.platformSecret)
     : null;
   assert.ok(pendingSecret);
   const enrollmentToken = await generate({ secret: pendingSecret });
@@ -157,7 +179,11 @@ test('password login requires optional MFA and a super-admin session unlocks the
     body: new URLSearchParams({ csrf: verifyCsrf, code: enrollmentToken }),
   });
   assert.equal(missingPassword.status, 302);
-  assert.equal(db.getUserSecurity(user.id).totpEnabled, false, 'MFA cannot be enabled from only a stolen session');
+  assert.equal(
+    db.getUserSecurity(user.id).totpEnabled,
+    false,
+    'MFA cannot be enabled from only a stolen session',
+  );
 
   const stolenSession = db.createSession(user.id);
   const sessionBeforeEnable = cookieValue(activeSessionCookie);
@@ -177,17 +203,28 @@ test('password login requires optional MFA and a super-admin session unlocks the
   const enrollmentReplayChallenge = await loginForMfa(sessions, password);
   const enrollmentReplay = await sessions.request('/auth/2fa', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: enrollmentReplayChallenge, 'x-real-ip': '192.0.2.11' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: enrollmentReplayChallenge,
+      'x-real-ip': '192.0.2.11',
+    },
     body: new URLSearchParams({ code: enrollmentToken }),
   });
   assert.equal(enrollmentReplay.status, 302);
   assert.equal(enrollmentReplay.headers.get('location'), '/auth/2fa?error=1');
 
-  const freshToken = await generate({ secret: pendingSecret, epoch: Math.floor(Date.now() / 1000) + 30 });
+  const freshToken = await generate({
+    secret: pendingSecret,
+    epoch: Math.floor(Date.now() / 1000) + 30,
+  });
   const firstChallenge = await loginForMfa(sessions, password);
   const accepted = await sessions.request('/auth/2fa', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: firstChallenge, 'x-real-ip': '192.0.2.11' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: firstChallenge,
+      'x-real-ip': '192.0.2.11',
+    },
     body: new URLSearchParams({ code: freshToken }),
   });
   assert.equal(accepted.status, 302);
@@ -221,7 +258,11 @@ test('password login requires optional MFA and a super-admin session unlocks the
   const replayChallenge = await loginForMfa(sessions, password);
   const replay = await sessions.request('/auth/2fa', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: replayChallenge, 'x-real-ip': '192.0.2.11' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: replayChallenge,
+      'x-real-ip': '192.0.2.11',
+    },
     body: new URLSearchParams({ code: freshToken }),
   });
   assert.equal(replay.status, 302);
@@ -233,19 +274,35 @@ test('password login requires optional MFA and a super-admin session unlocks the
     const cookie = await loginForMfa(sessions, password);
     const response = await sessions.request('/auth/2fa', {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', cookie, 'x-real-ip': '192.0.2.12' },
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        cookie,
+        'x-real-ip': '192.0.2.12',
+      },
       body: new URLSearchParams({ code: 'not-a-code' }),
     });
     assert.equal(response.status, attempt <= 5 ? 302 : 429, `attempt ${attempt}`);
   }
 
   for (let attempt = 1; attempt <= 6; attempt += 1) {
-    const response = await submitLogin(sessions, 'wrong-password', `198.51.100.${attempt}`, '/superadmin');
-    assert.equal(response.status, attempt <= 5 ? 302 : 429, `distributed password attempt ${attempt}`);
+    const response = await submitLogin(
+      sessions,
+      'wrong-password',
+      `198.51.100.${attempt}`,
+      '/superadmin',
+    );
+    assert.equal(
+      response.status,
+      attempt <= 5 ? 302 : 429,
+      `distributed password attempt ${attempt}`,
+    );
   }
 });
 
-async function loginForMfa(app: ReturnType<(typeof import('./session.js'))['sessionRoutes']>, password: string): Promise<string> {
+async function loginForMfa(
+  app: ReturnType<(typeof import('./session.js'))['sessionRoutes']>,
+  password: string,
+): Promise<string> {
   const response = await submitLogin(app, password, '192.0.2.12', '/superadmin');
   assert.equal(response.status, 302);
   assert.equal(response.headers.get('location'), '/auth/2fa');
@@ -269,7 +326,11 @@ async function submitLogin(
   assert.ok(csrf && csrfCookie);
   return app.request('/auth/login', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: csrfCookie, 'x-real-ip': ip },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: csrfCookie,
+      'x-real-ip': ip,
+    },
     body: new URLSearchParams({ email: 'admin@example.test', password, next, csrf }),
   });
 }

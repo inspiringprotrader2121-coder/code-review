@@ -26,7 +26,9 @@ export function createCappedArchiveStream(
     throw new Error(`invalid archive byte cap: ${String(maxBytes)}`);
   }
   const idleTimeoutMs =
-    opts.idleTimeoutMs !== undefined && Number.isFinite(opts.idleTimeoutMs) && opts.idleTimeoutMs > 0
+    opts.idleTimeoutMs !== undefined &&
+    Number.isFinite(opts.idleTimeoutMs) &&
+    opts.idleTimeoutMs > 0
       ? Math.floor(opts.idleTimeoutMs)
       : 120_000;
 
@@ -39,7 +41,10 @@ export function createCappedArchiveStream(
     source = Readable.fromWeb(data as ReadableStream<Uint8Array>);
   } else if (data && typeof (data as { pipe?: unknown }).pipe === 'function') {
     source = data as Readable;
-  } else if (data && typeof (data as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function') {
+  } else if (
+    data &&
+    typeof (data as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function'
+  ) {
     source = Readable.from(data as AsyncIterable<Uint8Array>);
   } else {
     throw new Error('GitHub archive response was not a readable body');

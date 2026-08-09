@@ -35,11 +35,21 @@ function fakeOctokit(tarball: Buffer, getContentBody?: string) {
   return {
     rest: {
       repos: {
-        downloadTarballArchive: async () => ({ data: tarball.buffer.slice(tarball.byteOffset, tarball.byteOffset + tarball.byteLength) }),
+        downloadTarballArchive: async () => ({
+          data: tarball.buffer.slice(tarball.byteOffset, tarball.byteOffset + tarball.byteLength),
+        }),
         getContent: async () =>
           getContentBody !== undefined
-            ? { data: { type: 'file', content: Buffer.from(getContentBody, 'utf8').toString('base64'), encoding: 'base64' } }
-            : (() => { throw new Error('getContent not stubbed'); })(),
+            ? {
+                data: {
+                  type: 'file',
+                  content: Buffer.from(getContentBody, 'utf8').toString('base64'),
+                  encoding: 'base64',
+                },
+              }
+            : (() => {
+                throw new Error('getContent not stubbed');
+              })(),
       },
     },
     // paginate isn't used on the snapshot path
@@ -52,7 +62,9 @@ test('fetchRepoSnapshot DROPS a >120KB file at the default cap but KEEPS it when
   assert.equal(atDefault.has('src/big.ts'), false, 'big file dropped at 120KB default');
   assert.equal(atDefault.has('src/small.ts'), true);
 
-  const raised = await fetchRepoSnapshot(fakeOctokit(tarball), 'o', 'r', 'sha', { maxFileBytes: 250_000 });
+  const raised = await fetchRepoSnapshot(fakeOctokit(tarball), 'o', 'r', 'sha', {
+    maxFileBytes: 250_000,
+  });
   assert.equal(raised.has('src/big.ts'), true, 'big file kept when cap raised to 250KB');
   assert.ok((raised.get('src/big.ts') ?? '').length > 120_000, 'full content retained');
 });
@@ -65,16 +77,26 @@ test('buildRepoContext gives a changed >120KB file its FULL content (via the rai
   });
   const changed = ctx.changedContents.find((f) => f.path === 'src/big.ts');
   assert.ok(changed, 'changed large file must be present in context, not dropped');
-  assert.ok(changed!.content.length > 120_000, 'changed large file has full content, not null/truncated');
+  assert.ok(
+    changed!.content.length > 120_000,
+    'changed large file has full content, not null/truncated',
+  );
 });
 
 test('readFile FALLS BACK to the GitHub API when a changed file is absent from the snapshot', async () => {
   // Snapshot excludes big.ts (simulate a tarball omission); the API returns it.
   const tarball = makeTarball({ 'src/other.ts': 'const a = 1;' });
-  const ctx = await buildRepoContext(fakeOctokit(tarball, bigContent), 'o', 'r', 'sha', ['src/big.ts'], {
-    maxFileBytes: 250_000,
-    maxSourceFiles: 5,
-  });
+  const ctx = await buildRepoContext(
+    fakeOctokit(tarball, bigContent),
+    'o',
+    'r',
+    'sha',
+    ['src/big.ts'],
+    {
+      maxFileBytes: 250_000,
+      maxSourceFiles: 5,
+    },
+  );
   const changed = ctx.changedContents.find((f) => f.path === 'src/big.ts');
   assert.ok(changed, 'a changed file missing from the snapshot is fetched via API fallback');
   assert.ok(changed!.content.length > 120_000);
@@ -111,11 +133,13 @@ test('the streaming snapshot parser enforces the total retained-byte cap', async
 
 test('the snapshot keeps package metadata required by runtime verification', async () => {
   const snapshot = await fetchRepoSnapshot(
-    fakeOctokit(makeTarball({
-      'package.json': '{"scripts":{"test":"node --test"}}',
-      'pnpm-lock.yaml': 'lockfileVersion: 9.0',
-      'src/index.ts': 'export const answer = 42;',
-    })),
+    fakeOctokit(
+      makeTarball({
+        'package.json': '{"scripts":{"test":"node --test"}}',
+        'pnpm-lock.yaml': 'lockfileVersion: 9.0',
+        'src/index.ts': 'export const answer = 42;',
+      }),
+    ),
     'o',
     'r',
     'sha',
@@ -127,7 +151,9 @@ test('the snapshot keeps package metadata required by runtime verification', asy
 test('the snapshot parser rejects an archive above its compressed-byte cap', async () => {
   const tarball = makeTarball({ 'src/a.ts': 'a'.repeat(10_000) });
   await assert.rejects(
-    fetchRepoSnapshot(fakeOctokit(tarball), 'o', 'r', 'sha', { maxArchiveBytes: tarball.length - 1 }),
+    fetchRepoSnapshot(fakeOctokit(tarball), 'o', 'r', 'sha', {
+      maxArchiveBytes: tarball.length - 1,
+    }),
     /archive exceeds/,
   );
 });

@@ -4,7 +4,9 @@ import { detectRiskSignals, isHighRiskDiff, riskProbeFocus } from './risk.js';
 
 test('isHighRiskDiff: risk path alone is enough', () => {
   assert.equal(
-    isHighRiskDiff([{ filename: 'apps/server/src/routes/billing.ts', patch: '@@\n+console.log("hi")\n' }]),
+    isHighRiskDiff([
+      { filename: 'apps/server/src/routes/billing.ts', patch: '@@\n+console.log("hi")\n' },
+    ]),
     true,
   );
   assert.equal(
@@ -72,8 +74,8 @@ test('detectRiskSignals: an outage fallback around auth routing raises the auth 
     {
       filename: 'frontend/src/App.jsx',
       patch:
-        '@@\n+  if (sessionError) return <OutageScreen />;\n'
-        + '+  return <AdminIndexRedirect />;\n',
+        '@@\n+  if (sessionError) return <OutageScreen />;\n' +
+        '+  return <AdminIndexRedirect />;\n',
     },
   ]);
   assert.equal(signals[0]?.id, 'degraded-auth');
@@ -83,7 +85,8 @@ test('detectRiskSignals: a concurrent expiry batch raises the partial-batch prob
   const signals = detectRiskSignals([
     {
       filename: 'backend/src/services/subscription.js',
-      patch: '@@\n+  await Promise.all(due.map((row) => markExpired(row)));\n+  await cleanupExpired();\n',
+      patch:
+        '@@\n+  await Promise.all(due.map((row) => markExpired(row)));\n+  await cleanupExpired();\n',
     },
   ]);
   assert.ok(signals.some((s) => s.id === 'partial-batch'));
@@ -93,7 +96,8 @@ test('detectRiskSignals: an already-redeemed short-circuit raises the retry prob
   const signals = detectRiskSignals([
     {
       filename: 'backend/src/services/coupon.js',
-      patch: '@@\n+  if (completed?.count === 0) { return; }\n+  await incrementUsedCountIfAllowed(id);\n',
+      patch:
+        '@@\n+  if (completed?.count === 0) { return; }\n+  await incrementUsedCountIfAllowed(id);\n',
     },
   ]);
   assert.ok(signals.some((s) => s.id === 'retry-lost-write'));
@@ -103,7 +107,8 @@ test('detectRiskSignals: a continuation offset raises the truncation probe', () 
   const signals = detectRiskSignals([
     {
       filename: 'backend/src/routes/gdpr.js',
-      patch: '@@\n+  const next = offset + GDPR_EXPORT_PAGE_SIZE;\n+  return { rows, continuation: next };\n',
+      patch:
+        '@@\n+  const next = offset + GDPR_EXPORT_PAGE_SIZE;\n+  return { rows, continuation: next };\n',
     },
   ]);
   assert.ok(signals.some((s) => s.id === 'pagination-ceiling'));
@@ -134,7 +139,10 @@ test('detectRiskSignals: deletions alone never raise a hypothesis', () => {
 test('detectRiskSignals: ordinary UI copy raises nothing', () => {
   assert.deepEqual(
     detectRiskSignals([
-      { filename: 'apps/web/src/components/Welcome.tsx', patch: '@@\n+<p>Welcome to the dashboard</p>\n' },
+      {
+        filename: 'apps/web/src/components/Welcome.tsx',
+        patch: '@@\n+<p>Welcome to the dashboard</p>\n',
+      },
     ]),
     [],
   );
@@ -173,7 +181,8 @@ test('detectRiskSignals: broad rules no longer fire on ordinary backend code', (
   const ids = detectRiskSignals([
     {
       filename: 'backend/src/services/report.js',
-      patch: '@@\n+  const active = rows.filter((r) => r.state === "on");\n+  router.get("/x", handler);\n',
+      patch:
+        '@@\n+  const active = rows.filter((r) => r.state === "on");\n+  router.get("/x", handler);\n',
     },
   ]).map((s) => s.id);
   assert.equal(ids.includes('schedule-window'), false);
@@ -188,8 +197,8 @@ test('detectRiskSignals: an availability helper on authorize raises the schedule
     {
       filename: 'backend/src/routes/stream-play.js',
       patch:
-        '@@\n+       ${buildAvailabilityWhere(\'s\')}\n'
-        + '+router.__test = { authorizeLiveStream };\n',
+        "@@\n+       ${buildAvailabilityWhere('s')}\n" +
+        '+router.__test = { authorizeLiveStream };\n',
     },
   ]);
   assert.equal(signals[0]?.id, 'schedule-window');
@@ -201,8 +210,8 @@ test('detectRiskSignals: an unfiltered storage listener raises the event-fanout 
     {
       filename: 'frontend/src/components/marketing/CookieConsent.jsx',
       patch:
-        '@@\n+    const onStorage = () => { invalidateConsentCache(); check(); };\n'
-        + '+    window.addEventListener(\'storage\', onStorage);\n',
+        '@@\n+    const onStorage = () => { invalidateConsentCache(); check(); };\n' +
+        "+    window.addEventListener('storage', onStorage);\n",
     },
   ]);
   assert.equal(signals[0]?.id, 'event-fanout');

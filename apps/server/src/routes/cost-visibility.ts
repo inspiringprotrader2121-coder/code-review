@@ -3,14 +3,10 @@ import type { ReviewRun, WorkspaceStats } from '@orvex-review/store';
 /** Internal model spend is opt-in per workspace; an unset allowlist fails closed. */
 export function llmCostVisibleForTenant(
   tenantSlug: string,
-  configuredTenants = process.env.ORVEX_LLM_COST_VISIBLE_TENANTS,
+  configuredTenants: readonly string[],
 ): boolean {
   const normalizedSlug = tenantSlug.trim().toLowerCase();
-  return (configuredTenants ?? '')
-    .split(',')
-    .map((slug) => slug.trim().toLowerCase())
-    .filter(Boolean)
-    .includes(normalizedSlug);
+  return configuredTenants.includes(normalizedSlug);
 }
 
 export function workspaceStatsForTenant(

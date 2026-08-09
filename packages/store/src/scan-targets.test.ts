@@ -6,9 +6,29 @@ test('listScanTargets returns enabled repos of active installs, tagged with plan
   const d = new AppDatabase(':memory:');
   const t = d.createTenant('acme');
   d.setTenantPlan(t.id, 'verify');
-  d.upsertInstallation({ installationId: 100, tenantId: t.id, accountLogin: 'acme', accountType: 'Organization' });
-  d.upsertRepo({ installationId: 100, tenantId: t.id, githubRepoId: 1, owner: 'acme', name: 'api', fullName: 'acme/api', defaultBranch: 'main' });
-  d.upsertRepo({ installationId: 100, tenantId: t.id, githubRepoId: 2, owner: 'acme', name: 'web', fullName: 'acme/web' });
+  d.upsertInstallation({
+    installationId: 100,
+    tenantId: t.id,
+    accountLogin: 'acme',
+    accountType: 'Organization',
+  });
+  d.upsertRepo({
+    installationId: 100,
+    tenantId: t.id,
+    githubRepoId: 1,
+    owner: 'acme',
+    name: 'api',
+    fullName: 'acme/api',
+    defaultBranch: 'main',
+  });
+  d.upsertRepo({
+    installationId: 100,
+    tenantId: t.id,
+    githubRepoId: 2,
+    owner: 'acme',
+    name: 'web',
+    fullName: 'acme/web',
+  });
 
   // disable one repo — it must not be a scan target
   const web = d.listRepos(t.id).find((r) => r.name === 'web')!;
@@ -25,8 +45,20 @@ test('listScanTargets excludes suspended installations', () => {
   const d = new AppDatabase(':memory:');
   const t = d.createTenant('acme');
   d.setTenantPlan(t.id, 'verify');
-  d.upsertInstallation({ installationId: 100, tenantId: t.id, accountLogin: 'acme', accountType: 'Organization' });
-  d.upsertRepo({ installationId: 100, tenantId: t.id, githubRepoId: 1, owner: 'acme', name: 'api', fullName: 'acme/api' });
+  d.upsertInstallation({
+    installationId: 100,
+    tenantId: t.id,
+    accountLogin: 'acme',
+    accountType: 'Organization',
+  });
+  d.upsertRepo({
+    installationId: 100,
+    tenantId: t.id,
+    githubRepoId: 1,
+    owner: 'acme',
+    name: 'api',
+    fullName: 'acme/api',
+  });
   assert.equal(d.listScanTargets().length, 1);
 
   d.upsertInstallation({

@@ -2,9 +2,11 @@
  * Account review-quota status for PR comments (`@orvex rate limit`) and for
  * clearer blocked-nudge copy when a review is skipped for rate/monthly/trial.
  */
-import type { AppDatabase } from '@orvex-review/store';
+import type { BillingRepository } from '@orvex-review/store';
+import { BillingPeriod } from '@orvex-review/billing';
 import { publicPlanLabel, type PlanFeatures } from '@orvex-review/tenants';
 import { commandTrigger } from '@orvex-review/review';
+import type { ServerConfig } from './bootstrap/config.js';
 
 export const MS_PER_HOUR = 3_600_000;
 export const MS_PER_30_DAYS = 30 * 24 * MS_PER_HOUR;
@@ -13,10 +15,10 @@ export const MS_PER_30_DAYS = 30 * 24 * MS_PER_HOUR;
  * not a customer-facing review allowance; set it after measuring real COGS.
  * Applies to every plan including enterprise — custom contracts still need a
  * spend backstop so a runaway cannot burn uncapped provider dollars. */
-export function monthlyCogsCapUsd(_planId: string): number | null {
-  const raw = process.env.ORVEX_MONTHLY_COGS_CAP_USD;
-  const value = raw === undefined || raw.trim() === '' ? 250 : Number(raw);
-  return Number.isFinite(value) && value > 0 ? value : 250;
+export function monthlyCogsCapUsd(configOrPlan?: Pick<ServerConfig, 'quota'> | string): number {
+  // Review-pipeline migration owns the final caller. Its compatibility path
+  // uses the historical default until it receives the injected server config.
+  return typeof configOrPlan === 'object' ? configOrPlan.quota.monthlyCogsCapUsd : 250;
 }
 
 export type AccountQuotaStatus = {
@@ -45,14 +47,28 @@ export type AccountQuotaStatus = {
   trial: { used: number; limit: number; remaining: number } | null;
 };
 
+/** Read-only quota projection required by commands and blocked-review copy. */
+export type QuotaStatusStore = Pick<
+  BillingRepository,
+  | 'countAccountReviews'
+  | 'countRunningAccountReviews'
+  | 'countTenantReviewUnits'
+  | 'getTenantBilling'
+  | 'getCreditBalanceCents'
+  | 'oldestAccountReviewCreatedAt'
+  | 'sumAccountCost'
+>;
+
 export function loadAccountQuotaStatus(
-  store: AppDatabase,
+  store: QuotaStatusStore,
   owner: string,
   tenantId: string,
   plan: PlanFeatures,
+  config?: Pick<ServerConfig, 'quota'>,
   _now = Date.now(),
 ): AccountQuotaStatus {
-  const hourlyUsed = plan.reviewsPerHour !== null ? store.countAccountReviews(owner, { sinceMs: MS_PER_HOUR }) : 0;
+  const hourlyUsed =
+    plan.reviewsPerHour !== null ? store.countAccountReviews(owner, { sinceMs: MS_PER_HOUR }) : 0;
   let nextSlotAt: string | null = null;
   if (plan.reviewsPerHour !== null && hourlyUsed >= plan.reviewsPerHour) {
     const oldest = store.oldestAccountReviewCreatedAt(owner, MS_PER_HOUR);
@@ -66,7 +82,9 @@ export function loadAccountQuotaStatus(
     plan.trialReviewLimit === null &&
     (plan.includedReviewsPerMonth !== null || plan.reviewsPerMonth !== null);
   const monthlyUsed = useTenantUnits
-    ? store.countTenantReviewUnits(tenantId, { sinceMs: MS_PER_30_DAYS })
+    ? store.countTenantReviewUnits(tenantId, {
+        sinceIso: BillingPeriod.start(store.getTenantBilling(tenantId)?.stripeCurrentPeriodStart),
+      })
     : store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS });
   if (plan.includedReviewsPerMonth !== null && plan.overageCentsPerReview !== null) {
     // Included allotment + prepaid overage — show included usage; hard ceiling is
@@ -88,7 +106,7 @@ export function loadAccountQuotaStatus(
     monthly = { kind: 'unlimited' };
   }
   const cost = store.sumAccountCost(owner, MS_PER_30_DAYS);
-  const costLimit = monthlyCogsCapUsd(plan.id);
+  const costLimit = monthlyCogsCapUsd(config);
 
   let trial: AccountQuotaStatus['trial'] = null;
   if (plan.trialReviewLimit !== null) {
@@ -185,7 +203,9 @@ export function formatQuotaStatusComment(
     formatMonthlyLine(status.monthly),
   ];
   if (status.cost.limitUsd !== null) {
-    lines.push(`**Provider-cost safety:** $${status.cost.usedUsd.toFixed(2)} / $${status.cost.limitUsd.toFixed(2)} rolling 30-day ceiling`);
+    lines.push(
+      `**Provider-cost safety:** $${status.cost.usedUsd.toFixed(2)} / $${status.cost.limitUsd.toFixed(2)} rolling 30-day ceiling`,
+    );
   }
   if (status.trial) {
     lines.push(
@@ -204,7 +224,13 @@ export function formatQuotaStatusComment(
 /** Clearer blocked-nudge when a review was skipped for quota. */
 export function formatLimitBlockedComment(
   status: AccountQuotaStatus,
-  reason: 'rate_limited' | 'monthly_limit' | 'trial_exhausted' | 'cost_capped' | 'concurrency_limited' | 'insufficient_credits',
+  reason:
+    | 'rate_limited'
+    | 'monthly_limit'
+    | 'trial_exhausted'
+    | 'cost_capped'
+    | 'concurrency_limited'
+    | 'insufficient_credits',
   trigger = commandTrigger(),
   now = Date.now(),
 ): string {
@@ -293,6 +319,7 @@ export function formatLimitBlockedComment(
 
   // Fallback — should be rare (e.g. monthly_limit without hard monthly shape).
   return (
-    `⏳ **Orvex limit reached** on the **${status.planLabel}** plan. This review was **not** run.` + tip
+    `⏳ **Orvex limit reached** on the **${status.planLabel}** plan. This review was **not** run.` +
+    tip
   );
 }

@@ -55,7 +55,11 @@ export function decryptTotpSecret(encrypted: string, masterSecret: string): stri
   const [version, ivRaw, tagRaw, ciphertextRaw] = encrypted.split('.');
   if (version !== ENCRYPTION_VERSION || !ivRaw || !tagRaw || !ciphertextRaw) return null;
   try {
-    const decipher = createDecipheriv('aes-256-gcm', encryptionKey(masterSecret), Buffer.from(ivRaw, 'base64url'));
+    const decipher = createDecipheriv(
+      'aes-256-gcm',
+      encryptionKey(masterSecret),
+      Buffer.from(ivRaw, 'base64url'),
+    );
     decipher.setAuthTag(Buffer.from(tagRaw, 'base64url'));
     return Buffer.concat([
       decipher.update(Buffer.from(ciphertextRaw, 'base64url')),
@@ -79,7 +83,12 @@ export function hashRecoveryCode(userId: string, code: string, masterSecret: str
     .digest('hex');
 }
 
-export function recoveryCodeMatches(expectedHash: string, userId: string, code: string, masterSecret: string): boolean {
+export function recoveryCodeMatches(
+  expectedHash: string,
+  userId: string,
+  code: string,
+  masterSecret: string,
+): boolean {
   const actual = Buffer.from(hashRecoveryCode(userId, code, masterSecret));
   const expected = Buffer.from(expectedHash);
   return actual.length === expected.length && timingSafeEqual(actual, expected);

@@ -17,9 +17,20 @@ const f = (over: Partial<ReviewFinding>): ReviewFinding => ({
 test('summarizeModelContribution counts shared vs unique fingerprints per tier', () => {
   const findings = [
     f({ message: 'only flash', sourceTier: 'deepseek-flash', sourcePass: 'deep-dive' }),
-    f({ message: 'only pro', sourceTier: 'deepseek', sourcePass: 'removed-behavior/callers', line: 2 }),
+    f({
+      message: 'only pro',
+      sourceTier: 'deepseek',
+      sourcePass: 'removed-behavior/callers',
+      line: 2,
+    }),
     f({ message: 'shared bug', sourceTier: 'deepseek-flash', sourcePass: 'deep-dive', line: 3 }),
-    f({ message: 'shared bug', sourceTier: 'openai', sourcePass: 'general', line: 3, ruleId: 'llm.general' }),
+    f({
+      message: 'shared bug',
+      sourceTier: 'openai',
+      sourcePass: 'general',
+      line: 3,
+      ruleId: 'llm.general',
+    }),
   ];
   const report = summarizeModelContribution(findings);
   assert.equal(report.total, 3);

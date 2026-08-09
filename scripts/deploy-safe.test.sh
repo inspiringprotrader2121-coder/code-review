@@ -32,8 +32,15 @@ if [[ "${DEPLOY_SAFE_TEST_FIXTURE:-0}" != "1" ]]; then
     scripts/build-internal-sandbox-image.sh \
     scripts/build-internal-sandbox-image.test.sh \
     "$FIXTURE/scripts/"
+  cp \
+    tsconfig.json \
+    .node-version \
+    .prettierignore \
+    .prettierrc.json \
+    "$FIXTURE/"
   mkdir -p "$FIXTURE/sandbox/runtime"
   cp sandbox/runtime/Dockerfile "$FIXTURE/sandbox/runtime/"
+  cp -R infra "$FIXTURE/"
   git -C "$FIXTURE" init -q
   git -C "$FIXTURE" config user.name 'deploy-safe test'
   git -C "$FIXTURE" config user.email 'deploy-safe-test@invalid'
@@ -74,10 +81,12 @@ grep -Fq 'bash -s -- "$REMOTE_DIR" "$STAGE_DIR" "${SOURCES[@]}"' scripts/deploy-
   echo "deploy does not pass selected sources to isolated stage preparation" >&2
   exit 1
 }
-grep -Fq 'corepack pnpm@11.7.0 --pm-on-fail=ignore test' scripts/deploy-safe.sh || {
-  echo "deploy does not run the full staged test gate" >&2
-  exit 1
-}
+for staged_gate in format:check check:runtime check:dependencies 'dedupe --check' check:architecture check:docs typecheck test build check:built-exports; do
+  if ! grep -Fq "corepack pnpm@11.7.0 --pm-on-fail=ignore $staged_gate" scripts/deploy-safe.sh; then
+    echo "deploy does not run staged $staged_gate gate" >&2
+    exit 1
+  fi
+done
 grep -Fq 'rm -rf -- "$stage/$source"' scripts/deploy-safe.sh || {
   echo "deploy stage does not remove stale copies of selected local sources" >&2
   exit 1

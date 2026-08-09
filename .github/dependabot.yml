@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      development-tooling:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Provider, identity, billing-adjacent, queue, and native-runtime updates
+      # need their own compatibility/release review rather than being batched as
+      # low-risk tooling maintenance.
+      - dependency-name: '@anthropic-ai/sdk'
+      - dependency-name: '@openai/codex'
+      - dependency-name: '@octokit/auth-app'
+      - dependency-name: '@octokit/rest'
+      - dependency-name: better-sqlite3
+      - dependency-name: ioredis
+      - dependency-name: otplib
+      - dependency-name: hono
+      - dependency-name: '@hono/node-server'

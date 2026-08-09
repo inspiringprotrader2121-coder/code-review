@@ -23,10 +23,12 @@ import {
   resolveCodexRateLimitPolicy,
   resolveCodexTimeouts,
   runCodexCliReview,
+  runCodexContainerExecForTest,
   runCodexExecForTest,
   trimCodexPrompt,
   withCodexHomeLockForTest,
 } from './codex-cli.js';
+import type { CodexContainerRequest, CodexContainerRuntime } from './providers/types.js';
 
 function withRepos(value: string | undefined, fn: () => void) {
   const prev = process.env.ORVEX_CODEX_CLI_REPOS;
@@ -123,9 +125,7 @@ test('lean Codex prompt omits changedContents when checkout exists', (t) => {
 });
 
 test('slim Codex prompt is shorter and skips rules/tree dump', () => {
-  const files = [
-    { filename: 'x.ts', status: 'modified', patch: '+y\n' },
-  ];
+  const files = [{ filename: 'x.ts', status: 'modified', patch: '+y\n' }];
   const slim = buildCodexPrompt(
     files,
     {
@@ -152,10 +152,16 @@ test('detectCodexAuthMode reads auth_mode from CODEX_HOME', () => {
   clearCodexAuthModeCache();
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-codex-auth-'));
   try {
-    writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-test' }));
+    writeFileSync(
+      path.join(dir, 'auth.json'),
+      JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-test' }),
+    );
     assert.equal(detectCodexAuthMode(dir), 'apikey');
     clearCodexAuthModeCache();
-    writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { refresh: 'x' } }));
+    writeFileSync(
+      path.join(dir, 'auth.json'),
+      JSON.stringify({ auth_mode: 'chatgpt', tokens: { refresh: 'x' } }),
+    );
     assert.equal(detectCodexAuthMode(dir), 'oauth');
     clearCodexAuthModeCache();
     writeFileSync(path.join(dir, 'auth.json'), '{');
@@ -170,11 +176,22 @@ test('Codex model and binary are pinned locally before any stale global path', (
   assert.equal(DEFAULT_CODEX_CLI_MODEL, 'gpt-5.6-luna');
   const pinned = '/srv/orvex/node_modules/@openai/codex/bin/codex.js';
   assert.equal(
-    resolveCodexBinary('/old/global/codex', () => pinned, (candidate) => candidate === pinned),
+    resolveCodexBinary(
+      '/old/global/codex',
+      () => pinned,
+      (candidate) => candidate === pinned,
+    ),
     pinned,
   );
   assert.throws(
-    () => resolveCodexBinary('/global/codex', () => { throw new Error('missing'); }, () => false),
+    () =>
+      resolveCodexBinary(
+        '/global/codex',
+        () => {
+          throw new Error('missing');
+        },
+        () => false,
+      ),
     /pinned Codex CLI .*is missing/,
   );
 });
@@ -200,11 +217,17 @@ test('Codex binary resolution works from the production apps/server cwd', () => 
 test('Codex runtime preflight requires an API-key-authenticated home', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-codex-preflight-'));
   try {
-    writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-test' }));
+    writeFileSync(
+      path.join(dir, 'auth.json'),
+      JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-test' }),
+    );
     clearCodexAuthModeCache();
     assert.match(assertCodexRuntimeReady([dir]), /@openai.*codex.*bin\/codex\.js/);
 
-    writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { refresh: 'x' } }));
+    writeFileSync(
+      path.join(dir, 'auth.json'),
+      JSON.stringify({ auth_mode: 'chatgpt', tokens: { refresh: 'x' } }),
+    );
     clearCodexAuthModeCache();
     assert.throws(() => assertCodexRuntimeReady([dir]), /API-key-authenticated/);
   } finally {
@@ -215,9 +238,7 @@ test('Codex runtime preflight requires an API-key-authenticated home', () => {
 
 test('Codex CLI model substitutions are detected and fail closed', () => {
   assert.equal(
-    codexAnnouncedModelFallback(
-      'gpt-5.6-luna not supported, falling back to gpt-5.5 max',
-    ),
+    codexAnnouncedModelFallback('gpt-5.6-luna not supported, falling back to gpt-5.5 max'),
     true,
   );
   assert.equal(
@@ -241,12 +262,19 @@ test('Codex execution arguments require the native read-only sandbox', () => {
   });
 
   assert.deepEqual(args.slice(0, 4), ['exec', '--model', DEFAULT_CODEX_CLI_MODEL, '--json']);
-  assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2), ['--sandbox', 'read-only']);
+  assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2), [
+    '--sandbox',
+    'read-only',
+  ]);
   assert.ok(args.includes('--ignore-user-config'));
   assert.ok(args.includes('--ignore-rules'));
   assert.ok(args.includes('--skip-git-repo-check'));
   assert.ok(args.includes('model_reasoning_effort="max"'));
-  assert.ok(args.includes('shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","CODEX_API_KEY","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY"]'));
+  assert.ok(
+    args.includes(
+      'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","CODEX_API_KEY","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY"]',
+    ),
+  );
   assert.ok(args.includes('--cd'));
   assert.equal(args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
   assert.equal(args.includes('--ephemeral'), false, 'sessions must remain resumable');
@@ -416,9 +444,12 @@ test('CountingSemaphore allows up to N concurrent runners', async () => {
 test('CountingSemaphore removes a cancelled waiter before it can spawn paid work', async () => {
   const gate = new CountingSemaphore(1);
   let release!: () => void;
-  const held = gate.run(() => new Promise<void>((resolve) => {
-    release = resolve;
-  }));
+  const held = gate.run(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
   const controller = new AbortController();
   let entered = false;
   const waiting = gate.run(async () => {
@@ -458,6 +489,115 @@ test('a non-allowlisted Codex review fails before spawning the CLI', async (t) =
       { repoId: 'untrusted/repo' },
     ),
     /non-allowlisted repository/i,
+  );
+});
+
+test('production Codex reviews refuse host execution when no internal container runtime is injected', async (t) => {
+  const previous = process.env.ORVEX_CODEX_CLI_REPOS;
+  process.env.ORVEX_CODEX_CLI_REPOS = 'trusted/repo';
+  t.after(() => {
+    if (previous === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
+    else process.env.ORVEX_CODEX_CLI_REPOS = previous;
+  });
+  await assert.rejects(
+    runCodexCliReview([{ filename: 'src/a.ts', status: 'modified', patch: '+safe' }], {
+      repoId: 'trusted/repo',
+      cwd: '/tmp/orvex-rverify-not-used',
+    }),
+    /credential-isolating container runtime/,
+  );
+});
+
+test('container protocol gives the internal runner only a private checkout, redacted prompt, and pinned Luna argv', async (t) => {
+  const checkout = mkdtempSync(path.join(tmpdir(), 'orvex-rverify-codex-protocol-'));
+  chmodSync(checkout, 0o700);
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  let request: CodexContainerRequest | undefined;
+  const runtime: CodexContainerRuntime = {
+    assertReady: async () => {},
+    run: async (received) => {
+      request = received;
+      return {
+        exitCode: 0,
+        stdout: `${JSON.stringify({ type: 'thread.started', thread_id: 'container-thread' })}\n${JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 7, output_tokens: 3 } })}`,
+        stderr: '',
+        lastMessage: '{"findings":[],"summary":"container ok"}',
+        timedOut: false,
+        durationMs: 1,
+      };
+    },
+  };
+  const result = await runCodexContainerExecForTest('review this redacted diff', {
+    cwd: checkout,
+    runtime,
+  });
+  assert.equal(result.threadId, 'container-thread');
+  assert.equal(result.text, '{"findings":[],"summary":"container ok"}');
+  assert.equal(request?.workdir, checkout);
+  assert.equal(request?.prompt, 'review this redacted diff');
+  assert.deepEqual(request?.args.slice(0, 5), [
+    'exec',
+    '--model',
+    DEFAULT_CODEX_CLI_MODEL,
+    '--json',
+    '--sandbox',
+  ]);
+  assert.ok(request?.args.includes('model_reasoning_effort="max"'));
+  assert.ok(request?.args.includes('/work'));
+  assert.match(
+    request?.lastMessageFile ?? '',
+    new RegExp(
+      `^${checkout.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/\\.orvex-agentic/last-message-`,
+    ),
+  );
+  assert.equal(
+    request?.args.some((arg) => /sk-[A-Za-z0-9]|orvex-container-broker-placeholder/.test(arg)),
+    false,
+  );
+});
+
+test('container protocol refuses announced model substitution without a fallback call', async () => {
+  const checkout = mkdtempSync(path.join(tmpdir(), 'orvex-rverify-codex-fallback-'));
+  chmodSync(checkout, 0o700);
+  try {
+    const runtime: CodexContainerRuntime = {
+      assertReady: async () => {},
+      run: async () => ({
+        exitCode: 0,
+        stdout: 'gpt-5.6-luna not supported, falling back to gpt-5.5 max',
+        stderr: '',
+        lastMessage: '{"findings":[],"summary":"should not parse"}',
+        timedOut: false,
+        durationMs: 1,
+      }),
+    };
+    await assert.rejects(
+      runCodexContainerExecForTest('review', { cwd: checkout, runtime }),
+      /refused model substitution/,
+    );
+  } finally {
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+test('container protocol also refuses an announced model substitution on stderr', async (t) => {
+  const checkout = mkdtempSync(path.join(tmpdir(), 'orvex-rverify-codex-stderr-fallback-'));
+  chmodSync(checkout, 0o700);
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  const runtime: CodexContainerRuntime = {
+    assertReady: async () => {},
+    run: async () => ({
+      exitCode: 0,
+      stdout: '',
+      stderr: 'gpt-5.6-luna is not supported; falling back to gpt-5.5 max',
+      lastMessage: '{"findings":[],"summary":"must not parse"}',
+      timedOut: false,
+      durationMs: 1,
+    }),
+  };
+  await assert.rejects(
+    runCodexContainerExecForTest('review', { cwd: checkout, runtime }),
+    /refused model substitution/,
   );
 });
 
@@ -512,7 +652,10 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:12, outpu
   const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[];
   assert.deepEqual(args.slice(0, 3), ['exec', '--model', DEFAULT_CODEX_CLI_MODEL]);
   assert.ok(args.includes('model_reasoning_effort="max"'));
-  assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2), ['--sandbox', 'read-only']);
+  assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2), [
+    '--sandbox',
+    'read-only',
+  ]);
   assert.ok(args.includes('--ignore-user-config'));
   assert.ok(args.includes('--ignore-rules'));
   assert.equal(args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
@@ -525,7 +668,11 @@ setInterval(() => {}, 1000);
 `);
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
   await assert.rejects(
-    runCodexExecForTest('review', { binaryPath: fixture.binary, hardMs: 5_000, inactivityMs: 3_000 }),
+    runCodexExecForTest('review', {
+      binaryPath: fixture.binary,
+      hardMs: 5_000,
+      inactivityMs: 3_000,
+    }),
     /refused model substitution/,
   );
 });
@@ -549,19 +696,22 @@ setInterval(() => {}, 1000);
     onUsage: (event) => usage.push(event),
   });
   await waitForFile(grandchildFile);
-  await assert.rejects(
-    pending,
-    /produced no output/,
-  );
+  await assert.rejects(pending, /produced no output/);
   const grandchildPid = Number(readFileSync(grandchildFile, 'utf8'));
-  assert.equal(await waitForExit(grandchildPid), true, 'grandchild process group member was killed');
-  assert.deepEqual(usage, [{
-    inputTokens: 50_000,
-    outputTokens: 5_000,
-    tokenSource: 'estimate',
-    model: DEFAULT_CODEX_CLI_MODEL,
-    provider: 'codex-cli',
-  }]);
+  assert.equal(
+    await waitForExit(grandchildPid),
+    true,
+    'grandchild process group member was killed',
+  );
+  assert.deepEqual(usage, [
+    {
+      inputTokens: 50_000,
+      outputTokens: 5_000,
+      tokenSource: 'estimate',
+      model: DEFAULT_CODEX_CLI_MODEL,
+      provider: 'codex-cli',
+    },
+  ]);
 });
 
 test('post-spawn cancellation kills the actual Codex process group', async (t) => {
@@ -588,7 +738,11 @@ setInterval(() => {}, 1000);
   controller.abort('pr_closed_mid_run');
   await assert.rejects(pending, /cancelled/i);
   const grandchildPid = Number(readFileSync(grandchildFile, 'utf8'));
-  assert.equal(await waitForExit(grandchildPid), true, 'cancel killed the grandchild process group member');
+  assert.equal(
+    await waitForExit(grandchildPid),
+    true,
+    'cancel killed the grandchild process group member',
+  );
 });
 
 test('hard timeout settles despite delayed close and removes the temporary output directory', async (t) => {
@@ -615,5 +769,9 @@ spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], {stdio:['ignore',
     /wall-clock cap/,
   );
   const codexTempDir = readFileSync(tempDirFile, 'utf8');
-  assert.equal(existsSync(codexTempDir), false, 'timeout cleanup removed the temp directory before delayed close');
+  assert.equal(
+    existsSync(codexTempDir),
+    false,
+    'timeout cleanup removed the temp directory before delayed close',
+  );
 });

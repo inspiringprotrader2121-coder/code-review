@@ -1,37 +1,48 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Hono, type Context } from 'hono';
-import { getCookie } from 'hono/cookie';
 import QRCode from 'qrcode';
-import { createAppDatabase, type AppDatabase, type User } from '@orvex-review/store';
-import {
-  decryptTotpSecret,
-  encryptTotpSecret,
-  generateRecoveryCodes,
-  generateTotpSecret,
-  hashRecoveryCode,
-  loadGoogleOAuthConfigFromEnv,
-  loadOAuthConfigFromEnv,
-  platformSecret,
-  recoveryCodeMatches,
-  totpEnrollmentUri,
-  verifyPassword,
-  verifyTotpCodeWithEpoch,
-} from '@orvex-review/tenants';
-import { checkAuthRateLimit, clearAuthRateLimit } from './rate-limit.js';
+import { type IdentityRepository, type User, type UserSecurity } from '@orvex-review/store';
+import { totpEnrollmentUri } from '@orvex-review/tenants';
 import { escapeHtml, pageShell } from './pages.js';
 import {
   consumeOAuthReauthProof,
   peekOAuthReauthProof,
   setSessionCookie,
-  SESSION_COOKIE,
   sessionUser,
 } from './session.js';
+import {
+  AccountSecurityService,
+  type AccountSecurityStore,
+  DurableIdentityRateLimits,
+  OAuthProviders,
+  RequestSecurity,
+} from '../application/identity/index.js';
+import type { ServerConfig } from '../bootstrap/config.js';
 
-const SECURITY_WINDOW_MS = 10 * 60_000;
-const SECURITY_MAX_ATTEMPTS = 5;
+export interface SecurityRouteDependencies {
+  db: AccountSecurityStore &
+    Pick<
+      IdentityRepository,
+      | 'consumeAuthAttempt'
+      | 'clearAuthAttempts'
+      | 'consumeMfaAttempt'
+      | 'clearMfaAttempts'
+      | 'getSessionUser'
+      | 'upsertUserFromGitHub'
+    >;
+  config: Pick<ServerConfig, 'appUrl' | 'authDisabled' | 'identity' | 'oauth' | 'platformSecret'>;
+}
 
-export function securityRoutes(db: AppDatabase = createAppDatabase()) {
+export function securityRoutes(dependencies: SecurityRouteDependencies) {
+  const { db, config } = dependencies;
   const app = new Hono();
+  const requestSecurity = new RequestSecurity({
+    appUrl: config.appUrl,
+    platformSecret: config.platformSecret,
+    trustedProxyIps: config.identity.trustedProxyIps,
+  });
+  const rateLimits = new DurableIdentityRateLimits(db, config.identity.rateLimits);
+  const oauthProviders = new OAuthProviders(config.oauth);
+  const accountSecurity = new AccountSecurityService(db, config.platformSecret);
 
   app.use('/settings/security/*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
@@ -43,10 +54,10 @@ export function securityRoutes(db: AppDatabase = createAppDatabase()) {
   });
 
   app.get('/settings/security', (c) => {
-    const user = sessionUser(c, db);
+    const user = sessionUser(c, db, config);
     if (!user) return c.redirect('/auth/login?next=/settings/security');
     return c.html(
-      securityPage(user, db.getUserSecurity(user.id), csrfToken(c), {
+      securityPage(user, accountSecurity.security(user.id), requestSecurity.sessionCsrf(c), {
         error: c.req.query('error'),
         disabled: c.req.query('disabled') === '1',
       }),
@@ -54,22 +65,26 @@ export function securityRoutes(db: AppDatabase = createAppDatabase()) {
   });
 
   app.post('/settings/security/totp/start', async (c) => {
-    const user = sessionUser(c, db);
+    const user = sessionUser(c, db, config);
     if (!user) return c.redirect('/auth/login?next=/settings/security');
-    if (!(await validCsrf(c))) return c.text('Invalid security token', 403);
-    if (db.getUserSecurity(user.id).totpEnabled) return c.redirect('/settings/security');
+    if (!(await requestSecurity.validSessionCsrf(c))) return c.text('Invalid security token', 403);
+    if (accountSecurity.security(user.id).totpEnabled) return c.redirect('/settings/security');
     if (!db.getPasswordHash(user.id)) {
-      const provider = mfaReauthProvider(user);
+      const provider = mfaReauthProvider(user, oauthProviders);
       if (!provider) return c.redirect('/settings/security?error=reauth');
-      if (!peekOAuthReauthProof(c, user.id)) {
-        return c.redirect(`/auth/reauth?provider=${provider}&next=${encodeURIComponent('/settings/security')}`);
+      if (!peekOAuthReauthProof(c, user.id, config)) {
+        return c.redirect(
+          `/auth/reauth?provider=${provider}&next=${encodeURIComponent('/settings/security')}`,
+        );
       }
     }
 
-    const secret = generateTotpSecret();
-    if (!db.setPendingTotpSecret(user.id, encryptTotpSecret(secret, platformSecret()))) {
-      return c.redirect('/settings/security');
-    }
+    const started = accountSecurity.beginEnrollment(
+      user.id,
+      peekOAuthReauthProof(c, user.id, config),
+    );
+    if (started.kind === 'reauth_required') return c.redirect('/settings/security?error=reauth');
+    if (started.kind !== 'ok') return c.redirect('/settings/security');
     return c.redirect('/settings/security/totp/setup');
   });
 
@@ -77,207 +92,145 @@ export function securityRoutes(db: AppDatabase = createAppDatabase()) {
     // Read-only: enrollment must be CSRF'd POST only. After OAuth reauth the
     // browser may land here via `next=` — send them back to the security page
     // (or setup if a secret is already pending) without generating a secret.
-    const user = sessionUser(c, db);
+    const user = sessionUser(c, db, config);
     if (!user) return c.redirect('/auth/login?next=/settings/security');
-    const security = db.getUserSecurity(user.id);
+    const security = accountSecurity.security(user.id);
     if (security.totpEnabled) return c.redirect('/settings/security');
     if (security.totpSecretEncrypted) return c.redirect('/settings/security/totp/setup');
     return c.redirect('/settings/security');
   });
 
   app.get('/settings/security/totp/setup', async (c) => {
-    const user = sessionUser(c, db);
+    const user = sessionUser(c, db, config);
     if (!user) return c.redirect('/auth/login?next=/settings/security/totp/setup');
-    const security = db.getUserSecurity(user.id);
+    const security = accountSecurity.security(user.id);
     if (security.totpEnabled) return c.redirect('/settings/security');
-    const secret = security.totpSecretEncrypted
-      ? decryptTotpSecret(security.totpSecretEncrypted, platformSecret())
-      : null;
+    const secret = accountSecurity.pendingSecret(user.id);
     if (!secret) return c.redirect('/settings/security');
 
     const uri = totpEnrollmentUri(user.email ?? user.login, secret);
     const qr = await QRCode.toDataURL(uri, { errorCorrectionLevel: 'M', margin: 1, width: 240 });
-    return c.html(totpSetupPage(user, secret, qr, csrfToken(c), c.req.query('error')));
+    return c.html(
+      totpSetupPage(user, secret, qr, requestSecurity.sessionCsrf(c), c.req.query('error')),
+    );
   });
 
   app.post('/settings/security/totp/verify', async (c) => {
-    const user = sessionUser(c, db);
+    const user = sessionUser(c, db, config);
     if (!user) return c.redirect('/auth/login?next=/settings/security');
-    if (!(await validCsrf(c))) return c.text('Invalid security token', 403);
-    const limit = checkSecurityRateLimit(c, db, user.id, 'enable');
+    if (!(await requestSecurity.validSessionCsrf(c))) return c.text('Invalid security token', 403);
+    const limit = checkSecurityRateLimit(rateLimits, requestSecurity, c, user.id, 'enable');
     if (!limit.allowed) return c.redirect('/settings/security/totp/setup?error=rate');
 
     const body = await c.req.parseBody();
     const password = String(body.password ?? '');
     const passwordHash = db.getPasswordHash(user.id);
-    const oauthProof = !passwordHash && peekOAuthReauthProof(c, user.id);
-    const encrypted = db.getUserSecurity(user.id).totpSecretEncrypted;
-    const secret = encrypted ? decryptTotpSecret(encrypted, platformSecret()) : null;
-    const totp = secret
-      ? await verifyTotpCodeWithEpoch(secret, String(body.code ?? ''))
-      : { valid: false as const };
-    if (
-      (passwordHash ? !verifyPassword(password, passwordHash) : !oauthProof) ||
-      !totp.valid ||
-      totp.epoch === undefined ||
-      !encrypted
-    ) {
+    const result = await accountSecurity.verifyEnrollment({
+      userId: user.id,
+      password,
+      code: String(body.code ?? ''),
+      oauthReauthenticated: peekOAuthReauthProof(c, user.id, config),
+    });
+    if (result.kind !== 'ok' || !result.sessionId || !result.recoveryCodes) {
       return c.redirect('/settings/security/totp/setup?error=code');
     }
-
-    if (!passwordHash) consumeOAuthReauthProof(c, user.id);
-    const codes = generateRecoveryCodes();
-    const hashes = codes.map((code) => hashRecoveryCode(user.id, code, platformSecret()));
-    const session = db.completeTotpEnrollment({
-      userId: user.id,
-      expectedEncryptedSecret: encrypted,
-      totpEpoch: totp.epoch,
-      recoveryCodeHashes: hashes,
-    });
-    if (!session) return c.redirect('/settings/security/totp/setup?error=stale');
-    setSessionCookie(c, session.id);
-    clearSecurityIpRateLimit(db, limit);
-    return c.html(recoveryCodesPage(user, codes));
+    if (!passwordHash) consumeOAuthReauthProof(c, user.id, config);
+    setSessionCookie(c, result.sessionId, config);
+    clearSecurityRateLimits(rateLimits, limit);
+    return c.html(recoveryCodesPage(user, result.recoveryCodes));
   });
 
   app.post('/settings/security/totp/disable', async (c) => {
-    const user = sessionUser(c, db);
+    const user = sessionUser(c, db, config);
     if (!user) return c.redirect('/auth/login?next=/settings/security');
-    if (!(await validCsrf(c))) return c.text('Invalid security token', 403);
-    const limit = checkSecurityRateLimit(c, db, user.id, 'disable');
+    if (!(await requestSecurity.validSessionCsrf(c))) return c.text('Invalid security token', 403);
+    const limit = checkSecurityRateLimit(rateLimits, requestSecurity, c, user.id, 'disable');
     if (!limit.allowed) return c.redirect('/settings/security?error=rate');
 
     const body = await c.req.parseBody();
     const password = String(body.password ?? '');
     const code = String(body.code ?? '');
-    const security = db.getUserSecurity(user.id);
-    const secret = security.totpSecretEncrypted
-      ? decryptTotpSecret(security.totpSecretEncrypted, platformSecret())
-      : null;
     const passwordHash = db.getPasswordHash(user.id);
-    const validPassword = passwordHash ? verifyPassword(password, passwordHash) : peekOAuthReauthProof(c, user.id);
-    const totp = secret ? await verifyTotpCodeWithEpoch(secret, code) : { valid: false as const };
-    const recoveryHash = security.recoveryCodeHashes.find((hash) =>
-      recoveryCodeMatches(hash, user.id, code, platformSecret()),
-    );
-    const factor = totp.valid && totp.epoch !== undefined
-      ? { totpEpoch: totp.epoch }
-      : recoveryHash
-        ? { recoveryCodeHash: recoveryHash }
-        : null;
-    if (!security.totpEnabled || !validPassword || !factor) {
+    const result = await accountSecurity.disable({
+      userId: user.id,
+      password,
+      code,
+      oauthReauthenticated: peekOAuthReauthProof(c, user.id, config),
+    });
+    if (result.kind !== 'ok' || !result.sessionId) {
       return c.redirect('/settings/security?error=invalid');
     }
-    if (!passwordHash) consumeOAuthReauthProof(c, user.id);
-
-    const session = db.disableTotpAndRotateSession({ userId: user.id, factor });
-    if (!session) return c.redirect('/settings/security?error=invalid');
-    setSessionCookie(c, session.id);
-    clearSecurityIpRateLimit(db, limit);
+    if (!passwordHash) consumeOAuthReauthProof(c, user.id, config);
+    setSessionCookie(c, result.sessionId, config);
+    clearSecurityRateLimits(rateLimits, limit);
     return c.redirect('/settings/security?disabled=1');
   });
 
   app.post('/settings/security/recovery/regenerate', async (c) => {
-    const user = sessionUser(c, db);
+    const user = sessionUser(c, db, config);
     if (!user) return c.redirect('/auth/login?next=/settings/security');
-    if (!(await validCsrf(c))) return c.text('Invalid security token', 403);
-    const limit = checkSecurityRateLimit(c, db, user.id, 'recovery');
+    if (!(await requestSecurity.validSessionCsrf(c))) return c.text('Invalid security token', 403);
+    const limit = checkSecurityRateLimit(rateLimits, requestSecurity, c, user.id, 'recovery');
     if (!limit.allowed) return c.redirect('/settings/security?error=rate');
 
     const body = await c.req.parseBody();
     const password = String(body.password ?? '');
     const code = String(body.code ?? '');
-    const security = db.getUserSecurity(user.id);
-    const secret = security.totpSecretEncrypted
-      ? decryptTotpSecret(security.totpSecretEncrypted, platformSecret())
-      : null;
-    const totp = secret ? await verifyTotpCodeWithEpoch(secret, code) : { valid: false as const };
     const passwordHash = db.getPasswordHash(user.id);
-    const reauth = passwordHash ? verifyPassword(password, passwordHash) : peekOAuthReauthProof(c, user.id);
-    if (
-      !security.totpEnabled ||
-      !reauth ||
-      !totp.valid ||
-      totp.epoch === undefined
-    ) {
+    const result = await accountSecurity.regenerateRecoveryCodes({
+      userId: user.id,
+      password,
+      code,
+      oauthReauthenticated: peekOAuthReauthProof(c, user.id, config),
+    });
+    if (result.kind !== 'ok' || !result.sessionId || !result.recoveryCodes) {
       return c.redirect('/settings/security?error=invalid');
     }
-    if (!passwordHash) consumeOAuthReauthProof(c, user.id);
+    if (!passwordHash) consumeOAuthReauthProof(c, user.id, config);
 
-    const codes = generateRecoveryCodes();
-    const hashes = codes.map((recoveryCode) => hashRecoveryCode(user.id, recoveryCode, platformSecret()));
-    const session = db.regenerateRecoveryCodesAndRotateSession({
-      userId: user.id,
-      totpEpoch: totp.epoch,
-      recoveryCodeHashes: hashes,
-    });
-    if (!session) return c.redirect('/settings/security?error=invalid');
-    setSessionCookie(c, session.id);
-    clearSecurityIpRateLimit(db, limit);
-    return c.html(recoveryCodesPage(user, codes));
+    setSessionCookie(c, result.sessionId, config);
+    clearSecurityRateLimits(rateLimits, limit);
+    return c.html(recoveryCodesPage(user, result.recoveryCodes));
   });
 
   return app;
 }
 
-function csrfToken(c: Context): string {
-  const sessionId = getCookie(c, SESSION_COOKIE) ?? '';
-  return createHmac('sha256', platformSecret()).update(`orvex-csrf-v1:${sessionId}`).digest('base64url');
-}
-
-async function validCsrf(c: Context): Promise<boolean> {
-  let submitted = c.req.header('x-orvex-csrf');
-  if (!submitted) {
-    try {
-      const form = await c.req.raw.clone().formData();
-      const value = form.get('csrf');
-      if (typeof value === 'string') submitted = value;
-    } catch {
-      return false;
-    }
-  }
-  return Boolean(submitted && safeEqual(submitted, csrfToken(c)));
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const aa = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return aa.length === bb.length && timingSafeEqual(aa, bb);
-}
-
-function mfaReauthProvider(user: User): 'github' | 'google' | null {
-  if (user.githubId > 0 && loadOAuthConfigFromEnv()) return 'github';
-  if (user.googleId && loadGoogleOAuthConfigFromEnv()) return 'google';
+function mfaReauthProvider(user: User, providers: OAuthProviders): 'github' | 'google' | null {
+  if (user.githubId > 0 && providers.get('github').configured()) return 'github';
+  if (user.googleId && providers.get('google').configured()) return 'google';
   return null;
 }
 
-function securityRateIpKey(c: Context, action: string): string {
-  const ip = c.req.header('x-real-ip')?.trim() || c.req.header('x-forwarded-for')?.split(',').at(-1)?.trim() || 'unknown';
-  return `account-security:ip:${action}:${ip}`;
-}
-
-function checkSecurityRateLimit(c: Context, db: AppDatabase, userId: string, action: string) {
-  const ipKey = securityRateIpKey(c, action);
-  const accountKey = `security:${action}:${userId}`;
-  const ip = checkAuthRateLimit(db, ipKey, { windowMs: SECURITY_WINDOW_MS, max: SECURITY_MAX_ATTEMPTS });
-  const account = db.consumeAuthAttempt(accountKey, {
-    windowMs: SECURITY_WINDOW_MS,
-    max: SECURITY_MAX_ATTEMPTS,
-  });
+function checkSecurityRateLimit(
+  limits: DurableIdentityRateLimits,
+  requestSecurity: RequestSecurity,
+  c: Context,
+  userId: string,
+  action: string,
+) {
+  const ipKey = limits.ipKey('security', requestSecurity.clientIp(c), action);
+  const accountKey = limits.securityAccountKey(userId, action);
+  const ip = limits.consume('security_ip', ipKey);
+  const account = limits.consume('security_account', accountKey);
   return {
     allowed: ip.allowed && account.allowed,
     retryAfterSeconds: Math.max(ip.retryAfterSeconds, account.retryAfterSeconds),
     ipKey,
+    accountKey,
   };
 }
 
-function clearSecurityIpRateLimit(db: AppDatabase, limit: { ipKey: string }): void {
-  clearAuthRateLimit(db, limit.ipKey);
+function clearSecurityRateLimits(
+  limits: DurableIdentityRateLimits,
+  limit: { ipKey: string; accountKey: string },
+): void {
+  limits.clear(limit.ipKey);
 }
 
 function securityPage(
   user: User,
-  security: ReturnType<ReturnType<typeof createAppDatabase>['getUserSecurity']>,
+  security: UserSecurity,
   csrf: string,
   status: { error?: string; disabled: boolean },
 ): string {
@@ -317,16 +270,26 @@ function securityPage(
          ${csrfInput(csrf)}
          <button type="submit">Set up authenticator app</button>
        </form>`;
-  return pageShell('Account security', `${body}<p><a href="/dashboard">Back to dashboard</a></p>`, user);
+  return pageShell(
+    'Account security',
+    `${body}<p><a href="/dashboard">Back to dashboard</a></p>`,
+    user,
+  );
 }
 
-function totpSetupPage(user: User, secret: string, qr: string, csrf: string, error?: string): string {
+function totpSetupPage(
+  user: User,
+  secret: string,
+  qr: string,
+  csrf: string,
+  error?: string,
+): string {
   const banner = error
     ? `<div class="banner error">${error === 'rate' ? 'Too many attempts. Try again later.' : 'That code was not accepted.'}</div>`
     : '';
   return pageShell(
-      'Set up authenticator',
-      `<h1>Set up authenticator</h1>
+    'Set up authenticator',
+    `<h1>Set up authenticator</h1>
        <p class="lead">Scan this code with Google Authenticator, Microsoft Authenticator, Authy, or another TOTP app.</p>
        ${banner}
        <p style="text-align:center"><img src="${qr}" width="240" height="240" alt="Authenticator QR code" /></p>
@@ -340,8 +303,8 @@ function totpSetupPage(user: User, secret: string, qr: string, csrf: string, err
          <button type="submit">Verify and enable</button>
        </form>
        <p><a href="/settings/security">Cancel</a></p>`,
-      user,
-    );
+    user,
+  );
 }
 
 function recoveryCodesPage(user: User, codes: string[]): string {

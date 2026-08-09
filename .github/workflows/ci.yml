@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Typecheck, test, and build
+    name: Policy, typecheck, test, and build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     services:
@@ -34,10 +34,15 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .node-version
 
       - name: Enable pnpm
         run: corepack enable
+
+      - name: Verify pinned toolchain
+        run: |
+          test "$(node --version)" = "v$(tr -d '[:space:]' < .node-version)"
+          test "$(corepack pnpm@11.7.0 --pm-on-fail=ignore --version)" = "11.7.0"
 
       - name: Locate pnpm store
         id: pnpm-cache
@@ -47,16 +52,37 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-node-${{ hashFiles('.node-version') }}-pnpm-11.7.0-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Architecture and export boundaries
+        run: |
+          pnpm format:check
+          pnpm check:runtime
+          pnpm check:dependencies
+          pnpm check:architecture
+          pnpm check:env
+          pnpm check:config
+          pnpm check:docs
+
+      - name: Lockfile consistency
+        run: pnpm dedupe --check
 
       - name: Test
-        run: pnpm test
+        run: |
+          pnpm build
+          pnpm check:built-exports
+          pnpm test
+
+      - name: Coverage trend
+        run: |
+          if [[ -f scripts/coverage-baseline.json ]]; then
+            pnpm coverage:check
+          else
+            pnpm coverage:report
+          fi
 
       - name: Redis queue concurrency and recovery tests
         env:
@@ -66,9 +92,46 @@ jobs:
       - name: Backup and deploy-safe script tests
         run: |
           node --test scripts/backup-db.test.mjs
+          node --test scripts/restore-db-drill.test.mjs
           if [[ -f scripts/deploy-safe.test.sh ]]; then
             bash scripts/deploy-safe.test.sh
           fi
 
-      - name: Build
-        run: pnpm build
+      - name: Typecheck
+        run: pnpm typecheck
+
+  linux-native:
+    name: Fresh Linux install and native runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7.4.9-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up the production Node.js line
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Verify pinned toolchain
+        run: |
+          test "$(node --version)" = "v$(tr -d '[:space:]' < .node-version)"
+          test "$(corepack pnpm@11.7.0 --pm-on-fail=ignore --version)" = "11.7.0"
+
+      - name: Verify an isolated Linux checkout
+        env:
+          REDIS_TEST_URL: redis://127.0.0.1:6379/15
+        run: pnpm verify:linux-fresh

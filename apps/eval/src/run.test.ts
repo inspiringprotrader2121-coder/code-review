@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import {
   evaluationInvestigateEnabled,
   evaluationInvestigateTarget,
+  evaluationConfigurationFingerprint,
+  evaluationModelConfiguration,
   evaluationPassTargets,
   evaluationRiskHuntTarget,
   evaluationVerifier,
@@ -66,10 +68,7 @@ test('evaluationVerifier defaults to DeepSeek Flash and passes the tier for peer
 });
 
 test('evaluationInvestigateEnabled mirrors production kill-switch + target resolution', () => {
-  assert.equal(
-    evaluationInvestigateEnabled({ ORVEX_DEEPSEEK_API_KEY: 'k' }),
-    false,
-  );
+  assert.equal(evaluationInvestigateEnabled({ ORVEX_DEEPSEEK_API_KEY: 'k' }), false);
   assert.equal(
     evaluationInvestigateEnabled({ ORVEX_DEEPSEEK_API_KEY: 'k', ORVEX_INVESTIGATE: '1' }),
     true,
@@ -109,4 +108,27 @@ test('evaluationRiskHuntTarget requires Flash and explicit opt-in', () => {
   assert.ok(target);
   assert.equal(target.tier, 'deepseek-flash');
   assert.equal(target.target.model, 'deepseek-v4-flash');
+});
+
+test('evaluation records model, transport, and production partition provenance without credentials', () => {
+  const config = evaluationModelConfiguration({
+    ORVEX_STANDARD_API_KEY: 'secret-standard',
+    ORVEX_STANDARD_MODEL: 'MiniMax-test',
+    ORVEX_OPENAI_API_KEY: 'secret-openai',
+    ORVEX_OPENAI_MODEL: 'luna-test',
+    ORVEX_DEEPSEEK_API_KEY: 'secret-deepseek',
+    ORVEX_DEEPSEEK_FLASH_MODEL: 'flash-test',
+  });
+  assert.equal(config.execution, 'controlled-live');
+  assert.deepEqual(config.lunaExecution, {
+    transport: 'direct-responses-api',
+    productionTransport: 'containerized-codex-cli',
+    productionEquivalent: false,
+  });
+  assert.equal(config.claimScope, 'non-production-transport');
+  assert.equal(config.normalSurface, 'partitionVerifiedFindings.toPost');
+  assert.equal(config.manualSurface, 'partitionVerifiedFindings.reviewOnly');
+  assert.equal(config.passes[0]?.model, 'luna-test');
+  assert.equal(JSON.stringify(config).includes('secret-'), false);
+  assert.match(evaluationConfigurationFingerprint(config), /^[a-f0-9]{64}$/);
 });

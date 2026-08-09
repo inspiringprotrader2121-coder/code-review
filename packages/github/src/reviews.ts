@@ -57,7 +57,10 @@ export async function postPullRequestReview(
   try {
     commentIds = await collectCommentIds(octokit, ref, inline, data.id);
   } catch (err) {
-    console.warn('[reviews] comment-id collection failed (review already posted):', (err as Error).message);
+    console.warn(
+      '[reviews] comment-id collection failed (review already posted):',
+      (err as Error).message,
+    );
   }
   return { reviewId: data.id, reviewUrl: data.html_url, commentIds };
 }
@@ -102,7 +105,9 @@ async function postReviewResilient(
     }
   }
   if (skipped > 0) {
-    console.warn(`[reviews] posted summary + ${commentIds.length}/${inline.length} inline (${skipped} unresolvable line(s) skipped)`);
+    console.warn(
+      `[reviews] posted summary + ${commentIds.length}/${inline.length} inline (${skipped} unresolvable line(s) skipped)`,
+    );
   }
   return { reviewId: data.id, reviewUrl: data.html_url, commentIds };
 }

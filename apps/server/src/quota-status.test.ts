@@ -68,6 +68,22 @@ test('loadAccountQuotaStatus reports hourly remaining and next slot when exhaust
   }
 });
 
+test('quota status uses the persisted Stripe period rather than a rolling thirty days', () => {
+  const d = db();
+  const tenantId = defaultTenant(d);
+  d.setTenantBilling(tenantId, {
+    stripeSubscriptionStatus: 'active',
+    stripeCurrentPeriodStart: new Date(Date.now() - 24 * 3_600_000).toISOString(),
+  });
+  complete(d, 'older-owner', 4, {
+    tenantId,
+    createdAt: new Date(Date.now() - 10 * 24 * 3_600_000).toISOString(),
+  });
+  const status = loadAccountQuotaStatus(d, 'acme', tenantId, planFeatures('review'));
+  assert.equal(status.monthly.kind, 'metered');
+  if (status.monthly.kind === 'metered') assert.equal(status.monthly.used, 0);
+});
+
 test('formatQuotaStatusComment includes plan, hourly, and dashboard tip', () => {
   const d = db();
   const status = loadAccountQuotaStatus(d, 'acme', defaultTenant(d), planFeatures('review-plus'));

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { verifyPassword } from '@orvex-review/tenants';
+import { testAppDatabase, testServerConfig } from '../bootstrap/test-config.js';
 
 test('registration creates a session-bound account and preserves existing passwords', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-registration-route-'));
@@ -14,17 +15,18 @@ test('registration creates a session-bound account and preserves existing passwo
   process.env.ORVEX_REQUIRE_LOGIN = '1';
   process.env.ORVEX_REGISTER_RATE_IP_MAX = '2';
 
-  const [{ createAppDatabase }, { sessionRoutes }] = await Promise.all([
-    import('@orvex-review/store'),
-    import('./session.js'),
-  ]);
-  const db = createAppDatabase();
-  const app = sessionRoutes();
+  const { sessionRoutes } = await import('./session.js');
+  const db = testAppDatabase();
+  const app = sessionRoutes({ db, config: testServerConfig() });
 
   const missingCsrf = await app.request('/auth/register', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-real-ip': '192.0.2.30' },
-    body: new URLSearchParams({ email: 'new@example.test', password: 'Long-enough-password', confirmPassword: 'Long-enough-password' }),
+    body: new URLSearchParams({
+      email: 'new@example.test',
+      password: 'Long-enough-password',
+      confirmPassword: 'Long-enough-password',
+    }),
   });
   assert.equal(missingCsrf.status, 403);
 
@@ -38,7 +40,11 @@ test('registration creates a session-bound account and preserves existing passwo
 
   const withoutConsent = await app.request('/auth/register', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: csrfCookie, 'x-real-ip': '192.0.2.30' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: csrfCookie,
+      'x-real-ip': '192.0.2.30',
+    },
     body: new URLSearchParams({
       email: 'new@example.test',
       password: 'Long-enough-password',
@@ -52,7 +58,11 @@ test('registration creates a session-bound account and preserves existing passwo
 
   const registered = await app.request('/auth/register', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: csrfCookie, 'x-real-ip': '192.0.2.30' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: csrfCookie,
+      'x-real-ip': '192.0.2.30',
+    },
     body: new URLSearchParams({
       email: 'new@example.test',
       password: 'Long-enough-password',
@@ -69,14 +79,20 @@ test('registration creates a session-bound account and preserves existing passwo
   assert.ok(verifyPassword('Long-enough-password', db.getPasswordHash(user.id)));
   assert.ok(cookiePair(registered.headers.get('set-cookie'), 'orvex_session'));
 
-  const duplicateForm = await app.request('/auth/register', { headers: { 'x-real-ip': '192.0.2.30' } });
+  const duplicateForm = await app.request('/auth/register', {
+    headers: { 'x-real-ip': '192.0.2.30' },
+  });
   const duplicateHtml = await duplicateForm.text();
   const duplicateCsrf = duplicateHtml.match(/name="csrf" value="([^"]+)"/)?.[1];
   const duplicateCookie = cookiePair(duplicateForm.headers.get('set-cookie'), 'orvex_login_csrf');
   assert.ok(duplicateCsrf && duplicateCookie);
   const duplicate = await app.request('/auth/register', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: duplicateCookie, 'x-real-ip': '192.0.2.30' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: duplicateCookie,
+      'x-real-ip': '192.0.2.30',
+    },
     body: new URLSearchParams({
       email: 'new@example.test',
       password: 'Different-long-password',
@@ -96,7 +112,11 @@ test('registration creates a session-bound account and preserves existing passwo
   assert.ok(rateCsrf && rateCookie);
   const rateLimited = await app.request('/auth/register', {
     method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: rateCookie, 'x-real-ip': '192.0.2.30' },
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      cookie: rateCookie,
+      'x-real-ip': '192.0.2.30',
+    },
     body: new URLSearchParams({
       email: 'second@example.test',
       password: 'Long-enough-password',

@@ -15,10 +15,7 @@
  *
  *   ORVEX_INSTALL_ID=144378482 tsx src/bench/diagnose.ts
  */
-import {
-  buildRepoContext,
-  fetchPrDiff,
-} from '@orvex-review/github';
+import { buildRepoContext, fetchPrDiff } from '@orvex-review/github';
 import {
   dropSelfNegatingFindings,
   llmFindingsToReviewFindings,
@@ -26,7 +23,14 @@ import {
   verifyFindings,
   type ReviewFinding,
 } from '@orvex-review/review';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { createBenchmarkOctokit } from './github-auth.js';
+import {
+  EvaluationRequestBudget,
+  requireLiveCaseLimit,
+  requireLiveEvaluationControls,
+} from '../live-controls.js';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
 const REPO = process.env.BENCH_REPO ?? 'Velatrix-Cloud';
@@ -40,8 +44,18 @@ interface Target {
 
 // PR + the file and lines where a competitor caught a bug Orvex missed.
 const DEFAULT_TARGETS: Target[] = [
-  { pr: 118, file: 'payment.js', lines: [68, 1105, 1126, 1231], what: 'Stripe coupon/reservation leak on failed checkout' },
-  { pr: 121, file: 'xtreamPlayerApi.js', lines: [166, 824, 1073], what: 'failures not recorded under the tenant guard' },
+  {
+    pr: 118,
+    file: 'payment.js',
+    lines: [68, 1105, 1126, 1231],
+    what: 'Stripe coupon/reservation leak on failed checkout',
+  },
+  {
+    pr: 121,
+    file: 'xtreamPlayerApi.js',
+    lines: [166, 824, 1073],
+    what: 'failures not recorded under the tenant guard',
+  },
 ];
 
 function loadTargets(): Target[] {
@@ -53,9 +67,14 @@ function loadTargets(): Target[] {
   }
   return parsed.map((value, index) => {
     const target = value as Partial<Target>;
-    if (!Number.isInteger(target.pr) || typeof target.file !== 'string' || !target.file
-      || !Array.isArray(target.lines) || !target.lines.every(Number.isInteger)
-      || typeof target.what !== 'string') {
+    if (
+      !Number.isInteger(target.pr) ||
+      typeof target.file !== 'string' ||
+      !target.file ||
+      !Array.isArray(target.lines) ||
+      !target.lines.every(Number.isInteger) ||
+      typeof target.what !== 'string'
+    ) {
       throw new Error(`BENCH_TARGETS[${index}] is invalid`);
     }
     return target as Target;
@@ -70,10 +89,19 @@ const NEAR = 5;
 
 function llmEnv() {
   const minimax = process.env.MINIMAX_API_KEY;
-  if (minimax) return { apiKey: minimax, baseUrl: process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1', model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3' };
+  if (minimax)
+    return {
+      apiKey: minimax,
+      baseUrl: process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1',
+      model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3',
+    };
   const anthropic = process.env.ANTHROPIC_API_KEY;
   if (!anthropic) throw new Error('MINIMAX_API_KEY or ANTHROPIC_API_KEY required');
-  return { apiKey: anthropic, baseUrl: undefined, model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514' };
+  return {
+    apiKey: anthropic,
+    baseUrl: undefined,
+    model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
+  };
 }
 
 const nearTarget = (f: ReviewFinding, t: Target) =>
@@ -82,11 +110,19 @@ const nearTarget = (f: ReviewFinding, t: Target) =>
 
 function show(stage: string, findings: ReviewFinding[], t: Target) {
   const hits = findings.filter((f) => nearTarget(f, t));
-  console.log(`  ${stage.padEnd(22)} ${findings.length} findings${hits.length ? `  ⟵ ${hits.length} NEAR TARGET` : ''}`);
-  for (const h of hits) console.log(`        ✦ ${h.severity} ${h.file}:${h.line} — ${h.message.replace(/\s+/g, ' ').slice(0, 100)}`);
+  console.log(
+    `  ${stage.padEnd(22)} ${findings.length} findings${hits.length ? `  ⟵ ${hits.length} NEAR TARGET` : ''}`,
+  );
+  for (const h of hits)
+    console.log(
+      `        ✦ ${h.severity} ${h.file}:${h.line} — ${h.message.replace(/\s+/g, ' ').slice(0, 100)}`,
+    );
 }
 
 async function main() {
+  const controls = requireLiveEvaluationControls();
+  requireLiveCaseLimit(TARGETS.length);
+  const budget = new EvaluationRequestBudget(controls);
   const octokit = await createBenchmarkOctokit(OWNER, REPO);
   const llm = llmEnv();
 
@@ -98,13 +134,23 @@ async function main() {
   }
 
   for (const [prNumber, targets] of targetsByPr) {
-    console.log(`\n════ PR#${prNumber} — ${targets.length} target${targets.length === 1 ? '' : 's'} ════`);
+    console.log(
+      `\n════ PR#${prNumber} — ${targets.length} target${targets.length === 1 ? '' : 's'} ════`,
+    );
     for (const target of targets) {
       console.log(`  • ${target.file} ~L${target.lines.join('/')} — ${target.what}`);
     }
-    const { data: pr } = await octokit.rest.pulls.get({ owner: OWNER, repo: REPO, pull_number: prNumber });
+    const { data: pr } = await octokit.rest.pulls.get({
+      owner: OWNER,
+      repo: REPO,
+      pull_number: prNumber,
+    });
     const sha = pr.head.sha;
-    const files = await fetchPrDiff(octokit, { owner: OWNER, repo: REPO, number: prNumber }, { maxFileBytes: 120_000, maxFiles: 40, headSha: sha });
+    const files = await fetchPrDiff(
+      octokit,
+      { owner: OWNER, repo: REPO, number: prNumber },
+      { maxFileBytes: 120_000, maxFiles: 40, headSha: sha },
+    );
     const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
 
     let context;
@@ -116,14 +162,24 @@ async function main() {
       // finding, production would too (a drop is conclusively a filter issue); a
       // miss here is only suggestive, not proof production never found it. A
       // faithful classifier needs the full pipeline replay (see ROADMAP Phase 7).
-      context = await buildRepoContext(octokit, OWNER, REPO, sha, reviewable.map((f) => f.filename), {
-        maxSourceFiles: Number(process.env.ORVEX_CTX_SOURCE ?? 200),
-        maxRelated: Number(process.env.ORVEX_CTX_RELATED ?? 18),
-        maxDependents: Number(process.env.ORVEX_CTX_DEPENDENTS ?? 12),
-        maxFileBytes: Number(process.env.ORVEX_CTX_FILE_BYTES ?? 250_000),
-      });
-    } catch { /* diff-only */ }
+      context = await buildRepoContext(
+        octokit,
+        OWNER,
+        REPO,
+        sha,
+        reviewable.map((f) => f.filename),
+        {
+          maxSourceFiles: Number(process.env.ORVEX_CTX_SOURCE ?? 200),
+          maxRelated: Number(process.env.ORVEX_CTX_RELATED ?? 18),
+          maxDependents: Number(process.env.ORVEX_CTX_DEPENDENTS ?? 12),
+          maxFileBytes: Number(process.env.ORVEX_CTX_FILE_BYTES ?? 250_000),
+        },
+      );
+    } catch {
+      /* diff-only */
+    }
 
+    budget.reserve('diagnostic review');
     const resp = await runLlmReview(
       reviewable.map((f) => ({ filename: f.filename, status: f.status, patch: f.patch })),
       { ...llm, context },
@@ -131,11 +187,15 @@ async function main() {
     const raw = llmFindingsToReviewFindings(resp.findings);
     const denoised = dropSelfNegatingFindings(raw).kept;
 
-    const ctxFiles = context ? [...context.changedContents, ...context.related, ...context.dependents] : [];
+    const ctxFiles = context
+      ? [...context.changedContents, ...context.related, ...context.dependents]
+      : [];
     let recall: ReviewFinding[] | null = null;
     let strict: ReviewFinding[] | null = null;
     if (ctxFiles.length && denoised.length) {
+      budget.reserve('diagnostic recall verification');
       recall = (await verifyFindings(denoised, ctxFiles, { ...llm, strict: false })).kept;
+      budget.reserve('diagnostic strict verification');
       strict = (await verifyFindings(denoised, ctxFiles, { ...llm, strict: true })).kept;
     }
 
@@ -150,9 +210,41 @@ async function main() {
         console.log('  (no context files or no findings to verify)');
       }
       const rawHit = raw.some((f) => nearTarget(f, target));
-      console.log(`  ▶ VERDICT: ${rawHit ? 'RAISED by the model → check which stage drops it (recall-tuning lever)' : 'NEVER RAISED → rules/prompt + context-depth lever'}`);
+      console.log(
+        `  ▶ VERDICT: ${rawHit ? 'RAISED by the model → check which stage drops it (recall-tuning lever)' : 'NEVER RAISED → rules/prompt + context-depth lever'}`,
+      );
     }
   }
+  mkdirSync(path.dirname(controls.resultFile), { recursive: true });
+  writeFileSync(
+    controls.resultFile,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        kind: 'orvex-diagnostic-benchmark',
+        createdAt: new Date().toISOString(),
+        targets: TARGETS.map(({ pr, file, lines, what }) => ({ pr, file, lines, what })),
+        declaredBudgetUsd: controls.declaredBudgetUsd,
+        maxRequests: controls.maxRequests,
+        usedRequests: budget.usedRequests,
+        operations: budget.operations,
+        qualityClaimEligible: false,
+        note: 'Diagnostic funnel only; it does not produce recall or precision metrics.',
+      },
+      null,
+      2,
+    )}\n`,
+    { encoding: 'utf8', flag: 'wx' },
+  );
+  console.log(`provenance record: ${controls.resultFile}`);
 }
 
-main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+const entrypoint = process.argv[1];
+if (entrypoint && import.meta.url === new URL(`file://${entrypoint}`).href) {
+  main()
+    .then(() => process.exit(0))
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
+}

@@ -1,13 +1,14 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true,
-    "baseUrl": ".",
-    "paths": {
-      "@orvex-review/github": ["../../packages/github/src/index.ts"],
-      "@orvex-review/review": ["../../packages/review/src/index.ts"],
-      "@orvex-review/rules": ["../../packages/rules/src/index.ts"]
-    }
+    "outDir": "dist",
+    "rootDir": "src"
   },
-  "include": ["src"]
+  "references": [
+    { "path": "../../packages/github" },
+    { "path": "../../packages/review" },
+    { "path": "../../packages/rules" }
+  ],
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }

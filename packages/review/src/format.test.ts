@@ -21,7 +21,10 @@ const finding = (over: Partial<ReviewFinding>): ReviewFinding => ({
   ...over,
 });
 
-const render = (over: Partial<InlineFindingRender['finding']> = {}, top: Partial<InlineFindingRender> = {}): InlineFindingRender => ({
+const render = (
+  over: Partial<InlineFindingRender['finding']> = {},
+  top: Partial<InlineFindingRender> = {},
+): InlineFindingRender => ({
   finding: {
     severity: 'P2',
     ruleId: 'llm.general',
@@ -50,25 +53,38 @@ test('AI-agent prompt falls back to a location-agnostic phrase when file is abse
 });
 
 test('fix-all box renders for paid plans with actionable findings and names the command', () => {
-  const body = formatReviewBody([finding({ severity: 'P1' })], [], { ...meta, trigger: '@orvex', canAutofix: true });
+  const body = formatReviewBody([finding({ severity: 'P1' })], [], {
+    ...meta,
+    trigger: '@orvex',
+    canAutofix: true,
+  });
   assert.match(body, /Fix all of these with Orvex/);
   assert.match(body, /`@orvex fix all`/);
   assert.match(body, /re-verified before it's fixed/);
 });
 
 test('fix-all box is hidden for free plans (canAutofix false)', () => {
-  const body = formatReviewBody([finding({ severity: 'P1' })], [], { ...meta, trigger: '@orvex', canAutofix: false });
+  const body = formatReviewBody([finding({ severity: 'P1' })], [], {
+    ...meta,
+    trigger: '@orvex',
+    canAutofix: false,
+  });
   assert.doesNotMatch(body, /Fix all of these with Orvex/);
 });
 
 test('fix-all box is hidden when there are no actionable findings', () => {
-  const body = formatReviewBody([], [], { ...meta, trigger: '@orvex', canAutofix: true }, [finding({ severity: 'P3' })]);
+  const body = formatReviewBody([], [], { ...meta, trigger: '@orvex', canAutofix: true }, [
+    finding({ severity: 'P3' }),
+  ]);
   assert.doesNotMatch(body, /Fix all of these with Orvex/);
 });
 
 test('a skipped pass never reads as a clean bill of health', () => {
   const meta = {
-    owner: 'o', repo: 'r', pr: 1, headSha: 'abcdef1234567890',
+    owner: 'o',
+    repo: 'r',
+    pr: 1,
+    headSha: 'abcdef1234567890',
     stats: { newCount: 0, fixedCount: 0, openCount: 0 },
     skippedLenses: ['pass 3/3 (perf/completeness/api)'],
   };
@@ -84,7 +100,10 @@ test('a skipped pass never reads as a clean bill of health', () => {
 
 test('a fully-completed clean review still reads as clean', () => {
   const body = formatReviewBody([], [], {
-    owner: 'o', repo: 'r', pr: 1, headSha: 'abcdef1234567890',
+    owner: 'o',
+    repo: 'r',
+    pr: 1,
+    headSha: 'abcdef1234567890',
     stats: { newCount: 0, fixedCount: 0, openCount: 0 },
   });
   assert.match(body, /it looks good to merge/);
@@ -96,10 +115,12 @@ test('manual-review candidates remain visible without becoming inline findings o
     ...meta,
     trigger: '@orvex',
     canAutofix: true,
-    reviewOnly: [{
-      finding: finding({ severity: 'P2', message: 'Possible auth bypass' }),
-      reason: 'Verifier did not confirm it: not enough evidence in the diff',
-    }],
+    reviewOnly: [
+      {
+        finding: finding({ severity: 'P2', message: 'Possible auth bypass' }),
+        reason: 'Verifier did not confirm it: not enough evidence in the diff',
+      },
+    ],
   });
   assert.match(body, /No confirmed issues to post inline/);
   assert.match(body, /finding for manual review/);
@@ -118,7 +139,12 @@ test('summary body ends with a compact commands footer', () => {
 
 test('untrusted summaries and finding text cannot escape markdown sections', () => {
   const body = formatReviewBody(
-    [finding({ message: '<details><summary>hide the finding</summary>```', suggestion: '<details>bad```' })],
+    [
+      finding({
+        message: '<details><summary>hide the finding</summary>```',
+        suggestion: '<details>bad```',
+      }),
+    ],
     [],
     { ...meta, summary: 'summary```<details><summary>bad', trigger: '@orvex', canAutofix: true },
   );

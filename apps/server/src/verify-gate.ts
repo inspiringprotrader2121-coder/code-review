@@ -5,9 +5,11 @@
  * never publishes through a configuration-only verifier bypass; an emergency
  * rollback must deploy known code rather than silently weakening every plan.
  */
-export function isVerificationEnabled(): boolean {
-  const production =
-    process.env.NODE_ENV === 'production' || process.env.ORVEX_ENV === 'production';
-  if (production) return true;
-  return process.env.ORVEX_VERIFY !== '0';
+import type { ServerConfig } from './bootstrap/config.js';
+
+/**
+ * Runtime callers receive the immutable bootstrap snapshot explicitly.
+ */
+export function isVerificationEnabled(config: Pick<ServerConfig, 'verificationEnabled'>): boolean {
+  return config.verificationEnabled;
 }

@@ -16,8 +16,15 @@ const defaultTenant = (d: AppDatabase): string => defaultTenants.get(d)!;
 function complete(d: AppDatabase, owner: string, n: number, tenantId = defaultTenant(d)): void {
   for (let i = 0; i < n; i++) {
     d.recordReviewRun({
-      tenantId, installationId: 1, owner, repo: 'r', pr: 1, headSha: `sha${i}`,
-      action: 'synchronize', status: 'completed', durationMs: 1000,
+      tenantId,
+      installationId: 1,
+      owner,
+      repo: 'r',
+      pr: 1,
+      headSha: `sha${i}`,
+      action: 'synchronize',
+      status: 'completed',
+      durationMs: 1000,
     });
   }
 }
@@ -37,8 +44,15 @@ function completeSpreadOverDays(
   for (let i = 0; i < n; i++) {
     const offset = 2 * 3_600_000 + (n <= 1 ? 0 : (i * span) / (n - 1));
     d.recordReviewRun({
-      tenantId, installationId: 1, owner, repo: 'r', pr: 1, headSha: `sha${i}`,
-      action: 'synchronize', status: 'completed', durationMs: 1000,
+      tenantId,
+      installationId: 1,
+      owner,
+      repo: 'r',
+      pr: 1,
+      headSha: `sha${i}`,
+      action: 'synchronize',
+      status: 'completed',
+      durationMs: 1000,
       createdAt: new Date(now - offset).toISOString(),
     });
   }
@@ -61,6 +75,51 @@ test('Review monthly included quota requires prepaid credits for overage', () =>
   assert.equal(accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }), null);
 });
 
+test('paid included quota starts at the stored Stripe billing-period boundary', () => {
+  const d = db();
+  const tenant = d.createTenant('stripe-period');
+  const plan = planFeatures('review');
+  const periodStart = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  d.setTenantBilling(tenant.id, {
+    stripeSubscriptionStatus: 'active',
+    stripeCurrentPeriodStart: periodStart,
+  });
+  for (let i = 0; i < plan.includedReviewsPerMonth!; i += 1) {
+    d.recordReviewRun({
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: `previous-period-${i}`,
+      repo: 'r',
+      pr: i,
+      headSha: `previous-${i}`,
+      action: 'synchronize',
+      status: 'completed',
+      durationMs: 1,
+      createdAt: new Date(Date.now() - 10 * 24 * 3_600_000).toISOString(),
+    });
+  }
+  assert.equal(accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }), null);
+
+  for (let i = 0; i < plan.includedReviewsPerMonth!; i += 1) {
+    d.recordReviewRun({
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: `current-period-${i}`,
+      repo: 'r',
+      pr: i,
+      headSha: `current-${i}`,
+      action: 'synchronize',
+      status: 'completed',
+      durationMs: 1,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+  }
+  assert.equal(
+    accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }),
+    'insufficient_credits',
+  );
+});
+
 test('Review hard safety ceiling still stops even with prepaid balance', () => {
   const d = db();
   const plan = planFeatures('review');
@@ -71,10 +130,7 @@ test('Review hard safety ceiling still stops even with prepaid balance', () => {
     stripeSessionId: 'cs_test_prepaid_cap',
   });
   completeSpreadOverDays(d, 'acme', plan.reviewsPerMonth!, tenant.id);
-  assert.equal(
-    accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }),
-    'monthly_limit',
-  );
+  assert.equal(accountLimitReason(d, 'acme', plan, 1, 0, { tenantId: tenant.id }), 'monthly_limit');
 });
 
 test('the hourly ceiling is checked FIRST — when a burst crosses BOTH thresholds at once, it reports rate_limited, not monthly_limit', () => {
@@ -143,8 +199,16 @@ test('GLOBAL free-tier daily cap trips for a trial account once total free revie
   const cap = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
   for (let i = 0; i < cap; i++) {
     d.recordReviewRun({
-      tenantId: d.createTenant(`farm-${i}`).id, installationId: i, owner: `farm-acct-${i}`, repo: 'r', pr: 1,
-      headSha: `s${i}`, action: 'opened', status: 'completed', durationMs: 100, freeTier: true,
+      tenantId: d.createTenant(`farm-${i}`).id,
+      installationId: i,
+      owner: `farm-acct-${i}`,
+      repo: 'r',
+      pr: 1,
+      headSha: `s${i}`,
+      action: 'opened',
+      status: 'completed',
+      durationMs: 100,
+      freeTier: true,
     });
   }
   // a brand-new farmed account (0 of its own reviews) is now blocked by the GLOBAL cap
@@ -156,8 +220,16 @@ test('the global free-tier cap does NOT block PAID accounts (only trial plans ar
   const cap = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
   for (let i = 0; i < cap; i++) {
     d.recordReviewRun({
-      tenantId: d.createTenant(`farm-${i}`).id, installationId: i, owner: `farm-acct-${i}`, repo: 'r', pr: 1,
-      headSha: `s${i}`, action: 'opened', status: 'completed', durationMs: 100, freeTier: true,
+      tenantId: d.createTenant(`farm-${i}`).id,
+      installationId: i,
+      owner: `farm-acct-${i}`,
+      repo: 'r',
+      pr: 1,
+      headSha: `s${i}`,
+      action: 'opened',
+      status: 'completed',
+      durationMs: 100,
+      freeTier: true,
     });
   }
   // a paying tenant is unaffected by the free-tier abuse pause
@@ -206,7 +278,11 @@ test('COGS safety reservations include running and newly requested reviews', () 
     headSha: 'completed',
     action: 'synchronize',
   });
-  d.completeReviewRun(completed, { status: 'completed', durationMs: 1, costUsd: Math.max(0, cap - 10) });
+  d.completeReviewRun(completed, {
+    status: 'completed',
+    durationMs: 1,
+    costUsd: Math.max(0, cap - 10),
+  });
   d.startReviewRun({
     tenantId,
     installationId: 1,
@@ -216,7 +292,10 @@ test('COGS safety reservations include running and newly requested reviews', () 
     headSha: 'running',
     action: 'synchronize',
   });
-  assert.equal(accountLimitReason(d, 'concurrent-user', planFeatures('review-plus')), 'cost_capped');
+  assert.equal(
+    accountLimitReason(d, 'concurrent-user', planFeatures('review-plus')),
+    'cost_capped',
+  );
 });
 
 test('unlimited hourly plans still enforce the COGS gate in the atomic reservation path', () => {
@@ -297,7 +376,11 @@ test('per-account concurrency caps parallel burn of the hourly bucket', () => {
     });
   }
   assert.equal(accountLimitReason(d, 'busy', plan, 1), 'concurrency_limited');
-  assert.equal(accountLimitReason(d, 'busy', plan, 0, 0), null, 'no new reservation is still under the in-flight cap');
+  assert.equal(
+    accountLimitReason(d, 'busy', plan, 0, 0),
+    null,
+    'no new reservation is still under the in-flight cap',
+  );
   assert.equal(
     accountLimitReason(d, 'busy', plan, 0, 1),
     null,

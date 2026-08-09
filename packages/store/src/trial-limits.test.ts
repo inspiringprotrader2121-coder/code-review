@@ -122,16 +122,97 @@ test('trial is anchored to the GitHub account, not the workspace — a second wo
 test('countGlobalFreeTierReviewsSince counts only free-tier reviews across all accounts', () => {
   const d = db();
   // free-tier reviews from several accounts (a farm)
-  d.recordReviewRun({ tenantId: tenantFor(d, 't1'), installationId: 1, owner: 'farm1', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: true });
-  d.recordReviewRun({ tenantId: tenantFor(d, 't2'), installationId: 2, owner: 'farm2', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'running', durationMs: 100, freeTier: true });
-  d.recordReviewRun({ tenantId: tenantFor(d, 't3'), installationId: 3, owner: 'farm3', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: true });
+  d.recordReviewRun({
+    tenantId: tenantFor(d, 't1'),
+    installationId: 1,
+    owner: 'farm1',
+    repo: 'r',
+    pr: 1,
+    headSha: 's',
+    action: 'opened',
+    status: 'completed',
+    durationMs: 100,
+    freeTier: true,
+  });
+  d.recordReviewRun({
+    tenantId: tenantFor(d, 't2'),
+    installationId: 2,
+    owner: 'farm2',
+    repo: 'r',
+    pr: 1,
+    headSha: 's',
+    action: 'opened',
+    status: 'running',
+    durationMs: 100,
+    freeTier: true,
+  });
+  d.recordReviewRun({
+    tenantId: tenantFor(d, 't3'),
+    installationId: 3,
+    owner: 'farm3',
+    repo: 'r',
+    pr: 1,
+    headSha: 's',
+    action: 'opened',
+    status: 'completed',
+    durationMs: 100,
+    freeTier: true,
+  });
   // a PAID review must NOT count toward the free-tier cap
-  d.recordReviewRun({ tenantId: tenantFor(d, 'p1'), installationId: 9, owner: 'paying', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: false });
+  d.recordReviewRun({
+    tenantId: tenantFor(d, 'p1'),
+    installationId: 9,
+    owner: 'paying',
+    repo: 'r',
+    pr: 1,
+    headSha: 's',
+    action: 'opened',
+    status: 'completed',
+    durationMs: 100,
+    freeTier: false,
+  });
   // a free-tier FIX / skipped run must NOT count
-  d.recordReviewRun({ tenantId: tenantFor(d, 't4'), installationId: 4, owner: 'farm4', repo: 'r', pr: 1, headSha: 's', action: 'fix:ready', status: 'completed', durationMs: 100, freeTier: true });
-  d.recordReviewRun({ tenantId: tenantFor(d, 't5'), installationId: 5, owner: 'farm5', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'skipped', durationMs: 0, freeTier: true });
-  d.recordReviewRun({ tenantId: tenantFor(d, 't6'), installationId: 6, owner: 'farm6', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'failed', durationMs: 100, freeTier: true });
-  assert.equal(d.countGlobalFreeTierReviewsSince(24 * 3600_000), 4, 'counts running+completed+failed free-tier reviews');
+  d.recordReviewRun({
+    tenantId: tenantFor(d, 't4'),
+    installationId: 4,
+    owner: 'farm4',
+    repo: 'r',
+    pr: 1,
+    headSha: 's',
+    action: 'fix:ready',
+    status: 'completed',
+    durationMs: 100,
+    freeTier: true,
+  });
+  d.recordReviewRun({
+    tenantId: tenantFor(d, 't5'),
+    installationId: 5,
+    owner: 'farm5',
+    repo: 'r',
+    pr: 1,
+    headSha: 's',
+    action: 'opened',
+    status: 'skipped',
+    durationMs: 0,
+    freeTier: true,
+  });
+  d.recordReviewRun({
+    tenantId: tenantFor(d, 't6'),
+    installationId: 6,
+    owner: 'farm6',
+    repo: 'r',
+    pr: 1,
+    headSha: 's',
+    action: 'opened',
+    status: 'failed',
+    durationMs: 100,
+    freeTier: true,
+  });
+  assert.equal(
+    d.countGlobalFreeTierReviewsSince(24 * 3600_000),
+    4,
+    'counts running+completed+failed free-tier reviews',
+  );
 });
 
 test('countDistinctAccountsFromIp counts unique accounts and ignores unknown IPs', () => {
@@ -148,10 +229,17 @@ test('countDistinctAccountsFromIp counts unique accounts and ignores unknown IPs
 test('getUserByNormalizedEmail finds an account by its alias-collapsed identity (anti-farm)', () => {
   const d = db();
   // signup stores the normalized (alias-collapsed) identity
-  const u = d.createPasswordUser({ email: 'John.Doe+work@gmail.com', passwordHash: 'scrypt$x$y', normalizedEmail: 'johndoe@gmail.com' });
+  const u = d.createPasswordUser({
+    email: 'John.Doe+work@gmail.com',
+    passwordHash: 'scrypt$x$y',
+    normalizedEmail: 'johndoe@gmail.com',
+  });
   assert.ok(u);
   // a second signup with a DIFFERENT-looking alias of the same inbox is detected
-  assert.ok(d.getUserByNormalizedEmail('johndoe@gmail.com'), 'alias of the same inbox is recognized');
+  assert.ok(
+    d.getUserByNormalizedEmail('johndoe@gmail.com'),
+    'alias of the same inbox is recognized',
+  );
   // an unrelated inbox is not
   assert.equal(d.getUserByNormalizedEmail('someoneelse@gmail.com'), null);
 });
@@ -165,13 +253,7 @@ test('setUserNormalizedEmailIfMissing backfills only when absent (never overwrit
 });
 
 test('new tenants start on the free trial, not a paid tier', () => {
-  const prev = process.env.ORVEX_DEFAULT_PLAN;
-  delete process.env.ORVEX_DEFAULT_PLAN;
-  try {
-    const d = db();
-    const t = d.createTenant('newco');
-    assert.equal(d.getTenantPlan(t.id), 'free');
-  } finally {
-    if (prev !== undefined) process.env.ORVEX_DEFAULT_PLAN = prev;
-  }
+  const d = db();
+  const t = d.createTenant('newco');
+  assert.equal(d.getTenantPlan(t.id), 'free');
 });

@@ -23,7 +23,10 @@ export function cleanupAbandonedAgentCheckouts(
   try {
     entries = fs.readdirSync(tempRoot, { withFileTypes: true });
   } catch (err) {
-    console.warn(`[server] abandoned agent checkout cleanup failed for ${tempRoot}:`, (err as Error).message);
+    console.warn(
+      `[server] abandoned agent checkout cleanup failed for ${tempRoot}:`,
+      (err as Error).message,
+    );
     return 0;
   }
   const activeCheckoutDirs = new Set<string>();
@@ -33,7 +36,11 @@ export function cleanupAbandonedAgentCheckouts(
     }
   }
   for (const entry of entries) {
-        if (!entry.isDirectory() || !AGENT_TEMP_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue;
+    if (
+      !entry.isDirectory() ||
+      !AGENT_TEMP_PREFIXES.some((prefix) => entry.name.startsWith(prefix))
+    )
+      continue;
     const fullPath = path.resolve(path.join(tempRoot, entry.name));
     if (activeCheckoutDirs.has(fullPath)) continue;
     try {
@@ -43,7 +50,10 @@ export function cleanupAbandonedAgentCheckouts(
         removed += 1;
       }
     } catch (err) {
-      console.warn(`[server] abandoned agent checkout cleanup failed for ${fullPath}:`, (err as Error).message);
+      console.warn(
+        `[server] abandoned agent checkout cleanup failed for ${fullPath}:`,
+        (err as Error).message,
+      );
     }
   }
   return removed;

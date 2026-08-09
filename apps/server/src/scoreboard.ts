@@ -56,7 +56,10 @@ export interface Scoreboard {
     older: { prs: number; clusters: number; orvexCatchPct: number };
   };
   prsAnalyzed: number;
-  bots: Record<string, { findings: number; prsWithFindings: number; clustersHit: number; uniqueClusters: number }>;
+  bots: Record<
+    string,
+    { findings: number; prsWithFindings: number; clustersHit: number; uniqueClusters: number }
+  >;
   clusters: { total: number; orvexMissed: ScoreCluster[]; orvexUnique: ScoreCluster[] };
   perPr: Array<{ pr: number; title: string; state: string; counts: Record<string, number> }>;
 }
@@ -143,7 +146,12 @@ export async function buildScoreboard(
       });
       counts[bot] = (counts[bot] ?? 0) + 1;
     }
-    perPr.push({ pr: pr.number, title: pr.title, state: pr.merged_at ? 'merged' : pr.state, counts });
+    perPr.push({
+      pr: pr.number,
+      title: pr.title,
+      state: pr.merged_at ? 'merged' : pr.state,
+      counts,
+    });
   }
 
   // Cluster: same PR + same file + line within ±5 = the same defect.
@@ -162,7 +170,14 @@ export async function buildScoreboard(
       if (!hit.key.severity && f.severity) hit.key.severity = f.severity;
     } else {
       clusters.push({
-        key: { pr: f.pr, path: f.path, line: f.line, bots: [f.bot], severity: f.severity, excerpt: f.excerpt },
+        key: {
+          pr: f.pr,
+          path: f.path,
+          line: f.line,
+          bots: [f.bot],
+          severity: f.severity,
+          excerpt: f.excerpt,
+        },
         members: [f],
       });
     }
@@ -176,7 +191,8 @@ export async function buildScoreboard(
       findings: own.length,
       prsWithFindings: new Set(own.map((f) => f.pr)).size,
       clustersHit: clusters.filter((cl) => cl.key.bots.includes(b)).length,
-      uniqueClusters: clusters.filter((cl) => cl.key.bots.length === 1 && cl.key.bots[0] === b).length,
+      uniqueClusters: clusters.filter((cl) => cl.key.bots.length === 1 && cl.key.bots[0] === b)
+        .length,
     };
   }
 
@@ -205,7 +221,9 @@ export async function buildScoreboard(
       // the recall report: defects other bots flagged that Orvex didn't
       orvexMissed: clusters.filter((cl) => !cl.key.bots.includes('orvex')).map((cl) => cl.key),
       // the marketing report: defects ONLY Orvex flagged
-      orvexUnique: clusters.filter((cl) => cl.key.bots.length === 1 && cl.key.bots[0] === 'orvex').map((cl) => cl.key),
+      orvexUnique: clusters
+        .filter((cl) => cl.key.bots.length === 1 && cl.key.bots[0] === 'orvex')
+        .map((cl) => cl.key),
     },
     perPr,
   };

@@ -10,14 +10,19 @@ test('CodeRabbit billing notices are recorded as rate-limited, not clean reviews
     'rate_limited',
   );
   assert.equal(
-    coderabbitState('This review was rate limited by CodeRabbit because adaptive limits are currently applied.'),
+    coderabbitState(
+      'This review was rate limited by CodeRabbit because adaptive limits are currently applied.',
+    ),
     'rate_limited',
   );
 });
 
 test('CodeRabbit skip notices remain distinct from rate limits', () => {
   assert.equal(coderabbitState('Review skipped: no new commits to review.'), 'skipped');
-  assert.equal(coderabbitState('The PR is safe to merge; no concrete defect identified.'), 'reviewed');
+  assert.equal(
+    coderabbitState('The PR is safe to merge; no concrete defect identified.'),
+    'reviewed',
+  );
 });
 
 test('a rate-limit notice wins over historical review evidence', () => {

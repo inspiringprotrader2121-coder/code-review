@@ -3,6 +3,7 @@ import test from 'node:test';
 import { Hono } from 'hono';
 import { canonicalHostRedirect, productionSecurityHeaders } from './app.js';
 import { sameOriginRequest } from './routes/request-security.js';
+import { testServerConfig } from './bootstrap/test-config.js';
 
 test('sets browser security headers and keeps authenticated surfaces out of caches', async (t) => {
   const previousAppUrl = process.env.APP_URL;
@@ -13,7 +14,8 @@ test('sets browser security headers and keeps authenticated surfaces out of cach
   });
 
   const app = new Hono();
-  app.use('*', productionSecurityHeaders);
+  const config = testServerConfig();
+  app.use('*', productionSecurityHeaders(config));
   app.get('/', (c) => c.html('<h1>public</h1>'));
   app.get('/auth/login', (c) => c.html('<h1>login</h1>'));
 
@@ -21,9 +23,23 @@ test('sets browser security headers and keeps authenticated surfaces out of cach
   assert.equal(publicResponse.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(publicResponse.headers.get('x-frame-options'), 'DENY');
   assert.equal(publicResponse.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
-  assert.equal(publicResponse.headers.get('permissions-policy'), 'camera=(), geolocation=(), microphone=()');
-  assert.equal(publicResponse.headers.get('strict-transport-security'), 'max-age=31536000; includeSubDomains');
-  assert.match(publicResponse.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
+  assert.equal(
+    publicResponse.headers.get('permissions-policy'),
+    'camera=(), geolocation=(), microphone=()',
+  );
+  assert.equal(
+    publicResponse.headers.get('strict-transport-security'),
+    'max-age=31536000; includeSubDomains',
+  );
+  assert.match(
+    publicResponse.headers.get('content-security-policy') ?? '',
+    /frame-ancestors 'none'/,
+  );
+  assert.doesNotMatch(publicResponse.headers.get('content-security-policy') ?? '', /unsafe-inline/);
+  assert.match(
+    publicResponse.headers.get('content-security-policy') ?? '',
+    /style-src 'self' 'unsafe-hashes'/,
+  );
   assert.equal(publicResponse.headers.get('cache-control'), null);
 
   const loginResponse = await app.request('/auth/login');
@@ -39,8 +55,9 @@ test('redirects the www host to the canonical public host', async (t) => {
   });
 
   const app = new Hono();
-  app.use('*', productionSecurityHeaders);
-  app.use('*', canonicalHostRedirect);
+  const config = testServerConfig();
+  app.use('*', productionSecurityHeaders(config));
+  app.use('*', canonicalHostRedirect(config));
   app.get('/connect', (c) => c.text('connect'));
 
   const response = await app.request('/connect?next=1', { headers: { host: 'www.useorvex.com' } });
@@ -58,7 +75,8 @@ test('same-origin mutation checks fail closed when APP_URL is not configured', a
   });
 
   const app = new Hono();
-  app.post('/mutate', (c) => c.json({ allowed: sameOriginRequest(c) }));
+  const config = testServerConfig();
+  app.post('/mutate', (c) => c.json({ allowed: sameOriginRequest(c, config) }));
   const response = await app.request('http://attacker.example/mutate', {
     method: 'POST',
     headers: { origin: 'http://attacker.example' },

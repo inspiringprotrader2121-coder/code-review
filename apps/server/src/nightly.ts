@@ -1,4 +1,8 @@
-import { buildRepoContext, createInstallationOctokit, fetchCompareDiff } from '@orvex-review/github';
+import {
+  buildRepoContext,
+  createInstallationOctokit,
+  fetchCompareDiff,
+} from '@orvex-review/github';
 import type { ReviewQueue } from '@orvex-review/queue';
 import {
   dropSelfNegatingFindings,
@@ -13,12 +17,12 @@ import {
 import { planFeatures } from '@orvex-review/tenants';
 import {
   createUsageRecorder,
-  loadWorkerConfig,
   accountLimitReason,
   type LlmTarget,
   type WorkerConfig,
 } from './pipeline.js';
 import { isVerificationEnabled } from './verify-gate.js';
+import type { ServerConfig } from './bootstrap/config.js';
 
 /**
  * Nightly whole-repo scans — the Verify/Enterprise scheduled-scan feature.
@@ -31,21 +35,12 @@ import { isVerificationEnabled } from './verify-gate.js';
  * plan has `nightlyScans`. Both gates must hold.
  */
 
-function boundedEnvInt(name: string, fallback: number, min: number, max: number): number {
-  const value = Number(process.env[name] ?? fallback);
-  return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
-}
-
-const LOOKBACK_DAYS = boundedEnvInt('ORVEX_NIGHTLY_LOOKBACK_DAYS', 1, 1, 30);
-const SCAN_HOUR = boundedEnvInt('ORVEX_NIGHTLY_HOUR', 3, 0, 23); // UTC hour to run
-/** Per-tenant daily ceiling on nightly scan reservations (unbounded repos → cost). */
-const MAX_SCANS_PER_TENANT_DAY = boundedEnvInt('ORVEX_NIGHTLY_MAX_SCANS_PER_TENANT', 25, 1, 500);
-
 export function startNightlyScheduler(
   queue: ReviewQueue,
-  loadConfig: () => WorkerConfig = loadWorkerConfig,
+  runtime: Pick<ServerConfig, 'nightly'>,
+  loadConfig: () => WorkerConfig,
 ): () => void {
-  if (process.env.ORVEX_NIGHTLY_SCANS !== '1') {
+  if (!runtime.nightly.enabled) {
     return () => {};
   }
   let running = true;
@@ -58,10 +53,10 @@ export function startNightlyScheduler(
     if (!running) return;
     const now = new Date();
     const day = now.toISOString().slice(0, 10);
-    if (now.getUTCHours() !== SCAN_HOUR || lastRunDay === day || checkInProgress) return;
+    if (now.getUTCHours() !== runtime.nightly.hour || lastRunDay === day || checkInProgress) return;
     checkInProgress = true;
     try {
-      await enqueueNightlyScans(queue, loadConfig);
+      await enqueueNightlyScans(queue, runtime, loadConfig);
       lastRunDay = day;
     } finally {
       checkInProgress = false;
@@ -73,7 +68,7 @@ export function startNightlyScheduler(
     check().catch((err) => console.error('[nightly] scheduler error', err));
   }, 3_600_000); // hourly
 
-  console.log(`[nightly] scheduler active — daily scans at ${SCAN_HOUR}:00 UTC`);
+  console.log(`[nightly] scheduler active — daily scans at ${runtime.nightly.hour}:00 UTC`);
   return () => {
     running = false;
     clearInterval(interval);
@@ -83,7 +78,8 @@ export function startNightlyScheduler(
 /** Enumerate eligible repos and enqueue a scan job for each. */
 export async function enqueueNightlyScans(
   queue: ReviewQueue,
-  loadConfig: () => WorkerConfig = loadWorkerConfig,
+  runtime: Pick<ServerConfig, 'nightly'>,
+  loadConfig: () => WorkerConfig,
 ): Promise<number> {
   const config = loadConfig();
   const targets = config.store.listScanTargets().filter((t) => planFeatures(t.plan).nightlyScans);
@@ -92,9 +88,9 @@ export async function enqueueNightlyScans(
   let enqueued = 0;
   for (const t of targets) {
     const n = perTenant.get(t.tenantId) ?? 0;
-    if (n >= MAX_SCANS_PER_TENANT_DAY) {
+    if (n >= runtime.nightly.maxScansPerTenantDay) {
       console.warn(
-        `[nightly] tenant ${t.tenantId} hit daily scan cap (${MAX_SCANS_PER_TENANT_DAY}) — skipping ${t.owner}/${t.name}`,
+        `[nightly] tenant ${t.tenantId} hit daily scan cap (${runtime.nightly.maxScansPerTenantDay}) — skipping ${t.owner}/${t.name}`,
       );
       continue;
     }
@@ -122,6 +118,7 @@ export async function enqueueNightlyScans(
 export async function processScanJob(
   job: { installationId: number; tenantId: string; owner: string; repo: string; scanDay?: string },
   config: WorkerConfig,
+  runtime: Pick<ServerConfig, 'nightly' | 'verificationEnabled'>,
 ): Promise<void> {
   const { installationId, tenantId, owner, repo } = job;
   const plan = planFeatures(config.store.getTenantPlan(tenantId));
@@ -132,19 +129,29 @@ export async function processScanJob(
     baseUrl: config.llmBaseUrl,
     model: config.llmModel,
     api: config.llmApi,
+    transport:
+      config.llmApi === 'responses'
+        ? 'responses'
+        : config.llmApi === 'anthropic'
+          ? 'anthropic'
+          : 'compatible-chat',
+    admissionBucket: /^minimax(?:-|$)/i.test(config.llmModel) ? 'minimax' : 'premium',
+    thinking: /^minimax(?:-|$)/i.test(config.llmModel),
   };
-  const reserved = config.store.tryReserveReviewRun({
-    tenantId,
-    installationId,
-    owner,
-    repo,
-    pr: 0,
-    headSha: `nightly:${job.scanDay ?? new Date().toISOString().slice(0, 10)}`,
-    action: 'scan:nightly',
-  }, () =>
-    // Scans must not consume PR included/prepaid quota, but they MUST reserve
-    // COGS headroom (and pass tenantId for any future prepaid hooks).
-    accountLimitReason(config.store, owner, plan, 1, 0, { tenantId, cogsOnly: true }),
+  const reserved = config.store.tryReserveReviewRun(
+    {
+      tenantId,
+      installationId,
+      owner,
+      repo,
+      pr: 0,
+      headSha: `nightly:${job.scanDay ?? new Date().toISOString().slice(0, 10)}`,
+      action: 'scan:nightly',
+    },
+    () =>
+      // Scans must not consume PR included/prepaid quota, but they MUST reserve
+      // COGS headroom (and pass tenantId for any future prepaid hooks).
+      accountLimitReason(config.store, owner, plan, 1, 0, { tenantId, cogsOnly: true }),
   );
   if (!reserved.ok) {
     console.warn(`[nightly] ${owner}/${repo}: ${reserved.reason} — skipping`);
@@ -157,109 +164,149 @@ export async function processScanJob(
   try {
     const octokit = createInstallationOctokit(config.github, installationId);
 
-  const info = await octokit.rest.repos.get({ owner, repo });
-  const branch = info.data.default_branch;
-  const until = new Date(Date.now() - LOOKBACK_DAYS * 86_400_000).toISOString();
+    const info = await octokit.rest.repos.get({ owner, repo });
+    const branch = info.data.default_branch;
+    const until = new Date(Date.now() - runtime.nightly.lookbackDays * 86_400_000).toISOString();
 
-  const [headCommits, baseCommits] = await Promise.all([
-    octokit.rest.repos.listCommits({ owner, repo, sha: branch, per_page: 1 }),
-    octokit.rest.repos.listCommits({ owner, repo, sha: branch, until, per_page: 1 }),
-  ]);
-  const headSha = headCommits.data[0]?.sha;
-  let baseSha = baseCommits.data[0]?.sha;
-  // New repos often have no commits older than the lookback window, so `until`
-  // returns empty. Fall back to the oldest commit we can page so the first
-  // nightly still has a compare base.
-  if (headSha && !baseSha) {
-    const recent = await octokit.rest.repos.listCommits({ owner, repo, sha: branch, per_page: 100 });
-    baseSha = recent.data[recent.data.length - 1]?.sha;
-  }
-  if (!headSha || !baseSha || headSha === baseSha) {
-    console.log(`[nightly] ${owner}/${repo}: no new commits in the last ${LOOKBACK_DAYS}d — skipping`);
-    status = 'skipped';
-    return;
-  }
+    const [headCommits, baseCommits] = await Promise.all([
+      octokit.rest.repos.listCommits({ owner, repo, sha: branch, per_page: 1 }),
+      octokit.rest.repos.listCommits({ owner, repo, sha: branch, until, per_page: 1 }),
+    ]);
+    const headSha = headCommits.data[0]?.sha;
+    let baseSha = baseCommits.data[0]?.sha;
+    // New repos often have no commits older than the lookback window, so `until`
+    // returns empty. Fall back to the oldest commit we can page so the first
+    // nightly still has a compare base.
+    if (headSha && !baseSha) {
+      const recent = await octokit.rest.repos.listCommits({
+        owner,
+        repo,
+        sha: branch,
+        per_page: 100,
+      });
+      baseSha = recent.data[recent.data.length - 1]?.sha;
+    }
+    if (!headSha || !baseSha || headSha === baseSha) {
+      console.log(
+        `[nightly] ${owner}/${repo}: no new commits in the last ${runtime.nightly.lookbackDays}d — skipping`,
+      );
+      status = 'skipped';
+      return;
+    }
 
-  const compared = await fetchCompareDiff(octokit, owner, repo, baseSha, headSha, {
-    maxFileBytes: 100_000,
-    maxFiles: 1_000,
-  });
-  const files = compared.files
-    .filter((f) => f.patch && f.status !== 'removed')
-    .map((f) => ({ filename: f.filename, status: f.status, patch: f.patch as string }));
-  if (files.length === 0) {
-    console.log(`[nightly] ${owner}/${repo}: no reviewable changes — skipping`);
-    status = 'skipped';
-    return;
-  }
-
-  let context: Awaited<ReturnType<typeof buildRepoContext>> | undefined;
-  try {
-    context = await buildRepoContext(octokit, owner, repo, headSha, files.map((f) => f.filename), {
-      maxSourceFiles: 60,
-      maxRelated: 25,
-      maxDependents: 15,
-      maxFileBytes: 24_000,
-      maxOthers: 40,
+    const compared = await fetchCompareDiff(octokit, owner, repo, baseSha, headSha, {
+      maxFileBytes: 100_000,
+      maxFiles: 1_000,
     });
-  } catch {
-    /* diff-only fallback */
-  }
+    const files = compared.files
+      .filter((f) => f.patch && f.status !== 'removed')
+      .map((f) => ({ filename: f.filename, status: f.status, patch: f.patch as string }));
+    if (files.length === 0) {
+      console.log(`[nightly] ${owner}/${repo}: no reviewable changes — skipping`);
+      status = 'skipped';
+      return;
+    }
 
-  const llm = await runLlmReview(files, {
-    apiKey: config.llmApiKey,
-    baseUrl: config.llmBaseUrl,
-    model: config.llmModel,
-    api: scanTarget.api,
-    reasoningEffort: scanTarget.reasoningEffort,
-    context,
-    onUsage: createUsageRecorder(config, runId, tenantId, 'premium', scanTarget, 'nightly discovery'),
-  });
+    let context: Awaited<ReturnType<typeof buildRepoContext>> | undefined;
+    try {
+      context = await buildRepoContext(
+        octokit,
+        owner,
+        repo,
+        headSha,
+        files.map((f) => f.filename),
+        {
+          maxSourceFiles: 60,
+          maxRelated: 25,
+          maxDependents: 15,
+          maxFileBytes: 24_000,
+          maxOthers: 40,
+        },
+      );
+    } catch {
+      /* diff-only fallback */
+    }
 
-  let findings = dropSelfNegatingFindings(llmFindingsToReviewFindings(llm.findings)).kept;
-
-  if (findings.length > 0 && isVerificationEnabled() && context) {
-    const verifyFiles = [...context.changedContents, ...context.related, ...context.dependents, ...context.others];
-    const verified = await verifyFindings(findings, verifyFiles, {
+    const llm = await runLlmReview(files, {
       apiKey: config.llmApiKey,
-      model: config.llmModel,
       baseUrl: config.llmBaseUrl,
+      model: config.llmModel,
       api: scanTarget.api,
       reasoningEffort: scanTarget.reasoningEffort,
-      onUsage: createUsageRecorder(config, runId, tenantId, 'premium', scanTarget, 'nightly verification'),
+      context,
+      onUsage: createUsageRecorder(
+        config,
+        runId,
+        tenantId,
+        'premium',
+        scanTarget,
+        'nightly discovery',
+      ),
     });
-    if (verified.status === 'verified') {
-      // Keep unverified candidates too (same union as PR partitionVerifiedFindings
-      // for missing verdicts) — dropping them discarded real P1/P2s when the
-      // verifier omitted a verdict.
-      const seen = new Set(verified.kept.map((f) => fingerprintFinding(f)));
-      findings = [
-        ...verified.kept,
-        ...verified.unverified.filter((f) => {
-          const fp = fingerprintFinding(f);
-          if (seen.has(fp)) return false;
-          seen.add(fp);
-          return true;
-        }),
+
+    let findings = dropSelfNegatingFindings(llmFindingsToReviewFindings(llm.findings)).kept;
+
+    if (findings.length > 0 && isVerificationEnabled(runtime) && context) {
+      const verifyFiles = [
+        ...context.changedContents,
+        ...context.related,
+        ...context.dependents,
+        ...context.others,
       ];
-    } else {
-      console.warn(`[nightly] verification ${verified.status}; keeping discovery findings`);
+      const verified = await verifyFindings(findings, verifyFiles, {
+        apiKey: config.llmApiKey,
+        model: config.llmModel,
+        baseUrl: config.llmBaseUrl,
+        api: scanTarget.api,
+        reasoningEffort: scanTarget.reasoningEffort,
+        onUsage: createUsageRecorder(
+          config,
+          runId,
+          tenantId,
+          'premium',
+          scanTarget,
+          'nightly verification',
+        ),
+      });
+      if (verified.status === 'verified') {
+        // Keep unverified candidates too (same union as PR partitionVerifiedFindings
+        // for missing verdicts) — dropping them discarded real P1/P2s when the
+        // verifier omitted a verdict.
+        const seen = new Set(verified.kept.map((f) => fingerprintFinding(f)));
+        findings = [
+          ...verified.kept,
+          ...verified.unverified.filter((f) => {
+            const fp = fingerprintFinding(f);
+            if (seen.has(fp)) return false;
+            seen.add(fp);
+            return true;
+          }),
+        ];
+      } else {
+        console.warn(`[nightly] verification ${verified.status}; keeping discovery findings`);
+      }
     }
-  }
 
-  if (findings.length === 0) {
-    console.log(`[nightly] ${owner}/${repo}: scan clean (0 findings)`);
-    status = 'completed';
-    return;
-  }
+    if (findings.length === 0) {
+      console.log(`[nightly] ${owner}/${repo}: scan clean (0 findings)`);
+      status = 'completed';
+      return;
+    }
 
-  await octokit.rest.issues.create({
-    owner,
-    repo,
-    title: `🌙 Orvex nightly scan — ${findings.length} finding${findings.length === 1 ? '' : 's'} on \`${branch}\``,
-    body: formatScanIssue(branch, baseSha, headSha, findings, llm.summary),
-  });
-  console.log(`[nightly] ${owner}/${repo}: filed issue with ${findings.length} findings`);
+    await octokit.rest.issues.create({
+      owner,
+      repo,
+      title: `🌙 Orvex nightly scan — ${findings.length} finding${findings.length === 1 ? '' : 's'} on \`${branch}\``,
+      body: formatScanIssue(
+        branch,
+        baseSha,
+        headSha,
+        findings,
+        runtime.nightly.lookbackDays,
+        llm.summary,
+      ),
+    });
+    console.log(`[nightly] ${owner}/${repo}: filed issue with ${findings.length} findings`);
   } catch (err) {
     status = 'failed';
     error = err instanceof Error ? err.message : String(err);
@@ -279,12 +326,13 @@ function formatScanIssue(
   baseSha: string,
   headSha: string,
   findings: ReviewFinding[],
+  lookbackDays: number,
   summary?: string,
 ): string {
   const rank: Record<string, number> = { P1: 0, P2: 1, P3: 2, info: 3 };
   const sorted = [...findings].sort((a, b) => (rank[a.severity] ?? 9) - (rank[b.severity] ?? 9));
   const lines = [
-    `Orvex scanned the last ${LOOKBACK_DAYS} day(s) of commits on \`${branch}\` (\`${baseSha.slice(0, 7)}\`…\`${headSha.slice(0, 7)}\`).`,
+    `Orvex scanned the last ${lookbackDays} day(s) of commits on \`${branch}\` (\`${baseSha.slice(0, 7)}\`…\`${headSha.slice(0, 7)}\`).`,
   ];
   if (summary) lines.push('', sanitizeFindingText(summary));
   lines.push('', '| Severity | File | Finding |', '| --- | --- | --- |');
@@ -294,6 +342,9 @@ function formatScanIssue(
     const message = sanitizeFindingText(f.message).replace(/\|/g, '\\|').replace(/\n/g, ' ');
     lines.push(`| ${f.severity} | ${loc} | ${message} |`);
   }
-  lines.push('', '<sub>Automated nightly scan by Orvex Review. Open a PR to get inline, fixable review comments.</sub>');
+  lines.push(
+    '',
+    '<sub>Automated nightly scan by Orvex Review. Open a PR to get inline, fixable review comments.</sub>',
+  );
   return lines.join('\n');
 }

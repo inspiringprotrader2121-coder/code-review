@@ -8,6 +8,10 @@ export type {
   ReviewJobPayload,
   MarkCompletedOptions,
   QueueDepth,
+  QueueFailureCode,
+  QueueFailure,
+  DeadLetterRecord,
+  ReviewQueueRuntime,
 } from './types.js';
 export {
   jobIdempotencyKey,
@@ -15,7 +19,21 @@ export {
   reviewShaIdempotencyKey,
   draftSkipIdempotencyKey,
   automaticReviewAlreadyDone,
+  queueFailure,
 } from './types.js';
 export { MemoryReviewQueue } from './memory.js';
 export { RedisReviewQueue } from './redis.js';
-export { createReviewQueue } from './factory.js';
+export {
+  MemoryProviderAdmission,
+  providerAdmissionFor,
+  type ProviderAdmission,
+  type ProviderAdmissionOwner,
+  type MemoryProviderAdmissionOptions,
+  type MemoryProviderAdmissionState,
+} from './provider-admission.js';
+export {
+  RedisProviderAdmission,
+  type RedisProviderAdmissionOptions,
+} from './redis-provider-admission.js';
+export { createReviewQueue, loadReviewQueueConfig, type ReviewQueueConfig } from './factory.js';
+export { assertJobTransition, canTransitionJob, type QueueJobState } from './state-machine.js';

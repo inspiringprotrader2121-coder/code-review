@@ -7,27 +7,40 @@ import {
   listInstallationRepos,
   userCanAccessInstallation,
 } from '@orvex-review/github';
-import type { AppDatabase, GitHubInstallation, Tenant } from '@orvex-review/store';
-import { createAppDatabase } from '@orvex-review/store';
+import type {
+  GitHubInstallation,
+  RepositoryWriteRepository,
+  Tenant,
+  TenancyRepository,
+  WorkspaceReadStore,
+} from '@orvex-review/store';
+import { loadTenantRuntimeConfig, type TenantRuntimeConfig } from './config.js';
 import { signInstallState, platformSecret } from './install-state.js';
+import { hasTenantCapability, mayClaimWorkspace, TENANT_OWNER_ROLE } from './policy.js';
 
-export function appPublicUrl(): string {
-  const url = process.env.APP_URL ?? `http://localhost:${process.env.PORT ?? 8787}`;
-  return url.replace(/\/$/, '');
+export function appPublicUrl(config: TenantRuntimeConfig = loadTenantRuntimeConfig()): string {
+  return config.appUrl;
 }
 
-export function githubAppSlug(config: GitHubAppConfig): string {
-  return config.appSlug ?? process.env.GITHUB_APP_SLUG ?? 'orvex-review';
+export function githubAppSlug(
+  config: GitHubAppConfig,
+  runtimeConfig: TenantRuntimeConfig = loadTenantRuntimeConfig(),
+): string {
+  return config.appSlug ?? runtimeConfig.githubAppSlug;
 }
 
 export function buildGitHubInstallUrl(
   tenantSlug: string,
   config?: GitHubAppConfig,
   userId?: string,
+  runtimeConfig: TenantRuntimeConfig = loadTenantRuntimeConfig(),
 ): string {
   const cfg = config ?? loadGitHubConfigFromEnv();
-  const slug = githubAppSlug(cfg);
-  const state = signInstallState({ tenantSlug, ts: Date.now(), userId }, platformSecret());
+  const slug = githubAppSlug(cfg, runtimeConfig);
+  const state = signInstallState(
+    { tenantSlug, ts: Date.now(), userId },
+    platformSecret(runtimeConfig),
+  );
   return ghBuildInstallUrl(slug, state);
 }
 
@@ -41,10 +54,29 @@ export class WorkspaceAccessError extends Error {
   }
 }
 
-export class TenantService {
-  constructor(private db: AppDatabase = createAppDatabase()) {}
+/** Persistence needed by GitHub onboarding, kept independent from the store facade. */
+export type TenantServiceStore = Pick<
+  TenancyRepository,
+  | 'addWorkspaceMember'
+  | 'createTenant'
+  | 'getInstallation'
+  | 'getInstallationsForTenant'
+  | 'getMembership'
+  | 'getOrCreateTenant'
+  | 'getTenantBySlug'
+  | 'tenantIsClaimable'
+  | 'upsertInstallation'
+> &
+  Pick<WorkspaceReadStore, 'getWorkspaceSettings'> &
+  Pick<RepositoryWriteRepository, 'upsertRepo'>;
 
-  get dbInstance(): AppDatabase {
+export class TenantService {
+  constructor(
+    private db: TenantServiceStore,
+    private readonly runtimeConfig: TenantRuntimeConfig = loadTenantRuntimeConfig(),
+  ) {}
+
+  get dbInstance(): TenantServiceStore {
     return this.db;
   }
 
@@ -68,18 +100,21 @@ export class TenantService {
       // (slug `org-<accountLogin>`, fully predictable from the public org
       // name) — so any signed-in user could take over another org's workspace
       // by requesting its slug, with no proof of control over that org.
-      if (!this.db.getMembership(existing.id, userId) && !this.db.tenantIsClaimable(existing.id)) {
+      const membership = this.db.getMembership(existing.id, userId);
+      const mayConnect = hasTenantCapability(membership, 'workspace:connect');
+      const mayClaim = mayClaimWorkspace(membership, this.db.tenantIsClaimable(existing.id));
+      if (!mayConnect && !mayClaim) {
         throw new WorkspaceAccessError(`Workspace slug "${existing.slug}" is already taken`);
       }
-      if (!this.db.getMembership(existing.id, userId)) {
-        this.db.addWorkspaceMember(existing.id, userId, 'owner');
+      if (mayClaim) {
+        this.db.addWorkspaceMember(existing.id, userId, TENANT_OWNER_ROLE);
       }
       tenant = existing;
     } else {
       tenant = this.db.createTenant(tenantSlug, displayName);
-      this.db.addWorkspaceMember(tenant.id, userId, 'owner');
+      this.db.addWorkspaceMember(tenant.id, userId, TENANT_OWNER_ROLE);
     }
-    const installUrl = buildGitHubInstallUrl(tenant.slug, undefined, userId);
+    const installUrl = buildGitHubInstallUrl(tenant.slug, undefined, userId, this.runtimeConfig);
     return { tenant, installUrl };
   }
 
@@ -89,9 +124,12 @@ export class TenantService {
    * accounts are enabled can claim the workspace — but only while it owns no
    * installation (see tenantIsClaimable).
    */
-  startConnectLegacy(tenantSlug: string, displayName?: string): { tenant: Tenant; installUrl: string } {
+  startConnectLegacy(
+    tenantSlug: string,
+    displayName?: string,
+  ): { tenant: Tenant; installUrl: string } {
     const tenant = this.db.getOrCreateTenant(tenantSlug, displayName);
-    const installUrl = buildGitHubInstallUrl(tenant.slug);
+    const installUrl = buildGitHubInstallUrl(tenant.slug, undefined, undefined, this.runtimeConfig);
     return { tenant, installUrl };
   }
 
@@ -102,7 +140,7 @@ export class TenantService {
   ): { tenant: Tenant; installations: GitHubInstallation[] } {
     const tenant = this.db.getTenantBySlug(slug);
     if (!tenant) throw new WorkspaceAccessError('workspace not found', 404);
-    if (!this.db.getMembership(tenant.id, userId)) {
+    if (!hasTenantCapability(this.db.getMembership(tenant.id, userId), 'workspace:read')) {
       throw new WorkspaceAccessError('not a member of this workspace');
     }
     return { tenant, installations: this.db.getInstallationsForTenant(tenant.id) };
@@ -189,7 +227,10 @@ export class TenantService {
     } catch (err) {
       // The installation is still valid; the webhook or the dashboard sync
       // endpoint can repair a transient GitHub listing failure.
-      console.warn(`[tenants] repository sync failed for installation ${installationId}:`, (err as Error).message);
+      console.warn(
+        `[tenants] repository sync failed for installation ${installationId}:`,
+        (err as Error).message,
+      );
     }
     return { tenant, installation };
   }
@@ -227,18 +268,6 @@ export class TenantService {
 
   resolveInstallation(installationId: number): GitHubInstallation | null {
     return this.db.getInstallation(installationId);
-  }
-
-  getTenantStatus(slug: string): {
-    tenant: Tenant;
-    installations: GitHubInstallation[];
-  } | null {
-    const tenant = this.db.getTenantBySlug(slug);
-    if (!tenant) return null;
-    return {
-      tenant,
-      installations: this.db.getInstallationsForTenant(tenant.id),
-    };
   }
 
   async isRepoOnInstallation(

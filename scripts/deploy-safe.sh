@@ -28,16 +28,9 @@ DEFAULT_SOURCES=(
   rules
   examples
   docs
-  scripts/deploy-safe.sh
-  scripts/deploy-safe.test.sh
-  scripts/provision-internal-sandbox.sh
-  scripts/provision-internal-sandbox.test.sh
-  scripts/build-internal-sandbox-image.sh
-  scripts/build-internal-sandbox-image.test.sh
+  infra
+  scripts
   sandbox
-  scripts/backup-db.mjs
-  scripts/restore-db-drill.mjs
-  scripts/orvex-backup.cron
   README.md
   PLAN.md
   ROADMAP.md
@@ -46,9 +39,13 @@ DEFAULT_SOURCES=(
   package.json
   pnpm-lock.yaml
   pnpm-workspace.yaml
+  tsconfig.json
   tsconfig.base.json
+  .node-version
   ecosystem.config.cjs
   .env.example
+  .prettierignore
+  .prettierrc.json
   .rsync-filter
 )
 
@@ -320,6 +317,14 @@ REMOTE_RELEASE_METADATA
 set -euo pipefail
 cd "$1"
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore install --frozen-lockfile
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore format:check
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:runtime
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:dependencies
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore dedupe --check
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:architecture
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:docs
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore build
+CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:built-exports
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore typecheck
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore test
 REMOTE_CHECK

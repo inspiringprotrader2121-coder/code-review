@@ -4,6 +4,7 @@ import {
   canRunAgentic,
   canRunInvestigate,
   canRunRiskHunt,
+  createReviewRoutingPolicy,
   accountUsage,
   buildReviewPassAngles,
   effectiveReviewConfig,
@@ -11,9 +12,6 @@ import {
   contextForReviewPass,
   maxOutputTokensForModel,
   modelForInvestigate,
-  modelForPass,
-  modelForReviewStage,
-  modelForPlanWithTier,
   maxRiskProbes,
   mayPublishRuntimeEvidence,
   modelForRiskHunt,
@@ -26,6 +24,7 @@ import {
 } from './pipeline.js';
 import { compileReviewPlan, isHedgedRejection, isTransientLlmError } from '@orvex-review/review';
 import { planFeatures } from '@orvex-review/tenants';
+import { createProviderCatalog } from './review/provider-catalog.js';
 
 function modelRoutingConfig(): WorkerConfig {
   return {
@@ -34,17 +33,26 @@ function modelRoutingConfig(): WorkerConfig {
       baseUrl: 'https://api.minimax.io/anthropic',
       model: 'MiniMax-M3',
       api: 'anthropic',
+      transport: 'anthropic',
+      admissionBucket: 'minimax',
+      thinking: true,
     },
     openaiModel: {
       apiKey: 'openai-key',
       baseUrl: 'https://api.openai.com/v1',
       model: 'gpt-5.6-luna',
       api: 'responses',
+      transport: 'responses',
+      admissionBucket: 'luna',
+      thinking: true,
       reasoningEffort: 'max',
     },
     codexCliModel: {
       apiKey: '',
       model: 'gpt-5.6-luna',
+      transport: 'codex-cli',
+      admissionBucket: 'luna',
+      thinking: true,
       reasoningEffort: 'max',
     },
     deepseekModel: {
@@ -52,24 +60,34 @@ function modelRoutingConfig(): WorkerConfig {
       baseUrl: 'https://api.deepseek.com',
       model: 'deepseek-v4-pro',
       api: 'chat',
+      transport: 'compatible-chat',
+      admissionBucket: 'deepseek',
+      thinking: true,
+      reasoningEffort: 'max',
     },
     deepseekFlashModel: {
       apiKey: 'deepseek-flash-key',
       baseUrl: 'https://api.deepseek.com',
       model: 'deepseek-v4-flash',
       api: 'chat',
+      transport: 'compatible-chat',
+      admissionBucket: 'deepseek',
+      thinking: true,
+      reasoningEffort: 'max',
     },
   } as WorkerConfig;
 }
 
 test('required paid model stacks fail closed when a provider is missing', () => {
-  const previousCli = process.env.ORVEX_CODEX_CLI;
-  const previousRepos = process.env.ORVEX_CODEX_CLI_REPOS;
-  process.env.ORVEX_CODEX_CLI = '1';
-  try {
   const config = modelRoutingConfig();
-  process.env.ORVEX_CODEX_CLI_REPOS = 'acme/api';
-  assert.equal(providerConfigurationIssue(planFeatures('verify'), config, 'acme/api'), null);
+  const policy = createReviewRoutingPolicy({
+    codexCliEnabled: true,
+    codexRepoAllowed: (repoId) => repoId.toLowerCase() === 'acme/api',
+  });
+  assert.equal(
+    providerConfigurationIssue(planFeatures('verify'), config, 'acme/api', policy),
+    null,
+  );
   const missingFrontier = providerConfigurationIssue(planFeatures('verify'), {
     ...config,
     openaiModel: null,
@@ -107,43 +125,36 @@ test('required paid model stacks fail closed when a provider is missing', () => 
     }) ?? '',
     /DeepSeek v4 Flash review provider/,
   );
-  } finally {
-    if (previousCli === undefined) delete process.env.ORVEX_CODEX_CLI;
-    else process.env.ORVEX_CODEX_CLI = previousCli;
-    if (previousRepos === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
-    else process.env.ORVEX_CODEX_CLI_REPOS = previousRepos;
-  }
 });
 
-test('high-tier preflight requires allowlisted pinned Codex CLI and never accepts direct Luna', (t) => {
-  const previousCli = process.env.ORVEX_CODEX_CLI;
-  const previousRepos = process.env.ORVEX_CODEX_CLI_REPOS;
-  t.after(() => {
-    if (previousCli === undefined) delete process.env.ORVEX_CODEX_CLI;
-    else process.env.ORVEX_CODEX_CLI = previousCli;
-    if (previousRepos === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
-    else process.env.ORVEX_CODEX_CLI_REPOS = previousRepos;
-  });
+test('high-tier preflight requires allowlisted pinned Codex CLI and never accepts direct Luna', () => {
   const config = modelRoutingConfig();
-  process.env.ORVEX_CODEX_CLI_REPOS = 'allowlisted/repo';
-
-  delete process.env.ORVEX_CODEX_CLI;
+  const disabled = createReviewRoutingPolicy({
+    codexRepoAllowed: (repoId) => repoId.toLowerCase() === 'allowlisted/repo',
+  });
   assert.match(
-    providerConfigurationIssue(planFeatures('verify'), config, 'allowlisted/repo') ?? '',
+    providerConfigurationIssue(planFeatures('verify'), config, 'allowlisted/repo', disabled) ?? '',
     /Luna review provider/,
   );
 
-  process.env.ORVEX_CODEX_CLI = '1';
+  const enabled = createReviewRoutingPolicy({
+    codexCliEnabled: true,
+    codexRepoAllowed: (repoId) => repoId.toLowerCase() === 'allowlisted/repo',
+  });
   assert.match(
-    providerConfigurationIssue(planFeatures('verify'), config, 'not/allowlisted') ?? '',
+    providerConfigurationIssue(planFeatures('verify'), config, 'not/allowlisted', enabled) ?? '',
     /Luna review provider/,
   );
-  assert.equal(providerConfigurationIssue(planFeatures('verify'), config, 'allowlisted/repo'), null);
+  assert.equal(
+    providerConfigurationIssue(planFeatures('verify'), config, 'allowlisted/repo', enabled),
+    null,
+  );
   assert.match(
     providerConfigurationIssue(
       planFeatures('verify'),
       { ...config, codexCliModel: null },
       'allowlisted/repo',
+      enabled,
     ) ?? '',
     /Luna review provider/,
     'direct Responses Luna must not substitute for the CLI contract',
@@ -151,27 +162,35 @@ test('high-tier preflight requires allowlisted pinned Codex CLI and never accept
 });
 
 test('provider output ceilings preserve max reasoning while bounding long generations', () => {
-  assert.equal(maxOutputTokensForModel('deepseek-v4-flash', {}), 24_000);
-  assert.equal(maxOutputTokensForModel('MiniMax-M3', {}), 24_000);
+  const defaults = createReviewRoutingPolicy({});
+  assert.equal(maxOutputTokensForModel('deepseek-v4-flash', defaults), 24_000);
+  assert.equal(maxOutputTokensForModel('MiniMax-M3', defaults), 24_000);
   assert.equal(
-    maxOutputTokensForModel('deepseek-v4-flash', { ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS: '999999' }),
+    maxOutputTokensForModel(
+      'deepseek-v4-flash',
+      createReviewRoutingPolicy({ deepseekMaxOutputTokens: 999_999 }),
+    ),
     64_000,
   );
-  assert.equal(maxOutputTokensForModel('gpt-5.6-luna', {}), undefined);
+  assert.equal(maxOutputTokensForModel('gpt-5.6-luna', defaults), undefined);
 });
 
-test('named public-plan stages are the model-routing source of truth', () => {
+test('named public-plan stages are resolved only by the ProviderCatalog', () => {
   const config = modelRoutingConfig();
   const plan = compileReviewPlan('multi-model');
   assert.ok(plan);
-  const routed = plan.discovery.map((stage) => modelForReviewStage(config, stage, stage.modelSlot === 'luna'));
-  assert.deepEqual(routed.map((item) => item.target.model), [
-    'gpt-5.6-luna',
+  const catalog = createProviderCatalog(config);
+  const routed = plan.discovery.map((stage) =>
+    catalog.resolveStage(stage, { agenticLuna: stage.modelSlot === 'luna' }),
+  );
+  assert.deepEqual(
+    routed.map((item) => item.target.model),
+    ['gpt-5.6-luna', 'deepseek-v4-flash', 'deepseek-v4-flash', 'MiniMax-M3'],
+  );
+  assert.equal(
+    catalog.resolveStage(plan.verification, { agenticLuna: false }).target.model,
     'deepseek-v4-flash',
-    'deepseek-v4-flash',
-    'MiniMax-M3',
-  ]);
-  assert.equal(modelForReviewStage(config, plan.verification).target.model, 'deepseek-v4-flash');
+  );
 });
 
 test('review lenses rotate changed files and receive only relevant cross-file context', () => {
@@ -184,31 +203,39 @@ test('review lenses rotate changed files and receive only relevant cross-file co
   };
 
   const deep = contextForReviewPass(context, 1);
-  assert.deepEqual(deep.changedContents?.map((file) => file.path), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(
+    deep.changedContents?.map((file) => file.path),
+    ['a', 'b', 'c', 'd'],
+  );
   assert.ok(deep.related);
   assert.equal(deep.dependents, undefined);
   assert.equal(deep.others, undefined);
 
   const callers = contextForReviewPass(context, 2);
-  assert.deepEqual(callers.changedContents?.map((file) => file.path), ['d', 'c', 'b', 'a']);
+  assert.deepEqual(
+    callers.changedContents?.map((file) => file.path),
+    ['d', 'c', 'b', 'a'],
+  );
   assert.ok(callers.dependents);
   assert.equal(callers.related, undefined);
   assert.equal(callers.others, undefined);
 
   const breadth = contextForReviewPass(context, 3);
-  assert.deepEqual(breadth.changedContents?.map((file) => file.path), ['c', 'd', 'a', 'b']);
+  assert.deepEqual(
+    breadth.changedContents?.map((file) => file.path),
+    ['c', 'd', 'a', 'b'],
+  );
   assert.ok(breadth.related);
   assert.ok(breadth.others);
   assert.equal(breadth.dependents, undefined);
 });
 
 test('usage accounting clamps malformed provider token counts instead of poisoning cost totals', () => {
-  const accounted = accountUsage(
-    'standard',
-    modelRoutingConfig().standardModel,
-    'discovery',
-    { inputTokens: Number.NaN, outputTokens: -10, tokenSource: 'provider' },
-  );
+  const accounted = accountUsage('standard', modelRoutingConfig().standardModel, 'discovery', {
+    inputTokens: Number.NaN,
+    outputTokens: -10,
+    tokenSource: 'provider',
+  });
   assert.equal(accounted.inputTokens, 0);
   assert.equal(accounted.outputTokens, 0);
   assert.equal(accounted.costUsd, 0);
@@ -228,10 +255,14 @@ test('runtime evidence requires a fresh lease and an un-cancelled open PR', asyn
   const controller = new AbortController();
   let openChecks = 0;
   assert.equal(
-    await mayPublishRuntimeEvidence(controller.signal, async () => false, async () => {
-      openChecks++;
-      return true;
-    }),
+    await mayPublishRuntimeEvidence(
+      controller.signal,
+      async () => false,
+      async () => {
+        openChecks++;
+        return true;
+      },
+    ),
     false,
   );
   assert.equal(openChecks, 0, 'lease loss must prevent the GitHub evidence check and comment');
@@ -239,21 +270,39 @@ test('runtime evidence requires a fresh lease and an un-cancelled open PR', asyn
   const cancelled = new AbortController();
   cancelled.abort('review closed');
   assert.equal(
-    await mayPublishRuntimeEvidence(cancelled.signal, async () => true, async () => {
-      assert.fail('cancelled reviews must not check or comment');
-    }),
+    await mayPublishRuntimeEvidence(
+      cancelled.signal,
+      async () => true,
+      async () => {
+        assert.fail('cancelled reviews must not check or comment');
+      },
+    ),
     false,
   );
 
   assert.equal(
-    await mayPublishRuntimeEvidence(controller.signal, async () => true, async () => true),
+    await mayPublishRuntimeEvidence(
+      controller.signal,
+      async () => true,
+      async () => true,
+    ),
     true,
   );
 });
 
 test('usage attribution labels the default no-base-url client as Anthropic', () => {
   assert.equal(
-    usageProvider({ apiKey: 'key', model: 'claude-sonnet', api: undefined }, 'review'),
+    usageProvider(
+      {
+        apiKey: 'key',
+        model: 'claude-sonnet',
+        api: undefined,
+        transport: 'anthropic',
+        admissionBucket: 'anthropic',
+        thinking: false,
+      },
+      'review',
+    ),
     'anthropic',
   );
 });
@@ -327,26 +376,21 @@ test('the explicit-behavior rejection bullet produces reasons that survive as fa
   }
 });
 
-test('Verify routes its first pass to pinned Codex CLI Luna', () => {
-  const config = modelRoutingConfig();
-
-  const firstPass = modelForPass(config, { modelTier: 'multi-model' }, 0, true);
-  assert.equal(firstPass.tier, 'openai');
-  assert.equal(firstPass.target.model, 'gpt-5.6-luna');
-  assert.equal(firstPass.target.apiKey, '');
-
-  const secondPass = modelForPass(config, { modelTier: 'multi-model' }, 1);
-  assert.equal(secondPass.tier, 'deepseek-flash');
-  assert.equal(secondPass.target.model, 'deepseek-v4-flash');
-
-  const thirdPass = modelForPass(config, { modelTier: 'multi-model' }, 2);
-  assert.equal(thirdPass.tier, 'deepseek-flash');
-  assert.equal(thirdPass.target.model, 'deepseek-v4-flash');
-
-  const fourthPass = modelForPass(config, { modelTier: 'multi-model' }, 3);
-  assert.equal(fourthPass.tier, 'standard');
-  assert.equal(fourthPass.target.model, 'MiniMax-M3');
-  assert.equal(fourthPass.target.api, 'anthropic');
+test('Verify routes all paid public stages through the catalog', () => {
+  const high = createProviderCatalog(modelRoutingConfig()).compilePublicPlan('multi-model', {
+    agenticLuna: true,
+  });
+  assert.ok(high);
+  assert.deepEqual(
+    high.discovery.map((stage) => [stage.tier, stage.target.model, stage.target.apiKey]),
+    [
+      ['openai', 'gpt-5.6-luna', ''],
+      ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-flash-key'],
+      ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-flash-key'],
+      ['standard', 'MiniMax-M3', 'standard-key'],
+    ],
+  );
+  assert.equal(high.verification.target.model, 'deepseek-v4-flash');
 });
 
 test('direct Luna diagnostics accept only native HTTPS Responses configuration', () => {
@@ -368,172 +412,144 @@ test('direct Luna diagnostics accept only native HTTPS Responses configuration',
   );
 });
 
-test('pass 3 stays on Flash even if a stale Pro override is present', (t) => {
-  const previous = process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO;
-  process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO = '1';
-  t.after(() => {
-    if (previous === undefined) delete process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO;
-    else process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO = previous;
-  });
+test('public-plan catalog fixes Flash verification and refuses incomplete provider stacks', () => {
   const config = modelRoutingConfig();
-  const thirdPass = modelForPass(config, { modelTier: 'multi-model' }, 2);
-  assert.equal(thirdPass.tier, 'deepseek-flash');
-  assert.equal(thirdPass.target.model, 'deepseek-v4-flash');
-});
-
-test('verification is fixed to DeepSeek v4 Flash despite stale override flags', (t) => {
-  const previousStandard = process.env.ORVEX_VERIFY_ON_STANDARD;
-  const previousOpenAi = process.env.ORVEX_VERIFY_ON_OPENAI;
-  const previousPro = process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO;
-  process.env.ORVEX_VERIFY_ON_STANDARD = '1';
-  process.env.ORVEX_VERIFY_ON_OPENAI = '1';
-  process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO = '1';
-  t.after(() => {
-    if (previousStandard === undefined) delete process.env.ORVEX_VERIFY_ON_STANDARD;
-    else process.env.ORVEX_VERIFY_ON_STANDARD = previousStandard;
-    if (previousOpenAi === undefined) delete process.env.ORVEX_VERIFY_ON_OPENAI;
-    else process.env.ORVEX_VERIFY_ON_OPENAI = previousOpenAi;
-    if (previousPro === undefined) delete process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO;
-    else process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO = previousPro;
-  });
-
-  const config = modelRoutingConfig();
-  const flash = modelForPlanWithTier(config, { modelTier: 'multi-model' });
-  assert.equal(flash.tier, 'deepseek-flash');
-  assert.equal(flash.target.model, 'deepseek-v4-flash');
-
-  const dual = modelForPlanWithTier(config, { modelTier: 'dual-model' });
-  assert.equal(dual.tier, 'deepseek-flash');
-  assert.equal(dual.target.model, 'deepseek-v4-flash');
-
+  const catalog = createProviderCatalog(config);
+  assert.equal(
+    catalog.compilePublicPlan('multi-model', { agenticLuna: true })?.verification.target.model,
+    'deepseek-v4-flash',
+  );
+  assert.equal(
+    catalog.compilePublicPlan('dual-model', { agenticLuna: false })?.verification.target.model,
+    'deepseek-v4-flash',
+  );
   assert.throws(
-    () => modelForPlanWithTier({ ...config, deepseekFlashModel: null }, { modelTier: 'multi-model' }),
+    () =>
+      createProviderCatalog({ ...config, deepseekFlashModel: null }).compilePublicPlan(
+        'multi-model',
+        { agenticLuna: true },
+      ),
     /Flash is required/,
   );
 });
 
-test('dual-model discovery is MiniMax general + Flash deep-dive', () => {
-  const config = modelRoutingConfig();
-  const general = modelForPass(config, { modelTier: 'dual-model' }, 0);
-  assert.equal(general.tier, 'standard');
-  assert.equal(general.target.model, 'MiniMax-M3');
-  const deepDive = modelForPass(config, { modelTier: 'dual-model' }, 1);
-  assert.equal(deepDive.tier, 'deepseek-flash');
-  assert.equal(deepDive.target.model, 'deepseek-v4-flash');
-});
-
-test('dual-model deep-dive fails closed instead of substituting another model', () => {
-  const withProOnly = {
-    ...modelRoutingConfig(),
-    deepseekFlashModel: null,
-  };
-  assert.throws(
-    () => modelForPass(withProOnly, { modelTier: 'dual-model' }, 1),
-    /Flash is required/,
-  );
-});
-
-test('canRunAgentic keeps wildcard tenant access closed until a real runner exists', (t) => {
-  const prev = {
-    flag: process.env.ORVEX_CODEX_CLI,
-    repos: process.env.ORVEX_CODEX_CLI_REPOS,
-    codeExecution: process.env.ORVEX_CODE_EXECUTION,
-    sandboxVerified: process.env.ORVEX_INTERNAL_SANDBOX_VERIFIED,
-  };
-  t.after(() => {
-    if (prev.flag === undefined) delete process.env.ORVEX_CODEX_CLI;
-    else process.env.ORVEX_CODEX_CLI = prev.flag;
-    if (prev.repos === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
-    else process.env.ORVEX_CODEX_CLI_REPOS = prev.repos;
-    if (prev.codeExecution === undefined) delete process.env.ORVEX_CODE_EXECUTION;
-    else process.env.ORVEX_CODE_EXECUTION = prev.codeExecution;
-    if (prev.sandboxVerified === undefined) delete process.env.ORVEX_INTERNAL_SANDBOX_VERIFIED;
-    else process.env.ORVEX_INTERNAL_SANDBOX_VERIFIED = prev.sandboxVerified;
+test('canRunAgentic is driven by an injected fail-closed repository policy', () => {
+  const allowlisted = createReviewRoutingPolicy({
+    codexCliEnabled: true,
+    codexRepoAllowed: (repoId) => repoId.toLowerCase() === 'acme/api',
   });
-
-  process.env.ORVEX_CODEX_CLI = '1';
-  process.env.ORVEX_CODEX_CLI_REPOS = 'acme/api';
-  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), true);
-  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'ACME/API'), true, 'allowlist is case-insensitive');
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api', allowlisted), true);
+  assert.equal(
+    canRunAgentic({ modelTier: 'multi-model' }, 'ACME/API', allowlisted),
+    true,
+    'allowlist is case-insensitive',
+  );
 
   // A third-party tenant cannot reach Codex before the internal sandbox has
   // been enabled and explicitly verified.
-  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'evil/repo'), false);
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'evil/repo', allowlisted), false);
   // 2. wrong tier
-  assert.equal(canRunAgentic({ modelTier: 'standard' }, 'acme/api'), false);
+  assert.equal(canRunAgentic({ modelTier: 'standard' }, 'acme/api', allowlisted), false);
   // 1. flag off
-  process.env.ORVEX_CODEX_CLI = '0';
-  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), false);
+  const disabled = createReviewRoutingPolicy({
+    codexCliEnabled: false,
+    codexRepoAllowed: () => true,
+  });
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api', disabled), false);
   // Fail closed when the allowlist is unset entirely.
-  process.env.ORVEX_CODEX_CLI = '1';
-  delete process.env.ORVEX_CODEX_CLI_REPOS;
-  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), false, 'unset allowlist = never');
+  const noAllowlist = createReviewRoutingPolicy({ codexCliEnabled: true });
+  assert.equal(
+    canRunAgentic({ modelTier: 'multi-model' }, 'acme/api', noAllowlist),
+    false,
+    'unset allowlist = never',
+  );
 
   // An environment attestation is not a machine-enforced credential boundary.
-  process.env.ORVEX_CODEX_CLI_REPOS = '*';
-  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'tenant/repo'), false);
-  process.env.ORVEX_CODE_EXECUTION = '1';
-  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'tenant/repo'), false);
-  process.env.ORVEX_INTERNAL_SANDBOX_VERIFIED = '1';
-  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'tenant/repo'), false);
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'tenant/repo', noAllowlist), false);
 });
 
-test('canRunInvestigate: multi-model only, not dual-model, not when Codex agentic', (t) => {
-  const prev = process.env.ORVEX_INVESTIGATE;
-  t.after(() => {
-    if (prev === undefined) delete process.env.ORVEX_INVESTIGATE;
-    else process.env.ORVEX_INVESTIGATE = prev;
-  });
-  delete process.env.ORVEX_INVESTIGATE;
+test('canRunInvestigate: multi-model only, not dual-model, not when Codex agentic', () => {
+  const disabled = createReviewRoutingPolicy({ investigateEnabled: false });
+  const enabled = createReviewRoutingPolicy({ investigateEnabled: true });
 
   // Dual-model stays MiniMax + Flash discovery + Flash verify — no investigate.
-  assert.equal(canRunInvestigate({ id: 'review', modelTier: 'dual-model' }, { useCodexCli: false }), false);
-  assert.equal(canRunInvestigate({ id: 'review-plus', modelTier: 'dual-model' }, { useCodexCli: false }), false);
-  assert.equal(canRunInvestigate({ id: 'free', modelTier: 'dual-model' }, { useCodexCli: false }), false);
-  assert.equal(canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: false }), false);
-  process.env.ORVEX_INVESTIGATE = '1';
-  assert.equal(canRunInvestigate({ id: 'verify-lite', modelTier: 'multi-model' }, { useCodexCli: false }), true);
-  assert.equal(canRunInvestigate({ id: 'enterprise', modelTier: 'multi-model' }, { useCodexCli: false }), true);
-  assert.equal(canRunInvestigate({ id: 'enterprise', modelTier: 'codex-hybrid' }, { useCodexCli: false }), true);
-  assert.equal(canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: true }), false);
-
-  process.env.ORVEX_INVESTIGATE = '0';
-  assert.equal(canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: false }), false);
-});
-
-test('canRunRiskHunt: opt-in only, then dual+multi when high-risk and Flash present', (t) => {
-  const prev = process.env.ORVEX_RISK_HUNT;
-  t.after(() => {
-    if (prev === undefined) delete process.env.ORVEX_RISK_HUNT;
-    else process.env.ORVEX_RISK_HUNT = prev;
-  });
-  delete process.env.ORVEX_RISK_HUNT;
-
   assert.equal(
-    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: true, hasFlash: true }),
+    canRunInvestigate({ id: 'review', modelTier: 'dual-model' }, { useCodexCli: false }, enabled),
     false,
   );
-  process.env.ORVEX_RISK_HUNT = '1';
   assert.equal(
-    canRunRiskHunt({ modelTier: 'multi-model' }, { highRisk: true, hasFlash: true }),
+    canRunInvestigate(
+      { id: 'review-plus', modelTier: 'dual-model' },
+      { useCodexCli: false },
+      enabled,
+    ),
+    false,
+  );
+  assert.equal(
+    canRunInvestigate({ id: 'free', modelTier: 'dual-model' }, { useCodexCli: false }, enabled),
+    false,
+  );
+  assert.equal(
+    canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: false }, disabled),
+    false,
+  );
+  assert.equal(
+    canRunInvestigate(
+      { id: 'verify-lite', modelTier: 'multi-model' },
+      { useCodexCli: false },
+      enabled,
+    ),
     true,
   );
   assert.equal(
-    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: false, hasFlash: true }),
+    canRunInvestigate(
+      { id: 'enterprise', modelTier: 'multi-model' },
+      { useCodexCli: false },
+      enabled,
+    ),
+    true,
+  );
+  assert.equal(
+    canRunInvestigate(
+      { id: 'enterprise', modelTier: 'codex-hybrid' },
+      { useCodexCli: false },
+      enabled,
+    ),
+    true,
+  );
+  assert.equal(
+    canRunInvestigate({ id: 'verify', modelTier: 'multi-model' }, { useCodexCli: true }, enabled),
+    false,
+  );
+});
+
+test('canRunRiskHunt: opt-in only, then dual+multi when high-risk and Flash present', () => {
+  const disabled = createReviewRoutingPolicy({ riskHuntEnabled: false });
+  const enabled = createReviewRoutingPolicy({ riskHuntEnabled: true });
+
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: true, hasFlash: true }, disabled),
     false,
   );
   assert.equal(
-    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: true, hasFlash: false }),
+    canRunRiskHunt({ modelTier: 'multi-model' }, { highRisk: true, hasFlash: true }, enabled),
+    true,
+  );
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: false, hasFlash: true }, enabled),
     false,
   );
   assert.equal(
-    canRunRiskHunt({ modelTier: 'standard' }, { highRisk: true, hasFlash: true }),
+    canRunRiskHunt({ modelTier: 'dual-model' }, { highRisk: true, hasFlash: false }, enabled),
+    false,
+  );
+  assert.equal(
+    canRunRiskHunt({ modelTier: 'standard' }, { highRisk: true, hasFlash: true }, enabled),
     false,
   );
 
-  process.env.ORVEX_RISK_HUNT = '0';
   assert.equal(
-    canRunRiskHunt({ modelTier: 'multi-model' }, { highRisk: true, hasFlash: true }),
+    canRunRiskHunt({ modelTier: 'multi-model' }, { highRisk: true, hasFlash: true }, disabled),
     false,
   );
 });
@@ -593,40 +609,33 @@ test('modelForInvestigate prefers DeepSeek v4 Flash', () => {
   assert.equal(picked?.target.model, 'deepseek-v4-flash');
 });
 
-test('modelForPass fails closed when pinned CLI Luna cannot run', () => {
-  // The stub has apiKey:'' and no baseUrl — on the plain HTTP path it resolves
-  // to the Anthropic client and 401s. Pass 1 is required, so that aborted every
-  // review on the affected tiers.
-  const config = {
-    codexCliModel: { apiKey: '', model: 'gpt-5.6-luna' },
-    openaiModel: { apiKey: 'k', baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-luna' },
-    standardModel: { apiKey: 's', baseUrl: 'https://x/v1', model: 'MiniMax-M3' },
-    deepseekModel: null,
-  } as unknown as WorkerConfig;
-
+test('public-plan catalog fails closed when Luna cannot run agentically', () => {
+  const config = modelRoutingConfig();
   assert.throws(
-    () => modelForPass(config, { modelTier: 'multi-model' }, 0, false),
-    /requires the pinned Codex CLI/,
+    () => createProviderCatalog(config).compilePublicPlan('multi-model', { agenticLuna: false }),
+    /pinned Codex CLI/,
   );
-  assert.throws(
-    () => modelForPass(config, { modelTier: 'multi-model' }, 0),
-    /requires the pinned Codex CLI/,
+  assert.equal(
+    createProviderCatalog(config).compilePublicPlan('multi-model', { agenticLuna: true })
+      ?.discovery[0]?.target.apiKey,
+    '',
   );
-
-  const agentic = modelForPass(config, { modelTier: 'multi-model' }, 0, true);
-  assert.equal(agentic.target.apiKey, '', 'the CLI stub is only selected when codex will actually run');
 });
 
 test('a timed-out required pass stays transient; a genuine failure does not', () => {
   // Keep the classification available for an operator-enabled bounded recovery
   // policy even though automatic whole-review replay is off by default.
   assert.equal(
-    isTransientLlmError('review aborted: 1/2 required review lens(es) completed fewer than 1 sample(s) — required provider call timed out or was temporarily unavailable'),
+    isTransientLlmError(
+      'review aborted: 1/2 required review lens(es) completed fewer than 1 sample(s) — required provider call timed out or was temporarily unavailable',
+    ),
     true,
     'a transient cause must remain distinguishable',
   );
   assert.equal(
-    isTransientLlmError('review aborted: 1/2 required model pass(es) failed; no partial review was posted'),
+    isTransientLlmError(
+      'review aborted: 1/2 required model pass(es) failed; no partial review was posted',
+    ),
     false,
     'a genuine model failure must NOT loop forever',
   );
@@ -669,10 +678,7 @@ test('buildReviewPassAngles: multi-model always runs the full four-pass track', 
     'all four purchased high-tier reviewer stages are required',
   );
   // Dual-model never gets the fourth-tier lenses.
-  const withDelete = [
-    ...small,
-    { filename: 'gone.ts', patch: '-old\n', status: 'removed' },
-  ];
+  const withDelete = [...small, { filename: 'gone.ts', patch: '-old\n', status: 'removed' }];
   assert.deepEqual(
     buildReviewPassAngles({ modelTier: 'dual-model', files: withDelete }).map((a) => a.tag),
     ['general', 'deep-dive'],
@@ -710,7 +716,10 @@ test('selectRiskProbes: second probe only when top signal is selective', (t) => 
     selectRiskProbes(narrow, 2).map((s) => s.id),
     ['a', 'b'],
   );
-  assert.deepEqual(selectRiskProbes(narrow, 1).map((s) => s.id), ['a']);
+  assert.deepEqual(
+    selectRiskProbes(narrow, 1).map((s) => s.id),
+    ['a'],
+  );
   assert.deepEqual(selectRiskProbes([], 2), []);
 });
 

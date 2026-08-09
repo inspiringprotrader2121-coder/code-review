@@ -1,3 +1,6 @@
+import type { QueueJobState } from './state-machine.js';
+import type { ProviderAdmission } from './provider-admission.js';
+
 export type JobId = string;
 
 export type JobKind = 'review' | 'fix' | 'explain' | 'ask' | 'resolve' | 'scan';
@@ -79,6 +82,57 @@ export interface QueueDepth {
   oldestQueuedAt?: string | null;
 }
 
+export type QueueFailureCode =
+  | 'resume_limit_exceeded'
+  | 'invalid_payload'
+  | 'pr_closed'
+  | 'worker_restart'
+  | 'worker_stopped'
+  | 'provider_transient'
+  | 'provider_permanent'
+  | 'lease_lost'
+  | 'cancelled'
+  | 'execution_failed';
+
+export interface QueueFailure {
+  code: QueueFailureCode;
+  message: string;
+  retryable: boolean;
+}
+
+export function queueFailure(
+  code: QueueFailureCode,
+  message: string,
+  retryable = false,
+): QueueFailure {
+  return { code, message: message.slice(0, 2_000), retryable };
+}
+
+export interface DeadLetterRecord {
+  id: string;
+  job: ReviewJobPayload;
+  reason: QueueFailureCode;
+  failedAt: string;
+  attempts: number;
+  error?: string;
+}
+
+export interface QueueOperationalEvent {
+  type: 'dead-lettered';
+  record: DeadLetterRecord;
+  source: 'terminal-failure' | 'orphan-recovery';
+}
+
+export function shouldDeadLetterFailure(failure: QueueFailure): boolean {
+  if (failure.retryable) return false;
+  return [
+    'provider_transient',
+    'provider_permanent',
+    'execution_failed',
+    'worker_restart',
+  ].includes(failure.code);
+}
+
 export interface ReviewQueue {
   enqueue(job: ReviewJobPayload): Promise<EnqueueResult>;
   dequeue(): Promise<ReviewJobPayload | null>;
@@ -94,15 +148,21 @@ export interface ReviewQueue {
    *  PROCESSING backup so recoverOrphans requeues with the same resume identity. */
   persistJob?(job: ReviewJobPayload): Promise<void>;
   /** Returns false when this worker no longer owns the durable claim. */
-  markFailed(job: ReviewJobPayload, error: string): Promise<boolean | void>;
+  markFailed(job: ReviewJobPayload, failure: QueueFailure): Promise<boolean | void>;
   releaseLockAndDrain(prKey: string): Promise<ReviewJobPayload | null>;
   /** Startup cleanup: clear stale in-flight locks + requeue pending. Returns count. */
   recoverOrphans(): Promise<number>;
-  /** Optional Redis-backed provider coordination used to keep model-specific
-   * concurrency and cooldowns correct across multiple worker processes. */
+  /**
+   * @deprecated Provider throttling belongs to a separately injected
+   * `ProviderAdmission`. These optional delegates remain only while callers
+   * migrate, and queue implementations must expose `providerAdmission`.
+   */
   acquireProviderLease?(provider: string, limit: number, signal?: AbortSignal): Promise<string>;
+  /** @deprecated Use ProviderAdmission.releaseProviderLease. */
   releaseProviderLease?(provider: string, token: string): Promise<void>;
+  /** @deprecated Use ProviderAdmission.getProviderCooldownMs. */
   getProviderCooldownMs?(provider: string): Promise<number>;
+  /** @deprecated Use ProviderAdmission.setProviderCooldown. */
   setProviderCooldown?(provider: string, durationMs: number): Promise<void>;
   /** Snapshot of waiting / in-flight work for the operator monitor. */
   depth?(): Promise<QueueDepth>;
@@ -114,10 +174,27 @@ export interface ReviewQueue {
    */
   acquireRecoveryLease?(): Promise<string | null>;
   releaseRecoveryLease?(token: string): Promise<void>;
+  /** Durable operator surface for work that cannot be retried automatically. */
+  listDeadLetters?(limit?: number): Promise<DeadLetterRecord[]>;
+  /** Requeue one dead-lettered job exactly once. Returns false when absent/claimed. */
+  replayDeadLetter?(id: string): Promise<boolean>;
+  /** Events produced by this process since the previous drain. */
+  drainOperationalEvents?(): QueueOperationalEvent[];
+  /** Move a claimed job into running before any provider spend begins. */
+  markRunning(job: ReviewJobPayload): Promise<boolean>;
+  /** Operator/readiness surface for the latest durable lifecycle state. */
+  getJobState(jobId: JobId): Promise<QueueJobState | null>;
   /** Liveness probe for /health — true if the backing store is reachable. */
   ping(): Promise<boolean>;
   close(): Promise<void>;
 }
+
+/**
+ * A complete runtime backend. New compositions should pass the queue and its
+ * providerAdmission as separate dependencies, rather than treating scheduling
+ * as queue state.
+ */
+export type ReviewQueueRuntime = ReviewQueue & { readonly providerAdmission: ProviderAdmission };
 
 /** Bare SHA key shared by automatic reviews of the same head (opened / ready / …). */
 export function reviewShaIdempotencyKey(
@@ -188,6 +265,8 @@ function hashShort(s: string): string {
   return (h >>> 0).toString(36);
 }
 
-export function prKey(job: Pick<ReviewJobPayload, 'installationId' | 'owner' | 'repo' | 'pr'>): string {
+export function prKey(
+  job: Pick<ReviewJobPayload, 'installationId' | 'owner' | 'repo' | 'pr'>,
+): string {
   return `${job.installationId}/${job.owner}/${job.repo}#${job.pr}`;
 }

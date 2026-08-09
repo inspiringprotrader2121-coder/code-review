@@ -1,12 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryReviewQueue } from './memory.js';
-import { jobIdempotencyKey, type ReviewJobPayload } from './types.js';
+import { jobIdempotencyKey, queueFailure, type ReviewJobPayload } from './types.js';
 
 function job(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   return {
-    installationId: 1, tenantId: 't', owner: 'acme', repo: 'api', pr: 5,
-    headSha: 'sha1', action: 'synchronize', enqueuedAt: '2026-01-01T00:00:00Z',
+    installationId: 1,
+    tenantId: 't',
+    owner: 'acme',
+    repo: 'api',
+    pr: 5,
+    headSha: 'sha1',
+    action: 'synchronize',
+    enqueuedAt: '2026-01-01T00:00:00Z',
     ...overrides,
   };
 }
@@ -28,7 +34,7 @@ test('the coalesced review runs (once) AFTER the first completes — reviewing t
   await q.enqueue(job({ headSha: 'sha1', action: 'manual' }));
   await q.enqueue(job({ headSha: 'sha2', action: 'manual' }));
   const first = await q.dequeue();
-  assert.equal((await q.dequeue()), null); // sha2 coalesced to pending
+  assert.equal(await q.dequeue(), null); // sha2 coalesced to pending
 
   await q.markCompleted(first!);
   const drained = await q.releaseLockAndDrain('1/acme/api#5');
@@ -115,15 +121,17 @@ test('reopened coalesces behind a close-aborted same-SHA review and then runs', 
   const opened = await q.dequeue();
   assert.ok(opened);
 
-  const reopened = await q.enqueue(job({
-    headSha: 'shaReopen',
-    action: 'reopened',
-    enqueuedAt: '2026-01-01T00:01:00Z',
-  }));
+  const reopened = await q.enqueue(
+    job({
+      headSha: 'shaReopen',
+      action: 'reopened',
+      enqueuedAt: '2026-01-01T00:01:00Z',
+    }),
+  );
   assert.equal(reopened.accepted, true);
   assert.equal(reopened.reason, 'coalesced');
 
-  await q.markFailed(opened!, 'pr_closed_mid_run');
+  await q.markFailed(opened!, queueFailure('pr_closed', 'pr_closed_mid_run'));
   await q.releaseLockAndDrain('1/acme/api#5');
   assert.equal((await q.dequeue())?.action, 'reopened');
 });
@@ -179,4 +187,57 @@ test('webhook command retries reuse a stable source idempotency key', async () =
   assert.equal(jobIdempotencyKey(first), jobIdempotencyKey(retry));
   assert.equal((await q.enqueue(first)).accepted, true);
   assert.equal((await q.enqueue(retry)).accepted, false);
+});
+
+test('memory queue exposes the explicit lifecycle state machine', async () => {
+  const q = new MemoryReviewQueue();
+  const payload = job({ headSha: 'stateful', action: 'manual' });
+  const id = jobIdempotencyKey(payload);
+  assert.equal(await q.getJobState(id), null);
+  await q.enqueue(payload);
+  assert.equal(await q.getJobState(id), 'ready');
+  const claimed = await q.dequeue();
+  assert.equal(await q.getJobState(id), 'claimed');
+  assert.equal(await q.markRunning(claimed!), true);
+  assert.equal(await q.getJobState(id), 'running');
+  await q.markCompleted(claimed!);
+  assert.equal(await q.getJobState(id), 'succeeded');
+});
+
+test('terminal failures enter a durable operator queue and replay exactly once', async () => {
+  const q = new MemoryReviewQueue();
+  const payload = job({ headSha: 'terminal', action: 'manual' });
+  await q.enqueue(payload);
+  const claimed = await q.dequeue();
+  assert.ok(claimed);
+  await q.markRunning(claimed!);
+  assert.equal(
+    await q.markFailed(claimed!, queueFailure('execution_failed', 'provider exhausted')),
+    true,
+  );
+  assert.equal(await q.getJobState(jobIdempotencyKey(payload)), 'dead-lettered');
+  const [record] = await q.listDeadLetters!();
+  assert.ok(record);
+  assert.equal(record.reason, 'execution_failed');
+  assert.deepEqual(q.drainOperationalEvents!(), [
+    { type: 'dead-lettered', record, source: 'terminal-failure' },
+  ]);
+  assert.deepEqual(q.drainOperationalEvents!(), []);
+  assert.equal(await q.replayDeadLetter!(record.id), true);
+  assert.equal(await q.replayDeadLetter!(record.id), false);
+  assert.equal(await q.getJobState(jobIdempotencyKey(payload)), 'ready');
+  assert.deepEqual(await q.dequeue(), payload);
+});
+
+test('retryable failures remain replayable by the worker and are not dead-lettered', async () => {
+  const q = new MemoryReviewQueue();
+  const payload = job({ headSha: 'retryable', action: 'manual' });
+  await q.enqueue(payload);
+  const claimed = await q.dequeue();
+  assert.ok(claimed);
+  await q.markFailed(claimed!, queueFailure('provider_transient', 'retry', true));
+  assert.equal(await q.getJobState(jobIdempotencyKey(payload)), 'failed');
+  assert.deepEqual(await q.listDeadLetters!(), []);
+  assert.deepEqual(q.drainOperationalEvents!(), []);
+  assert.equal((await q.enqueue(payload)).accepted, true);
 });

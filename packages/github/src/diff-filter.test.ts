@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { filterChangedFiles } from './diff-filter.js';
 
-const file = (filename: string, over: Partial<{ status: string; patch: string; truncated: boolean }> = {}) => ({
+const file = (
+  filename: string,
+  over: Partial<{ status: string; patch: string; truncated: boolean }> = {},
+) => ({
   filename,
   status: (over.status ?? 'modified') as never,
   patch: over.patch ?? 'diff',
@@ -11,7 +14,10 @@ const file = (filename: string, over: Partial<{ status: string; patch: string; t
 });
 
 test('coverage is COMPLETE when nothing is dropped or truncated', () => {
-  const { files, coverage } = filterChangedFiles([file('a.ts'), file('b.ts')], { maxFileBytes: 100_000, maxFiles: 50 });
+  const { files, coverage } = filterChangedFiles([file('a.ts'), file('b.ts')], {
+    maxFileBytes: 100_000,
+    maxFiles: 50,
+  });
   assert.equal(files.length, 2);
   assert.equal(coverage.candidates, 2);
   assert.equal(coverage.reviewed, 2);
@@ -30,7 +36,10 @@ test('maxFiles cap COUNTS the dropped files (not a silent break) and marks incom
 });
 
 test('a truncated patch marks coverage incomplete', () => {
-  const { coverage } = filterChangedFiles([file('big.ts', { patch: 'x'.repeat(500) })], { maxFileBytes: 100, maxFiles: 50 });
+  const { coverage } = filterChangedFiles([file('big.ts', { patch: 'x'.repeat(500) })], {
+    maxFileBytes: 100,
+    maxFiles: 50,
+  });
   assert.equal(coverage.truncatedFiles, 1);
   assert.equal(coverage.complete, false);
 });
@@ -46,7 +55,10 @@ test('intentionally-skipped lockfiles are NOT counted as coverage gaps', () => {
 });
 
 test('deletions are counted (informational) but do not by themselves make coverage incomplete', () => {
-  const { coverage } = filterChangedFiles([file('gone.ts', { status: 'removed', patch: '' })], { maxFileBytes: 100_000, maxFiles: 50 });
+  const { coverage } = filterChangedFiles([file('gone.ts', { status: 'removed', patch: '' })], {
+    maxFileBytes: 100_000,
+    maxFiles: 50,
+  });
   assert.equal(coverage.deletedFiles, 1);
   assert.equal(coverage.complete, true);
 });
@@ -55,7 +67,13 @@ test('a file whose patch GitHub OMITTED is a coverage gap, not "reviewed"', () =
   const { files, coverage } = filterChangedFiles(
     [
       file('normal.ts'),
-      { filename: 'huge.ts', status: 'modified' as never, patch: undefined, previousFilename: undefined, truncated: false },
+      {
+        filename: 'huge.ts',
+        status: 'modified' as never,
+        patch: undefined,
+        previousFilename: undefined,
+        truncated: false,
+      },
     ],
     { maxFileBytes: 100_000, maxFiles: 50 },
   );
@@ -68,7 +86,15 @@ test('a file whose patch GitHub OMITTED is a coverage gap, not "reviewed"', () =
 
 test('a REMOVED file without a patch is expected — coverage stays complete', () => {
   const { coverage } = filterChangedFiles(
-    [{ filename: 'gone.ts', status: 'removed' as never, patch: undefined, previousFilename: undefined, truncated: false }],
+    [
+      {
+        filename: 'gone.ts',
+        status: 'removed' as never,
+        patch: undefined,
+        previousFilename: undefined,
+        truncated: false,
+      },
+    ],
     { maxFileBytes: 100_000, maxFiles: 50 },
   );
   assert.equal(coverage.deletedFiles, 1);

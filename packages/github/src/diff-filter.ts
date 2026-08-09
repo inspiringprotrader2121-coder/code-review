@@ -13,8 +13,20 @@ const DEFAULT_SKIP_GLOBS = [
 ];
 
 const BINARY_EXTENSIONS = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.pdf',
-  '.zip', '.gz', '.woff', '.woff2', '.ttf', '.eot', '.sqlite',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.ico',
+  '.pdf',
+  '.zip',
+  '.gz',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.eot',
+  '.sqlite',
 ]);
 
 export function filterChangedFiles(

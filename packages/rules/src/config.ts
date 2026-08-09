@@ -29,7 +29,9 @@ export function parseReviewConfigYaml(raw: string | null | undefined): ReviewCon
     // Never silently discard: a malformed .orvex-review.yml falling back to
     // defaults with no signal leaves the repo owner thinking their ignore list
     // / thresholds are active when none are.
-    console.warn(`[config] .orvex-review.yml is not valid YAML — using defaults: ${(err as Error).message}`);
+    console.warn(
+      `[config] .orvex-review.yml is not valid YAML — using defaults: ${(err as Error).message}`,
+    );
     return { ...DEFAULT_REVIEW_CONFIG };
   }
   const parsed = ReviewConfigSchema.safeParse(doc ?? {});

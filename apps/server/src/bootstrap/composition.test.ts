@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MemoryReviewQueue, type ReviewQueue } from '@orvex-review/queue';
+import { MemoryReviewQueue, providerAdmissionFor } from '@orvex-review/queue';
 import type { LlmProviderCoordinator } from '@orvex-review/review';
 import { AppDatabase } from '@orvex-review/store';
 import { composeApplication } from './composition.js';
@@ -18,31 +18,23 @@ test('composition injects one database and queue into readiness', async () => {
   assert.equal(services.queue, queue);
   const response = await services.app.request('/ready');
   assert.equal(response.status, 200);
-  const body = await response.json() as { ok: boolean };
+  const body = (await response.json()) as { ok: boolean };
   assert.equal(body.ok, true);
 });
 
-test('composition configures distributed provider coordination only for capable queues', () => {
+test('composition injects the dedicated provider-admission adapter', () => {
   const db = new AppDatabase(':memory:');
   let configured: LlmProviderCoordinator | undefined;
-  const capable = Object.assign(new MemoryReviewQueue(), {
-    acquireProviderLease: async () => 'token',
-    releaseProviderLease: async () => {},
-    getProviderCooldownMs: async () => 0,
-    setProviderCooldown: async () => {},
-  }) as ReviewQueue & LlmProviderCoordinator;
+  const queue = new MemoryReviewQueue();
+  const admission = providerAdmissionFor(queue);
+  assert.ok(admission);
   composeApplication(loadServerRuntimeConfig({}), {
     db,
-    queue: capable,
-    configureProviderCoordinator: (coordinator) => { configured = coordinator; },
+    queue,
+    configureProviderCoordinator: (coordinator) => {
+      configured = coordinator;
+    },
   });
-  assert.equal(configured, capable);
-
-  configured = undefined;
-  composeApplication(loadServerRuntimeConfig({}), {
-    db,
-    queue: new MemoryReviewQueue(),
-    configureProviderCoordinator: (coordinator) => { configured = coordinator; },
-  });
-  assert.equal(configured, undefined);
+  assert.equal(configured, admission);
+  assert.notEqual(configured, queue);
 });

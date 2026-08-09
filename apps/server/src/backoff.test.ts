@@ -33,7 +33,11 @@ test('a non-provider failure (a real bug, not rate-limit/quota) does NOT trip th
     s = nextBackoffState(s, 'other_failure', t0 + i, OPTS);
   }
   assert.equal(s.consecutiveFailures, 0);
-  assert.equal(isPaused(s, t0 + 10), false, 'repeated genuine bugs must not silence the whole worker');
+  assert.equal(
+    isPaused(s, t0 + 10),
+    false,
+    'repeated genuine bugs must not silence the whole worker',
+  );
 });
 
 test('the pause expires after backoffMs and the pump resumes', () => {
@@ -41,7 +45,11 @@ test('the pause expires after backoffMs and the pump resumes', () => {
   const t0 = 1_000_000;
   for (let i = 0; i < 3; i++) s = nextBackoffState(s, 'transient_failure', t0 + i, OPTS);
   assert.equal(isPaused(s, t0 + 3), true);
-  assert.equal(isPaused(s, t0 + 3 + OPTS.backoffMs + 1), false, 'unpauses once backoffMs has elapsed');
+  assert.equal(
+    isPaused(s, t0 + 3 + OPTS.backoffMs + 1),
+    false,
+    'unpauses once backoffMs has elapsed',
+  );
 });
 
 test('once paused, further transient failures extend/refresh the pause window', () => {
@@ -50,5 +58,8 @@ test('once paused, further transient failures extend/refresh the pause window', 
   for (let i = 0; i < 3; i++) s = nextBackoffState(s, 'transient_failure', t0 + i, OPTS);
   const firstPause = s.pausedUntil;
   s = nextBackoffState(s, 'transient_failure', t0 + 4, OPTS);
-  assert.ok(s.pausedUntil > firstPause, 'still-failing provider keeps the breaker tripped, not stuck on the first window');
+  assert.ok(
+    s.pausedUntil > firstPause,
+    'still-failing provider keeps the breaker tripped, not stuck on the first window',
+  );
 });

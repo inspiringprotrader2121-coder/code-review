@@ -21,7 +21,7 @@ export type OrvexCommand =
   | { kind: 'prompt'; instruction: string }; // free-form AI instruction (ask / change)
 
 export function commandTrigger(): string {
-  return process.env.ORVEX_TRIGGER ?? '@orvex';
+  return loadReviewRuntimeConfig().commandTrigger;
 }
 
 /**
@@ -40,8 +40,10 @@ export function parseOrvexCommand(body: string, trigger = commandTrigger()): Orv
       ),
       '$1 ',
     );
-  const scanBody = removeFencedBlocks(removeFencedBlocks(body, '`'), '~')
-    .replace(/^\s*>.*$/gm, ' ');
+  const scanBody = removeFencedBlocks(removeFencedBlocks(body, '`'), '~').replace(
+    /^\s*>.*$/gm,
+    ' ',
+  );
   const lower = scanBody.toLowerCase();
   const idx = lower.indexOf(trigger.toLowerCase());
   if (idx === -1) return null;
@@ -181,3 +183,4 @@ function looksLikeRateLimitAsk(normalized: string): boolean {
   if (/\bremaining\s+reviews?\b/.test(normalized)) return true;
   return false;
 }
+import { loadReviewRuntimeConfig } from '@orvex-review/config';

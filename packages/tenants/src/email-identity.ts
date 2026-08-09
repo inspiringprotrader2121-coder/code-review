@@ -8,6 +8,8 @@
  * throwaway-inbox domains that farmers use to mint unlimited "real" emails.
  */
 
+import { loadTenantRuntimeConfig, type TenantRuntimeConfig } from './config.js';
+
 // Providers whose local-part is dot-insensitive AND +tag-subaddressed. Gmail is
 // the canonical one; a few others share the semantics.
 const DOT_INSENSITIVE_DOMAINS = new Set(['gmail.com', 'googlemail.com']);
@@ -43,34 +45,70 @@ export function normalizeEmail(email: string): string {
 // the distribution that catches the overwhelming majority of throwaway signups.
 // Extend via ORVEX_EXTRA_DISPOSABLE_DOMAINS (comma-separated).
 const DISPOSABLE_DOMAINS = new Set([
-  'mailinator.com', 'guerrillamail.com', 'guerrillamail.info', 'guerrillamail.biz',
-  'sharklasers.com', 'grr.la', 'yopmail.com', 'yopmail.fr', 'trashmail.com',
-  '10minutemail.com', '10minutemail.net', 'temp-mail.org', 'tempmail.com',
-  'tempmailo.com', 'tempr.email', 'throwawaymail.com', 'getnada.com', 'nada.email',
-  'maildrop.cc', 'dispostable.com', 'mailnesia.com', 'fakeinbox.com', 'mohmal.com',
-  'moakt.com', 'mytemp.email', 'emailondeck.com', 'spam4.me', 'burnermail.io',
-  'mailcatch.com', 'inboxbear.com', 'harakirimail.com', 'tmpmail.org', 'tmpmail.net',
-  'discard.email', 'mailtemp.net', 'jetable.org', 'trbvm.com', 'cock.li', 'anonaddy.me',
+  'mailinator.com',
+  'guerrillamail.com',
+  'guerrillamail.info',
+  'guerrillamail.biz',
+  'sharklasers.com',
+  'grr.la',
+  'yopmail.com',
+  'yopmail.fr',
+  'trashmail.com',
+  '10minutemail.com',
+  '10minutemail.net',
+  'temp-mail.org',
+  'tempmail.com',
+  'tempmailo.com',
+  'tempr.email',
+  'throwawaymail.com',
+  'getnada.com',
+  'nada.email',
+  'maildrop.cc',
+  'dispostable.com',
+  'mailnesia.com',
+  'fakeinbox.com',
+  'mohmal.com',
+  'moakt.com',
+  'mytemp.email',
+  'emailondeck.com',
+  'spam4.me',
+  'burnermail.io',
+  'mailcatch.com',
+  'inboxbear.com',
+  'harakirimail.com',
+  'tmpmail.org',
+  'tmpmail.net',
+  'discard.email',
+  'mailtemp.net',
+  'jetable.org',
+  'trbvm.com',
+  'cock.li',
+  'anonaddy.me',
 ]);
 
-function extraDisposable(): Set<string> {
-  const extra = process.env.ORVEX_EXTRA_DISPOSABLE_DOMAINS;
-  if (!extra) return DISPOSABLE_DOMAINS;
+function disposableDomains(config: TenantRuntimeConfig): ReadonlySet<string> {
+  if (config.extraDisposableDomains.length === 0) return DISPOSABLE_DOMAINS;
   const set = new Set(DISPOSABLE_DOMAINS);
-  for (const d of extra.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)) set.add(d);
+  for (const domain of config.extraDisposableDomains) set.add(domain);
   return set;
 }
 
 /** True when the email's domain is a known disposable/temp-inbox provider —
  *  exact match OR any subdomain (`x.mailinator.com` is the same throwaway
  *  inbox as `mailinator.com`; several providers hand out per-user subdomains). */
-export function isDisposableEmail(email: string): boolean {
+export function isDisposableEmail(
+  email: string,
+  config: TenantRuntimeConfig = loadTenantRuntimeConfig(),
+): boolean {
   const at = email.lastIndexOf('@');
   // at <= 0: no local part (or no @) — not a parseable email; don't classify on
   // the domain alone. at === length-1: no domain at all.
   if (at <= 0 || at === email.length - 1) return false;
-  const domain = email.slice(at + 1).trim().toLowerCase();
-  for (const d of extraDisposable()) {
+  const domain = email
+    .slice(at + 1)
+    .trim()
+    .toLowerCase();
+  for (const d of disposableDomains(config)) {
     if (domain === d || domain.endsWith(`.${d}`)) return true;
   }
   return false;

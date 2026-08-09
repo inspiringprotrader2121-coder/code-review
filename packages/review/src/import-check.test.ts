@@ -64,7 +64,11 @@ test('named and namespace re-exports are treated as non-enumerable, not missing 
     `export { internalName as publicName } from './source.js';\n`,
     `export * as namespace from './source.js';\n`,
   ]) {
-    assert.equal(enumerateExports(target), null, `must not guess through re-export: ${target.trim()}`);
+    assert.equal(
+      enumerateExports(target),
+      null,
+      `must not guess through re-export: ${target.trim()}`,
+    );
   }
 });
 
@@ -77,9 +81,17 @@ test('spread in module.exports → un-enumerable, stays silent even on a missing
 });
 
 test('module.exports = someIdentifier and export * → un-enumerable, silent', async () => {
-  for (const target of [`const api = buildApi();\nmodule.exports = api;\n`, `export * from './other';\nexport const z = 1;\n`]) {
+  for (const target of [
+    `const api = buildApi();\nmodule.exports = api;\n`,
+    `export * from './other';\nexport const z = 1;\n`,
+  ]) {
     const findings = await checkImportBindings(
-      [{ path: 'a.js', content: `const { missing } = require('./b');\nimport { missing2 } from './b';\n` }],
+      [
+        {
+          path: 'a.js',
+          content: `const { missing } = require('./b');\nimport { missing2 } from './b';\n`,
+        },
+      ],
       files({ 'b.js': target }),
     );
     assert.equal(findings.length, 0, `should be silent for: ${target.slice(0, 40)}`);
@@ -88,7 +100,12 @@ test('module.exports = someIdentifier and export * → un-enumerable, silent', a
 
 test('non-relative (package) imports are ignored', async () => {
   const findings = await checkImportBindings(
-    [{ path: 'a.js', content: `const { whatever } = require('express');\nimport { thing } from 'zod';\n` }],
+    [
+      {
+        path: 'a.js',
+        content: `const { whatever } = require('express');\nimport { thing } from 'zod';\n`,
+      },
+    ],
     files({}),
   );
   assert.equal(findings.length, 0);
@@ -130,7 +147,12 @@ test('THE PR103 FALSE POSITIVE: exports preceded by // comments are still captur
   // that export → false "isJobsLeader is not exported" P1. Both isJobsLeader
   // and recordJobStatus sit under comment lines here.
   const findings = await checkImportBindings(
-    [{ path: 'a.test.js', content: `const { isJobsLeader, recordJobStatus } = require('./cronManager');\n` }],
+    [
+      {
+        path: 'a.test.js',
+        content: `const { isJobsLeader, recordJobStatus } = require('./cronManager');\n`,
+      },
+    ],
     files({
       'cronManager.js': `
 module.exports = {

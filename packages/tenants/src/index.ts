@@ -1,4 +1,20 @@
 export {
+  loadTenantRuntimeConfig,
+  type TenantRuntimeConfig,
+  type TenantOAuthConfig,
+} from './config.js';
+export {
+  TENANT_OWNER_ROLE,
+  hasTenantCapability,
+  mayClaimWorkspace,
+  hasPlanCapability,
+  isCustomContractPlan,
+  reviewEntitlement,
+  type TenantCapability,
+  type PlanCapability,
+  type ReviewEntitlement,
+} from './policy.js';
+export {
   signInstallState,
   verifyInstallState,
   platformSecret,
@@ -7,6 +23,7 @@ export {
 export {
   TenantService,
   WorkspaceAccessError,
+  type TenantServiceStore,
   buildGitHubInstallUrl,
   appPublicUrl,
   githubAppSlug,
@@ -29,6 +46,10 @@ export {
   planFeatures,
   publicPlanLabel,
   defaultPlanId,
+  canAutofix,
+  canRunDeepReview,
+  canRunCodeExecution,
+  canRunNightlyScans,
   isPlanId,
   type PlanId,
   type PlanFeatures,

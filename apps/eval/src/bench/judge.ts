@@ -9,9 +9,16 @@
  *   ORVEX_INSTALL_ID=144378482 BENCH_PR_LO=124 BENCH_PR_HI=128 tsx src/bench/judge.ts
  */
 import { llmChat } from '@orvex-review/review';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { createBenchmarkOctokit } from './github-auth.js';
 import { parseOrvexFindingTables } from './orvex-table.js';
-import { severityOf, worseSev, sameClusterLine , isOrvexStatusComment } from './severity.js';
+import { severityOf, worseSev, sameClusterLine, isOrvexStatusComment } from './severity.js';
+import {
+  EvaluationRequestBudget,
+  requireLiveCaseLimit,
+  requireLiveEvaluationControls,
+} from '../live-controls.js';
 
 const OWNER = process.env.BENCH_OWNER ?? 'inspiringprotrader2121-coder';
 const REPO = process.env.BENCH_REPO ?? 'Velatrix-Cloud';
@@ -21,15 +28,37 @@ const PR_HI = Number(process.env.BENCH_PR_HI ?? 128);
 const CUTOFF = process.env.BENCH_CUTOFF ?? '2026-07-12T17:20:00Z';
 
 const LOGIN_MAP: Record<string, string> = {
-  'orvex-review[bot]': 'orvex', 'chatgpt-codex-connector[bot]': 'codex', 'chatgpt-codex-connector': 'codex',
-  'qodo-code-review[bot]': 'qodo', 'coderabbitai[bot]': 'coderabbit', 'gitar-bot[bot]': 'gitar', 'greptile-apps[bot]': 'greptile',
+  'orvex-review[bot]': 'orvex',
+  'chatgpt-codex-connector[bot]': 'codex',
+  'chatgpt-codex-connector': 'codex',
+  'qodo-code-review[bot]': 'qodo',
+  'coderabbitai[bot]': 'coderabbit',
+  'gitar-bot[bot]': 'gitar',
+  'greptile-apps[bot]': 'greptile',
 };
-const botOf = (l: string) => LOGIN_MAP[l] ?? (/gitar/i.test(l) ? 'gitar' : /greptile/i.test(l) ? 'greptile' : /qodo/i.test(l) ? 'qodo' : /coderabbit/i.test(l) ? 'coderabbit' : null);
+const botOf = (l: string) =>
+  LOGIN_MAP[l] ??
+  (/gitar/i.test(l)
+    ? 'gitar'
+    : /greptile/i.test(l)
+      ? 'greptile'
+      : /qodo/i.test(l)
+        ? 'qodo'
+        : /coderabbit/i.test(l)
+          ? 'coderabbit'
+          : null);
 const isOrvexStatus = (b: string) => isOrvexStatusComment(b);
 /** Anchored severity parse (label region, not free text) — shared module. */
 const sevOf = severityOf;
 
-interface Finding { pr: number; bot: string; path: string | null; line: number | null; sev: string | null; text: string; }
+interface Finding {
+  pr: number;
+  bot: string;
+  path: string | null;
+  line: number | null;
+  sev: string | null;
+  text: string;
+}
 
 function llmEnv() {
   // BENCH_JUDGE=deepseek reroutes the judge to DeepSeek — needed when the
@@ -50,7 +79,9 @@ function llmEnv() {
   const k = process.env.ORVEX_STANDARD_API_KEY ?? process.env.MINIMAX_API_KEY;
   if (!k) throw new Error('ORVEX_STANDARD_API_KEY (or MINIMAX_API_KEY) required');
   const baseUrl =
-    process.env.ORVEX_STANDARD_BASE_URL ?? process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/v1';
+    process.env.ORVEX_STANDARD_BASE_URL ??
+    process.env.MINIMAX_BASE_URL ??
+    'https://api.minimax.io/v1';
   // Production configures MiniMax through its Anthropic-shaped endpoint
   // (…/anthropic). Calling that with the default /chat/completions shape 404s.
   const api = /\/anthropic\b/.test(baseUrl) ? ('anthropic' as const) : undefined;
@@ -59,6 +90,9 @@ function llmEnv() {
 }
 
 async function main() {
+  const controls = requireLiveEvaluationControls();
+  requireLiveCaseLimit(PR_HI - PR_LO + 1);
+  const budget = new EvaluationRequestBudget(controls);
   const octokit = await createBenchmarkOctokit(OWNER, REPO);
   const llm = llmEnv();
 
@@ -70,8 +104,18 @@ async function main() {
     const { data } = await octokit.rest.pulls.get({ owner: OWNER, repo: REPO, pull_number: pr });
     headSha[pr] = data.head.sha;
     const [rc, rv] = await Promise.all([
-      octokit.paginate(octokit.rest.pulls.listReviewComments, { owner: OWNER, repo: REPO, pull_number: pr, per_page: 100 }),
-      octokit.paginate(octokit.rest.pulls.listReviews, { owner: OWNER, repo: REPO, pull_number: pr, per_page: 100 }),
+      octokit.paginate(octokit.rest.pulls.listReviewComments, {
+        owner: OWNER,
+        repo: REPO,
+        pull_number: pr,
+        per_page: 100,
+      }),
+      octokit.paginate(octokit.rest.pulls.listReviews, {
+        owner: OWNER,
+        repo: REPO,
+        pull_number: pr,
+        per_page: 100,
+      }),
     ]);
     for (const c of rc) {
       const bot = botOf(c.user?.login ?? '');
@@ -79,14 +123,31 @@ async function main() {
       const body = c.body ?? '';
       // Orvex findings: only NEW-prompt ones (post-cutoff). Competitors: any (for corroboration).
       if (bot === 'orvex' && (isOrvexStatus(body) || (c.created_at ?? '') < CUTOFF)) continue;
-      findings.push({ pr, bot, path: c.path ?? null, line: c.line ?? c.original_line ?? null, sev: sevOf(body), text: body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() });
+      findings.push({
+        pr,
+        bot,
+        path: c.path ?? null,
+        line: c.line ?? c.original_line ?? null,
+        sev: sevOf(body),
+        text: body
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim(),
+      });
     }
     // Orvex summary-table findings (new-prompt reviews only)
     for (const r of rv) {
       if (botOf(r.user?.login ?? '') !== 'orvex') continue;
       if ((r.submitted_at ?? '') < CUTOFF) continue;
-      for (const finding of parseOrvexFindingTables(r.body ?? '')) {
-        findings.push({ pr, bot: 'orvex', path: finding.path, line: finding.line, sev: finding.severity, text: finding.message });
+      for (const finding of parseOrvexFindingTables(r.body ?? '', { strict: true })) {
+        findings.push({
+          pr,
+          bot: 'orvex',
+          path: finding.path,
+          line: finding.line,
+          sev: finding.severity,
+          text: finding.message,
+        });
       }
     }
   }
@@ -95,17 +156,47 @@ async function main() {
   // Unanchored (null-line) findings only cluster within the SAME bot. Cluster
   // severity MAX-FOLDS — a cluster holding an Orvex P2 must judge as P2 even if
   // a P3 copy was seen first (first-non-null used to mask it out of judging).
-  interface C { pr: number; path: string | null; line: number | null; bots: Set<string>; orvexText: string; sev: string | null; }
+  interface C {
+    pr: number;
+    path: string | null;
+    line: number | null;
+    bots: Set<string>;
+    orvexText: string;
+    sev: string | null;
+  }
   const clusters: C[] = [];
   for (const f of findings) {
-    const hit = clusters.find((c) => c.pr === f.pr && c.path === f.path && sameClusterLine(c.line, f.line, c.bots.has(f.bot)));
-    if (hit) { hit.bots.add(f.bot); if (f.bot === 'orvex' && f.text.length > hit.orvexText.length) hit.orvexText = f.text; hit.sev = worseSev(hit.sev, f.sev); }
-    else clusters.push({ pr: f.pr, path: f.path, line: f.line, bots: new Set([f.bot]), orvexText: f.bot === 'orvex' ? f.text : '', sev: f.sev });
+    const hit = clusters.find(
+      (c) =>
+        c.pr === f.pr && c.path === f.path && sameClusterLine(c.line, f.line, c.bots.has(f.bot)),
+    );
+    if (hit) {
+      hit.bots.add(f.bot);
+      if (f.bot === 'orvex' && f.text.length > hit.orvexText.length) hit.orvexText = f.text;
+      hit.sev = worseSev(hit.sev, f.sev);
+    } else
+      clusters.push({
+        pr: f.pr,
+        path: f.path,
+        line: f.line,
+        bots: new Set([f.bot]),
+        orvexText: f.bot === 'orvex' ? f.text : '',
+        sev: f.sev,
+      });
   }
 
   // Orvex-only, actionable (P1/P2), with a locatable anchor
-  const toJudge = clusters.filter((c) => c.bots.has('orvex') && c.bots.size === 1 && (c.sev === 'P1' || c.sev === 'P2') && c.path && c.orvexText);
-  console.log(`\nPrecision-judge — ${OWNER}/${REPO} #${PR_LO}-#${PR_HI} (new-prompt reviews after ${CUTOFF})`);
+  const toJudge = clusters.filter(
+    (c) =>
+      c.bots.has('orvex') &&
+      c.bots.size === 1 &&
+      (c.sev === 'P1' || c.sev === 'P2') &&
+      c.path &&
+      c.orvexText,
+  );
+  console.log(
+    `\nPrecision-judge — ${OWNER}/${REPO} #${PR_LO}-#${PR_HI} (new-prompt reviews after ${CUTOFF})`,
+  );
   console.log(`Orvex-only P1/P2 findings to judge: ${toJudge.length}\n`);
 
   const getWindow = async (pr: number, path: string, line: number | null): Promise<string> => {
@@ -113,37 +204,71 @@ async function main() {
     let content = fileCache.get(key);
     if (content === undefined) {
       try {
-        const { data } = await octokit.rest.repos.getContent({ owner: OWNER, repo: REPO, path, ref: headSha[pr] });
-        content = !Array.isArray(data) && data.type === 'file' && data.content ? Buffer.from(data.content, 'base64').toString('utf8') : '';
-      } catch { content = ''; }
+        const { data } = await octokit.rest.repos.getContent({
+          owner: OWNER,
+          repo: REPO,
+          path,
+          ref: headSha[pr],
+        });
+        content =
+          !Array.isArray(data) && data.type === 'file' && data.content
+            ? Buffer.from(data.content, 'base64').toString('utf8')
+            : '';
+      } catch {
+        content = '';
+      }
       fileCache.set(key, content);
     }
     if (!content) return '(file not fetchable)';
     const lines = content.split('\n');
-    if (line == null) return lines.slice(0, 80).map((l, i) => `${i + 1}: ${l}`).join('\n').slice(0, 6000);
-    const lo = Math.max(0, line - 30), hi = Math.min(lines.length, line + 30);
-    return lines.slice(lo, hi).map((l, i) => `${lo + i + 1}: ${l}`).join('\n').slice(0, 6000);
+    if (line == null)
+      return lines
+        .slice(0, 80)
+        .map((l, i) => `${i + 1}: ${l}`)
+        .join('\n')
+        .slice(0, 6000);
+    const lo = Math.max(0, line - 30),
+      hi = Math.min(lines.length, line + 30);
+    return lines
+      .slice(lo, hi)
+      .map((l, i) => `${lo + i + 1}: ${l}`)
+      .join('\n')
+      .slice(0, 6000);
   };
 
-  let real = 0, uncertain = 0, falsePos = 0;
+  let real = 0,
+    uncertain = 0,
+    falsePos = 0;
   const falses: string[] = [];
   for (const c of toJudge) {
     const code = await getWindow(c.pr, c.path!, c.line);
-    const system = 'You are a skeptical principal engineer independently judging whether a code-review finding is a REAL, actionable bug at the indicated location, or a false positive. Judge ONLY against the code shown. A real bug: a concrete correctness/security/reliability defect a competent reviewer would fix. NOT real: speculation the code contradicts, a style/nitpick dressed up, a claim about code not shown, or a hazard the shown code already handles. Reply strict JSON only: {"verdict":"real"|"false"|"uncertain","reason":"<=15 words"}.';
+    const system =
+      'You are a skeptical principal engineer independently judging whether a code-review finding is a REAL, actionable bug at the indicated location, or a false positive. Judge ONLY against the code shown. A real bug: a concrete correctness/security/reliability defect a competent reviewer would fix. NOT real: speculation the code contradicts, a style/nitpick dressed up, a claim about code not shown, or a hazard the shown code already handles. Reply strict JSON only: {"verdict":"real"|"false"|"uncertain","reason":"<=15 words"}.';
     const user = `Finding (Orvex, ${c.sev}) at ${c.path}:${c.line ?? '?'}:\n${c.orvexText.slice(0, 500)}\n\nCode around that location:\n\`\`\`\n${code}\n\`\`\``;
-    let verdict = 'uncertain', reason = '';
+    let verdict = 'uncertain',
+      reason = '';
     try {
       // maxTokens must leave room for models that reason by default (deepseek):
       // 200 was exhausted mid-reasoning, surfacing every call as an error.
+      budget.reserve('precision judgement');
       const raw = await llmChat(system, user, { ...llm, thinking: false, maxTokens: 4000 });
       const m = raw.match(/\{[\s\S]*\}/);
       const p = m ? JSON.parse(m[0]) : null;
-      verdict = p?.verdict ?? 'uncertain'; reason = p?.reason ?? '';
-    } catch (e) { reason = `judge error: ${(e as Error).message}`; }
+      verdict = p?.verdict ?? 'uncertain';
+      reason = p?.reason ?? '';
+    } catch (e) {
+      reason = `judge error: ${(e as Error).message}`;
+    }
     if (verdict === 'real') real++;
-    else if (verdict === 'false') { falsePos++; falses.push(`  ✗ #${c.pr} ${c.path}:${c.line} [${c.sev}] — ${reason} :: ${c.orvexText.slice(0, 80)}`); }
-    else uncertain++;
-    console.log(`${verdict === 'real' ? '✅' : verdict === 'false' ? '❌' : '❔'} #${c.pr} ${c.path?.split('/').pop()}:${c.line} ${c.sev} — ${reason}`);
+    else if (verdict === 'false') {
+      falsePos++;
+      falses.push(
+        `  ✗ #${c.pr} ${c.path}:${c.line} [${c.sev}] — ${reason} :: ${c.orvexText.slice(0, 80)}`,
+      );
+    } else uncertain++;
+    console.log(
+      `${verdict === 'real' ? '✅' : verdict === 'false' ? '❌' : '❔'} #${c.pr} ${c.path?.split('/').pop()}:${c.line} ${c.sev} — ${reason}`,
+    );
   }
 
   const judged = real + falsePos; // exclude uncertain from the ratio
@@ -153,13 +278,54 @@ async function main() {
     // A judge whose every call failed must read as an INVALID RUN, not as 0%
     // precision — the exact misread this tool produced when the judge model
     // was misconfigured/out of credits.
-    console.log('RUN INVALID: every candidate came back uncertain (judge errors?) — no precision measured.');
-    process.exit(1);
+    console.log(
+      'RUN INVALID: every candidate came back uncertain (judge errors?) — no precision measured.',
+    );
+    process.exitCode = 1;
   }
   const precision = judged ? Math.round((real / judged) * 100) : 0;
   console.log(`precision (real / (real+false)) = ${precision}%`);
-  if (falses.length) { console.log('\nfalse positives:'); console.log(falses.join('\n')); }
-  console.log('\nNote: the judge model shares a family with pipeline models, so this is a sanity check, not a fully independent oracle. Corroborated findings (a competitor agreed) are assumed real and not re-judged.');
+  if (falses.length) {
+    console.log('\nfalse positives:');
+    console.log(falses.join('\n'));
+  }
+  console.log(
+    '\nNote: the judge model shares a family with pipeline models, so this is a sanity check, not a fully independent oracle. Corroborated findings (a competitor agreed) are assumed real and not re-judged.',
+  );
+  mkdirSync(path.dirname(controls.resultFile), { recursive: true });
+  writeFileSync(
+    controls.resultFile,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        kind: 'orvex-precision-judge',
+        createdAt: new Date().toISOString(),
+        prRange: [PR_LO, PR_HI],
+        candidates: toJudge.length,
+        real,
+        false: falsePos,
+        uncertain,
+        declaredBudgetUsd: controls.declaredBudgetUsd,
+        maxRequests: controls.maxRequests,
+        usedRequests: budget.usedRequests,
+        operations: budget.operations,
+        qualityClaimEligible: false,
+        note: 'Independent-model sanity check, not labelled corpus precision and not a product-quality claim.',
+      },
+      null,
+      2,
+    )}\n`,
+    { encoding: 'utf8', flag: 'wx' },
+  );
+  console.log(`provenance record: ${controls.resultFile}`);
 }
 
-main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+const entrypoint = process.argv[1];
+if (entrypoint && import.meta.url === new URL(`file://${entrypoint}`).href) {
+  main()
+    .then(() => process.exit(process.exitCode ?? 0))
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
+}

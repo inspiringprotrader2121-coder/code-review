@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
+import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { extractJsonLoose } from './llm-client.js';
 import {
   fingerprintFinding,
@@ -22,32 +23,30 @@ export interface ReviewAggregationConfig {
   disabledReason?: string;
 }
 
-function finiteInteger(raw: string | undefined, fallback: number): number {
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) ? Math.floor(value) : fallback;
-}
-
-function boundedNumber(raw: string | undefined, fallback: number, min: number, max: number): number {
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
-}
-
 /**
  * Repeated reviews are intentionally opt-in. Values 2–4 are not "almost on":
  * they disable the feature, because the reproducible evaluation protocol starts
  * at five samples. Values above ten are capped so one review cannot fan out
  * without a deliberate code/config change.
  */
-export function readReviewAggregationConfig(env: NodeJS.ProcessEnv = process.env): ReviewAggregationConfig {
-  const requested = finiteInteger(env.ORVEX_REVIEW_AGGREGATION_RUNS, 1);
-  const temperature = boundedNumber(env.ORVEX_REVIEW_AGGREGATION_TEMPERATURE, 0.2, 0, 1);
-  const maxCandidates = finiteInteger(env.ORVEX_REVIEW_AGGREGATION_MAX_CANDIDATES, 120);
-  const boundedCandidates = Math.min(250, Math.max(10, maxCandidates));
+export function createReviewAggregationConfig(values: {
+  runs: number;
+  minOccurrences: number;
+  temperature: number;
+  maxCandidates: number;
+}): ReviewAggregationConfig {
+  const requested = values.runs;
+  const temperature = values.temperature;
+  const boundedCandidates = values.maxCandidates;
 
   if (requested === 1) {
-    return { runs: 1, minOccurrences: 1, temperature, maxCandidates: boundedCandidates, enabled: false };
+    return {
+      runs: 1,
+      minOccurrences: 1,
+      temperature,
+      maxCandidates: boundedCandidates,
+      enabled: false,
+    };
   }
   if (requested < 5) {
     return {
@@ -61,9 +60,21 @@ export function readReviewAggregationConfig(env: NodeJS.ProcessEnv = process.env
   }
 
   const runs = Math.min(10, requested);
-  const requestedOccurrences = finiteInteger(env.ORVEX_REVIEW_AGGREGATION_MIN_OCCURRENCES, 2);
+  const requestedOccurrences = values.minOccurrences;
   const minOccurrences = Math.min(runs, Math.max(2, requestedOccurrences));
   return { runs, minOccurrences, temperature, maxCandidates: boundedCandidates, enabled: true };
+}
+
+/** Compatibility ingress for callers that intentionally load from an env map.
+ * Production composition passes the preloaded immutable values instead. */
+export function readReviewAggregationConfig(env?: NodeJS.ProcessEnv): ReviewAggregationConfig {
+  const runtime = loadReviewRuntimeConfig(env);
+  return createReviewAggregationConfig({
+    runs: runtime.aggregationRuns,
+    minOccurrences: runtime.aggregationMinOccurrences,
+    temperature: runtime.aggregationTemperature,
+    maxCandidates: runtime.aggregationMaxCandidates,
+  });
 }
 
 export interface EffectiveReviewAggregation extends ReviewAggregationConfig {
@@ -84,7 +95,12 @@ export function fitReviewAggregationToBudget(
 ): EffectiveReviewAggregation {
   if (!config.enabled) return { ...config, effectiveRuns: 1 };
   if (!Number.isInteger(callsPerSample) || callsPerSample < 1) {
-    return { ...config, enabled: false, effectiveRuns: 1, disabledReason: 'No repeatable review calls are available.' };
+    return {
+      ...config,
+      enabled: false,
+      effectiveRuns: 1,
+      disabledReason: 'No repeatable review calls are available.',
+    };
   }
   const available = Math.max(0, maxCalls - reservedCalls);
   const capacity = Math.floor(available / callsPerSample);
@@ -215,7 +231,8 @@ function mergeExactOverlaps(entries: RepeatedFinding[], clusters: Cluster[]): Cl
     const root = find(clusterIndex);
     const group = grouped.get(root);
     if (group) group.members.push(...cluster.members);
-    else grouped.set(root, { representative: cluster.representative, members: [...cluster.members] });
+    else
+      grouped.set(root, { representative: cluster.representative, members: [...cluster.members] });
   }
   return [...grouped.values()];
 }
@@ -242,7 +259,9 @@ function boundedLlmClusters(entries: RepeatedFinding[], raw: unknown): Cluster[]
     // from different samples land close together, so members far from the
     // cluster's anchor line are split back out as singletons instead of
     // silently absorbed.
-    const anchorId = members.includes(proposed.representative) ? proposed.representative : members[0];
+    const anchorId = members.includes(proposed.representative)
+      ? proposed.representative
+      : members[0];
     const anchorLine = entries[anchorId].finding.line;
     const near = members.filter((id) => {
       const line = entries[id].finding.line;
@@ -252,7 +271,9 @@ function boundedLlmClusters(entries: RepeatedFinding[], raw: unknown): Cluster[]
       return Math.abs(line - anchorLine) <= MAX_CLUSTER_LINE_SPREAD;
     });
     if (near.length === 0) continue;
-    const representative = near.includes(proposed.representative) ? proposed.representative : near[0];
+    const representative = near.includes(proposed.representative)
+      ? proposed.representative
+      : near[0];
     near.forEach((id) => claimed.add(id));
     clusters.push({ representative, members: near });
   }
@@ -265,7 +286,8 @@ function boundedLlmClusters(entries: RepeatedFinding[], raw: unknown): Cluster[]
 
 function buildMergePrompt(entries: RepeatedFinding[]): { system: string; user: string } {
   const sentinel = `ORVEX_REPEATED_FINDING_${randomBytes(9).toString('hex')}`;
-  const stripSentinel = (value: string) => value.replace(/ORVEX_REPEATED_FINDING_[0-9a-f]{4,}/gi, 'ORVEX_REPEATED_FINDING_[x]');
+  const stripSentinel = (value: string) =>
+    value.replace(/ORVEX_REPEATED_FINDING_[0-9a-f]{4,}/gi, 'ORVEX_REPEATED_FINDING_[x]');
   const candidates = entries.map(({ sample, finding }, id) => ({
     id,
     sample,
@@ -299,7 +321,8 @@ export async function aggregateRepeatedFindings(
   entries: RepeatedFinding[],
   opts: RepeatedFindingAggregationOptions,
 ): Promise<RepeatedFindingAggregation> {
-  if (entries.length === 0) return { findings: [], reviewOnly: [], usedLlmMerge: false, clusterCount: 0 };
+  if (entries.length === 0)
+    return { findings: [], reviewOnly: [], usedLlmMerge: false, clusterCount: 0 };
 
   const maxCandidates = Math.max(1, opts.maxCandidates);
   const mergeable = entries.slice(0, maxCandidates);
@@ -315,10 +338,16 @@ export async function aggregateRepeatedFindings(
       clusters = merged;
       usedLlmMerge = true;
     } else {
-      clusters = exactFingerprintClusters(mergeable, mergeable.map((_, index) => index));
+      clusters = exactFingerprintClusters(
+        mergeable,
+        mergeable.map((_, index) => index),
+      );
     }
   } catch {
-    clusters = exactFingerprintClusters(mergeable, mergeable.map((_, index) => index));
+    clusters = exactFingerprintClusters(
+      mergeable,
+      mergeable.map((_, index) => index),
+    );
   }
 
   // Candidates outside the prompt cap are never dropped. Exact recurrence can

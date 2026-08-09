@@ -1,12 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true,
-    "baseUrl": ".",
-    "paths": {
-      "@orvex-review/rules": ["../rules/src/index.ts"],
-      "@orvex-review/store": ["../store/src/index.ts"]
-    }
+    "outDir": "dist",
+    "rootDir": "src"
   },
-  "include": ["src"]
+  "references": [{ "path": "../config" }, { "path": "../rules" }, { "path": "../store" }],
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }

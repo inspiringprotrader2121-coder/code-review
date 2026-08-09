@@ -1,37 +1,74 @@
 import {
   DEFAULT_CODEX_CLI_MODEL,
-  isCodexRepoAllowed,
   compileReviewPlan,
-  type ReviewStage,
   type ReviewPromptContext,
 } from '@orvex-review/review';
 import type { LlmTarget, ModelTier, PassTier, WorkerConfig } from './worker-types.js';
 
-function premiumTarget(config: WorkerConfig): LlmTarget {
+export interface ReviewRoutingPolicy {
+  codexCliEnabled: boolean;
+  codexRepoAllowed: (repoId: string) => boolean;
+  investigateEnabled: boolean;
+  riskHuntEnabled: boolean;
+  investigateTier: 'deepseek-flash' | 'deepseek' | 'openai' | 'standard';
+  deepseekMaxOutputTokens: number;
+  minimaxMaxOutputTokens: number;
+}
+
+export const DEFAULT_REVIEW_ROUTING_POLICY: ReviewRoutingPolicy = {
+  codexCliEnabled: false,
+  codexRepoAllowed: () => false,
+  investigateEnabled: false,
+  riskHuntEnabled: false,
+  investigateTier: 'deepseek-flash',
+  deepseekMaxOutputTokens: 24_000,
+  minimaxMaxOutputTokens: 24_000,
+};
+
+export function createReviewRoutingPolicy(
+  values: Partial<ReviewRoutingPolicy>,
+): ReviewRoutingPolicy {
+  const outputLimit = (value: number | undefined): number =>
+    Number.isFinite(value) ? Math.min(64_000, Math.max(16_000, Math.floor(Number(value)))) : 24_000;
+  const investigateTier = values.investigateTier;
+  return {
+    codexCliEnabled: values.codexCliEnabled === true,
+    codexRepoAllowed: values.codexRepoAllowed ?? (() => false),
+    investigateEnabled: values.investigateEnabled === true,
+    riskHuntEnabled: values.riskHuntEnabled === true,
+    investigateTier: ['deepseek-flash', 'deepseek', 'openai', 'standard'].includes(
+      investigateTier ?? '',
+    )
+      ? investigateTier!
+      : 'deepseek-flash',
+    deepseekMaxOutputTokens: outputLimit(values.deepseekMaxOutputTokens),
+    minimaxMaxOutputTokens: outputLimit(values.minimaxMaxOutputTokens),
+  };
+}
+
+function premiumTarget(config: WorkerConfig, policy = DEFAULT_REVIEW_ROUTING_POLICY): LlmTarget {
+  const api = config.llmApi;
   return {
     apiKey: config.llmApiKey,
     baseUrl: config.llmBaseUrl,
     model: config.llmModel,
-    api: config.llmApi,
-    maxTokens: maxOutputTokensForModel(config.llmModel),
+    api,
+    transport:
+      api === 'responses' ? 'responses' : api === 'anthropic' ? 'anthropic' : 'compatible-chat',
+    admissionBucket: /^minimax(?:-|$)/i.test(config.llmModel) ? 'minimax' : 'premium',
+    thinking: /^minimax(?:-|$)/i.test(config.llmModel),
+    maxTokens: maxOutputTokensForModel(config.llmModel, policy),
   };
 }
 
 export function maxOutputTokensForModel(
   model: string,
-  env: NodeJS.ProcessEnv = process.env,
+  policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
 ): number | undefined {
   const normalized = model.toLowerCase();
-  const key = normalized.includes('deepseek')
-    ? 'ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS'
-    : normalized.includes('minimax')
-      ? 'ORVEX_MINIMAX_MAX_OUTPUT_TOKENS'
-      : undefined;
-  if (!key) return undefined;
-  const parsed = Number(env[key] ?? 24_000);
-  return Number.isFinite(parsed)
-    ? Math.min(64_000, Math.max(16_000, Math.floor(parsed)))
-    : 24_000;
+  if (normalized.includes('deepseek')) return policy.deepseekMaxOutputTokens;
+  if (normalized.includes('minimax')) return policy.minimaxMaxOutputTokens;
+  return undefined;
 }
 
 export function contextForReviewPass(
@@ -48,44 +85,53 @@ export function contextForReviewPass(
   if (modelPassIndex === 1) return { ...common, related: context.related };
   if (modelPassIndex === 2) return { ...common, dependents: context.dependents };
   if (modelPassIndex >= 3) return { ...common, related: context.related, others: context.others };
-  return { ...common, related: context.related, dependents: context.dependents, others: context.others };
+  return {
+    ...common,
+    related: context.related,
+    dependents: context.dependents,
+    others: context.others,
+  };
 }
 
 export function canRunCodexCli(
   plan: { modelTier?: ModelTier },
-  env: NodeJS.ProcessEnv = process.env,
+  policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
 ): boolean {
-  return env.ORVEX_CODEX_CLI === '1'
-    && (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model');
+  return (
+    policy.codexCliEnabled &&
+    (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model')
+  );
 }
 
 export function canRunAgentic(
   plan: { modelTier?: ModelTier },
   repoId: string,
-  env: NodeJS.ProcessEnv = process.env,
+  policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
 ): boolean {
-  if (!canRunCodexCli(plan, env)) return false;
-  return isCodexRepoAllowed(repoId, env);
+  if (!canRunCodexCli(plan, policy)) return false;
+  return policy.codexRepoAllowed(repoId);
 }
 
 export function canRunInvestigate(
   plan: { id?: string; modelTier?: ModelTier },
   opts: { useCodexCli: boolean },
-  env: NodeJS.ProcessEnv = process.env,
+  policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
 ): boolean {
-  if (env.ORVEX_INVESTIGATE !== '1' || opts.useCodexCli) return false;
+  if (!policy.investigateEnabled || opts.useCodexCli) return false;
   return plan.modelTier === 'multi-model' || plan.modelTier === 'codex-hybrid';
 }
 
 export function canRunRiskHunt(
   plan: { modelTier?: ModelTier },
   opts: { highRisk: boolean; hasFlash: boolean },
-  env: NodeJS.ProcessEnv = process.env,
+  policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
 ): boolean {
-  if (env.ORVEX_RISK_HUNT !== '1' || !opts.highRisk || !opts.hasFlash) return false;
-  return plan.modelTier === 'dual-model'
-    || plan.modelTier === 'multi-model'
-    || plan.modelTier === 'codex-hybrid';
+  if (!policy.riskHuntEnabled || !opts.highRisk || !opts.hasFlash) return false;
+  return (
+    plan.modelTier === 'dual-model' ||
+    plan.modelTier === 'multi-model' ||
+    plan.modelTier === 'codex-hybrid'
+  );
 }
 
 export function modelForRiskHunt(
@@ -98,13 +144,16 @@ export function modelForRiskHunt(
 
 export function modelForInvestigate(
   config: WorkerConfig,
-  env: NodeJS.ProcessEnv = process.env,
+  policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
 ): { target: LlmTarget; tier: PassTier } {
-  const override = (env.ORVEX_INVESTIGATE_TIER ?? 'deepseek-flash').trim().toLowerCase();
-  if (override === 'openai' && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
-  if (override === 'deepseek' && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+  const override = policy.investigateTier;
+  if (override === 'openai' && config.openaiModel)
+    return { target: config.openaiModel, tier: 'openai' };
+  if (override === 'deepseek' && config.deepseekModel)
+    return { target: config.deepseekModel, tier: 'deepseek' };
   if (override === 'standard') return { target: config.standardModel, tier: 'standard' };
-  if (config.deepseekFlashModel) return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
+  if (config.deepseekFlashModel)
+    return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
   if (config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
   if (config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
   return { target: config.standardModel, tier: 'standard' };
@@ -115,37 +164,20 @@ export function modelForPass(
   plan: { modelTier?: ModelTier },
   passIndex: number,
   agentic = false,
+  policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
 ): { target: LlmTarget; tier: PassTier } {
-  const stage = compileReviewPlan(plan.modelTier)?.discovery.find((candidate) => candidate.modelIndex === passIndex);
-  if (stage) return modelForReviewStage(config, stage, agentic);
+  if (compileReviewPlan(plan.modelTier)) {
+    throw new Error('public review plans must resolve through ProviderCatalog');
+  }
 
   if (plan.modelTier === 'codex-hybrid') {
     if (passIndex === 0 && config.codexCliModel && agentic) {
       return { target: config.codexCliModel, tier: 'openai' };
     }
-    if (passIndex === 0) throw new Error('high-tier Luna requires the pinned Codex CLI; direct API substitution is disabled');
-    return { target: config.standardModel, tier: 'standard' };
-  }
-  if (plan.modelTier === 'multi-model') {
-    if (passIndex === 0 && config.codexCliModel && agentic) {
-      return { target: config.codexCliModel, tier: 'openai' };
-    }
-    if (passIndex === 0) throw new Error('high-tier Luna requires the pinned Codex CLI; direct API substitution is disabled');
-    if (passIndex === 1 || passIndex === 2) {
-      if (config.deepseekFlashModel) {
-        return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
-      }
-      throw new Error(`DeepSeek v4 Flash is required for multi-model pass ${passIndex + 1}`);
-    }
-    return { target: config.standardModel, tier: 'standard' };
-  }
-  if (plan.modelTier === 'dual-model') {
-    if (passIndex === 1) {
-      if (config.deepseekFlashModel) {
-        return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
-      }
-      throw new Error('DeepSeek v4 Flash is required for dual-model pass 2');
-    }
+    if (passIndex === 0)
+      throw new Error(
+        'high-tier Luna requires the pinned Codex CLI; direct API substitution is disabled',
+      );
     return { target: config.standardModel, tier: 'standard' };
   }
   if (plan.modelTier === 'openai') {
@@ -156,43 +188,21 @@ export function modelForPass(
   if (plan.modelTier === 'hybrid') {
     return passIndex === 0
       ? { target: config.standardModel, tier: 'standard' }
-      : { target: premiumTarget(config), tier: 'premium' };
+      : { target: premiumTarget(config, policy), tier: 'premium' };
   }
   if (plan.modelTier === 'standard') return { target: config.standardModel, tier: 'standard' };
-  return { target: premiumTarget(config), tier: 'premium' };
-}
-
-/** Resolve a named public-plan stage. No default model is allowed here: a
- * missing contracted provider must fail before an unrelated provider spends. */
-export function modelForReviewStage(
-  config: WorkerConfig,
-  stage: ReviewStage,
-  agentic = false,
-): { target: LlmTarget; tier: PassTier } {
-  switch (stage.modelSlot) {
-    case 'luna':
-      if (config.codexCliModel && agentic) return { target: config.codexCliModel, tier: 'openai' };
-      throw new Error('high-tier Luna requires the pinned Codex CLI; direct API substitution is disabled');
-    case 'deepseek-flash':
-      if (config.deepseekFlashModel) return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
-      throw new Error(`DeepSeek v4 Flash is required for ${stage.id}`);
-    case 'minimax':
-      return { target: config.standardModel, tier: 'standard' };
-  }
+  return { target: premiumTarget(config, policy), tier: 'premium' };
 }
 
 export function modelForPlanWithTier(
   config: WorkerConfig,
   plan: { modelTier?: ModelTier },
 ): { target: LlmTarget; tier: PassTier } {
-  const publicPlan = compileReviewPlan(plan.modelTier);
-  if (publicPlan) return modelForReviewStage(config, publicPlan.verification);
+  if (compileReviewPlan(plan.modelTier)) {
+    throw new Error('public review plans must resolve through ProviderCatalog');
+  }
 
-  if (
-    plan.modelTier === 'multi-model'
-    || plan.modelTier === 'codex-hybrid'
-    || plan.modelTier === 'dual-model'
-  ) {
+  if (plan.modelTier === 'codex-hybrid') {
     if (config.deepseekFlashModel) {
       return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
     }
@@ -219,18 +229,22 @@ export function validateNativeOpenAiResponsesConfig(
     throw new Error('ORVEX_OPENAI_BASE_URL must be a valid native OpenAI URL');
   }
   if (
-    parsed.protocol !== 'https:'
-    || parsed.hostname.toLowerCase() !== 'api.openai.com'
-    || parsed.username
-    || parsed.password
-    || parsed.search
-    || parsed.hash
-    || parsed.pathname.replace(/\/+$/, '') !== '/v1'
+    parsed.protocol !== 'https:' ||
+    parsed.hostname.toLowerCase() !== 'api.openai.com' ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.pathname.replace(/\/+$/, '') !== '/v1'
   ) {
-    throw new Error('direct Luna configuration must use https://api.openai.com/v1; gateways and custom paths are refused');
+    throw new Error(
+      'direct Luna configuration must use https://api.openai.com/v1; gateways and custom paths are refused',
+    );
   }
   if (api !== undefined && api !== '' && api !== 'responses') {
-    throw new Error('direct Luna configuration must use the OpenAI Responses API, not chat/completions');
+    throw new Error(
+      'direct Luna configuration must use the OpenAI Responses API, not chat/completions',
+    );
   }
   return 'https://api.openai.com/v1';
 }
@@ -239,10 +253,11 @@ export function hasPinnedCodexLuna(
   config: WorkerConfig,
   plan: { modelTier?: ModelTier },
   repoId: string | undefined,
+  policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
 ): boolean {
   return Boolean(
-    repoId
-    && canRunAgentic(plan, repoId)
-    && config.codexCliModel?.model.trim().toLowerCase() === DEFAULT_CODEX_CLI_MODEL,
+    repoId &&
+      canRunAgentic(plan, repoId, policy) &&
+      config.codexCliModel?.model.trim().toLowerCase() === DEFAULT_CODEX_CLI_MODEL,
   );
 }

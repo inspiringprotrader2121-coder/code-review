@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { loadRulesRuntimeConfig, type RulesRuntimeConfig } from '@orvex-review/config';
 
 const execFileAsync = promisify(execFile);
 
@@ -29,9 +30,10 @@ interface SarifResult {
 export async function runSemgrepOnPaths(
   paths: string[],
   cwd?: string,
+  runtimeConfig: RulesRuntimeConfig = loadRulesRuntimeConfig(),
 ): Promise<SemgrepFinding[]> {
   if (paths.length === 0) return [];
-  if (process.env.SEMGREP_DISABLED === '1') return [];
+  if (runtimeConfig.semgrepDisabled) return [];
 
   try {
     const { stdout } = await execFileAsync(

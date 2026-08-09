@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { createAppDatabase } from '@orvex-review/store';
 import { apiRoutes } from './api.js';
+import { testAppDatabase, testServerConfig } from '../bootstrap/test-config.js';
 
 test('workspace APIs isolate tenants and reject revoked sessions', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-launch-security-'));
@@ -24,7 +24,8 @@ test('workspace APIs isolate tenants and reject revoked sessions', async (t) => 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const db = createAppDatabase();
+  const db = testAppDatabase();
+  const config = testServerConfig();
   const alpha = db.createTenant('alpha');
   const beta = db.createTenant('beta');
   const alphaUser = db.createPasswordUser({ email: 'alpha@example.test', passwordHash: 'unused' })!;
@@ -33,14 +34,14 @@ test('workspace APIs isolate tenants and reject revoked sessions', async (t) => 
   db.addWorkspaceMember(beta.id, betaUser.id, 'owner');
   const alphaSession = db.createSession(alphaUser.id);
   const betaSession = db.createSession(betaUser.id);
-  const app = apiRoutes();
+  const app = apiRoutes({ db, config });
 
   assert.equal((await app.request('/api/workspaces/alpha/stats')).status, 401);
   const own = await app.request('/api/workspaces/alpha/stats', {
     headers: { cookie: `orvex_session=${alphaSession.id}` },
   });
   assert.equal(own.status, 200);
-  const ownBody = await own.json() as { workspace?: string };
+  const ownBody = (await own.json()) as { workspace?: string };
   assert.equal(ownBody.workspace, 'alpha');
 
   const crossTenant = await app.request('/api/workspaces/beta/stats', {
@@ -55,7 +56,12 @@ test('workspace APIs isolate tenants and reject revoked sessions', async (t) => 
   assert.equal(betaOwn.status, 200);
 
   db.deleteSession(alphaSession.id);
-  assert.equal((await app.request('/api/workspaces/alpha/stats', {
-    headers: { cookie: `orvex_session=${alphaSession.id}` },
-  })).status, 401);
+  assert.equal(
+    (
+      await app.request('/api/workspaces/alpha/stats', {
+        headers: { cookie: `orvex_session=${alphaSession.id}` },
+      })
+    ).status,
+    401,
+  );
 });

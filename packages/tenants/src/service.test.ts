@@ -21,7 +21,9 @@ test('refuses to rebind an installation owned by another tenant with members (ta
   await assert.rejects(
     // config passed so it never calls loadGitHubConfigFromEnv / the network
     () => svc.completeInstallCallback(1, 'attacker-slug', {} as never),
-    (e) => e instanceof WorkspaceAccessError && /already linked to another workspace/.test((e as Error).message),
+    (e) =>
+      e instanceof WorkspaceAccessError &&
+      /already linked to another workspace/.test((e as Error).message),
   );
 });
 
@@ -31,15 +33,20 @@ test('refuses to rebind a memberless webhook row as well', async () => {
   const svc = new TenantService(mockDb({ tenantHasMembers: () => false }));
   await assert.rejects(
     () => svc.completeInstallCallback(1, 'owner-slug', {} as never),
-    (e) => e instanceof WorkspaceAccessError && /already linked to another workspace/.test((e as Error).message),
+    (e) =>
+      e instanceof WorkspaceAccessError &&
+      /already linked to another workspace/.test((e as Error).message),
   );
 });
 
 test('does NOT block a same-tenant reinstall', async () => {
-  const svc = new TenantService(mockDb({ getInstallation: () => ({ installationId: 1, tenantId: 'tenant-B' }) }));
+  const svc = new TenantService(
+    mockDb({ getInstallation: () => ({ installationId: 1, tenantId: 'tenant-B' }) }),
+  );
   await assert.rejects(
     () => svc.completeInstallCallback(1, 'same-slug', {} as never),
-    (e) => e instanceof WorkspaceAccessError && /re-authenticate with GitHub/.test((e as Error).message),
+    (e) =>
+      e instanceof WorkspaceAccessError && /re-authenticate with GitHub/.test((e as Error).message),
   );
 });
 
@@ -51,7 +58,8 @@ test('requires user installation proof before binding an unknown installation', 
   );
   await assert.rejects(
     () => svc.completeInstallCallback(99, 'new-slug', {} as never),
-    (e) => e instanceof WorkspaceAccessError && /re-authenticate with GitHub/.test((e as Error).message),
+    (e) =>
+      e instanceof WorkspaceAccessError && /re-authenticate with GitHub/.test((e as Error).message),
   );
 });
 
@@ -99,4 +107,17 @@ test('a genuinely orphaned workspace (no members, no installation) stays claimab
     'an orphan with no installation must still be claimable',
   );
   assert.equal(grantedRole, 'owner', 'legacy reclaim still grants ownership');
+});
+
+test('tenant status is always membership-scoped', () => {
+  const svc = new TenantService(
+    mockDb({
+      getTenantBySlug: (slug: string) => ({ id: 'tenant-private', slug, name: slug }),
+      getMembership: () => null,
+    }),
+  );
+  assert.throws(
+    () => svc.getTenantStatusForUser('private', 'unrelated-user'),
+    (error) => error instanceof WorkspaceAccessError && /not a member/.test(error.message),
+  );
 });

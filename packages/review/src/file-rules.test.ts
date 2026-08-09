@@ -3,8 +3,16 @@ import assert from 'node:assert/strict';
 import { fileRulesFor, loadOrvexRules, buildUserPrompt } from './prompt.js';
 
 test('file-type rules are injected only for matching changed files', () => {
-  assert.equal(fileRulesFor(['src/app.ts']).includes('module system'), true, 'TS gets the JS/TS doc');
-  assert.equal(fileRulesFor(['src/app.ts']).includes('Service parity'), false, 'TS must NOT pay for infra rules');
+  assert.equal(
+    fileRulesFor(['src/app.ts']).includes('module system'),
+    true,
+    'TS gets the JS/TS doc',
+  );
+  assert.equal(
+    fileRulesFor(['src/app.ts']).includes('Service parity'),
+    false,
+    'TS must NOT pay for infra rules',
+  );
 
   const infra = fileRulesFor(['docker-compose.yml']);
   assert.match(infra, /Service parity/, 'compose gets infra rules');
@@ -44,7 +52,11 @@ test('the universal core keeps its hard-won calibration rules', () => {
     'validated downstream',
     'not user-facing',
   ]) {
-    assert.match(core, new RegExp(rule.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), `core must retain: ${rule}`);
+    assert.match(
+      core,
+      new RegExp(rule.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
+      `core must retain: ${rule}`,
+    );
   }
   assert.match(core, /## Scope/, 'scope discipline must be present');
 });

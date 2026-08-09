@@ -4,16 +4,29 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { AppDatabase } from './database.js';
+import { STORE_MIGRATIONS } from './migrations.js';
 
 function freshDb(): AppDatabase {
   return new AppDatabase(':memory:');
 }
 
-type MigrationRow = { version: number; name: string; checksum: string; applied_at: string };
+type MigrationRow = {
+  version: number;
+  name: string;
+  checksum: string;
+  artifact_timestamp: string | null;
+  applied_at: string;
+};
 
 function migrationRows(database: AppDatabase): MigrationRow[] {
-  const raw = (database as unknown as { db: { prepare: (sql: string) => { all: () => MigrationRow[] } } }).db;
-  return raw.prepare(`SELECT version, name, checksum, applied_at FROM orvex_schema_migrations ORDER BY version`).all();
+  const raw = (
+    database as unknown as { db: { prepare: (sql: string) => { all: () => MigrationRow[] } } }
+  ).db;
+  return raw
+    .prepare(
+      `SELECT version, name, checksum, artifact_timestamp, applied_at FROM orvex_schema_migrations ORDER BY version`,
+    )
+    .all();
 }
 
 test('migration ledger records the full ordered schema history on first boot', () => {
@@ -23,35 +36,93 @@ test('migration ledger records the full ordered schema history on first boot', (
     const rows = migrationRows(db);
     assert.deepEqual(
       rows.map(({ version, name }) => ({ version, name })),
-      [
-        'baseline-schema-v2',
-        'legacy-pr-reviews',
-        'user-auth-columns',
-        'user-security-columns',
-        'tenant-plan',
-        'tenant-billing-columns',
-        'prepaid-credit-ledger',
-        'repo-automation-toggles',
-        'review-run-cost-columns',
-        'review-run-lifecycle-integrity',
-        'pr-review-columns',
-        'stripe-revenue-indexes',
-        'webhook-claim-token',
-        'review-attempt-lineage-integrity',
-      ].map((name, index) => ({ version: index + 1, name })),
+      STORE_MIGRATIONS.map(({ version, name }) => ({ version, name })),
     );
-    for (const row of rows) {
-      assert.match(row.checksum, /^[a-f0-9]{64}$/);
+    for (const [index, row] of rows.entries()) {
+      const expected = STORE_MIGRATIONS[index]!;
+      assert.equal(row.checksum, expected.checksum);
+      assert.equal(row.artifact_timestamp, expected.timestamp);
       assert.ok(Number.isFinite(Date.parse(row.applied_at)));
     }
-    const raw = (db as unknown as {
-      db: { prepare: (sql: string) => { all: () => Array<{ name: string }> } };
-    }).db;
+    const raw = (
+      db as unknown as {
+        db: { prepare: (sql: string) => { all: () => Array<{ name: string }> } };
+      }
+    ).db;
     const lineageTriggers = raw
-      .prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_review_%_same_run_%' ORDER BY name`)
+      .prepare(
+        `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_review_%_same_run_%' ORDER BY name`,
+      )
       .all();
     assert.equal(lineageTriggers.length, 4);
     db.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a pre-canonical v14 ledger fixture upgrades to immutable artifacts and passes SQLite checks', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-historical-fixture-'));
+  try {
+    const dbPath = path.join(directory, 'store.db');
+    const fixture = new AppDatabase(dbPath);
+    const tenant = fixture.createTenant('historical-fixture');
+    const runId = fixture.startReviewRun({
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'historical-fixture',
+      repo: 'api',
+      pr: 1,
+      headSha: 'historical-sha',
+      action: 'manual',
+    });
+    fixture.completeReviewRun(runId, { status: 'completed', durationMs: 1 });
+    const raw = (
+      fixture as unknown as {
+        db: {
+          prepare: (sql: string) => {
+            run: (...params: unknown[]) => unknown;
+            all: () => unknown[];
+          };
+          pragma: (value: string, options?: { simple?: boolean }) => unknown;
+        };
+      }
+    ).db;
+    for (const migration of STORE_MIGRATIONS.filter((migration) => migration.version < 15)) {
+      raw
+        .prepare(
+          `UPDATE orvex_schema_migrations SET checksum = ?, artifact_timestamp = NULL WHERE version = ?`,
+        )
+        .run(migration.legacyChecksums[0], migration.version);
+    }
+    raw.prepare(`DELETE FROM orvex_schema_migrations WHERE version >= 15`).run();
+    fixture.close();
+
+    const upgraded = new AppDatabase(dbPath);
+    assert.equal(upgraded.listReviewRuns(tenant.id, 1)[0]?.id, runId);
+    assert.deepEqual(
+      migrationRows(upgraded).map(({ version, checksum, artifact_timestamp }) => ({
+        version,
+        checksum,
+        artifact_timestamp,
+      })),
+      STORE_MIGRATIONS.map(({ version, checksum, timestamp }) => ({
+        version,
+        checksum,
+        artifact_timestamp: timestamp,
+      })),
+    );
+    const upgradedRaw = (
+      upgraded as unknown as {
+        db: {
+          prepare: (sql: string) => { all: () => unknown[] };
+          pragma: (value: string, options?: { simple?: boolean }) => unknown;
+        };
+      }
+    ).db;
+    assert.equal(upgradedRaw.pragma('integrity_check', { simple: true }), 'ok');
+    assert.deepEqual(upgradedRaw.prepare('PRAGMA foreign_key_check').all(), []);
+    upgraded.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -135,18 +206,29 @@ test('lineage migration preserves legacy usage while clearing unprovable links',
       tokenSource: 'provider',
     });
     assert.ok(usage);
-    const raw = (legacy as unknown as {
-      db: { exec: (sql: string) => void; prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
-    }).db;
+    const raw = (
+      legacy as unknown as {
+        db: {
+          exec: (sql: string) => void;
+          prepare: (sql: string) => { run: (...params: unknown[]) => unknown };
+        };
+      }
+    ).db;
     raw.exec(`
 DROP TRIGGER trg_review_attempt_parent_same_run_insert;
 DROP TRIGGER trg_review_attempt_parent_same_run_update;
 DROP TRIGGER trg_review_usage_attempt_same_run_insert;
 DROP TRIGGER trg_review_usage_attempt_same_run_update;
 `);
-    raw.prepare(`UPDATE review_run_usage SET attempt_id = 'missing-legacy-attempt' WHERE id = ?`).run(usage.id);
-    raw.prepare(`UPDATE review_run_attempts SET parent_attempt_id = 'other-run-parent' WHERE id = 'legacy-child'`).run();
-    raw.prepare(`DELETE FROM orvex_schema_migrations WHERE version = 14`).run();
+    raw
+      .prepare(`UPDATE review_run_usage SET attempt_id = 'missing-legacy-attempt' WHERE id = ?`)
+      .run(usage.id);
+    raw
+      .prepare(
+        `UPDATE review_run_attempts SET parent_attempt_id = 'other-run-parent' WHERE id = 'legacy-child'`,
+      )
+      .run();
+    raw.prepare(`DELETE FROM orvex_schema_migrations WHERE version >= 14`).run();
     legacy.close();
 
     const upgraded = new AppDatabase(dbPath, 'upgraded-worker');
@@ -155,7 +237,7 @@ DROP TRIGGER trg_review_usage_attempt_same_run_update;
     assert.equal(retainedUsage[0]?.costUsd, 0.000015);
     assert.equal(retainedUsage[0]?.attemptId, undefined);
     assert.equal(upgraded.listReviewRunAttempts(runId)[0]?.parentAttemptId, undefined);
-    assert.equal(migrationRows(upgraded).length, 14);
+    assert.equal(migrationRows(upgraded).length, STORE_MIGRATIONS.length);
     upgraded.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -168,15 +250,17 @@ test('a populated pre-ledger database is upgraded without changing its data', ()
     const dbPath = path.join(directory, 'store.db');
     const beforeLedger = new AppDatabase(dbPath);
     const user = beforeLedger.upsertUserFromGitHub({ githubId: 77, login: 'pre-ledger-user' });
-    const raw = (beforeLedger as unknown as {
-      db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
-    }).db;
+    const raw = (
+      beforeLedger as unknown as {
+        db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
+      }
+    ).db;
     raw.prepare(`DROP TABLE orvex_schema_migrations`).run();
     beforeLedger.close();
 
     const upgraded = new AppDatabase(dbPath);
     assert.equal(upgraded.getUserByGitHubId(77)?.id, user.id);
-    assert.equal(migrationRows(upgraded).length, 14);
+    assert.equal(migrationRows(upgraded).length, STORE_MIGRATIONS.length);
     upgraded.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -188,16 +272,27 @@ test('migration ledger rejects historical checksum or version mismatches', () =>
   try {
     const dbPath = path.join(directory, 'store.db');
     const checksumDb = new AppDatabase(dbPath);
-    const raw = (checksumDb as unknown as { db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } } }).db;
+    const raw = (
+      checksumDb as unknown as {
+        db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
+      }
+    ).db;
     raw.prepare(`UPDATE orvex_schema_migrations SET checksum = 'changed' WHERE version = 1`).run();
     checksumDb.close();
     assert.throws(() => new AppDatabase(dbPath), /migration ledger checksum mismatch/);
 
     const versionDb = new AppDatabase(path.join(directory, 'version.db'));
-    const versionRaw = (versionDb as unknown as { db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } } }).db;
+    const versionRaw = (
+      versionDb as unknown as {
+        db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
+      }
+    ).db;
     versionRaw.prepare(`UPDATE orvex_schema_migrations SET version = 99 WHERE version = 14`).run();
     versionDb.close();
-    assert.throws(() => new AppDatabase(path.join(directory, 'version.db')), /migration ledger version mismatch/);
+    assert.throws(
+      () => new AppDatabase(path.join(directory, 'version.db')),
+      /migration ledger version mismatch/,
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -270,31 +365,33 @@ test('startup cleanup interrupts only rows whose heartbeat is stale', () => {
 test('review runs enforce tenant ownership and non-negative lifecycle fields', () => {
   const db = freshDb();
   assert.throws(
-    () => db.startReviewRun({
-      tenantId: 'missing-tenant',
-      installationId: 1,
-      owner: 'missing',
-      repo: 'api',
-      pr: 1,
-      headSha: 'sha',
-      action: 'manual',
-    }),
+    () =>
+      db.startReviewRun({
+        tenantId: 'missing-tenant',
+        installationId: 1,
+        owner: 'missing',
+        repo: 'api',
+        pr: 1,
+        headSha: 'sha',
+        action: 'manual',
+      }),
     /tenant foreign key violation|FOREIGN KEY constraint failed/,
   );
 
   const tenant = db.createTenant('integrity');
   assert.throws(
-    () => db.recordReviewRun({
-      tenantId: tenant.id,
-      installationId: 1,
-      owner: 'integrity',
-      repo: 'api',
-      pr: 1,
-      headSha: 'sha',
-      action: 'manual',
-      status: 'completed',
-      durationMs: -1,
-    }),
+    () =>
+      db.recordReviewRun({
+        tenantId: tenant.id,
+        installationId: 1,
+        owner: 'integrity',
+        repo: 'api',
+        pr: 1,
+        headSha: 'sha',
+        action: 'manual',
+        status: 'completed',
+        durationMs: -1,
+      }),
     /check constraint violation|CHECK constraint failed/,
   );
 });
@@ -339,19 +436,26 @@ test('provider attempts persist retry lineage and terminal review cleanup', () =
     keyIndex: 0,
     startedAt,
   });
-  assert.equal(db.completeReviewRunAttempt({
-    id: 'attempt-1',
-    outcome: 'rate_limited',
-    durationMs: 12,
-    completedAt: new Date().toISOString(),
-    error: 'rate limited',
-  }), true);
-  assert.equal(db.completeReviewRunAttempt({
-    id: 'attempt-1',
-    outcome: 'failed',
-    durationMs: 15,
-    completedAt: new Date().toISOString(),
-  }), false, 'attempt completion is compare-and-swap');
+  assert.equal(
+    db.completeReviewRunAttempt({
+      id: 'attempt-1',
+      outcome: 'rate_limited',
+      durationMs: 12,
+      completedAt: new Date().toISOString(),
+      error: 'rate limited',
+    }),
+    true,
+  );
+  assert.equal(
+    db.completeReviewRunAttempt({
+      id: 'attempt-1',
+      outcome: 'failed',
+      durationMs: 15,
+      completedAt: new Date().toISOString(),
+    }),
+    false,
+    'attempt completion is compare-and-swap',
+  );
   db.completeReviewRun(runId, { status: 'failed', durationMs: 20, error: 'provider exhausted' });
 
   const attempts = db.listReviewRunAttempts(runId);
@@ -361,19 +465,20 @@ test('provider attempts persist retry lineage and terminal review cleanup', () =
   assert.ok(attempts[1]?.completedAt);
   assert.ok(db.listReviewRuns(tenant.id, 1)[0]?.completedAt);
   assert.throws(
-    () => db.startReviewRunAttempt({
-      id: 'attempt-bad-lineage',
-      runId,
-      tenantId: tenant.id,
-      parentAttemptId: 'missing',
-      provider: 'openai',
-      model: 'gpt-5.6-luna',
-      tier: 'openai',
-      transport: 'codex-cli',
-      retryIndex: 2,
-      keyIndex: 0,
-      startedAt,
-    }),
+    () =>
+      db.startReviewRunAttempt({
+        id: 'attempt-bad-lineage',
+        runId,
+        tenantId: tenant.id,
+        parentAttemptId: 'missing',
+        provider: 'openai',
+        model: 'gpt-5.6-luna',
+        tier: 'openai',
+        transport: 'codex-cli',
+        retryIndex: 2,
+        keyIndex: 0,
+        startedAt,
+      }),
     /lineage mismatch/,
   );
 });
@@ -413,36 +518,38 @@ test('usage and retry lineage cannot cross review-run boundaries', () => {
   });
 
   assert.throws(
-    () => db.startReviewRunAttempt({
-      id: 'cross-run-child',
-      runId: secondRun,
-      tenantId: tenant.id,
-      parentAttemptId: 'first-run-attempt',
-      provider: 'deepseek',
-      model: 'deepseek-v4-flash',
-      tier: 'deepseek-flash',
-      transport: 'chat',
-      retryIndex: 1,
-      keyIndex: 0,
-      startedAt: new Date().toISOString(),
-    }),
+    () =>
+      db.startReviewRunAttempt({
+        id: 'cross-run-child',
+        runId: secondRun,
+        tenantId: tenant.id,
+        parentAttemptId: 'first-run-attempt',
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        tier: 'deepseek-flash',
+        transport: 'chat',
+        retryIndex: 1,
+        keyIndex: 0,
+        startedAt: new Date().toISOString(),
+      }),
     /lineage mismatch/,
   );
   assert.throws(
-    () => db.recordReviewRunUsage({
-      runId: secondRun,
-      tenantId: tenant.id,
-      provider: 'deepseek',
-      model: 'deepseek-v4-flash',
-      tier: 'deepseek-flash',
-      inputTokens: 1,
-      outputTokens: 1,
-      inputRatePerM: 1,
-      outputRatePerM: 1,
-      costUsd: 0.000002,
-      tokenSource: 'provider',
-      attemptId: 'first-run-attempt',
-    }),
+    () =>
+      db.recordReviewRunUsage({
+        runId: secondRun,
+        tenantId: tenant.id,
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        tier: 'deepseek-flash',
+        inputTokens: 1,
+        outputTokens: 1,
+        inputRatePerM: 1,
+        outputRatePerM: 1,
+        costUsd: 0.000002,
+        tokenSource: 'provider',
+        attemptId: 'first-run-attempt',
+      }),
     /usage attempt lineage mismatch/,
   );
 });
@@ -513,7 +620,14 @@ test('review-run lifecycle writes are fenced to the worker that owns the running
 
     assert.equal(staleWorker.setReviewRunHeadSha(runId, 'stale-sha'), false);
     assert.equal(staleWorker.interruptReviewRun(runId), false);
-    assert.equal(staleWorker.completeReviewRun(runId, { status: 'failed', durationMs: 1, error: 'stale worker' }), false);
+    assert.equal(
+      staleWorker.completeReviewRun(runId, {
+        status: 'failed',
+        durationMs: 1,
+        error: 'stale worker',
+      }),
+      false,
+    );
 
     assert.equal(
       activeWorker.startReviewRunAttempt({
@@ -564,7 +678,10 @@ test('review-run lifecycle writes are fenced to the worker that owns the running
     assert.equal(activeWorker.listReviewRunAttempts(runId)[0]?.outcome, 'running');
     assert.deepEqual(activeWorker.listReviewRunUsage(runId), []);
 
-    assert.equal(activeWorker.completeReviewRun(runId, { status: 'completed', durationMs: 2 }), true);
+    assert.equal(
+      activeWorker.completeReviewRun(runId, { status: 'completed', durationMs: 2 }),
+      true,
+    );
     assert.equal(staleWorker.completeReviewRun(runId, { status: 'failed', durationMs: 3 }), false);
     assert.equal(activeWorker.listReviewRuns(tenant.id, 1)[0]?.status, 'completed');
   } finally {
@@ -573,24 +690,29 @@ test('review-run lifecycle writes are fenced to the worker that owns the running
 });
 
 test('durable storage rejects database files anywhere inside the checkout', () => {
-  const previous = process.env.ORVEX_REQUIRE_DURABLE_STORAGE;
-  process.env.ORVEX_REQUIRE_DURABLE_STORAGE = '1';
-  try {
-    assert.throws(
-      () => new AppDatabase(path.join(process.cwd(), 'velatrix-review.db')),
-      /outside the checkout/,
-    );
-  } finally {
-    if (previous === undefined) delete process.env.ORVEX_REQUIRE_DURABLE_STORAGE;
-    else process.env.ORVEX_REQUIRE_DURABLE_STORAGE = previous;
-  }
+  assert.throws(
+    () =>
+      new AppDatabase({
+        databasePath: path.join(process.cwd(), 'velatrix-review.db'),
+        workerIdBase: 'durability-test',
+        checkoutRoot: process.cwd(),
+        requireDurableStorage: true,
+        defaultPlan: 'free',
+      }),
+    /outside the checkout/,
+  );
 });
 
 test('installation upsert never rebinds an existing installation to another tenant', () => {
   const db = freshDb();
   const first = db.createTenant('first');
   const second = db.createTenant('second');
-  db.upsertInstallation({ installationId: 7, tenantId: first.id, accountLogin: 'org', accountType: 'Organization' });
+  db.upsertInstallation({
+    installationId: 7,
+    tenantId: first.id,
+    accountLogin: 'org',
+    accountType: 'Organization',
+  });
   const result = db.upsertInstallation({
     installationId: 7,
     tenantId: second.id,
@@ -649,7 +771,10 @@ test('paid access downgrades on explicit dunning status and durable webhook clai
   assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), null);
   db.completeWebhookEvent('stripe', 'evt_1', stripeClaim);
   assert.equal(db.claimWebhookEvent('stripe', 'evt_1'), null);
-  assert.ok(db.claimWebhookEvent('github', 'evt_1'), 'providers use independent delivery namespaces');
+  assert.ok(
+    db.claimWebhookEvent('github', 'evt_1'),
+    'providers use independent delivery namespaces',
+  );
 
   const runId = db.startReviewRun({
     tenantId: tenant.id,
@@ -661,7 +786,11 @@ test('paid access downgrades on explicit dunning status and durable webhook clai
     action: 'synchronize',
   });
   assert.equal(db.failStaleRunningRuns({ staleAfterMs: 60_000, nowMs: Date.now() + 61_000 }), 1);
-  assert.equal(db.countAccountReviews('billing'), 1, 'an interrupted attempt remains quota-consuming');
+  assert.equal(
+    db.countAccountReviews('billing'),
+    1,
+    'an interrupted attempt remains quota-consuming',
+  );
   assert.equal(
     db.resumeReviewRun(runId, {
       tenantId: tenant.id,
@@ -692,7 +821,9 @@ test('retention removes abandoned webhook claims so the event ledger stays bound
   const firstClaim = db.claimWebhookEvent('github', 'stale-event');
   assert.ok(firstClaim);
   const old = new Date(Date.now() - 2 * 24 * 3_600_000).toISOString();
-  (db as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db
+  (
+    db as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }
+  ).db
     .prepare(`UPDATE webhook_events SET claimed_at = ?`)
     .run(old);
 
@@ -711,7 +842,11 @@ test('body-hash claims dedupe replays inside the TTL and reopen after it', () =>
   const hash = 'a'.repeat(64);
   const first = db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 });
   assert.ok(first);
-  assert.equal(db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 }), null, 'in-flight blocks');
+  assert.equal(
+    db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 }),
+    null,
+    'in-flight blocks',
+  );
   db.completeWebhookEvent(db.webhookBodyProvider('github'), hash, first);
   assert.equal(
     db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 }),
@@ -720,8 +855,12 @@ test('body-hash claims dedupe replays inside the TTL and reopen after it', () =>
   );
 
   const expired = new Date(Date.now() - 120_000).toISOString();
-  (db as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }).db
-    .prepare(`UPDATE webhook_events SET processed_at = ?, claimed_at = ? WHERE provider = ? AND event_id = ?`)
+  (
+    db as unknown as { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } }
+  ).db
+    .prepare(
+      `UPDATE webhook_events SET processed_at = ?, claimed_at = ? WHERE provider = ? AND event_id = ?`,
+    )
     .run(expired, expired, db.webhookBodyProvider('github'), hash);
 
   const afterTtl = db.claimWebhookBodyHash('github', hash, { ttlMs: 60_000 });
@@ -802,14 +941,23 @@ test('review runs: setReviewRunHeadSha re-points a run at the effective SHA', ()
 
   // Cooldown keys on head_sha: the EFFECTIVE sha must hit, the stale one must not.
   assert.notEqual(db.secondsSinceLastCompletedReview(1, 'acme', 'api', 7, 'effective-sha'), null);
-  assert.equal(db.secondsSinceLastCompletedReview(1, 'acme', 'api', 7, 'stale-sha-from-webhook'), null);
+  assert.equal(
+    db.secondsSinceLastCompletedReview(1, 'acme', 'api', 7, 'stale-sha-from-webhook'),
+    null,
+  );
 });
 
 test('repos: upsert refreshes tenant_id when an installation is re-linked', () => {
   const db = freshDb();
   const t1 = db.createTenant('one');
   const t2 = db.createTenant('two');
-  const base = { installationId: 7, githubRepoId: 99, owner: 'acme', name: 'api', fullName: 'acme/api' };
+  const base = {
+    installationId: 7,
+    githubRepoId: 99,
+    owner: 'acme',
+    name: 'api',
+    fullName: 'acme/api',
+  };
 
   db.upsertRepo({ ...base, tenantId: t1.id });
   assert.equal(db.getRepoByGitHubId(7, 99)?.tenantId, t1.id);
@@ -822,7 +970,11 @@ test('repos: upsert refreshes tenant_id when an installation is re-linked', () =
 
   assert.equal(db.disableRepoByGitHubId(7, 99), true);
   assert.equal(db.getRepoByGitHubId(7, 99)?.enabled, false);
-  assert.equal(db.disableReposForInstallation(7), 0, 'already-disabled repos are not counted twice');
+  assert.equal(
+    db.disableReposForInstallation(7),
+    0,
+    'already-disabled repos are not counted twice',
+  );
 });
 
 test('manual-review candidates round-trip separately from findings', () => {

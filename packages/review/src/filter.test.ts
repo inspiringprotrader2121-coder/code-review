@@ -15,7 +15,8 @@ const f = (over: Partial<ReviewFinding>): ReviewFinding => ({
   category: 'correctness',
   // Default to a message that states a trigger and an outcome, so tests about
   // severity routing are not silently also testing the inline evidence gate.
-  message: 'When the request arrives without a tenant scope, the lookup returns another tenant\'s record.',
+  message:
+    "When the request arrives without a tenant scope, the lookup returns another tenant's record.",
   confidence: 0.8,
   ruleId: 'llm.general',
   ...over,
@@ -34,16 +35,27 @@ test('TAXONOMY: P1/P2/P3 (Critical/High/MEDIUM) go inline; only info (Low) is fo
     cfg,
   );
   assert.deepEqual(inline.map((x) => x.severity).sort(), ['P1', 'P2', 'P3']);
-  assert.deepEqual(nitpicks.map((x) => x.severity), ['info'], 'only Low/info is folded');
+  assert.deepEqual(
+    nitpicks.map((x) => x.severity),
+    ['info'],
+    'only Low/info is folded',
+  );
   assert.equal(summaryOnly.length, 0);
 });
 
 test('fold_medium:true collapses Medium (P3) alongside Low for a quieter thread', () => {
   const { inline, nitpicks } = filterAndCapFindings(
-    [f({ severity: 'P2', line: 2 }), f({ severity: 'P3', line: 3 }), f({ severity: 'info', line: 4 })],
+    [
+      f({ severity: 'P2', line: 2 }),
+      f({ severity: 'P3', line: 3 }),
+      f({ severity: 'info', line: 4 }),
+    ],
     { max_comments: 25, fold_medium: true } as never,
   );
-  assert.deepEqual(inline.map((x) => x.severity), ['P2']);
+  assert.deepEqual(
+    inline.map((x) => x.severity),
+    ['P2'],
+  );
   assert.deepEqual(nitpicks.map((x) => x.severity).sort(), ['P3', 'info'].sort());
 });
 
@@ -63,7 +75,9 @@ test('max_comments caps actionable inline only — folded notes are never capped
     ...Array.from({ length: 5 }, (_, i) => f({ severity: 'P2', line: i + 1 })),
     ...Array.from({ length: 5 }, (_, i) => f({ severity: 'info', line: i + 100 })),
   ];
-  const { inline, summaryOnly, nitpicks } = filterAndCapFindings(many, { max_comments: 3 } as never);
+  const { inline, summaryOnly, nitpicks } = filterAndCapFindings(many, {
+    max_comments: 3,
+  } as never);
   assert.equal(inline.length, 3, 'inline capped to max_comments');
   assert.equal(summaryOnly.length, 2, 'overflow P2s go to summary, not dropped');
   assert.equal(nitpicks.length, 5, 'all folded notes kept, not subject to the inline cap');
@@ -96,10 +110,10 @@ test('same-line dedupe preserves provenance from every corroborating pass', () =
     }),
   ]);
   assert.equal(merged.provenance?.length, 2);
-  assert.deepEqual(
-    merged.provenance?.map((item) => item.sourcePass).sort(),
-    ['deep-dive', 'general'],
-  );
+  assert.deepEqual(merged.provenance?.map((item) => item.sourcePass).sort(), [
+    'deep-dive',
+    'general',
+  ]);
 });
 
 test('collapseSameDefect: one defect reported at two lines becomes one comment', () => {
@@ -110,16 +124,16 @@ test('collapseSameDefect: one defect reported at two lines becomes one comment',
       line: 42,
       severity: 'P2',
       message:
-        'The public API page now advertises `PUT /{slug}/api/lines/{id}`, but '
-        + '`backend/src/openapi.yaml` no longer defines any such operation.',
+        'The public API page now advertises `PUT /{slug}/api/lines/{id}`, but ' +
+        '`backend/src/openapi.yaml` no longer defines any such operation.',
     }),
     f({
       file: 'ApiDocs.jsx',
       line: 48,
       severity: 'P1',
       message:
-        'The page advertises `PUT /{slug}/api/lines/{id}`, but the revised OpenAPI '
-        + 'document has no corresponding path entry.',
+        'The page advertises `PUT /{slug}/api/lines/{id}`, but the revised OpenAPI ' +
+        'document has no corresponding path entry.',
     }),
   ]);
   assert.equal(kept.length, 1);
@@ -130,8 +144,16 @@ test('collapseSameDefect: one defect reported at two lines becomes one comment',
 
 test('collapseSameDefect: distinct defects in one file both survive', () => {
   const kept = collapseSameDefect([
-    f({ file: 'a.ts', line: 10, message: 'The rate limiter permits a burst past the documented quota.' }),
-    f({ file: 'a.ts', line: 40, message: 'Timestamps are stored without a timezone, so the audit trail is off by hours.' }),
+    f({
+      file: 'a.ts',
+      line: 10,
+      message: 'The rate limiter permits a burst past the documented quota.',
+    }),
+    f({
+      file: 'a.ts',
+      line: 40,
+      message: 'Timestamps are stored without a timezone, so the audit trail is off by hours.',
+    }),
   ]);
   assert.equal(kept.length, 2);
 });
@@ -157,15 +179,15 @@ test('collapseSameDefect: unanchored findings are left alone', () => {
 test('hasConcreteFailurePath: a stated trigger and outcome passes; an assertion does not', () => {
   assert.equal(
     hasConcreteFailurePath(
-      'When a retry runs after the redemption row already exists, `incrementUsedCountIfAllowed` '
-      + 'is skipped, so the coupon usage counter never increments and the limit can be exceeded.',
+      'When a retry runs after the redemption row already exists, `incrementUsedCountIfAllowed` ' +
+        'is skipped, so the coupon usage counter never increments and the limit can be exceeded.',
     ),
     true,
   );
   assert.equal(
     hasConcreteFailurePath(
-      'This validation pattern is risky and inconsistent with the rest of the codebase; consider '
-      + 'extracting it into a shared helper for maintainability and clarity going forward.',
+      'This validation pattern is risky and inconsistent with the rest of the codebase; consider ' +
+        'extracting it into a shared helper for maintainability and clarity going forward.',
     ),
     false,
   );
@@ -175,10 +197,11 @@ test('the evidence gate moves vague P2/P3s to the table and never touches P1', (
   t.after(() => {
     delete process.env.ORVEX_INLINE_EVIDENCE_GATE;
   });
-  const vague = 'This pattern is risky and inconsistent with the surrounding code; a shared helper would read better here.';
+  const vague =
+    'This pattern is risky and inconsistent with the surrounding code; a shared helper would read better here.';
   const concrete =
-    'When the cursor exceeds the export ceiling, the final page is emitted without a truncation '
-    + 'marker, so the caller silently receives partial data.';
+    'When the cursor exceeds the export ceiling, the final page is emitted without a truncation ' +
+    'marker, so the caller silently receives partial data.';
 
   const { inline, summaryOnly } = filterAndCapFindings(
     [
@@ -190,9 +213,15 @@ test('the evidence gate moves vague P2/P3s to the table and never touches P1', (
     ],
     cfg,
   );
-  assert.deepEqual(inline.map((x) => x.line), [1, 5, 4]);
+  assert.deepEqual(
+    inline.map((x) => x.line),
+    [1, 5, 4],
+  );
   // Gated, not dropped — they still reach the author in the summary table.
-  assert.deepEqual(summaryOnly.map((x) => x.line), [2, 3]);
+  assert.deepEqual(
+    summaryOnly.map((x) => x.line),
+    [2, 3],
+  );
 
   process.env.ORVEX_INLINE_EVIDENCE_GATE = '0';
   const off = filterAndCapFindings([f({ severity: 'P3', line: 3, message: vague })], cfg);

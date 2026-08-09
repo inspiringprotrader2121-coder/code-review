@@ -15,10 +15,17 @@ test('password hashing round-trips and rejects wrong password', () => {
 });
 
 test('OAuth state is browser-bound by a nonce', () => {
-  const state = signOAuthState({ ts: Date.now(), next: '/dashboard', nonce: 'n'.repeat(32) }, 'test-secret');
+  const state = signOAuthState(
+    { ts: Date.now(), next: '/dashboard', nonce: 'n'.repeat(32) },
+    'test-secret',
+  );
   assert.equal(verifyOAuthState(state, 'test-secret')?.nonce, 'n'.repeat(32));
-  const legacyBody = Buffer.from(JSON.stringify({ ts: Date.now(), next: '/dashboard' })).toString('base64url');
-  const legacySig = createHmac('sha256', 'test-secret').update(`oauth.${legacyBody}`).digest('base64url');
+  const legacyBody = Buffer.from(JSON.stringify({ ts: Date.now(), next: '/dashboard' })).toString(
+    'base64url',
+  );
+  const legacySig = createHmac('sha256', 'test-secret')
+    .update(`oauth.${legacyBody}`)
+    .digest('base64url');
   const legacy = `${legacyBody}.${legacySig}`;
   assert.equal(verifyOAuthState(legacy, 'test-secret'), null);
 });

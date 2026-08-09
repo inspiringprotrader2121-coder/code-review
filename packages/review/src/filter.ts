@@ -1,4 +1,5 @@
 import type { ReviewConfig } from '@orvex-review/rules';
+import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { mergeFindingProvenance, type ReviewFinding } from './finding.js';
 import { sameDefectText } from './similarity.js';
 
@@ -67,7 +68,7 @@ export function filterAndCapFindings(
   // marquee bug always earns an inline comment. P2/P3 must earn the surface.
   // Gated, never dropped: the finding still reaches the author with its
   // apply-fix checkbox.
-  const evidenceGate = process.env.ORVEX_INLINE_EVIDENCE_GATE !== '0';
+  const evidenceGate = loadReviewRuntimeConfig().inlineEvidenceGate;
   const earnsInline = (f: ReviewFinding): boolean => {
     if (!evidenceGate) return true;
     if (f.severity === 'P1') return true;

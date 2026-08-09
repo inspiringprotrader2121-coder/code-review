@@ -9,21 +9,22 @@ Self-hosted AI code review for GitHub. Install the GitHub App, open a PR, and Or
 
 ## What you get
 
-| Capability | Notes |
-|------------|--------|
-| PR review on open / push | Diff + repo context → LLM → summary + inline comments |
-| Deterministic layers | Optional Semgrep + config rules before the model |
-| Re-review on push | Fingerprints prior findings; replies when issues are fixed |
-| PR commands | `@orvex review`, `deep`, `fix`, `explain`, `ignore`, `help`, … |
-| Auto-fix | Suggestion blocks + Apply checkbox; commits only with safety locks |
-| Multi-tenant SaaS | Installations, plans, Stripe overage, dashboards |
-| Check runs | Optional GitHub Check `orvex-review` |
+| Capability               | Notes                                                              |
+| ------------------------ | ------------------------------------------------------------------ |
+| PR review on open / push | Diff + repo context → LLM → summary + inline comments              |
+| Deterministic layers     | Optional Semgrep + config rules before the model                   |
+| Re-review on push        | Fingerprints prior findings; replies when issues are fixed         |
+| PR commands              | `@orvex review`, `deep`, `fix`, `explain`, `ignore`, `help`, …     |
+| Auto-fix                 | Suggestion blocks + Apply checkbox; commits only with safety locks |
+| Multi-tenant SaaS        | Installations, plans, Stripe overage, dashboards                   |
+| Check runs               | Optional GitHub Check `orvex-review`                               |
 
 ---
 
 ## Requirements
 
-- **Node.js 22.13+** and **pnpm 11** (via Corepack)
+- **Node.js 22.13+** and **pnpm 11.7.0** (via Corepack). CI and fresh-Linux
+  verification use the exact Node version in [`.node-version`](./.node-version).
 - A **GitHub App** (permissions below)
 - **MiniMax and DeepSeek API keys** for normal review tracks
 - **OpenAI API-key-authenticated Codex CLI home** when enabling Verify-tier Luna
@@ -75,10 +76,10 @@ Codex status): `GET /ready`.
 
 Create an app (org or user): [New GitHub App](https://github.com/settings/apps/new).
 
-| Setting | Value |
-|---------|--------|
-| Webhook URL | `{APP_URL}/webhooks/github` |
-| Webhook secret | same as `GITHUB_WEBHOOK_SECRET` |
+| Setting          | Value                                          |
+| ---------------- | ---------------------------------------------- |
+| Webhook URL      | `{APP_URL}/webhooks/github`                    |
+| Webhook secret   | same as `GITHUB_WEBHOOK_SECRET`                |
 | Setup / callback | see [docs/SAAS_SETUP.md](./docs/SAAS_SETUP.md) |
 
 **Permissions:** Metadata (R), Contents (R/W), Pull requests (R/W), Issues (R/W), Checks (R/W optional).
@@ -108,15 +109,15 @@ pnpm review --pr 67 --sync
 
 Trigger word defaults to `@orvex` (`ORVEX_TRIGGER`). Write access is required for mutating commands; `help` / public rate info may be restricted by plan.
 
-| Command | Effect |
-|---------|--------|
-| `@orvex review` | Re-run review on current head |
-| `@orvex deep` | Extra analysis (counts as more billable units on paid plans) |
-| `@orvex fix` / `fix this` / `fix all` | Commit ready / AI fixes |
-| `@orvex explain` | Explain a finding (thread) |
-| `@orvex ignore` | Suppress a finding for the repo |
-| `@orvex rate limit` | Quota status (collaborators) |
-| `@orvex help` | Command list |
+| Command                               | Effect                                                       |
+| ------------------------------------- | ------------------------------------------------------------ |
+| `@orvex review`                       | Re-run review on current head                                |
+| `@orvex deep`                         | Extra analysis (counts as more billable units on paid plans) |
+| `@orvex fix` / `fix this` / `fix all` | Commit ready / AI fixes                                      |
+| `@orvex explain`                      | Explain a finding (thread)                                   |
+| `@orvex ignore`                       | Suppress a finding for the repo                              |
+| `@orvex rate limit`                   | Quota status (collaborators)                                 |
+| `@orvex help`                         | Command list                                                 |
 
 Fixes only land when the branch head is unchanged, the target code still matches, and no other Orvex fix holds the PR lock. Fork PRs are never pushed.
 
@@ -130,7 +131,7 @@ Copy [examples/orvex-review.yml](./examples/orvex-review.yml) into a customer re
 mode: normal
 max_comments: 8
 ignore:
-  - "**/dist/**"
+  - '**/dist/**'
 ignore_labels:
   - review-bot:ignore
 ```
@@ -157,21 +158,27 @@ scripts/         Deploy, backup, restore drill
 
 ## Scripts
 
-| Command | Description |
-|---------|-------------|
-| `pnpm dev` | API + worker (development) |
-| `pnpm start` | Production start for `@orvex-review/server` |
-| `pnpm build` | Build all packages |
-| `pnpm typecheck` | TypeScript across the workspace |
-| `pnpm test` | Unit tests (+ script tests) |
-| `pnpm review --pr N` | CLI review |
-| `pnpm eval` | Eval harness |
+| Command                    | Description                                           |
+| -------------------------- | ----------------------------------------------------- |
+| `pnpm dev`                 | API + worker (development)                            |
+| `pnpm start`               | Production start for `@orvex-review/server`           |
+| `pnpm build`               | Build all packages                                    |
+| `pnpm typecheck`           | TypeScript across the workspace                       |
+| `pnpm test`                | Unit tests (+ script tests)                           |
+| `pnpm format:check`        | Formatting policy                                     |
+| `pnpm check:dependencies`  | Workspace dependency policy                           |
+| `pnpm check:docs`          | Generated configuration and local documentation links |
+| `pnpm check:built-exports` | Compiled public API import smoke test                 |
+| `pnpm coverage:report`     | Coverage measurement without changing a baseline      |
+| `pnpm coverage:check`      | Enforce a reviewed coverage baseline                  |
+| `pnpm review --pr N`       | CLI review                                            |
+| `pnpm eval`                | Eval harness                                          |
 
 ---
 
 ## Environment
 
-All variables are documented in **[.env.example](./.env.example)**. Minimum for a first review:
+All variables are documented in **[.env.example](./.env.example)** and the generated **[configuration reference](./docs/CONFIGURATION.md)**. Minimum for a first review:
 
 - `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, `GITHUB_WEBHOOK_SECRET`
 - `REVIEW_API_SECRET`
@@ -187,7 +194,9 @@ Never commit `.env`, `*.pem`, or database files — they are gitignored.
 
 - Keep `STORE_PATH` on durable disk **outside** the git checkout.
 - Deploy only with `scripts/deploy-safe.sh --dry-run`, inspect its file list,
-  then `scripts/deploy-safe.sh --restart`. Raw `rsync` is prohibited.
+  then `scripts/deploy-safe.sh --restart`. Raw `rsync` is prohibited. The
+  guarded release procedure and rollback conditions are in the
+  [deployment runbook](./docs/DEPLOYMENT_RUNBOOK.md).
 - Set `ORVEX_ADMIN_SECRET` for admin bearer automation (do not reuse `PLATFORM_SECRET`).
 - Optional: Redis queue, Stripe keys, Codex CLI homes — see `.env.example`.
 
