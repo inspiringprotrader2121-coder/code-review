@@ -12,6 +12,7 @@ EXCLUDES=(
   --exclude '.env.*'
   --exclude '.data/'
   --exclude 'node_modules/'
+  --exclude 'node_modules.failed/'
   --exclude 'dist/'
   --exclude 'build/'
   --exclude '*.tsbuildinfo'
@@ -85,7 +86,7 @@ for source in "${SOURCES[@]}"; do
   case "$source" in
     .env.example)
       ;;
-    .env|*/.env|.env.*|*/.env.*|*.pem|*.key|*.db|*.db-*|*.sqlite|*.sqlite3|node_modules|node_modules/*|*/node_modules|*/node_modules/*|dist|dist/*|*/dist|*/dist/*|.data|.data/*|*/.data|*/.data/*)
+    .env|*/.env|.env.*|*/.env.*|*.pem|*.key|*.db|*.db-*|*.sqlite|*.sqlite3|node_modules|node_modules/*|*/node_modules|*/node_modules/*|node_modules.failed|node_modules.failed/*|*/node_modules.failed|*/node_modules.failed/*|dist|dist/*|*/dist|*/dist/*|.data|.data/*|*/.data|*/.data/*)
       echo "[deploy] refusing protected source: $source" >&2
       exit 2
       ;;
@@ -287,7 +288,7 @@ mkdir -p "$stage"
 rsync -a --delete \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
-  --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' \
+  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' \
   --exclude 'build/' --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' \
   --exclude '*.db' --exclude '*.db-*' --exclude '*.sqlite' --exclude '*.sqlite3' \
   "$live/" "$stage/"
@@ -437,7 +438,7 @@ mkdir -p "$backup"
 rsync -a --delete \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
-  --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
+  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' --exclude 'build/' \
   --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$live/" "$backup/"
 REMOTE_BACKUP
@@ -463,7 +464,7 @@ backup=$3
 rsync -a --delete-delay \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
-  --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
+  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' --exclude 'build/' \
   --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$stage/" "$live/"
 mv "$live/node_modules" "$backup/node_modules"
@@ -520,7 +521,7 @@ backup=$2
 rsync -a --delete-delay \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
-  --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
+  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' --exclude 'build/' \
   --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$backup/" "$live/"
 if [[ -d "$live/node_modules" ]]; then rm -rf "$live/node_modules.failed"; mv "$live/node_modules" "$live/node_modules.failed"; fi

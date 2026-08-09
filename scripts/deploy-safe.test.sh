@@ -18,7 +18,7 @@ if [[ "${DEPLOY_SAFE_TEST_FIXTURE:-0}" != "1" ]]; then
     rsync -a \
       --include '.env.example' \
       --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
-      --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
+      --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' --exclude 'build/' \
       --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
       --exclude '*.sqlite' --exclude '*.sqlite3' \
       "$ROOT/" "$FIXTURE/"
@@ -79,6 +79,10 @@ if [[ $(grep -c -- "--exclude '.DS_Store'" scripts/deploy-safe.sh) -ne 5 ]]; the
 fi
 if [[ $(grep -c -- "--exclude '\*.tsbuildinfo'" scripts/deploy-safe.sh) -ne 5 ]]; then
   echo "deploy must exclude generated TypeScript build metadata from every release path" >&2
+  exit 1
+fi
+if [[ $(grep -c -- "--exclude 'node_modules.failed/'" scripts/deploy-safe.sh) -ne 5 ]]; then
+  echo "deploy must exclude rollback-quarantined dependencies from every release path" >&2
   exit 1
 fi
 grep -Fq 'bash -s -- "$REMOTE_DIR" "$STAGE_DIR" "${SOURCES[@]}"' scripts/deploy-safe.sh || {
@@ -142,6 +146,7 @@ assert_rejected .env
 assert_rejected node_modules
 assert_rejected node_modules/.pnpm
 assert_rejected apps/server/node_modules
+assert_rejected node_modules.failed
 
 FAKE_BIN=$(mktemp -d)
 STATE=$(mktemp -d)
