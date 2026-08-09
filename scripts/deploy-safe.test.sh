@@ -10,7 +10,19 @@ cd "$ROOT"
 if [[ "${DEPLOY_SAFE_TEST_FIXTURE:-0}" != "1" ]]; then
   FIXTURE=$(mktemp -d)
   trap 'rm -rf "$FIXTURE"' EXIT
-  git archive HEAD | tar -x -C "$FIXTURE"
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git archive HEAD | tar -x -C "$FIXTURE"
+  else
+    # Staged production releases intentionally contain no .git directory.
+    # Recreate the same protected-path boundary for the disposable fixture.
+    rsync -a \
+      --include '.env.example' \
+      --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
+      --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
+      --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
+      --exclude '*.sqlite' --exclude '*.sqlite3' \
+      "$ROOT/" "$FIXTURE/"
+  fi
   mkdir -p "$FIXTURE/scripts"
   cp \
     scripts/deploy-safe.sh \
