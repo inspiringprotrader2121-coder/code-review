@@ -51,9 +51,10 @@ Docker daemon.
   `fuse-overlayfs`, and `docker-ce-rootless-extras` packages from an already
   configured official Docker APT repository. It does not add repositories or
   download/install a shell script from the network.
-- Docker's packaged rootless installation must supply the required AppArmor
-  policy. If it is absent, provisioning stops. The script never manufactures an
-  `unconfined` fallback profile.
+- Ubuntu's package-owned rootlesskit AppArmor policy must be present and parse
+  cleanly. The workflow may load that exact packaged file; if it is absent or
+  unowned, provisioning stops. The script never manufactures a fallback
+  profile or changes the global user-namespace restriction.
 - The script does not print environment variables, Docker configuration, API
   keys, tokens, or `.env` content. Package-manager and rootless-installer output
   are written only to `/var/log/orvex-sandbox-provision.log` with mode `0600`.

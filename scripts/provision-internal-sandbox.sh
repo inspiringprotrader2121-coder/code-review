@@ -251,13 +251,21 @@ ensure_subid_range() {
 }
 
 require_packaged_apparmor_profile() {
-  local binary
+  local binary profile=/etc/apparmor.d/rootlesskit
   binary=$(rootlesskit_path) || fail "rootlesskit still missing after prerequisites install"
   if apparmor_allows_rootlesskit "$binary"; then
-    log "using Docker/Ubuntu packaged AppArmor rootlesskit profile"
+    log "using the loaded Ubuntu package-owned AppArmor rootlesskit profile"
     return
   fi
-  fail "packaged rootlesskit AppArmor profile is not loaded; refusing to create an unconfined fallback"
+  [[ -f $profile ]] || fail "the packaged rootlesskit AppArmor profile is missing"
+  dpkg-query -S "$profile" 2>/dev/null | grep -Eq '^(apparmor|docker-ce-rootless-extras):' ||
+    fail "the rootlesskit AppArmor profile is not owned by an approved system package"
+  apparmor_parser -Q "$profile" >/dev/null 2>&1 ||
+    fail "the packaged rootlesskit AppArmor profile does not parse cleanly"
+  log "loading the package-owned AppArmor rootlesskit profile"
+  run_privately apparmor_parser -r "$profile"
+  apparmor_allows_rootlesskit "$binary" ||
+    fail "the package-owned rootlesskit AppArmor profile did not load"
 }
 
 install_rootless_daemon() {
