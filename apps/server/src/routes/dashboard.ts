@@ -1,14 +1,13 @@
 import { Hono } from 'hono';
-import { createAppDatabase } from '@orvex-review/store';
+import { createAppDatabase, type AppDatabase } from '@orvex-review/store';
 import { legacyAuthMode, planFeatures, publicPlanLabel, type PlanFeatures } from '@orvex-review/tenants';
 import { formatCommandsHtmlRows } from '@orvex-review/review';
 import { logoutCsrfToken, sessionUser } from './session.js';
 import { llmCostVisibleForTenant } from './cost-visibility.js';
 import { escapeHtml } from './pages.js';
 
-export function dashboardRoutes() {
+export function dashboardRoutes(db: AppDatabase = createAppDatabase()) {
   const app = new Hono();
-  const db = createAppDatabase();
 
   app.get('/dashboard', (c) => {
     if (legacyAuthMode(db.hasPasswordUsers())) {

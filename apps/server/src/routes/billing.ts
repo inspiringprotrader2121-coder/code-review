@@ -46,9 +46,8 @@ const OVERAGE_EVENT_NAMES: Partial<Record<PaidPlan, string>> = {
   verify: 'orvex_verify_overage',
 };
 
-export function billingRoutes() {
+export function billingRoutes(db: AppDatabase = createAppDatabase()) {
   const app = new Hono();
-  const db = createAppDatabase();
   const tenants = new TenantService(db);
 
   function workspace(c: Context): { tenant: Tenant; role: 'owner' | 'member' } | Response {

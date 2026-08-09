@@ -145,6 +145,10 @@ test(
     // discarded expensive reviews at publication.
     await queue.renewLease!(dequeued!);
     await queue.markCompleted(dequeued!);
+    await assert.rejects(
+      queue.renewLease!(dequeued!),
+      /lease lost.*claim token missing/i,
+    );
   },
 );
 

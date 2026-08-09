@@ -1,25 +1,19 @@
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
-import { createReviewQueue } from '@orvex-review/queue';
-import { configureLlmProviderCoordinator, type LlmProviderCoordinator } from '@orvex-review/review';
-import { createAppDatabase } from '@orvex-review/store';
 import { authDisabled, legacyAuthMode } from '@orvex-review/tenants';
-import { createApp } from './app.js';
-import { startWorkerLoop } from './queue-runner.js';
-import { startNightlyScheduler } from './nightly.js';
-import { retryStripeMeterEvents } from './routes/billing.js';
-import { sendOperationalAlert } from './alerts.js';
-import { cleanupAbandonedAgentCheckouts } from './temp-cleanup.js';
+import { composeApplication } from './bootstrap/composition.js';
+import { isLoopbackHost, loadServerRuntimeConfig } from './bootstrap/config.js';
+import { startApplicationLifecycle } from './bootstrap/lifecycle.js';
 
-const port = Number(process.env.PORT ?? 8787);
-const host = process.env.HOST ?? '0.0.0.0';
+const runtime = loadServerRuntimeConfig();
+const { host, port } = runtime;
 
 // FAIL CLOSED: refuse to serve the dashboard on a public interface with no
 // authentication configured. Prod sets ORVEX_REQUIRE_LOGIN=1 (or OAuth), so this
 // never fires there — it's a backstop so a future deploy that drops the auth env
 // can't silently expose every tenant's data. Override only for a deliberate
 // public demo with ORVEX_ALLOW_PUBLIC_NOLOGIN=1.
-const isLoopbackBind = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+const isLoopbackBind = isLoopbackHost(host);
 // AUTH_DISABLED makes every request the shared `dev` user — never allow that on
 // a non-loopback bind (legacyAuthMode() is false when AUTH_DISABLED=1, so the
 // check below would otherwise miss it).
@@ -29,7 +23,7 @@ if (!isLoopbackBind && authDisabled()) {
       `Unset AUTH_DISABLED, or bind to 127.0.0.1 for local bypass.`,
   );
 }
-if (!isLoopbackBind && legacyAuthMode() && process.env.ORVEX_ALLOW_PUBLIC_NOLOGIN !== '1') {
+if (!isLoopbackBind && legacyAuthMode() && !runtime.allowPublicNoLogin) {
   throw new Error(
     `Refusing to bind ${host}:${port} with NO authentication (legacy no-login mode). ` +
       `Set ORVEX_REQUIRE_LOGIN=1 (or configure GitHub OAuth), bind to 127.0.0.1, ` +
@@ -37,100 +31,15 @@ if (!isLoopbackBind && legacyAuthMode() && process.env.ORVEX_ALLOW_PUBLIC_NOLOGI
   );
 }
 
-// Clear review rows left 'running' by a previous crash/restart so the dashboard
-// doesn't show a perpetual in-progress spinner.
-const bootDb = createAppDatabase();
-const abandonedCheckouts = cleanupAbandonedAgentCheckouts();
-if (abandonedCheckouts > 0) {
-  console.log(`[server] removed ${abandonedCheckouts} abandoned agent checkout(s)`);
-}
-const tempCleanupTimer = setInterval(() => {
-  const removed = cleanupAbandonedAgentCheckouts();
-  if (removed > 0) {
-    console.log(`[server] removed ${removed} abandoned agent temp director${removed === 1 ? 'y' : 'ies'}`);
-  }
-}, 24 * 3_600_000);
-tempCleanupTimer.unref();
-// Only interrupt rows whose durable heartbeat is stale. The positive default is
-// mandatory even on today's one-process PM2 setup so adding a second process or
-// doing a rolling restart cannot invalidate a peer's live database row.
-const configuredStaleRunMs = Number(process.env.ORVEX_RUNNING_STALE_MS ?? 15 * 60_000);
-const staleRunMs =
-  Number.isFinite(configuredStaleRunMs) && configuredStaleRunMs >= 60_000
-    ? Math.min(Math.floor(configuredStaleRunMs), 24 * 3_600_000)
-    : 15 * 60_000;
-const staleRuns = bootDb.failStaleRunningRuns({ staleAfterMs: staleRunMs });
-if (staleRuns > 0) console.log(`[server] cleared ${staleRuns} stale 'running' review row(s)`);
-
-// Bounded retention: prune ephemeral rows (skipped/failed runs, expired
-// sessions, old abuse signals) at boot and daily. Never touches completed
-// reviews (the lifetime trial cap needs them).
-function pruneOnce(): void {
-  try {
-    const pruned = bootDb.pruneEphemeralData();
-    if (pruned > 0) console.log(`[server] pruned ${pruned} ephemeral row(s)`);
-  } catch (err) {
-    console.error('[server] prune failed', err);
-    void sendOperationalAlert({
-      event: 'database-prune-failed',
-      severity: 'warning',
-      message: `Ephemeral database cleanup failed: ${(err as Error).message}`,
-    });
-  }
-}
-pruneOnce();
-const pruneTimer = setInterval(pruneOnce, 24 * 3_600_000);
-pruneTimer.unref();
-const meterRetryTimer = setInterval(() => {
-  retryStripeMeterEvents(bootDb).catch((err) => console.error('[server] Stripe meter retry failed', err));
-}, 60_000);
-meterRetryTimer.unref();
-
-const queue = createReviewQueue();
-if (
-  queue.acquireProviderLease
-  && queue.releaseProviderLease
-  && queue.getProviderCooldownMs
-  && queue.setProviderCooldown
-) {
-  configureLlmProviderCoordinator(queue as LlmProviderCoordinator);
-}
-const app = createApp(queue);
-
-// Startup recovery BEFORE the worker starts: clear stale in-flight locks and
-// requeue anything left pending by a prior crash/restart, so no PR is left
-// silently blocked.
-try {
-  const recovered = await queue.recoverOrphans();
-  if (recovered > 0) console.log(`[server] recovered ${recovered} orphaned/pending queue item(s)`);
-} catch (err) {
-  console.error('[server] queue recovery failed', err);
-  void sendOperationalAlert({
-    event: 'queue-recovery-failed',
-    severity: 'critical',
-    message: `Queue recovery failed during startup: ${(err as Error).message}`,
-  });
-  throw err;
-}
-
-const stopWorker = startWorkerLoop(queue);
-// Nightly whole-repo scans (Verify+); no-op unless ORVEX_NIGHTLY_SCANS=1.
-const stopNightly = startNightlyScheduler(queue);
+const { db: bootDb, queue, app } = composeApplication(runtime);
+const lifecycle = await startApplicationLifecycle(bootDb, queue, runtime.staleRunMs);
 
 console.log(`[server] Orvex Review listening on http://${host}:${port}`);
 
 serve({ fetch: app.fetch, port, hostname: host });
 
-let shuttingDown = false;
 async function shutdown() {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  console.log('[server] shutting down…');
-  stopNightly();
-  clearInterval(meterRetryTimer);
-  clearInterval(tempCleanupTimer);
-  await stopWorker(); // re-queues in-flight reviews so they resume after restart
-  await queue.close();
+  await lifecycle.shutdown();
   process.exit(0);
 }
 

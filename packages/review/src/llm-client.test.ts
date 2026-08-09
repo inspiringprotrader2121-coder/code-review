@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   configureLlmProviderCoordinator,
   llmChat,
+  providerConcurrency,
   ReviewCancelledError,
   setProviderCooldown,
   withProviderCallSlot,
@@ -269,20 +270,35 @@ test('provider-specific LLM concurrency hands off slots without exceeding the co
   assert.equal(maximum, 1);
 });
 
-test('DeepSeek max-reasoning calls serialize by default', async (t) => {
+test('production provider defaults expose all eight review slots', () => {
+  assert.equal(providerConcurrency('luna', {}), 8);
+  assert.equal(providerConcurrency('deepseek', {}), 8);
+  assert.equal(providerConcurrency('minimax', {}), 8);
+  assert.equal(providerConcurrency('luna', { ORVEX_PROVIDER_CONCURRENCY_LUNA: '3' }), 3);
+});
+
+test('DeepSeek max-reasoning gate admits eight calls and holds the ninth', async (t) => {
   const previous = process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK;
-  delete process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK;
+  process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK = '8';
   const originalFetch = globalThis.fetch;
   let active = 0;
   let maximum = 0;
+  let calls = 0;
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => { release = resolve; });
+  let reachedEight!: () => void;
+  const eightStarted = new Promise<void>((resolve) => { reachedEight = resolve; });
   globalThis.fetch = (async () => {
+    calls++;
     active++;
     maximum = Math.max(maximum, active);
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    if (active === 8) reachedEight();
+    await hold;
     active--;
     return new Response(chatStream('{"findings":[]}'), { status: 200 });
   }) as typeof globalThis.fetch;
   t.after(() => {
+    release();
     globalThis.fetch = originalFetch;
     if (previous === undefined) delete process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK;
     else process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK = previous;
@@ -296,8 +312,14 @@ test('DeepSeek max-reasoning calls serialize by default', async (t) => {
     reasoningEffort: 'max',
     maxTokens: 32_000,
   };
-  await Promise.all([llmChat('sys', 'one', target), llmChat('sys', 'two', target)]);
-  assert.equal(maximum, 1);
+  const requests = Array.from({ length: 9 }, (_, index) =>
+    llmChat('sys', `request-${index}`, target));
+  await eightStarted;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls, 8, 'the ninth call must remain queued behind the provider gate');
+  release();
+  await Promise.all(requests);
+  assert.equal(maximum, 8);
 });
 
 test('caller cancellation aborts the active stream and never retries paid work', async (t) => {

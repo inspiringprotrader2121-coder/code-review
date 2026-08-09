@@ -27,7 +27,8 @@ Self-hosted AI code review for GitHub. Install the GitHub App, open a PR, and Or
 - A **GitHub App** (permissions below)
 - **MiniMax and DeepSeek API keys** for normal review tracks
 - **OpenAI API-key-authenticated Codex CLI home** when enabling Verify-tier Luna
-- Optional: Redis (`QUEUE_BACKEND=redis`), Semgrep on `PATH`, Docker (runtime-verify)
+- Redis (`QUEUE_BACKEND=redis`) for production; optional locally alongside
+  Semgrep on `PATH` and Docker (runtime verification)
 
 ---
 
@@ -65,7 +66,8 @@ ngrok http 8787
 # Update the GitHub App webhook + setup URLs to the same host
 ```
 
-Health: `GET /readyz` (when the server is up).
+Liveness: `GET /health`. Readiness (database, queue, drain, active jobs, and
+Codex status): `GET /ready`.
 
 ---
 
@@ -184,7 +186,8 @@ Never commit `.env`, `*.pem`, or database files — they are gitignored.
 ## Production notes
 
 - Keep `STORE_PATH` on durable disk **outside** the git checkout.
-- Prefer `scripts/deploy-safe.sh --dry-run` then `--restart` over raw `rsync` (see `AGENTS.md`).
+- Deploy only with `scripts/deploy-safe.sh --dry-run`, inspect its file list,
+  then `scripts/deploy-safe.sh --restart`. Raw `rsync` is prohibited.
 - Set `ORVEX_ADMIN_SECRET` for admin bearer automation (do not reuse `PLATFORM_SECRET`).
 - Optional: Redis queue, Stripe keys, Codex CLI homes — see `.env.example`.
 

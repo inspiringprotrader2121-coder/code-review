@@ -24,6 +24,7 @@ import {
   runCodexCliReview,
   runCodexExecForTest,
   trimCodexPrompt,
+  withCodexHomeLockForTest,
 } from './codex-cli.js';
 
 function withRepos(value: string | undefined, fn: () => void) {
@@ -228,23 +229,86 @@ test('Codex CLI model substitutions are detected and fail closed', () => {
   );
 });
 
-test('resolveCodexHomeConcurrency: every auth mode is locked to one', (t) => {
+test('resolveCodexHomeConcurrency: API-key homes honor bounded parallel capacity', (t) => {
+  const previousApiKeyConcurrency = process.env.ORVEX_CODEX_APIKEY_CONCURRENCY;
+  const previousReviewConcurrency = process.env.ORVEX_MAX_CONCURRENT_REVIEWS;
   t.after(() => {
-    delete process.env.ORVEX_CODEX_APIKEY_CONCURRENCY;
-    delete process.env.ORVEX_MAX_CONCURRENT_REVIEWS;
+    if (previousApiKeyConcurrency === undefined) delete process.env.ORVEX_CODEX_APIKEY_CONCURRENCY;
+    else process.env.ORVEX_CODEX_APIKEY_CONCURRENCY = previousApiKeyConcurrency;
+    if (previousReviewConcurrency === undefined) delete process.env.ORVEX_MAX_CONCURRENT_REVIEWS;
+    else process.env.ORVEX_MAX_CONCURRENT_REVIEWS = previousReviewConcurrency;
   });
   assert.equal(resolveCodexHomeConcurrency('oauth'), 1);
   assert.equal(resolveCodexHomeConcurrency('unknown'), 1);
 
   delete process.env.ORVEX_CODEX_APIKEY_CONCURRENCY;
   process.env.ORVEX_MAX_CONCURRENT_REVIEWS = '8';
-  assert.equal(resolveCodexHomeConcurrency('apikey'), 1);
+  assert.equal(resolveCodexHomeConcurrency('apikey'), 8);
 
   process.env.ORVEX_CODEX_APIKEY_CONCURRENCY = '3';
-  assert.equal(resolveCodexHomeConcurrency('apikey'), 1);
+  assert.equal(resolveCodexHomeConcurrency('apikey'), 3);
 
   process.env.ORVEX_CODEX_APIKEY_CONCURRENCY = '99';
-  assert.equal(resolveCodexHomeConcurrency('apikey'), 1);
+  assert.equal(resolveCodexHomeConcurrency('apikey'), 32);
+});
+
+test('production home lock admits eight API-key calls and holds the ninth', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered = 0;
+  let markEightEntered!: () => void;
+  const eightEntered = new Promise<void>((resolve) => {
+    markEightEntered = resolve;
+  });
+  let ninthEntered = false;
+
+  await withCodexHomeLockForTest(
+    { mode: 'apikey', env: { ORVEX_CODEX_APIKEY_CONCURRENCY: '8' } },
+    async (withLock) => {
+      const firstEight = Array.from({ length: 8 }, () =>
+        withLock(async () => {
+          entered++;
+          if (entered === 8) markEightEntered();
+          await blocked;
+        }),
+      );
+      await eightEntered;
+
+      const ninth = withLock(async () => {
+        ninthEntered = true;
+      });
+      await Promise.resolve();
+      assert.equal(ninthEntered, false, 'ninth API-key call must wait for a home slot');
+
+      release();
+      await Promise.all([...firstEight, ninth]);
+      assert.equal(ninthEntered, true);
+    },
+  );
+});
+
+test('production home lock keeps OAuth and unknown homes serial', async () => {
+  for (const mode of ['oauth', 'unknown'] as const) {
+    await withCodexHomeLockForTest(
+      { mode, env: { ORVEX_CODEX_APIKEY_CONCURRENCY: '8' } },
+      async (withLock) => {
+        let active = 0;
+        let peak = 0;
+        const tasks = Array.from({ length: 3 }, () =>
+          withLock(async () => {
+            active++;
+            peak = Math.max(peak, active);
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            active--;
+          }),
+        );
+        await Promise.all(tasks);
+        assert.equal(peak, 1, `${mode} homes must remain serial`);
+      },
+    );
+  }
 });
 
 test('resolveCodexTimeouts bounds wall and silence timers', () => {
@@ -343,6 +407,22 @@ test('a pre-cancelled Codex review fails before spawning the CLI', async () => {
   );
 });
 
+test('a non-allowlisted Codex review fails before spawning the CLI', async (t) => {
+  const previous = process.env.ORVEX_CODEX_CLI_REPOS;
+  process.env.ORVEX_CODEX_CLI_REPOS = 'trusted/repo';
+  t.after(() => {
+    if (previous === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
+    else process.env.ORVEX_CODEX_CLI_REPOS = previous;
+  });
+  await assert.rejects(
+    runCodexCliReview(
+      [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
+      { repoId: 'untrusted/repo' },
+    ),
+    /non-allowlisted repository/i,
+  );
+});
+
 function fakeCodex(source: string): { dir: string; binary: string } {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-fake-codex-'));
   const binary = path.join(dir, 'codex');
@@ -387,6 +467,8 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:12, outpu
   const result = await runCodexExecForTest('review this', {
     binaryPath: fixture.binary,
     env: { ...process.env, ARGS_FILE: argsFile },
+    hardMs: 5_000,
+    inactivityMs: 3_000,
   });
   assert.equal(result.threadId, 'fixture-thread');
   const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[];
@@ -402,7 +484,7 @@ setInterval(() => {}, 1000);
 `);
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
   await assert.rejects(
-    runCodexExecForTest('review', { binaryPath: fixture.binary, hardMs: 1_000, inactivityMs: 500 }),
+    runCodexExecForTest('review', { binaryPath: fixture.binary, hardMs: 5_000, inactivityMs: 3_000 }),
     /refused model substitution/,
   );
 });

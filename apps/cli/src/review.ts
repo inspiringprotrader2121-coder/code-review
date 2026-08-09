@@ -8,8 +8,8 @@ import {
   getInstallationIdForRepo,
   parseRepoSlug,
 } from '@orvex-review/github';
-import { enqueueManualReview, startWorkerLoop } from '../../server/src/queue-runner.js';
-import { loadWorkerConfig, processReviewJob } from '../../server/src/worker.js';
+import { enqueueManualReview, startWorkerLoop } from '@orvex-review/server/queue-runner';
+import { loadWorkerConfig, processReviewJob } from '@orvex-review/server/worker';
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -21,7 +21,7 @@ const { values, positionals } = parseArgs({
   },
 });
 
-if (values.help || positionals[0] !== 'review') {
+if (values.help || (positionals[0] !== undefined && positionals[0] !== 'review')) {
   console.log(`Usage:
   pnpm review --pr <number> [--repo owner/repo] [--sync]
 
@@ -45,10 +45,16 @@ async function main() {
   if (values.sync) {
     const config = loadWorkerConfig();
     const installationId = await getInstallationIdForRepo(config.github, owner, repo);
+    const installation = config.store.getInstallation(installationId);
+    if (!installation || installation.suspendedAt) {
+      throw new Error(`GitHub installation ${installationId} is not active in Orvex`);
+    }
     const octokit = createInstallationOctokit(config.github, installationId);
     const pr = await fetchPullRequest(octokit, { owner, repo, number: prNumber });
 
     const job = {
+      installationId,
+      tenantId: installation.tenantId,
       owner,
       repo,
       pr: prNumber,
@@ -71,7 +77,7 @@ async function main() {
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 1000));
   }
-  stop();
+  await stop();
   await queue.close();
 }
 

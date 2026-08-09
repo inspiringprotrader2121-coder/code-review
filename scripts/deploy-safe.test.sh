@@ -7,6 +7,17 @@ cd "$ROOT"
 scripts/deploy-safe.sh --validate-only
 scripts/deploy-safe.sh --validate-only .env.example
 
+TEST_RELEASE_COMMIT=$(git rev-parse --verify HEAD)
+TEST_RELEASE_LOCKFILE_SHA256=$(shasum -a 256 pnpm-lock.yaml | awk '{print $1}')
+TEST_RELEASE_ID="${TEST_RELEASE_COMMIT}.${TEST_RELEASE_LOCKFILE_SHA256}"
+export DEPLOY_READY_ATTEMPTS=2
+export DEPLOY_READY_SLEEP_S=0
+export DEPLOY_IDLE_ATTEMPTS=2
+export DEPLOY_IDLE_SLEEP_S=0
+export REMOTE='stage@example.test:/srv/orvex/'
+export DEPLOY_DRAIN_PATH=/tmp/stage-deploy-drain
+export DEPLOY_TEST_MODE=1
+
 if [[ $(grep -c -- "--include '.env.example'" scripts/deploy-safe.sh) -ne 5 ]]; then
   echo "deploy must allow .env.example through upload, stage, backup, apply, and rollback" >&2
   exit 1
@@ -27,6 +38,25 @@ grep -Fq 'install_backup_schedule' scripts/deploy-safe.sh || {
   echo "deploy does not install the database backup schedule" >&2
   exit 1
 }
+
+node <<'NODE'
+const config = require('./ecosystem.config.cjs');
+const args = config.apps?.find((app) => app.name === 'velatrix-review')?.args ?? '';
+for (const variable of [
+  'ORVEX_MAX_CONCURRENT_REVIEWS',
+  'ORVEX_CODEX_APIKEY_CONCURRENCY',
+  'ORVEX_PROVIDER_CONCURRENCY_LUNA',
+  'ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK',
+  'ORVEX_PROVIDER_CONCURRENCY_MINIMAX',
+]) {
+  if (!args.includes(`${variable}=8`)) {
+    throw new Error(`production profile does not pin ${variable}=8`);
+  }
+}
+if (args.indexOf('. ./.env') > args.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8')) {
+  throw new Error('immutable .env would override the code-owned production profile');
+}
+NODE
 
 # Stale-lock inspection and takeover must be serialized. Without this guard two
 # reclaimers can both delete/recreate the same lock and both enter deployment.
@@ -60,10 +90,12 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "%s\n" "$*" >>"$DEPLOY_TEST_STATE/ssh-args"' \
   'if [[ "$*" == *curl* ]]; then' \
+  '  release_id=${DEPLOY_TEST_RELEASE_ID:-missing}' \
+  '  if [[ -e "$DEPLOY_TEST_STATE/restarted" && "${DEPLOY_TEST_POST_READY_RELEASE_MISMATCH:-0}" == 1 ]]; then release_id=wrong-release; fi' \
   '  if [[ -e "$DEPLOY_TEST_STATE/restarted" && "${DEPLOY_TEST_POST_READY_FAIL:-0}" == 1 ]]; then exit 22; fi' \
   '  if [[ -e "$DEPLOY_TEST_STATE/restarted" && "${DEPLOY_TEST_POST_READY_MALFORMED:-0}" == 1 ]]; then printf "{\"activeJobs\":0}\n"; exit 0; fi' \
   '  if [[ "${DEPLOY_TEST_OLD_READY:-0}" == 1 && ! -e "$DEPLOY_TEST_STATE/restarted" ]]; then printf "{\"ok\":true}\n"; exit 0; fi' \
-  '  if [[ "${DEPLOY_TEST_READY_MODE:-idle}" == busy ]]; then printf "{\"ok\":true,\"activeJobs\":1,\"draining\":true}\n"; elif [[ -e "$DEPLOY_TEST_STATE/restarted" && -e "$DEPLOY_TEST_STATE/drain-cleared" && "${DEPLOY_TEST_POST_READY_BUSY:-0}" == 1 ]]; then printf "{\"ok\":true,\"activeJobs\":1,\"draining\":false}\n"; elif [[ -e "$DEPLOY_TEST_STATE/drain-cleared" ]]; then printf "{\"ok\":true,\"activeJobs\":0,\"draining\":false}\n"; else printf "{\"ok\":true,\"activeJobs\":0,\"draining\":true}\n"; fi' \
+  '  if [[ "${DEPLOY_TEST_READY_MODE:-idle}" == busy ]]; then printf "{\"ok\":true,\"activeJobs\":1,\"draining\":true,\"releaseId\":\"%s\"}\n" "$release_id"; elif [[ -e "$DEPLOY_TEST_STATE/restarted" && -e "$DEPLOY_TEST_STATE/drain-cleared" && "${DEPLOY_TEST_POST_READY_BUSY:-0}" == 1 ]]; then printf "{\"ok\":true,\"activeJobs\":1,\"draining\":false,\"releaseId\":\"%s\"}\n" "$release_id"; elif [[ -e "$DEPLOY_TEST_STATE/drain-cleared" ]]; then printf "{\"ok\":true,\"activeJobs\":0,\"draining\":false,\"releaseId\":\"%s\"}\n" "$release_id"; else printf "{\"ok\":true,\"activeJobs\":0,\"draining\":true,\"releaseId\":\"%s\"}\n" "$release_id"; fi' \
   'elif [[ "$*" == *"pm2 stop"* ]]; then' \
   '  : >"$DEPLOY_TEST_STATE/stopped"' \
   'elif [[ "$*" == *"pm2 restart"* ]]; then' \
@@ -74,12 +106,14 @@ printf '%s\n' \
   '    if [[ "$SCRIPT" == *rmdir* ]]; then rm -f "$DEPLOY_TEST_STATE/lock" "$DEPLOY_TEST_STATE/lock-stale"; elif [[ -e "$DEPLOY_TEST_STATE/lock" && ! -e "$DEPLOY_TEST_STATE/lock-stale" ]]; then exit 75; else : >"$DEPLOY_TEST_STATE/lock"; rm -f "$DEPLOY_TEST_STATE/lock-stale"; fi' \
   '  fi' \
   '  if [[ "$SCRIPT" == *"pnpm@11.7.0"* && "${DEPLOY_TEST_STAGE_FAIL:-0}" == 1 ]]; then exit 23; fi' \
+  '  if [[ "$SCRIPT" == *"release.json"* && "$SCRIPT" == *"lockfileSha256"* ]]; then printf "%s\n" "$*" >"$DEPLOY_TEST_STATE/release-metadata-args"; fi' \
   '  if [[ "$SCRIPT" == *"startOrRestart"* || "$SCRIPT" == *"pm2 restart"* || "$SCRIPT" == *"pm2 start /usr/bin/bash"* ]]; then : >"$DEPLOY_TEST_STATE/restarted"; fi' \
   '  if [[ "$SCRIPT" == *"touch --"* ]]; then : >"$DEPLOY_TEST_STATE/draining"; fi' \
   '  if [[ "$SCRIPT" == *"rm -f --"* ]]; then : >"$DEPLOY_TEST_STATE/drain-cleared"; fi' \
   '  : >"$DEPLOY_TEST_STATE/installed"' \
   'fi' >"$FAKE_BIN/ssh"
 chmod +x "$FAKE_BIN/rsync" "$FAKE_BIN/ssh"
+export DEPLOY_TEST_RELEASE_ID="$TEST_RELEASE_ID"
 
 if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_READY_MODE=busy \
   DEPLOY_IDLE_ATTEMPTS=2 DEPLOY_IDLE_SLEEP_S=0 \
@@ -109,12 +143,19 @@ rm -f "$STATE/lock"
 : >"$STATE/lock"
 : >"$STATE/lock-stale"
 if ! PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" \
+  DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
   scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
   echo "deploy refused to reclaim a stale deployment lock" >&2
   exit 1
 fi
 if [[ -e "$STATE/lock-stale" ]]; then
   echo "stale lock marker survived — reclaim path not taken" >&2
+  exit 1
+fi
+if [[ ! -f "$STATE/release-metadata-args" ]] \
+  || ! grep -Fq "$TEST_RELEASE_COMMIT" "$STATE/release-metadata-args" \
+  || ! grep -Fq "$TEST_RELEASE_LOCKFILE_SHA256" "$STATE/release-metadata-args"; then
+  echo "deploy did not generate staged release metadata from the local commit and lockfile" >&2
   exit 1
 fi
 rm -f "$STATE"/*
@@ -160,6 +201,14 @@ if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_MALF
   DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
   scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
   echo "deploy accepted malformed post-restart readiness" >&2
+  exit 1
+fi
+
+rm -f "$STATE"/*
+if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_RELEASE_MISMATCH=1 \
+  DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
+  scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
+  echo "deploy accepted a ready process running a different release" >&2
   exit 1
 fi
 

@@ -1,6 +1,6 @@
 import { Hono, type Context } from 'hono';
 import { listInstallationRepos, loadGitHubConfigFromEnv } from '@orvex-review/github';
-import { createAppDatabase, type Tenant } from '@orvex-review/store';
+import { createAppDatabase, type AppDatabase, type Tenant } from '@orvex-review/store';
 import {
   TenantService,
   WorkspaceAccessError,
@@ -13,9 +13,8 @@ import { llmCostVisibleForTenant, reviewRunsForTenant, workspaceStatsForTenant }
 import { sameOriginRequest } from './request-security.js';
 
 
-export function apiRoutes() {
+export function apiRoutes(db: AppDatabase = createAppDatabase()) {
   const app = new Hono();
-  const db = createAppDatabase();
   const tenants = new TenantService(db);
 
   /** Resolve the membership-checked tenant, or (in legacy no-login mode) any tenant by slug. */

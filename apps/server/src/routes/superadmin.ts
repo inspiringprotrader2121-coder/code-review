@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { Hono } from 'hono';
-import { createAppDatabase } from '@orvex-review/store';
+import { createAppDatabase, type AppDatabase } from '@orvex-review/store';
 import { createInstallationOctokit, loadGitHubConfigFromEnv } from '@orvex-review/github';
 import { buildScoreboard, type Scoreboard } from '../scoreboard.js';
 import { buildDeepScorecard } from '../deep-scorecard.js';
@@ -11,12 +11,7 @@ import { pageShell } from './pages.js';
 import { sessionUser } from './session.js';
 import { planFeatures, publicPlanLabel } from '@orvex-review/tenants';
 import { sampleActiveReviews } from '../active-reviews.js';
-import { getQueueDepth } from '../queue-runner.js';
-
-function maxConcurrentFromEnv(): number {
-  const value = Number(process.env.ORVEX_MAX_CONCURRENT_REVIEWS ?? 4);
-  return Number.isFinite(value) ? Math.min(100, Math.max(1, Math.floor(value))) : 4;
-}
+import { getQueueDepth, maxConcurrentReviews } from '../queue-runner.js';
 
 function emptyScoreboard(): Scoreboard {
   return {
@@ -45,9 +40,8 @@ function scoreboardPath(): string {
   return path.join(dir, 'scoreboard.json');
 }
 
-export function superadminRoutes() {
+export function superadminRoutes(db: AppDatabase = createAppDatabase()) {
   const app = new Hono();
-  const db = createAppDatabase();
 
   app.get('/superadmin', (c) => {
     const user = sessionUser(c, db);
@@ -65,7 +59,7 @@ export function superadminRoutes() {
    */
   app.get('/superadmin/api/active-reviews', async (c) => {
     if (!authorizedAdmin(c, db)) return c.json({ error: 'unauthorized' }, 401);
-    const snap = sampleActiveReviews({ maxConcurrent: maxConcurrentFromEnv() });
+    const snap = sampleActiveReviews({ maxConcurrent: maxConcurrentReviews() });
     const reviews = snap.reviews.map((r) => {
       const tenant = db.getTenantById(r.tenantId);
       const plan = db.getTenantPlan(r.tenantId) ?? 'free';

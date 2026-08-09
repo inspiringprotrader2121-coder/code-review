@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import type { ReviewQueue } from '@orvex-review/queue';
-import { createAppDatabase } from '@orvex-review/store';
+import { AppDatabase, createAppDatabase } from '@orvex-review/store';
 import { createApp } from './app.js';
 
 test('health is live-only while readiness checks both database and queue', async (t) => {
@@ -32,7 +32,7 @@ test('health is live-only while readiness checks both database and queue', async
   const queue = {
     ping: async () => queueUp,
   } as unknown as ReviewQueue;
-  const app = createApp(queue);
+  const app = createApp(queue, { releaseFile: path.join(dir, 'missing-release.json') });
 
   const health = await app.request('/health');
   assert.equal(health.status, 200);
@@ -52,6 +52,7 @@ test('health is live-only while readiness checks both database and queue', async
     activeJobs: 0,
     draining: false,
     codexAuth: 'unknown',
+    releaseId: 'unknown',
   });
 
   queueUp = false;
@@ -64,9 +65,37 @@ test('health is live-only while readiness checks both database and queue', async
     activeJobs: 0,
     draining: false,
     codexAuth: 'unknown',
+    releaseId: 'unknown',
   });
 
   createAppDatabase().close();
+});
+
+test('readiness exposes only a valid release identity from injected metadata', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-release-readiness-'));
+  const releaseFile = path.join(dir, 'release.json');
+  const db = new AppDatabase(':memory:');
+  const queue = { ping: async () => true } as unknown as ReviewQueue;
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  writeFileSync(releaseFile, JSON.stringify({
+    releaseId: 'c9471fdb',
+    buildTimestamp: '2026-08-09T12:00:00.000Z',
+    apiKey: 'must-not-appear-in-readiness',
+  }));
+  const app = createApp(queue, { db, releaseFile });
+  const ready = await app.request('/ready');
+  assert.equal(ready.status, 200);
+  const body = await ready.json() as Record<string, unknown>;
+  assert.equal(body.releaseId, 'c9471fdb');
+  assert.equal(JSON.stringify(body).includes('must-not-appear-in-readiness'), false);
+
+  writeFileSync(releaseFile, '{not-json');
+  const malformed = await app.request('/ready');
+  assert.equal((await malformed.json() as Record<string, unknown>).releaseId, 'unknown');
 });
 
 function snapshotEnv(keys: string[]): Map<string, string | undefined> {

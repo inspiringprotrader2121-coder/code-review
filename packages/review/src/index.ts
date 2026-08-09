@@ -139,6 +139,18 @@ export {
 } from './contribution.js';
 export { checkImportBindings, enumerateExports, extractNamedImports } from './import-check.js';
 export {
+  resolveCodexApiKeyConcurrency,
+  resolveProviderConcurrency,
+  resolveReviewWorkerConcurrency,
+} from './runtime-limits.js';
+export {
+  compileReviewPlan,
+  type CompiledReviewPlan,
+  type ReviewModelSlot,
+  type ReviewStage,
+  type ReviewStageId,
+} from './review-plan.js';
+export {
   ReviewCancelledError,
   isReviewCancelledError,
   isRateLimitOrQuotaError,

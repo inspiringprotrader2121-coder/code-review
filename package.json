@@ -7,7 +7,7 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test && node --test scripts/*.test.mjs && bash scripts/deploy-safe.test.sh",
-    "review": "tsx apps/cli/src/review.ts",
+    "review": "pnpm --filter @orvex-review/cli review --",
     "start": "corepack pnpm@11.7.0 --pm-on-fail=ignore --filter @orvex-review/server start",
     "eval": "pnpm --filter @orvex-review/eval eval"
   },

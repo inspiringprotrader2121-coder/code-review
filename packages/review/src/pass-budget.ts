@@ -1,4 +1,5 @@
-import { DEEP_DIVE_FOCUS, REMOVED_BEHAVIOR_FOCUS, THIRD_ANGLE_FOCUS } from './lenses.js';
+import { DEEP_DIVE_FOCUS, THIRD_ANGLE_FOCUS } from './lenses.js';
+import { compileReviewPlan, type ReviewStage } from './review-plan.js';
 
 /**
  * How many single-hypothesis probes a plan may run.
@@ -76,6 +77,9 @@ export function hasDeleteOrRename(
 }
 
 export type PassAngle = {
+  /** Present for public fixed tiers. This is the authoritative stage contract
+   * used by execution; numeric indexes remain only for legacy routing. */
+  stage?: ReviewStage;
   tag: string;
   focus?: string;
   bestEffort?: boolean;
@@ -115,28 +119,15 @@ export function buildReviewPassAngles(opts: {
   }>;
 }): PassAngle[] {
   const tier = opts.modelTier;
-  const fourthTier = tier === 'multi-model' || tier === 'codex-hybrid';
-  if (fourthTier) {
-    return [
-      { tag: 'general', modelIdx: 0 },
-      { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS, modelIdx: 1 },
-      {
-        tag: 'removed-behavior/callers',
-        focus: REMOVED_BEHAVIOR_FOCUS,
-        modelIdx: 2,
-      },
-      {
-        tag: 'perf/completeness/api',
-        focus: THIRD_ANGLE_FOCUS,
-        modelIdx: 3,
-      },
-    ];
-  }
-  if (tier === 'dual-model') {
-    return [
-      { tag: 'general', modelIdx: 0 },
-      { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS, modelIdx: 1 },
-    ];
+  const fixedPlan = compileReviewPlan(tier);
+  if (fixedPlan) {
+    return fixedPlan.discovery.map((stage) => ({
+      stage,
+      tag: stage.tag,
+      focus: stage.focus,
+      modelIdx: stage.modelIndex,
+      bestEffort: !stage.required,
+    }));
   }
 
   const breadthMode = (process.env.ORVEX_BREADTH_ON ?? 'deep-or-large').trim().toLowerCase();

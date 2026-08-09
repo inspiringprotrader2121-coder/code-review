@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   activeReviewSignal,
+  cancelAllActiveReviews,
   cancelActiveReviewsForPr,
   directorySizeBytes,
   getActiveReviewCount,
@@ -137,4 +138,25 @@ test('PR cancellation aborts only the matching active review and is idempotent',
 
   release();
   await Promise.all([first, second]);
+});
+
+test('worker shutdown cancellation aborts every active review', async () => {
+  const signals: AbortSignal[] = [];
+  let bothReady!: () => void;
+  const ready = new Promise<void>((resolve) => { bothReady = resolve; });
+  const run = (pr: number) => runWithActiveReview(job({ pr }), async () => {
+    const signal = activeReviewSignal();
+    assert.ok(signal);
+    signals.push(signal);
+    if (signals.length === 2) bothReady();
+    await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+  });
+
+  const first = run(21);
+  const second = run(22);
+  await ready;
+  assert.equal(cancelAllActiveReviews(), 2);
+  await Promise.all([first, second]);
+  assert.ok(signals.every((signal) => signal.aborted));
+  assert.equal(cancelAllActiveReviews(), 0);
 });

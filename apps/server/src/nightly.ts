@@ -41,7 +41,10 @@ const SCAN_HOUR = boundedEnvInt('ORVEX_NIGHTLY_HOUR', 3, 0, 23); // UTC hour to 
 /** Per-tenant daily ceiling on nightly scan reservations (unbounded repos → cost). */
 const MAX_SCANS_PER_TENANT_DAY = boundedEnvInt('ORVEX_NIGHTLY_MAX_SCANS_PER_TENANT', 25, 1, 500);
 
-export function startNightlyScheduler(queue: ReviewQueue): () => void {
+export function startNightlyScheduler(
+  queue: ReviewQueue,
+  loadConfig: () => WorkerConfig = loadWorkerConfig,
+): () => void {
   if (process.env.ORVEX_NIGHTLY_SCANS !== '1') {
     return () => {};
   }
@@ -58,7 +61,7 @@ export function startNightlyScheduler(queue: ReviewQueue): () => void {
     if (now.getUTCHours() !== SCAN_HOUR || lastRunDay === day || checkInProgress) return;
     checkInProgress = true;
     try {
-      await enqueueNightlyScans(queue);
+      await enqueueNightlyScans(queue, loadConfig);
       lastRunDay = day;
     } finally {
       checkInProgress = false;
@@ -78,8 +81,11 @@ export function startNightlyScheduler(queue: ReviewQueue): () => void {
 }
 
 /** Enumerate eligible repos and enqueue a scan job for each. */
-export async function enqueueNightlyScans(queue: ReviewQueue): Promise<number> {
-  const config = loadWorkerConfig();
+export async function enqueueNightlyScans(
+  queue: ReviewQueue,
+  loadConfig: () => WorkerConfig = loadWorkerConfig,
+): Promise<number> {
+  const config = loadConfig();
   const targets = config.store.listScanTargets().filter((t) => planFeatures(t.plan).nightlyScans);
   const scanDay = new Date().toISOString().slice(0, 10);
   const perTenant = new Map<string, number>();

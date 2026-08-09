@@ -12,6 +12,7 @@ import {
   maxOutputTokensForModel,
   modelForInvestigate,
   modelForPass,
+  modelForReviewStage,
   modelForPlanWithTier,
   maxRiskProbes,
   modelForRiskHunt,
@@ -22,7 +23,7 @@ import {
   validateNativeOpenAiResponsesConfig,
   type WorkerConfig,
 } from './pipeline.js';
-import { isHedgedRejection, isTransientLlmError } from '@orvex-review/review';
+import { compileReviewPlan, isHedgedRejection, isTransientLlmError } from '@orvex-review/review';
 import { planFeatures } from '@orvex-review/tenants';
 
 function modelRoutingConfig(): WorkerConfig {
@@ -61,8 +62,13 @@ function modelRoutingConfig(): WorkerConfig {
 }
 
 test('required paid model stacks fail closed when a provider is missing', () => {
+  const previousCli = process.env.ORVEX_CODEX_CLI;
+  const previousRepos = process.env.ORVEX_CODEX_CLI_REPOS;
+  process.env.ORVEX_CODEX_CLI = '1';
+  try {
   const config = modelRoutingConfig();
-  assert.equal(providerConfigurationIssue(planFeatures('verify'), config), null);
+  process.env.ORVEX_CODEX_CLI_REPOS = 'acme/api';
+  assert.equal(providerConfigurationIssue(planFeatures('verify'), config, 'acme/api'), null);
   const missingFrontier = providerConfigurationIssue(planFeatures('verify'), {
     ...config,
     openaiModel: null,
@@ -100,6 +106,47 @@ test('required paid model stacks fail closed when a provider is missing', () => 
     }) ?? '',
     /DeepSeek v4 Flash review provider/,
   );
+  } finally {
+    if (previousCli === undefined) delete process.env.ORVEX_CODEX_CLI;
+    else process.env.ORVEX_CODEX_CLI = previousCli;
+    if (previousRepos === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
+    else process.env.ORVEX_CODEX_CLI_REPOS = previousRepos;
+  }
+});
+
+test('high-tier preflight requires allowlisted pinned Codex CLI and never accepts direct Luna', (t) => {
+  const previousCli = process.env.ORVEX_CODEX_CLI;
+  const previousRepos = process.env.ORVEX_CODEX_CLI_REPOS;
+  t.after(() => {
+    if (previousCli === undefined) delete process.env.ORVEX_CODEX_CLI;
+    else process.env.ORVEX_CODEX_CLI = previousCli;
+    if (previousRepos === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
+    else process.env.ORVEX_CODEX_CLI_REPOS = previousRepos;
+  });
+  const config = modelRoutingConfig();
+  process.env.ORVEX_CODEX_CLI_REPOS = 'allowlisted/repo';
+
+  delete process.env.ORVEX_CODEX_CLI;
+  assert.match(
+    providerConfigurationIssue(planFeatures('verify'), config, 'allowlisted/repo') ?? '',
+    /Luna review provider/,
+  );
+
+  process.env.ORVEX_CODEX_CLI = '1';
+  assert.match(
+    providerConfigurationIssue(planFeatures('verify'), config, 'not/allowlisted') ?? '',
+    /Luna review provider/,
+  );
+  assert.equal(providerConfigurationIssue(planFeatures('verify'), config, 'allowlisted/repo'), null);
+  assert.match(
+    providerConfigurationIssue(
+      planFeatures('verify'),
+      { ...config, codexCliModel: null },
+      'allowlisted/repo',
+    ) ?? '',
+    /Luna review provider/,
+    'direct Responses Luna must not substitute for the CLI contract',
+  );
 });
 
 test('provider output ceilings preserve max reasoning while bounding long generations', () => {
@@ -110,6 +157,20 @@ test('provider output ceilings preserve max reasoning while bounding long genera
     64_000,
   );
   assert.equal(maxOutputTokensForModel('gpt-5.6-luna', {}), undefined);
+});
+
+test('named public-plan stages are the model-routing source of truth', () => {
+  const config = modelRoutingConfig();
+  const plan = compileReviewPlan('multi-model');
+  assert.ok(plan);
+  const routed = plan.discovery.map((stage) => modelForReviewStage(config, stage, stage.modelSlot === 'luna'));
+  assert.deepEqual(routed.map((item) => item.target.model), [
+    'gpt-5.6-luna',
+    'deepseek-v4-flash',
+    'deepseek-v4-flash',
+    'MiniMax-M3',
+  ]);
+  assert.equal(modelForReviewStage(config, plan.verification).target.model, 'deepseek-v4-flash');
 });
 
 test('review lenses rotate changed files and receive only relevant cross-file context', () => {

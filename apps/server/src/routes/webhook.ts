@@ -31,7 +31,7 @@ import {
   replaceApplyLine,
 } from '@orvex-review/review';
 import { TenantService, isPlanId, planFeatures } from '@orvex-review/tenants';
-import { createAppDatabase, type GitHubInstallation } from '@orvex-review/store';
+import { createAppDatabase, type AppDatabase, type GitHubInstallation } from '@orvex-review/store';
 import { enqueueManualReview } from '../queue-runner.js';
 import { authorizedAdminMutation } from './admin-auth.js';
 import { formatQuotaStatusComment, loadAccountQuotaStatus } from '../quota-status.js';
@@ -126,16 +126,22 @@ interface CommentWebhook {
   sender: { login: string };
 }
 
-export function webhookRoutes(queue: ReviewQueue) {
+export interface WebhookRouteDependencies {
+  db?: AppDatabase;
+  tenants?: TenantService;
+  githubConfig?: GitHubAppConfig;
+}
+
+export function webhookRoutes(queue: ReviewQueue, dependencies: WebhookRouteDependencies = {}) {
   const app = new Hono();
-  const tenants = new TenantService();
-  const db = createAppDatabase();
+  const db = dependencies.db ?? createAppDatabase();
+  const tenants = dependencies.tenants ?? new TenantService(db);
 
   // Load the GitHub App config ONCE (lazily, on the first webhook) — it reads
   // and parses the App private key, and doing it PER REQUEST meant every
   // webhook delivery re-read the PEM from disk. Lazy (not at construction) so
   // tests can build the routes without GitHub env set.
-  let githubConfig: GitHubAppConfig | null = null;
+  let githubConfig: GitHubAppConfig | null = dependencies.githubConfig ?? null;
   const getGithubConfig = (): GitHubAppConfig => (githubConfig ??= loadGitHubConfigFromEnv());
 
   /** Upsert the repos an installation can access into the dashboard repo list. */
@@ -1054,7 +1060,7 @@ export function webhookRoutes(queue: ReviewQueue) {
       headSha: body.headSha,
       installationId: body.installationId,
       tenantSlug: body.tenantSlug,
-    });
+    }, db);
 
     return c.json({ ok: true, job });
   });

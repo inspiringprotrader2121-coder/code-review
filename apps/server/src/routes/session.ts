@@ -264,9 +264,8 @@ function beginAuthenticatedSession(c: Context, db: AppDatabase, user: User, next
   return c.redirect(postAuthDestination(db, user, next));
 }
 
-export function sessionRoutes() {
+export function sessionRoutes(db: AppDatabase = createAppDatabase()) {
   const app = new Hono();
-  const db = createAppDatabase();
 
   app.get('/auth/register', (c) => {
     const next = safeNext(c.req.query('next') ?? '/connect');

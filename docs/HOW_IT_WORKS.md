@@ -21,9 +21,11 @@ GitHub event ──▶ /webhooks/github ──▶ queue ──▶ worker ──�
 2. **Queue** (`packages/queue`) — Redis-backed in production (`QUEUE_BACKEND=redis`),
    in-memory for dev. Jobs are deduped and per-PR locked so the same SHA isn't
    reviewed twice and commands never collide.
-3. **Worker** (`apps/server/src/queue-runner.ts`) — a bounded pump pulls jobs and
-   runs at most `ORVEX_MAX_CONCURRENT_REVIEWS` at once. Agentic Luna mode defaults
-   to one whole review at a time to keep a single API key inside its TPM budget.
+3. **Worker** (`apps/server/src/queue-runner.ts`) — a bounded pump pulls jobs at
+   the resolved process capacity (default 8). With Codex CLI API-key mode enabled,
+   `ORVEX_CODEX_APIKEY_CONCURRENCY` can raise that capacity; keep it equal to
+   `ORVEX_MAX_CONCURRENT_REVIEWS`. Provider admission gates individual calls, so
+   an unrelated Luna call never serializes a whole review.
 4. **Review pipeline** (`apps/server/src/pipeline.ts`) — builds context, runs the
    review, verifies findings, posts the comment, records the run.
 
@@ -49,8 +51,8 @@ For each changed file the pipeline builds **deep context** and reviews against i
 Depth is enforced in the harness (not left to the model) and scaled **by plan**.
 Required stages are scheduled with bounded concurrency. Before any paid lane
 starts, provider-specific cooldown admission checks the whole required stack;
-local and Redis leases then pace each provider independently. Luna is serialized;
-DeepSeek and MiniMax use their separately configured capacities:
+local and Redis leases then pace each provider independently. Luna, DeepSeek,
+and MiniMax each use their separately configured capacities:
 
 - **Passes** — the review runs N times over the change + neighborhood + top-K
   index files; findings accumulate and dedupe by fingerprint.
@@ -243,10 +245,11 @@ callback refuses to rebind an installation already owned by another workspace
 | `ORVEX_DEEPSEEK_API_KEY` / `ORVEX_DEEPSEEK_FLASH_MODEL` | required DeepSeek key + Flash model id (default `deepseek-v4-flash`) |
 | `QUEUE_BACKEND` | `redis` (prod) or `memory` |
 | `REDIS_URL` | Redis connection (with auth) |
-| `ORVEX_MAX_CONCURRENT_REVIEWS` | reviews per worker process (default 4) |
+| `ORVEX_MAX_CONCURRENT_REVIEWS` | base reviews per worker process (default 8); keep equal to the API-key Codex capacity when Codex CLI is enabled |
+| `ORVEX_CODEX_APIKEY_CONCURRENCY` | parallel pinned Codex CLI processes sharing the API-key home (default 8; bounded to 32); this caps Codex stages and never raises the whole-review worker ceiling |
 | `ORVEX_CODEX_HOME` | dedicated API-key-authenticated Codex home; OAuth is refused |
 | `ORVEX_REVIEW_CONCURRENCY` | maximum concurrently scheduled stages within one review (default 3) |
-| `ORVEX_PROVIDER_CONCURRENCY_LUNA` / `_DEEPSEEK` / `_MINIMAX` | provider-specific local and Redis-coordinated ceilings (defaults 1/1/2) |
+| `ORVEX_PROVIDER_CONCURRENCY_LUNA` / `_DEEPSEEK` / `_MINIMAX` | provider-specific local and Redis-coordinated call ceilings (default 8 each); set all three consistently with worker capacity unless a provider needs a lower limit |
 | `ORVEX_PROVIDER_LEASE_WAIT_MS` | optional distributed-slot wait bound; default `0` queues until available/cancelled |
 | `ORVEX_MAX_JOB_RETRIES` | opt-in whole-review replay after failure (default 0 to prevent duplicate spend) |
 | `ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS` / `ORVEX_MINIMAX_MAX_OUTPUT_TOKENS` | completion ceilings (default 32000); reasoning effort remains max |
@@ -287,7 +290,10 @@ callback refuses to rebind an installation already owned by another workspace
 
 ## 9. Deployment
 
-Node ≥ 20, pnpm workspace. Runs under pm2 behind nginx; SQLite store (Postgres
+Node >= 22.13, pnpm workspace. Runs under pm2 behind nginx; SQLite store (Postgres
 planned), Redis queue, Docker for the sandbox. Source of truth is the local repo —
-changes are developed locally and `rsync`'d to the server; the server is never the
-source of truth.
+changes are developed locally and deployed only with `scripts/deploy-safe.sh
+--dry-run` followed by `scripts/deploy-safe.sh --restart`; the server is never
+the source of truth. The script drains new work, waits for active work to finish,
+stages and tests the Linux release, then verifies readiness after restart. Raw
+rsync is prohibited.

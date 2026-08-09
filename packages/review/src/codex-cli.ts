@@ -18,6 +18,7 @@ import {
 } from './llm-client.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 import { normalizeLlmResponse } from './llm.js';
+import { resolveCodexApiKeyConcurrency } from './runtime-limits.js';
 
 export interface CodexCliReviewOptions {
   /** Existing Codex session id to resume; omit to start a new session. */
@@ -30,9 +31,8 @@ export interface CodexCliReviewOptions {
   signal?: AbortSignal;
   /** cross-file context: repo tree + imported files */
   context?: ReviewPromptContext;
-  /** A read-only repo checkout Codex may explore for call sites and tests.
-   *  Only honored when `repoId` is on the ORVEX_CODEX_CLI_REPOS allowlist —
-   *  otherwise the checkout is REFUSED and the review runs diff-only. */
+  /** A repo checkout Codex may explore for call sites and tests.
+   *  `repoId` must be on the ORVEX_CODEX_CLI_REPOS allowlist. */
   cwd?: string;
   /** "owner/repo" of the repo being reviewed. Required for `cwd` to be honored
    *  (first-party allowlist enforcement — see isCodexRepoAllowed). */
@@ -67,12 +67,12 @@ export const DEFAULT_CODEX_CLI_REASONING_EFFORT = 'max';
  * FIRST-PARTY REPO ALLOWLIST — defense in depth, INDEPENDENT of the
  * ORVEX_CODEX_CLI feature flag. codex runs with
  * `--dangerously-bypass-approvals-and-sandbox` and shell access inside the repo
- * checkout, i.e. it executes whatever a malicious PR puts in the repo (build
- * scripts, hooks, "test fixtures"). That is a latent RCE surface, so a whole-repo
- * sweep is only ever handed to codex for repos explicitly listed in
+ * checkout, i.e. it can execute whatever a malicious PR puts in the repo (build
+ * scripts, hooks, "test fixtures"). Diff-only input does not remove shell or
+ * network capability, so the complete invocation is limited to repos listed in
  * ORVEX_CODEX_CLI_REPOS (comma-separated "owner/repo", case-insensitive;
  * "*" disables the check — NOT recommended). Unset/empty = no repo is ever
- * checked out for codex, no matter what the caller or the feature flag says.
+ * reviewed by Codex, no matter what the caller or the feature flag says.
  */
 export function codexAllowedRepos(): string[] {
   return (process.env.ORVEX_CODEX_CLI_REPOS ?? '')
@@ -396,12 +396,12 @@ export class CountingSemaphore {
  * Resolve how many Codex CLI processes may share one API-key CODEX_HOME.
  * OAuth callers must pass mode !== 'apikey' and always get 1.
  */
-export function resolveCodexHomeConcurrency(mode: CodexAuthMode): number {
+export function resolveCodexHomeConcurrency(
+  mode: CodexAuthMode,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
   if (mode !== 'apikey') return 1;
-  // A single agentic Luna process can consume most of an account's TPM itself.
-  // Parallel reviews previously stampeded the same key, then all entered long
-  // reconnect loops. Keep this code-level cap immune to stale immutable env.
-  return 1;
+  return resolveCodexApiKeyConcurrency(env);
 }
 
 /**
@@ -413,8 +413,8 @@ export function resolveCodexHomeConcurrency(mode: CodexAuthMode): number {
  * Concurrency rules:
  * - **OAuth / ChatGPT homes stay SERIAL (1)** — concurrent refreshes of one
  *   auth.json race and revoke each other. Scale OAuth by adding more homes.
- * - **API-key homes stay SERIAL (1)** so parallel agentic runs cannot stampede
- *   one key's TPM. This is deliberately not configurable from the live env.
+ * - **API-key homes use ORVEX_CODEX_APIKEY_CONCURRENCY** (default 8). They do
+ *   not share OAuth refresh state, so independent sessions may run in parallel.
  * - A PR's session sticks to the home that created it (rollouts live in that
  *   home); the stored thread ref encodes the home as "hN:<threadId>".
  * - A home whose auth fails is benched for 15 minutes and the call fails
@@ -437,6 +437,12 @@ const AUTH_MODE_CACHE_TTL_MS = 60_000;
 const authModeCache = new Map<string, { mode: CodexAuthMode; expiresAt: number }>();
 const codexUsageTotals = new Map<string, { input: number; output: number; reasoning: number }>();
 const MAX_CODEX_USAGE_TOTALS = 10_000;
+
+type CodexHomeLock = <T>(run: () => Promise<T>, signal?: AbortSignal) => Promise<T>;
+
+/** Test-only override for exercising the production home admission path without
+ * mutating a real CODEX_HOME/auth.json file or launching a Codex child. */
+let homeLockTestOverride: { mode: CodexAuthMode; env: NodeJS.ProcessEnv } | undefined;
 
 // With API-key concurrency, two calls can RESUME the same persisted thread in
 // parallel on one home. Codex then reports each one's CUMULATIVE thread usage,
@@ -493,8 +499,9 @@ function homeLabel(idx: number): string {
 }
 
 function ensureHomeSlot(idx: number): CountingSemaphore {
-  const mode = detectCodexAuthMode(CODEX_HOME_POOL[idx]);
-  const limit = resolveCodexHomeConcurrency(mode);
+  const override = homeLockTestOverride;
+  const mode = override?.mode ?? detectCodexAuthMode(CODEX_HOME_POOL[idx]);
+  const limit = resolveCodexHomeConcurrency(mode, override?.env ?? process.env);
   const existing = homeSlots[idx];
   if (!existing || existing.concurrency !== limit) {
     // Recreate only when idle; if in-flight, keep the old gate for those waiters
@@ -551,6 +558,32 @@ function withHomeLock<T>(idx: number, fn: () => Promise<T>, signal?: AbortSignal
     .finally(() => {
       homeBusy[idx]--;
     });
+}
+
+/** Exercise the same home-lock admission used in production with a synthetic
+ * auth mode and environment. It is intentionally limited to tests: no Codex
+ * process, binary, prompt, timeout, or runtime configuration is overridden. */
+export async function withCodexHomeLockForTest<T>(
+  options: { mode: CodexAuthMode; env?: NodeJS.ProcessEnv },
+  test: (withLock: CodexHomeLock) => Promise<T>,
+): Promise<T> {
+  const previousOverride = homeLockTestOverride;
+  const previousSlot = homeSlots[0]!;
+  const previousBusy = homeBusy[0]!;
+  const wasLogged = homeSlotLimitLogged.has(0);
+  homeLockTestOverride = { mode: options.mode, env: options.env ?? process.env };
+  homeSlots[0] = new CountingSemaphore(1);
+  homeBusy[0] = 0;
+  homeSlotLimitLogged.delete(0);
+  try {
+    return await test((run, signal) => withHomeLock(0, run, signal));
+  } finally {
+    homeLockTestOverride = previousOverride;
+    homeSlots[0] = previousSlot;
+    homeBusy[0] = previousBusy;
+    if (wasLogged) homeSlotLimitLogged.add(0);
+    else homeSlotLimitLogged.delete(0);
+  }
 }
 
 /** Stored thread refs encode their home as "hN:<threadId>" (multi-home only). */
@@ -1269,16 +1302,14 @@ export async function runCodexCliReview(
   files: ReviewableFile[],
   opts: CodexCliReviewOptions = {},
 ): Promise<CodexCliReviewResult> {
-  // ALLOWLIST ENFORCEMENT (C1): a repo checkout is only handed to codex for
-  // first-party allowlisted repos. Anything else silently drops to diff-only —
-  // the checkout dir contains executable PR code and codex runs unsandboxed.
-  let cwd = opts.cwd;
-  if (cwd && !isCodexRepoAllowed(opts.repoId)) {
-    console.warn(
-      `[codex-cli] repo sweep REFUSED for ${opts.repoId ?? '(unknown repo)'} — not in ORVEX_CODEX_CLI_REPOS; running diff-only`,
-    );
-    cwd = undefined;
+  if (opts.signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
+  // Codex runs with sandbox bypass on the dedicated worker VM. Diff-only prompt
+  // input does not remove its shell/network capability, so the repository
+  // allowlist gates the entire CLI invocation, not only checkout access.
+  if (!isCodexRepoAllowed(opts.repoId)) {
+    throw new Error(`Codex CLI review refused for non-allowlisted repository ${opts.repoId ?? '(unknown repo)'}`);
   }
+  const cwd = opts.cwd;
 
   let promptMode: CodexPromptMode = opts.promptMode ?? (cwd ? 'lean' : 'full');
   let prompt = buildCodexPrompt(files, opts.context, { hasRepoCheckout: Boolean(cwd), mode: promptMode });

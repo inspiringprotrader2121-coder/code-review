@@ -6,17 +6,29 @@ import {
   returnLateDequeuedJob,
   resolveMaxJobRetries,
   resolveWorkerConcurrency,
+  shouldReturnDequeuedJob,
+  startWorkerLoop,
   waitForReservedDequeues,
-  withAgenticReviewSlot,
 } from './queue-runner.js';
-import type { ReviewJobPayload, ReviewQueue } from '@orvex-review/queue';
+import { MemoryReviewQueue, type ReviewJobPayload, type ReviewQueue } from '@orvex-review/queue';
+import { activeReviewSignal } from './active-reviews.js';
+import type { WorkerConfig } from './pipeline.js';
 
-test('worker concurrency is not reduced for lower-tier reviews', () => {
+test('worker concurrency remains an explicit operator ceiling', () => {
+  assert.equal(resolveWorkerConcurrency({}), 8);
   assert.equal(resolveWorkerConcurrency({ ORVEX_MAX_CONCURRENT_REVIEWS: '4' }), 4);
   assert.equal(
     resolveWorkerConcurrency({
       ORVEX_MAX_CONCURRENT_REVIEWS: '4',
       ORVEX_CODEX_CLI: '1',
+    }),
+    4,
+  );
+  assert.equal(
+    resolveWorkerConcurrency({
+      ORVEX_MAX_CONCURRENT_REVIEWS: '4',
+      ORVEX_CODEX_CLI: '1',
+      ORVEX_CODEX_APIKEY_CONCURRENCY: '8',
     }),
     4,
   );
@@ -27,6 +39,12 @@ test('full failed reviews are not automatically replayed unless explicitly enabl
   assert.equal(resolveMaxJobRetries({ ORVEX_MAX_JOB_RETRIES: '1' }), 1);
   assert.equal(resolveMaxJobRetries({ ORVEX_MAX_JOB_RETRIES: '20' }), 1);
   assert.equal(resolveMaxJobRetries({ ORVEX_MAX_JOB_RETRIES: 'invalid' }), 0);
+});
+
+test('a drain arriving during dequeue returns the untouched claim', () => {
+  assert.equal(shouldReturnDequeuedJob(true, false), false);
+  assert.equal(shouldReturnDequeuedJob(false, false), true);
+  assert.equal(shouldReturnDequeuedJob(true, true), true);
 });
 
 test('restart interruption is failed without re-enqueuing paid stages', async () => {
@@ -65,6 +83,50 @@ test('shutdown bounds its wait for a dequeue that never settles', async () => {
   assert.ok(elapsed < 250, `shutdown handoff wait was not bounded (${elapsed}ms)`);
 });
 
+test('forced shutdown aborts an active API review before durable cleanup', async () => {
+  const queue = new MemoryReviewQueue();
+  const queued = {
+    installationId: 1,
+    tenantId: 'tenant',
+    owner: 'owner',
+    repo: 'repo',
+    pr: 99,
+    headSha: 'shutdown-sha',
+    action: 'opened',
+    enqueuedAt: new Date(0).toISOString(),
+  } satisfies ReviewJobPayload;
+  await queue.enqueue(queued);
+  let observedSignal: AbortSignal | undefined;
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+
+  const stop = startWorkerLoop(queue, {
+    maxConcurrent: 1,
+    pollMs: 1,
+    shutdownDrainMs: 1,
+    shutdownCancelMs: 250,
+    loadConfig: () => ({ store: {} } as unknown as WorkerConfig),
+    processReview: async () => {
+      observedSignal = activeReviewSignal();
+      assert.ok(observedSignal);
+      entered();
+      await new Promise<void>((_resolve, reject) => {
+        observedSignal!.addEventListener(
+          'abort',
+          () => reject(new Error(String(observedSignal!.reason ?? 'worker_shutdown'))),
+          { once: true },
+        );
+      });
+      throw new Error('unreachable');
+    },
+  });
+
+  await started;
+  await stop();
+  assert.equal(observedSignal?.aborted, true);
+  assert.equal((await queue.depth()).inFlight, 0);
+});
+
 test('a late dequeue drains a newer coalesced SHA instead of requeueing the old one', async () => {
   const calls: string[] = [];
   const newer = {
@@ -86,45 +148,6 @@ test('a late dequeue drains a newer coalesced SHA instead of requeueing the old 
 
   assert.equal(await returnLateDequeuedJob(queue, old), 'newer-pending');
   assert.deepEqual(calls, ['failed-old', 'drained-newer']);
-});
-
-test('agentic reviews serialize while non-agentic work bypasses the Luna gate', async () => {
-  let markFirstStarted!: () => void;
-  const firstStarted = new Promise<void>((resolve) => {
-    markFirstStarted = resolve;
-  });
-  let releaseFirst!: () => void;
-  const firstCanFinish = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
-  const events: string[] = [];
-
-  const first = withAgenticReviewSlot(true, async () => {
-    events.push('agentic-1-start');
-    markFirstStarted();
-    await firstCanFinish;
-    events.push('agentic-1-end');
-  });
-  await firstStarted;
-  const second = withAgenticReviewSlot(true, async () => {
-    events.push('agentic-2-start');
-    events.push('agentic-2-end');
-  });
-  const lowerTier = withAgenticReviewSlot(false, async () => {
-    events.push('lower-tier');
-  });
-
-  await lowerTier;
-  assert.deepEqual(events, ['agentic-1-start', 'lower-tier']);
-  releaseFirst();
-  await Promise.all([first, second]);
-  assert.deepEqual(events, [
-    'agentic-1-start',
-    'lower-tier',
-    'agentic-1-end',
-    'agentic-2-start',
-    'agentic-2-end',
-  ]);
 });
 
 test('close-aborted reviews clear queue dedup instead of being marked completed', async () => {

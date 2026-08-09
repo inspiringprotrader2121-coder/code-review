@@ -1,0 +1,138 @@
+import { planFeatures } from '@orvex-review/tenants';
+import { monthlyCogsCapUsd } from '../quota-status.js';
+import type { WorkerConfig } from './worker-types.js';
+
+const MS_PER_30_DAYS = 30 * 24 * 3_600_000;
+const GLOBAL_FREE_TIER_DAILY_CAP = (() => {
+  const value = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
+  return Number.isFinite(value) && value >= 1 ? Math.min(Math.floor(value), 1_000_000) : 300;
+})();
+
+export type AccountLimitReason =
+  | 'rate_limited'
+  | 'monthly_limit'
+  | 'trial_exhausted'
+  | 'free_tier_capped'
+  | 'cost_capped'
+  | 'concurrency_limited'
+  | 'insufficient_credits';
+
+export interface AccountLimitOptions {
+  tenantId?: string;
+  deep?: boolean;
+  /** Nightly/scan/cmd: enforce COGS and optional concurrency, not PR quota. */
+  cogsOnly?: boolean;
+}
+
+export function accountLimitReason(
+  store: WorkerConfig['store'],
+  owner: string,
+  plan: ReturnType<typeof planFeatures>,
+  pendingReservations = 1,
+  excludedRunningReservations = 0,
+  opts: AccountLimitOptions = {},
+): AccountLimitReason | null {
+  if (!opts.cogsOnly) {
+    if (plan.trialReviewLimit !== null) {
+      const globalToday = store.countGlobalFreeTierReviewsSince(24 * 3_600_000);
+      if (globalToday >= GLOBAL_FREE_TIER_DAILY_CAP) {
+        console.error(
+          `[abuse] FREE-TIER DAILY CAP HIT: ${globalToday} free reviews in 24h (cap ${GLOBAL_FREE_TIER_DAILY_CAP}). Pausing free reviews - likely trial-farming. Raise ORVEX_FREE_TIER_DAILY_CAP if this is genuine growth.`,
+        );
+        return 'free_tier_capped';
+      }
+    }
+    if (plan.trialReviewLimit !== null && store.countAccountReviews(owner) >= plan.trialReviewLimit) {
+      return 'trial_exhausted';
+    }
+    if (plan.maxConcurrentReviews !== null) {
+      const running = store.countRunningAccountReviews(owner);
+      const projected =
+        Math.max(0, running - Math.max(0, excludedRunningReservations)) + Math.max(0, pendingReservations);
+      if (projected > plan.maxConcurrentReviews) return 'concurrency_limited';
+    }
+    if (
+      plan.reviewsPerHour !== null
+      && store.countAccountReviews(owner, { sinceMs: 3_600_000 }) >= plan.reviewsPerHour
+    ) {
+      return 'rate_limited';
+    }
+
+    const useTenantUnits =
+      Boolean(opts.tenantId)
+      && plan.trialReviewLimit === null
+      && (plan.includedReviewsPerMonth !== null || plan.reviewsPerMonth !== null);
+    const used = useTenantUnits
+      ? store.countTenantReviewUnits(opts.tenantId!, { sinceMs: MS_PER_30_DAYS })
+      : store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS });
+    const pendingUnits = Math.max(0, pendingReservations) * (opts.deep ? 2 : 1);
+    if (
+      plan.reviewsPerMonth !== null
+      && used + (pendingReservations > 0 ? pendingUnits : 0) > plan.reviewsPerMonth
+    ) {
+      return 'monthly_limit';
+    }
+    const included = plan.includedReviewsPerMonth;
+    if (included !== null && plan.overageCentsPerReview !== null && pendingReservations > 0) {
+      const overageUnits = Math.max(0, used + pendingUnits - included);
+      if (overageUnits > 0) {
+        const need = plan.overageCentsPerReview * Math.min(pendingUnits, overageUnits);
+        const balance = opts.tenantId ? store.getCreditBalanceCents(opts.tenantId) : 0;
+        if (balance < need) return 'insufficient_credits';
+      }
+    } else if (
+      included !== null
+      && plan.overageCentsPerReview === null
+      && used + (pendingReservations > 0 ? pendingUnits : 0) > included
+    ) {
+      return 'monthly_limit';
+    }
+  } else if (plan.maxConcurrentReviews !== null) {
+    const running = store.countRunningAccountReviews(owner);
+    const projected =
+      Math.max(0, running - Math.max(0, excludedRunningReservations)) + Math.max(0, pendingReservations);
+    if (projected > plan.maxConcurrentReviews) return 'concurrency_limited';
+  }
+
+  const costLimit = monthlyCogsCapUsd(plan.id);
+  const accountCost = costLimit !== null ? store.sumAccountCost(owner, MS_PER_30_DAYS).costUsd : 0;
+  const runningReviews = costLimit !== null
+    ? store.countRunningCogsReservations(owner, MS_PER_30_DAYS)
+    : 0;
+  const reservation = costLimit !== null ? cogsReservationUsd() : 0;
+  const projectedReservations =
+    Math.max(0, runningReviews - Math.max(0, excludedRunningReservations)) + Math.max(0, pendingReservations);
+  const projectedCost = accountCost + reservation * projectedReservations;
+  if (costLimit !== null && projectedCost >= costLimit) {
+    console.error(
+      `[billing] monthly COGS safety ceiling reached for ${owner}: `
+        + `$${projectedCost.toFixed(2)} projected (${Math.max(0, runningReviews - Math.max(0, excludedRunningReservations))} running + ${Math.max(0, pendingReservations)} pending) >= $${costLimit.toFixed(2)}`,
+    );
+    return 'cost_capped';
+  }
+  return null;
+}
+
+export function prepaidOverageDebitCents(
+  store: WorkerConfig['store'],
+  owner: string,
+  plan: ReturnType<typeof planFeatures>,
+  deep = false,
+  tenantId?: string,
+): number {
+  if (plan.includedReviewsPerMonth === null || plan.overageCentsPerReview === null) return 0;
+  const useTenantUnits = Boolean(tenantId) && plan.trialReviewLimit === null;
+  const used = useTenantUnits
+    ? store.countTenantReviewUnits(tenantId!, { sinceMs: MS_PER_30_DAYS })
+    : store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS });
+  const units = deep ? 2 : 1;
+  const overageUnits = Math.max(0, used + units - plan.includedReviewsPerMonth);
+  if (overageUnits <= 0) return 0;
+  return plan.overageCentsPerReview * Math.min(units, overageUnits);
+}
+
+function cogsReservationUsd(): number {
+  const raw = process.env.ORVEX_COGS_RESERVATION_USD;
+  const value = raw === undefined || raw.trim() === '' ? 5 : Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.min(Math.max(value, 0.01), 1_000) : 5;
+}

@@ -30,9 +30,8 @@ import {
 const SECURITY_WINDOW_MS = 10 * 60_000;
 const SECURITY_MAX_ATTEMPTS = 5;
 
-export function securityRoutes() {
+export function securityRoutes(db: AppDatabase = createAppDatabase()) {
   const app = new Hono();
-  const db = createAppDatabase();
 
   app.use('/settings/security/*', async (c, next) => {
     c.header('Cache-Control', 'no-store');

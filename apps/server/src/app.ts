@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { ReviewQueue } from '@orvex-review/queue';
-import { createAppDatabase } from '@orvex-review/store';
+import { createAppDatabase, type AppDatabase } from '@orvex-review/store';
 import { appPublicUrl } from '@orvex-review/tenants';
 import { apiRoutes } from './routes/api.js';
 import { authRoutes } from './routes/auth.js';
@@ -70,8 +70,37 @@ export const canonicalHostRedirect: MiddlewareHandler = async (c, next) => {
   await next();
 };
 
-export function createApp(queue: ReviewQueue) {
+export interface CreateAppDependencies {
+  db?: AppDatabase;
+  codexStatusFile?: string;
+  /** Non-secret release metadata written alongside the deployed application. */
+  releaseFile?: string;
+}
+
+const RELEASE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * Return only the safe release identifier from deployment metadata. Readiness
+ * must never expose the complete file because future metadata may grow.
+ */
+export function readReleaseId(file: string): string {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 'unknown';
+    const metadata = parsed as Record<string, unknown>;
+    for (const key of ['releaseId', 'commitSha', 'commit']) {
+      const value = metadata[key];
+      if (typeof value === 'string' && RELEASE_ID_PATTERN.test(value)) return value;
+    }
+  } catch {
+    // A missing or incomplete metadata file must not make a healthy service unready.
+  }
+  return 'unknown';
+}
+
+export function createApp(queue: ReviewQueue, dependencies: CreateAppDependencies = {}) {
   const app = new Hono();
+  const db = dependencies.db ?? createAppDatabase();
   app.use('*', productionSecurityHeaders);
   app.use('*', canonicalHostRedirect);
 
@@ -85,7 +114,7 @@ export function createApp(queue: ReviewQueue) {
     let dbOk = false;
     let queueOk = false;
     try {
-      createAppDatabase().pingDb();
+      db.pingDb();
       dbOk = true;
     } catch {
       /* dbOk stays false */
@@ -103,7 +132,12 @@ export function createApp(queue: ReviewQueue) {
     // unknown) — a revoked OAuth session shows here instead of hiding in a log.
     let codexAuth = 'unknown';
     try {
-      const raw = readFileSync(process.env.ORVEX_CODEX_STATUS_FILE ?? '/home/orvex/orvex-data/codex-auth-status', 'utf8');
+      const raw = readFileSync(
+        dependencies.codexStatusFile
+        ?? process.env.ORVEX_CODEX_STATUS_FILE
+        ?? '/home/orvex/orvex-data/codex-auth-status',
+        'utf8',
+      );
       codexAuth = raw.trim().split(/\s+/)[0] || 'unknown';
     } catch {
       /* watchdog hasn't run yet */
@@ -116,21 +150,22 @@ export function createApp(queue: ReviewQueue) {
         activeJobs: getActiveJobCount(),
         draining: isDeployDraining(),
         codexAuth,
+        releaseId: readReleaseId(dependencies.releaseFile ?? `${process.cwd()}/release.json`),
       },
       ok ? 200 : 503,
     );
   });
 
   app.route('/', marketingRoutes());
-  app.route('/', sessionRoutes());
-  app.route('/', securityRoutes());
-  app.route('/', dashboardRoutes());
-  app.route('/', authRoutes());
-  app.route('/', billingRoutes());
-  app.route('/', apiRoutes());
-  app.route('/', webhookRoutes(queue));
+  app.route('/', sessionRoutes(db));
+  app.route('/', securityRoutes(db));
+  app.route('/', dashboardRoutes(db));
+  app.route('/', authRoutes(db));
+  app.route('/', billingRoutes(db));
+  app.route('/', apiRoutes(db));
+  app.route('/', webhookRoutes(queue, { db }));
   // operator-only tooling (scoreboard etc.) — secret-gated, never tenant-facing
-  app.route('/', superadminRoutes());
+  app.route('/', superadminRoutes(db));
 
   return app;
 }

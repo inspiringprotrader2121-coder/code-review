@@ -1,20 +1,22 @@
 import { existsSync } from 'node:fs';
 import type { ReviewQueue, ReviewJobPayload, QueueDepth } from '@orvex-review/queue';
 import { prKey } from '@orvex-review/queue';
+import type { AppDatabase } from '@orvex-review/store';
 import {
   createInstallationOctokit,
   fetchPullRequest,
   getInstallationIdForRepo,
 } from '@orvex-review/github';
-import { TenantService, planFeatures } from '@orvex-review/tenants';
+import { TenantService } from '@orvex-review/tenants';
 import {
-  CountingSemaphore,
   isTransientLlmError,
   killAllCodexChildren,
+  resolveReviewWorkerConcurrency,
   setCodexChildListener,
 } from '@orvex-review/review';
-import { canRunCodexCli, processReviewJob, loadWorkerConfig } from './pipeline.js';
+import { processReviewJob, loadWorkerConfig } from './pipeline.js';
 import {
+  cancelAllActiveReviews,
   noteActiveChildExit,
   noteActiveChildSpawn,
   runWithActiveReview,
@@ -69,10 +71,7 @@ function boundedEnvInt(name: string, fallback: number, min: number, max: number)
  * throughput horizontally by running more processes against the Redis queue.
  */
 export function resolveWorkerConcurrency(env: NodeJS.ProcessEnv = process.env): number {
-  const requestedRaw = Number(env.ORVEX_MAX_CONCURRENT_REVIEWS ?? 4);
-  return Number.isFinite(requestedRaw)
-    ? Math.min(100, Math.max(1, Math.floor(requestedRaw)))
-    : 4;
+  return resolveReviewWorkerConcurrency(env);
 }
 
 /** A failed model ensemble may already have incurred most of a review's cost.
@@ -147,17 +146,8 @@ export async function returnLateDequeuedJob(
   return 'requeued';
 }
 
-// One agentic Luna review per process/API-key home. Lower-tier reviews bypass
-// this gate and retain the configured worker concurrency. Production currently
-// runs one PM2 process; the Codex home semaphore independently enforces the same
-// one-process limit at the CLI boundary.
-const agenticReviewGate = new CountingSemaphore(1);
-
-export async function withAgenticReviewSlot<T>(
-  agentic: boolean,
-  run: () => Promise<T>,
-): Promise<T> {
-  return agentic ? agenticReviewGate.run(run) : run();
+export function shouldReturnDequeuedJob(running: boolean, draining: boolean): boolean {
+  return !running || draining;
 }
 
 const MAX_CONCURRENT = resolveWorkerConcurrency();
@@ -167,9 +157,27 @@ export function maxConcurrentReviews(): number {
   return MAX_CONCURRENT;
 }
 
-export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
+export interface WorkerLoopDependencies {
+  maxConcurrent?: number;
+  pollMs?: number;
+  isDraining?: () => boolean;
+  loadConfig?: typeof loadWorkerConfig;
+  processReview?: typeof processReviewJob;
+  shutdownDrainMs?: number;
+  shutdownCancelMs?: number;
+}
+
+export function startWorkerLoop(
+  queue: ReviewQueue,
+  dependencies: WorkerLoopDependencies = {},
+): () => Promise<void> {
   let running = true;
   let active = 0;
+  const capacity = dependencies.maxConcurrent ?? MAX_CONCURRENT;
+  const pollMs = dependencies.pollMs ?? POLL_MS;
+  const draining = dependencies.isDraining ?? isDeployDraining;
+  const loadConfig = dependencies.loadConfig ?? loadWorkerConfig;
+  const reviewJob = dependencies.processReview ?? processReviewJob;
   // Jobs currently being processed — so a graceful shutdown (deploy/restart) can
   // re-queue them instead of killing them mid-flight and losing the work.
   const inFlight = new Set<ReviewJobPayload>();
@@ -186,7 +194,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     const pk = prKey(job);
     const kind = job.kind ?? 'review';
     console.log(
-      `[worker] start inst=${job.installationId} ${pk} @ ${job.headSha.slice(0, 7)} kind=${kind} action=${job.action} (active=${active}/${MAX_CONCURRENT})`,
+      `[worker] start inst=${job.installationId} ${pk} @ ${job.headSha.slice(0, 7)} kind=${kind} action=${job.action} (active=${active}/${capacity})`,
     );
 
     // Heartbeat the in-flight lease. Without this the lease is a fixed TTL taken
@@ -250,7 +258,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     return runWithActiveReview(job, async () => {
     try {
       const config = {
-        ...loadWorkerConfig(),
+        ...loadConfig(),
         leaseValid,
         persistJob: queue.persistJob ? (j: ReviewJobPayload) => queue.persistJob!(j) : undefined,
       };
@@ -267,9 +275,11 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
       } else if (kind === 'scan') {
         await processScanJob(job, config);
       } else {
-        const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
-        const agentic = canRunCodexCli(plan);
-        const result = await withAgenticReviewSlot(agentic, () => processReviewJob(job, config));
+        // Provider calls own their narrow, distributed concurrency gates. Never
+        // serialize the whole review here: doing so hid claimed jobs before run
+        // reservation and blocked checkout, MiniMax, DeepSeek and verification
+        // behind an unrelated Luna call.
+        const result = await reviewJob(job, config);
         draftSkipped = result.skipReason === 'draft PR';
         prClosedMidRun = result.skipReason === 'pr_closed_mid_run';
         // auto-apply mode: commit Orvex's ready fixes right after each review
@@ -353,8 +363,8 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   const pump = async () => {
     // Re-checked PER ITERATION below too: a deploy-drain flag appearing
     // mid-loop must stop further dequeues in this same tick.
-    while (active < MAX_CONCURRENT) {
-      if (!running || isDeployDraining()) return;
+    while (active < capacity) {
+      if (!running || draining()) return;
       // Reserve the slot BEFORE the async dequeue so two overlapping pump ticks
       // can't both pass the guard and exceed MAX_CONCURRENT; release it if the
       // dequeue turns up empty.
@@ -371,9 +381,10 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         active--;
         break;
       }
-      if (!running) {
-        // Shutdown began while dequeue was awaiting Redis. No paid stage has
-        // started, so release the claim and put the untouched job back safely.
+      if (shouldReturnDequeuedJob(running, draining())) {
+        // Shutdown or deploy drain began while dequeue was awaiting Redis. No
+        // paid stage has started, so release the claim and put the untouched
+        // job back safely.
         try {
           await returnLateDequeuedJob(queue, job);
         } catch (err) {
@@ -395,7 +406,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
 
   const interval = setInterval(() => {
     pump().catch((err) => console.error('[worker] pump error', err));
-  }, POLL_MS);
+  }, pollMs);
   const recoveryInterval = setInterval(() => {
     queue.recoverOrphans().catch((err) => {
       const message = (err as Error).message;
@@ -421,12 +432,13 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     // naturally. Killing a codex process mid token-refresh corrupts its OAuth
     // session, so exiting while codex is running is the last resort, not the
     // default. pm2's kill timeout must exceed this (set on the server).
-    const drainMs = boundedEnvInt('ORVEX_SHUTDOWN_DRAIN_MS', 240_000, 1_000, 86_400_000);
+    const drainMs = dependencies.shutdownDrainMs
+      ?? boundedEnvInt('ORVEX_SHUTDOWN_DRAIN_MS', 240_000, 1_000, 86_400_000);
     const deadline = Date.now() + drainMs;
     if (active > 0) {
       console.log(`[worker] shutdown: draining ${active} active slot(s) (up to ${Math.round(drainMs / 1000)}s)…`);
       while (active > 0 && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, Math.min(2000, Math.max(1, deadline - Date.now()))));
       }
     }
     if (active === 0) {
@@ -451,7 +463,12 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     if (inFlight.size === 0) {
       return;
     }
-    // Kill any in-flight Codex agent before finalizing interruption. Children are
+    const cancelled = cancelAllActiveReviews('worker_shutdown');
+    if (cancelled > 0) {
+      console.log(`[worker] shutdown: cancelled ${cancelled} active review(s)`);
+    }
+    // Kill any in-flight Codex agent after signalling every provider transport.
+    // Children are
     // spawned `detached` (own process group, so a timeout can kill their
     // grandchildren), which also means they OUTLIVE this worker — every deploy
     // would otherwise orphan an unsandboxed agent still running against a PR
@@ -463,7 +480,17 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     } catch (err) {
       console.warn('[worker] shutdown: codex kill failed:', (err as Error).message);
     }
-    const store = loadWorkerConfig().store;
+    const cancelMs = dependencies.shutdownCancelMs
+      ?? boundedEnvInt('ORVEX_SHUTDOWN_CANCEL_MS', 10_000, 100, 60_000);
+    const cancelDeadline = Date.now() + cancelMs;
+    while ((inFlight.size > 0 || active > 0) && Date.now() < cancelDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (inFlight.size === 0 && active === 0) {
+      console.log('[worker] shutdown: cancelled jobs settled cleanly');
+      return;
+    }
+    const store = loadConfig().store;
     try {
       const failed = await failInterruptedJobs(queue, store, inFlight);
       console.log(
@@ -486,8 +513,9 @@ export async function enqueueManualReview(
     installationId?: number;
     tenantSlug?: string;
   },
+  store?: AppDatabase,
 ): Promise<ReviewJobPayload> {
-  const config = loadWorkerConfig();
+  const config = loadWorkerConfig(store);
   const tenants = new TenantService(config.store);
 
   let installationId = input.installationId;

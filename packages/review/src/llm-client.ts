@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { randomUUID } from 'node:crypto';
+import { resolveProviderConcurrency } from './runtime-limits.js';
 
 export type LlmAttemptOutcome =
   | 'succeeded'
@@ -206,16 +207,11 @@ interface ProviderGate {
 const providerGates = new Map<string, ProviderGate>();
 const localProviderCooldownUntil = new Map<string, number>();
 
-function providerConcurrency(provider: string): number {
-  const normalized = provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
-  // Two max-reasoning Flash passes on one key compete for the same generation
-  // throughput and both can cross the wall-clock cap. Serialize DeepSeek while
-  // keeping independent providers concurrent.
-  const defaults: Record<string, number> = { LUNA: 1, DEEPSEEK: 1, MINIMAX: 2 };
-  const fallback = defaults[normalized] ?? 4;
-  const raw = process.env[`ORVEX_PROVIDER_CONCURRENCY_${normalized}`];
-  const parsed = raw === undefined || raw.trim() === '' ? fallback : Number(raw);
-  return Number.isFinite(parsed) && parsed >= 1 ? Math.min(32, Math.floor(parsed)) : fallback;
+export function providerConcurrency(
+  provider: string,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return resolveProviderConcurrency(provider, env);
 }
 
 export function providerBucketForTarget(

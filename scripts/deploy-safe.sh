@@ -68,6 +68,23 @@ else
   SOURCES=("${DEFAULT_SOURCES[@]}")
 fi
 
+# Release metadata is generated, never copied from the worktree. It lets the
+# running process prove that it is serving the exact source + dependency graph
+# that passed the staged Linux checks, without exposing any runtime settings.
+if ! RELEASE_COMMIT=$(git rev-parse --verify HEAD 2>/dev/null); then
+  echo "[deploy] unable to resolve the local Git commit for release metadata" >&2
+  exit 2
+fi
+if ! RELEASE_LOCKFILE_SHA256=$(shasum -a 256 pnpm-lock.yaml | awk '{print $1}'); then
+  echo "[deploy] unable to hash pnpm-lock.yaml for release metadata" >&2
+  exit 2
+fi
+if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$RELEASE_LOCKFILE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "[deploy] refusing malformed release metadata identity" >&2
+  exit 2
+fi
+RELEASE_ID="${RELEASE_COMMIT}.${RELEASE_LOCKFILE_SHA256}"
+
 for source in "${SOURCES[@]}"; do
   if [[ "$source" = /* || "$source" == *'..'* || ! -e "$source" ]]; then
     echo "[deploy] refusing invalid source: $source" >&2
@@ -106,6 +123,12 @@ if [[ "$MODE" == "--restart" ]]; then
   if [[ -z "$REMOTE_HOST" || "$REMOTE_DIR" != /* ]]; then
     echo "[deploy] refusing malformed REMOTE: $REMOTE" >&2
     exit 2
+  fi
+  if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+    if [[ "${DEPLOY_TEST_MODE:-0}" != "1" || "$REMOTE_HOST" != "stage@example.test" ]]; then
+      echo "[deploy] refusing restart from a dirty worktree; commit the exact release first" >&2
+      exit 2
+    fi
   fi
 
   SSH=(ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE_HOST")
@@ -249,6 +272,20 @@ done
 REMOTE_STAGE
   "${stage_cmd[@]}"
 
+  # release.json is a generated, non-secret deployment artifact. It must be in
+  # the stage before tests and activation; the ordinary apply/backup/rollback
+  # rsync paths preserve it while retaining every existing protected-path rule.
+  "${SSH[@]}" bash -s -- "$STAGE_DIR" "$RELEASE_COMMIT" "$RELEASE_LOCKFILE_SHA256" "$RELEASE_ID" <<'REMOTE_RELEASE_METADATA'
+set -euo pipefail
+stage=$1
+commit=$2
+lockfile_sha256=$3
+release_id=$4
+printf '{\n  "schemaVersion": 1,\n  "releaseId": "%s",\n  "commit": "%s",\n  "lockfileSha256": "%s"\n}\n' \
+  "$release_id" "$commit" "$lockfile_sha256" >"$stage/release.json"
+chmod 0644 "$stage/release.json"
+REMOTE_RELEASE_METADATA
+
   echo "[deploy] installing and checking the staged Linux release"
   "${SSH[@]}" bash -s -- "$STAGE_DIR" <<'REMOTE_CHECK'
 set -euo pipefail
@@ -259,13 +296,17 @@ CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore test
 REMOTE_CHECK
 
   parse_ready() {
+      local expected_release_id=${2:-}
       node -e '
       const fs = require("node:fs");
       const value = JSON.parse(fs.readFileSync(0, "utf8"));
       if (!value || value.ok !== true) process.exit(2);
+      const expectedReleaseId = process.argv[1];
+      const releaseId = typeof value.releaseId === "string" && value.releaseId ? value.releaseId : "missing";
+      if (expectedReleaseId && releaseId !== expectedReleaseId) process.exit(3);
       const active = Number.isInteger(value.activeJobs) && value.activeJobs >= 0 ? value.activeJobs : "missing";
-      process.stdout.write(`${active}\t${value.draining === true ? "true" : value.draining === false ? "false" : "missing"}`);
-    ' <<<"$1"
+      process.stdout.write(`${active}\t${value.draining === true ? "true" : value.draining === false ? "false" : "missing"}\t${releaseId}`);
+    ' "$expected_release_id" <<<"$1"
   }
 
   ready_json() {
@@ -273,18 +314,23 @@ REMOTE_CHECK
     local sleep_s=${2:-2}
     local require_not_draining=${3:-0}
     local require_idle=${4:-1}
-    local ready details active draining
+    local expected_release_id=${5:-}
+    local ready details active draining release_id
     for i in $(seq 1 "$attempts"); do
       if ready=$("${SSH[@]}" 'curl -fsS -m 5 http://127.0.0.1:8788/ready') \
-        && details=$(parse_ready "$ready"); then
-        IFS=$'\t' read -r active draining <<<"$details"
+        && details=$(parse_ready "$ready" "$expected_release_id"); then
+        IFS=$'\t' read -r active draining release_id <<<"$details"
         if [[ "$active" != "missing" && ("$require_idle" != "1" || "$active" == "0") && ("$require_not_draining" != "1" || "$draining" == "false") ]]; then
           printf '%s\n' "$ready"
           return 0
         fi
-        echo "[deploy] readiness: activeJobs=$active draining=$draining ($i/$attempts)"
+        echo "[deploy] readiness: activeJobs=$active draining=$draining releaseId=$release_id ($i/$attempts)"
       else
-        echo "[deploy] readiness probe failed ($i/$attempts)"
+        if [[ -n "$expected_release_id" ]]; then
+          echo "[deploy] readiness probe failed or releaseId did not match expected staged release ($i/$attempts)"
+        else
+          echo "[deploy] readiness probe failed ($i/$attempts)"
+        fi
       fi
       if ((i < attempts)); then sleep "$sleep_s"; fi
     done
@@ -295,6 +341,7 @@ REMOTE_CHECK
   set_drain
 
   IDLE=0
+  PREVIOUS_RELEASE_ID=''
   IDLE_ATTEMPTS=${DEPLOY_IDLE_ATTEMPTS:-90}
   IDLE_SLEEP_S=${DEPLOY_IDLE_SLEEP_S:-10}
   BOOTSTRAP=${DEPLOY_BOOTSTRAP_DRAIN:-0}
@@ -302,8 +349,11 @@ REMOTE_CHECK
   for i in $(seq 1 "$IDLE_ATTEMPTS"); do
     if READY=$("${SSH[@]}" 'curl -fsS -m 5 http://127.0.0.1:8788/ready') \
       && DETAILS=$(parse_ready "$READY"); then
-      IFS=$'\t' read -r ACTIVE DRAINING <<<"$DETAILS"
+      IFS=$'\t' read -r ACTIVE DRAINING CURRENT_RELEASE_ID <<<"$DETAILS"
       if [[ "$ACTIVE" == "0" && "$DRAINING" == "true" ]]; then
+        if [[ "$CURRENT_RELEASE_ID" != "missing" && "$CURRENT_RELEASE_ID" != "unknown" ]]; then
+          PREVIOUS_RELEASE_ID=$CURRENT_RELEASE_ID
+        fi
         IDLE=1
         break
       fi
@@ -393,7 +443,7 @@ else
   # stale args or the .env port during rollback.
   pm2 delete velatrix-review >/dev/null 2>&1 || true
   pm2 start /usr/bin/bash --name velatrix-review --interpreter none -- \
-    -lc 'cd /home/orvex/code-review && set -a && . ./.env && set +a && PORT=8788 HOST=0.0.0.0 pnpm start' >/dev/null
+    -lc 'cd /home/orvex/code-review && set -a && . ./.env && set +a && NODE_ENV=production ORVEX_REQUIRE_DURABLE_STORAGE=1 PORT=8788 HOST=0.0.0.0 ORVEX_MAX_CONCURRENT_REVIEWS=8 ORVEX_CODEX_APIKEY_CONCURRENCY=8 ORVEX_PROVIDER_CONCURRENCY_LUNA=8 ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=8 ORVEX_PROVIDER_CONCURRENCY_MINIMAX=8 pnpm start' >/dev/null
 fi
 REMOTE_RESTART
   }
@@ -443,7 +493,7 @@ REMOTE_ROLLBACK
     if ! restart_release; then
       echo "[deploy] CRITICAL: rollback PM2 restart failed" >&2
       failed=1
-    elif ! ready_json "${DEPLOY_READY_ATTEMPTS:-30}" "${DEPLOY_READY_SLEEP_S:-2}" 0 1 >/dev/null; then
+    elif ! ready_json "${DEPLOY_READY_ATTEMPTS:-30}" "${DEPLOY_READY_SLEEP_S:-2}" 0 1 "$PREVIOUS_RELEASE_ID" >/dev/null; then
       echo "[deploy] CRITICAL: rollback release did not become ready" >&2
       failed=1
     fi
@@ -461,7 +511,7 @@ REMOTE_ROLLBACK
 
   READY_ATTEMPTS=${DEPLOY_READY_ATTEMPTS:-30}
   READY_SLEEP_S=${DEPLOY_READY_SLEEP_S:-2}
-  if ! ready_json "$READY_ATTEMPTS" "$READY_SLEEP_S" 0 >/dev/null; then
+  if ! ready_json "$READY_ATTEMPTS" "$READY_SLEEP_S" 0 1 "$RELEASE_ID" >/dev/null; then
     if ! rollback_release; then exit 20; fi
     exit 8
   fi
@@ -470,7 +520,7 @@ REMOTE_ROLLBACK
     if ! rollback_release; then exit 20; fi
     exit 10
   fi
-  if ! ready_json "$READY_ATTEMPTS" "$READY_SLEEP_S" 1 0 >/dev/null; then
+  if ! ready_json "$READY_ATTEMPTS" "$READY_SLEEP_S" 1 0 "$RELEASE_ID" >/dev/null; then
     echo "[deploy] app did not report healthy after releasing drain; restoring the previous release" >&2
     if ! set_drain; then
       echo "[deploy] could not re-enable the drain before rollback" >&2

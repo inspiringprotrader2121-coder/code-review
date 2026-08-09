@@ -29,9 +29,8 @@ function legacyConnectMode(hasPasswordUsers: boolean): boolean {
   return legacyAuthMode(hasPasswordUsers);
 }
 
-export function authRoutes() {
+export function authRoutes(db: AppDatabase = createAppDatabase()) {
   const app = new Hono();
-  const db = createAppDatabase();
   const tenants = new TenantService(db);
 
   // Old entry points (marketing links, GitHub App homepage) → connect flow.

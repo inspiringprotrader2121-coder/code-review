@@ -475,7 +475,7 @@ export class RedisReviewQueue implements ReviewQueue {
 
   async renewLease(job: ReviewJobPayload): Promise<void> {
     const claim = this.lockTokens.get(job);
-    if (!claim) return;
+    if (!claim) throw new Error(`review lease lost for ${prKey(job)} (claim token missing)`);
     const renewed = await this.redis.eval(
       CASEXPIRE_LUA,
       1,

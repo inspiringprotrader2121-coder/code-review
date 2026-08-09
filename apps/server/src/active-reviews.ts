@@ -143,6 +143,17 @@ export function cancelActiveReviewsForPr(
   return cancelled;
 }
 
+/** Abort every active job during forced worker shutdown. */
+export function cancelAllActiveReviews(reason = 'worker_shutdown'): number {
+  let cancelled = 0;
+  for (const entry of entries.values()) {
+    if (entry.abortController.signal.aborted) continue;
+    entry.abortController.abort(reason);
+    cancelled++;
+  }
+  return cancelled;
+}
+
 export function noteActiveCheckoutDir(dir: string | null | undefined): void {
   if (!dir) return;
   const id = als.getStore();

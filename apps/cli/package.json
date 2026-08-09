@@ -1,0 +1,22 @@
+{
+  "name": "@orvex-review/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "review": "tsx src/review.ts"
+  },
+  "dependencies": {
+    "@orvex-review/github": "workspace:*",
+    "@orvex-review/queue": "workspace:*",
+    "@orvex-review/server": "workspace:*",
+    "dotenv": "^16.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
