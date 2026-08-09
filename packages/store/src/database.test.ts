@@ -43,8 +43,21 @@ test('startup cleanup interrupts only rows whose heartbeat is stale', () => {
     headSha: 'fresh',
     action: 'synchronize',
   });
+  db.startReviewRunAttempt({
+    id: 'stale-attempt',
+    runId,
+    tenantId: tenant.id,
+    provider: 'deepseek',
+    model: 'deepseek-v4-flash',
+    tier: 'deepseek-flash',
+    transport: 'chat',
+    retryIndex: 0,
+    keyIndex: 0,
+    startedAt: new Date().toISOString(),
+  });
   assert.equal(db.failStaleRunningRuns({ staleAfterMs: 60_000 }), 0, 'fresh peer work survives');
   assert.equal(db.failStaleRunningRuns({ staleAfterMs: 60_000, nowMs: Date.now() + 61_000 }), 1);
+  assert.equal(db.listReviewRunAttempts(runId)[0]?.outcome, 'cancelled');
   assert.equal(
     db.resumeReviewRun(runId, {
       tenantId: tenant.id,
@@ -182,9 +195,22 @@ test('interruptReviewRun marks running rows so resumeReviewRun can reopen them',
     action: 'synchronize' as const,
   };
   const runId = db.startReviewRun(input);
+  db.startReviewRunAttempt({
+    id: 'interrupted-attempt',
+    runId,
+    tenantId: tenant.id,
+    provider: 'openai',
+    model: 'gpt-5.6-luna',
+    tier: 'openai',
+    transport: 'codex-cli',
+    retryIndex: 0,
+    keyIndex: 0,
+    startedAt: new Date().toISOString(),
+  });
   assert.equal(db.interruptReviewRun(runId), true);
   assert.equal(db.interruptReviewRun(runId), false, 'already interrupted');
   assert.equal(db.listReviewRuns(tenant.id, 1)[0]?.skipReason, 'interrupted by restart');
+  assert.equal(db.listReviewRunAttempts(runId)[0]?.outcome, 'cancelled');
   assert.equal(
     db.resumeReviewRun(runId, {
       tenantId: input.tenantId,

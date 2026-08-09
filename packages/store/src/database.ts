@@ -461,6 +461,7 @@ export class AppDatabase {
     this.migrateRepoAutomationToggles();
     this.migrateReviewRunCostColumns();
     this.migrateReviewRunLifecycleColumns();
+    this.reconcileTerminalReviewRunAttempts();
     this.migratePrReviewColumns();
     this.migrateRevenueIndexes();
     this.migrateWebhookEventColumns();
@@ -592,6 +593,36 @@ WHEN NEW.input_tokens < 0 OR NEW.output_tokens < 0 OR NEW.input_rate_per_m < 0
   OR NEW.output_rate_per_m < 0 OR NEW.cost_usd < 0
 BEGIN SELECT RAISE(ABORT, 'review_run_usage check constraint violation'); END;
 `);
+  }
+
+  /** Repair attempt rows left open when an older shutdown/maintenance path
+   * terminalized the parent review without closing its provider calls. */
+  private reconcileTerminalReviewRunAttempts(): number {
+    const completedAt = new Date().toISOString();
+    return this.db
+      .prepare(
+        `UPDATE review_run_attempts
+         SET outcome = CASE
+               WHEN (SELECT status FROM review_runs WHERE id = review_run_attempts.run_id) = 'skipped'
+                 THEN 'cancelled'
+               ELSE 'failed'
+             END,
+             error = COALESCE(error, 'parent review ended before attempt completion'),
+             completed_at = COALESCE(
+               (SELECT completed_at FROM review_runs WHERE id = review_run_attempts.run_id),
+               ?
+             ),
+             duration_ms = MAX(0, CAST((julianday(COALESCE(
+               (SELECT completed_at FROM review_runs WHERE id = review_run_attempts.run_id),
+               ?
+             )) - julianday(started_at)) * 86400000 AS INTEGER))
+         WHERE outcome = 'running'
+           AND EXISTS (
+             SELECT 1 FROM review_runs
+             WHERE id = review_run_attempts.run_id AND status <> 'running'
+           )`,
+      )
+      .run(completedAt, completedAt).changes;
   }
 
   /** Add the subscription plan column to an existing tenants table.
@@ -1367,15 +1398,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
     const staleAfterMs = Math.max(60_000, opts.staleAfterMs ?? 15 * 60_000);
     const nowMs = opts.nowMs ?? Date.now();
     const cutoff = new Date(nowMs - staleAfterMs).toISOString();
-    const res = this.db
-      .prepare(
-        `UPDATE review_runs
-         SET status = 'skipped', skip_reason = 'interrupted by restart — retried',
-             completed_at = ?, worker_id = NULL
-         WHERE status = 'running' AND COALESCE(heartbeat_at, created_at) < ?`,
-      )
-      .run(new Date(nowMs).toISOString(), cutoff);
-    return res.changes;
+    return this.db.transaction(() => {
+      const completedAt = new Date(nowMs).toISOString();
+      const res = this.db
+        .prepare(
+          `UPDATE review_runs
+           SET status = 'skipped', skip_reason = 'interrupted by restart — retried',
+               completed_at = ?, worker_id = NULL
+           WHERE status = 'running' AND COALESCE(heartbeat_at, created_at) < ?`,
+        )
+        .run(completedAt, cutoff);
+      if (res.changes > 0) this.reconcileTerminalReviewRunAttempts();
+      return res.changes;
+    })();
   }
 
   heartbeatReviewRun(id: string): boolean {
@@ -1408,6 +1443,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         if (res.changes > 0) {
           // Wallet debit stays until resume completes or is abandoned; resume
           // reuses this run id so a second debit is not charged.
+          this.reconcileTerminalReviewRunAttempts();
         }
         return res.changes > 0;
       })
