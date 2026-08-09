@@ -103,6 +103,7 @@ test('forced shutdown aborts an active API review before durable cleanup', async
   const stop = startWorkerLoop(queue, {
     maxConcurrent: 1,
     pollMs: 1,
+    isDraining: () => false,
     shutdownDrainMs: 1,
     shutdownCancelMs: 250,
     loadConfig: () => ({ store: {} } as unknown as WorkerConfig),
