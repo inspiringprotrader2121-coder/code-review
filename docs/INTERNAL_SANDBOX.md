@@ -76,6 +76,13 @@ alternative to disabling the global restriction:
 Passing host preflight does **not** enable code execution. Enable it only in a
 separate, reviewed local configuration change and normal safe deployment:
 
+```bash
+# Run as the service account after rootless preflight passes. The final line is
+# the immutable local image ID used below.
+export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
+/home/orvex/code-review/scripts/build-internal-sandbox-image.sh
+```
+
 ```dotenv
 # Rootless Docker socket for the Orvex service account. Replace <uid> with the
 # numeric UID reported by `id -u orvex`; do not put credentials in this value.
@@ -88,7 +95,7 @@ ORVEX_CODE_EXECUTION=1
 # Required: an already-loaded, reviewed image pinned by content digest. The
 # image must contain approved package-manager binaries and offline dependency
 # caches; customer lockfiles receive no network egress.
-ORVEX_SANDBOX_IMAGE=registry.example/orvex-runtime@sha256:<64-hex-digest>
+ORVEX_SANDBOX_IMAGE=sha256:<64-hex-local-image-id>
 ```
 
 The production `.env` is immutable by design. Use the existing approved
@@ -97,10 +104,12 @@ server as a one-off and do not run raw `rsync`.
 
 The current application integration uses this internal Docker boundary for
 runtime verification. It enforces the service account's rootless Unix socket,
-Docker's reported rootless mode, a digest-pinned local image, no container
-capabilities, and no runtime network. Dependency installation is offline-only;
-missing cached packages produce honest incomplete evidence rather than opening
-egress.
+Docker's reported rootless mode, an immutable local image ID or registry
+digest, no container capabilities, and no runtime network. Container UID 0 maps
+to the unprivileged `orvex` host account and is used only so that account can
+write its own bind-mounted temporary checkout. Dependency installation is
+offline-only; missing cached packages skip runtime evidence with an explicit
+internal reason rather than blaming the PR or opening egress.
 
 It does **not** yet place the Codex/Luna agent process inside that boundary. Do
 not remove the explicit repository allowlist or enable untrusted agentic

@@ -32,6 +32,9 @@ DEFAULT_SOURCES=(
   scripts/deploy-safe.test.sh
   scripts/provision-internal-sandbox.sh
   scripts/provision-internal-sandbox.test.sh
+  scripts/build-internal-sandbox-image.sh
+  scripts/build-internal-sandbox-image.test.sh
+  sandbox
   scripts/backup-db.mjs
   scripts/restore-db-drill.mjs
   scripts/orvex-backup.cron
@@ -51,12 +54,17 @@ DEFAULT_SOURCES=(
 
 MODE=${1:-}
 DRY_RUN=()
+KEEP_DRAIN=0
 case "$MODE" in
   --dry-run)
     DRY_RUN=(--dry-run --itemize-changes)
     shift
     ;;
   --restart|--validate-only)
+    shift
+    ;;
+  --restart-drained)
+    KEEP_DRAIN=1
     shift
     ;;
   --*)
@@ -115,7 +123,7 @@ if ((${#DRY_RUN[@]} > 0)); then
 fi
 cmd+=("${SOURCES[@]}" "$REMOTE")
 
-if [[ "$MODE" == "--restart" ]]; then
+if [[ "$MODE" == "--restart" || "$MODE" == "--restart-drained" ]]; then
   if [[ "$REMOTE" != *:* ]]; then
     echo "[deploy] REMOTE must be in user@host:/absolute/path form" >&2
     exit 2
@@ -201,7 +209,10 @@ REMOTE_UNLOCK
     local status=$?
     rm -rf -- "$LOCAL_RELEASE"
     if ((drain_set)); then
-      if ((status == 0)); then
+      if ((status == 0 && KEEP_DRAIN == 1)); then
+        echo "[deploy] preserving the production drain as requested"
+        drain_set=0
+      elif ((status == 0)); then
         if ! clear_drain; then status=20; fi
       else
         echo "[deploy] deployment failed; preserving the production drain" >&2
@@ -333,12 +344,13 @@ REMOTE_CHECK
     local require_not_draining=${3:-0}
     local require_idle=${4:-1}
     local expected_release_id=${5:-}
+    local require_draining=${6:-0}
     local ready details active draining release_id
     for i in $(seq 1 "$attempts"); do
       if ready=$("${SSH[@]}" 'curl -fsS -m 5 http://127.0.0.1:8788/ready') \
         && details=$(parse_ready "$ready" "$expected_release_id"); then
         IFS=$'\t' read -r active draining release_id <<<"$details"
-        if [[ "$active" != "missing" && ("$require_idle" != "1" || "$active" == "0") && ("$require_not_draining" != "1" || "$draining" == "false") ]]; then
+        if [[ "$active" != "missing" && ("$require_idle" != "1" || "$active" == "0") && ("$require_not_draining" != "1" || "$draining" == "false") && ("$require_draining" != "1" || "$draining" == "true") ]]; then
           printf '%s\n' "$ready"
           return 0
         fi
@@ -542,6 +554,18 @@ REMOTE_ROLLBACK
     if ! rollback_release; then exit 20; fi
     exit 11
   fi
+  if ((KEEP_DRAIN == 1)); then
+    if ! ready_json "$READY_ATTEMPTS" "$READY_SLEEP_S" 0 1 "$RELEASE_ID" 1 >/dev/null; then
+      echo "[deploy] staged release is not healthy, idle, and drained" >&2
+      exit 12
+    fi
+    "${SSH[@]}" bash -s -- "$STAGE_DIR" <<'REMOTE_CLEAN_DRAINED'
+set -euo pipefail
+rm -rf "$1"
+REMOTE_CLEAN_DRAINED
+    echo "[deploy] staged release is live, healthy, and still drained"
+    exit 0
+  fi
   if ! clear_drain; then
     echo "[deploy] drain release failed; restoring the previous release" >&2
     if ! rollback_release; then exit 20; fi
@@ -568,7 +592,7 @@ fi
 # Bare rsync without drain/stage is only for --dry-run inspection. Never write
 # straight to the live tree during reviews — that path tore packages mid-run.
 if ((${#DRY_RUN[@]} == 0)); then
-  echo "[deploy] refusing live sync without --restart (use --dry-run to inspect, or --restart to stage+drain)" >&2
+  echo "[deploy] refusing live sync without --restart (use --dry-run to inspect, --restart to release, or --restart-drained to keep reviews blocked)" >&2
   exit 2
 fi
 "${cmd[@]}"

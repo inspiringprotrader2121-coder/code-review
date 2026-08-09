@@ -103,9 +103,12 @@ export interface SandboxStartupPreparationOptions {
   checkReadiness?: () => Promise<SandboxRuntimeReadiness>;
 }
 
-/** A tag can be moved; a content digest cannot. Runtime execution accepts only the latter. */
+/** A tag can be moved; a registry digest or local image ID cannot. */
 export function isDigestPinnedSandboxImage(image: string | undefined): image is string {
-  return Boolean(image && /^[^@\s]+@sha256:[a-f0-9]{64}$/i.test(image));
+  return Boolean(image && (
+    /^[^@\s]+@sha256:[a-f0-9]{64}$/i.test(image)
+    || /^sha256:[a-f0-9]{64}$/i.test(image)
+  ));
 }
 
 function configuredSandboxImage(): string | undefined {
@@ -218,8 +221,10 @@ export function buildSandboxDockerArgs(opts: SandboxRunOptions, name: string): s
     'ALL',
     '--security-opt',
     'no-new-privileges',
+    // Rootless Docker maps container uid 0 to the unprivileged host service
+    // account. This is required to write that account's bind-mounted checkout.
     '-u',
-    '1000:1000',
+    '0:0',
     '-v',
     `${opts.workdir}:/work:${mountMode}`,
     '-w',
@@ -395,7 +400,7 @@ export async function checkSandboxRuntimeReadiness(
   if (!isDigestPinnedSandboxImage(image)) {
     return {
       ready: false,
-      reason: 'ORVEX_SANDBOX_IMAGE must be a digest-pinned image (for example registry/image@sha256:<64-hex>)',
+      reason: 'ORVEX_SANDBOX_IMAGE must be a registry digest or immutable local image ID (sha256:<64-hex>)',
     };
   }
 

@@ -17,7 +17,11 @@ if [[ "${DEPLOY_SAFE_TEST_FIXTURE:-0}" != "1" ]]; then
     scripts/deploy-safe.test.sh \
     scripts/provision-internal-sandbox.sh \
     scripts/provision-internal-sandbox.test.sh \
+    scripts/build-internal-sandbox-image.sh \
+    scripts/build-internal-sandbox-image.test.sh \
     "$FIXTURE/scripts/"
+  mkdir -p "$FIXTURE/sandbox/runtime"
+  cp sandbox/runtime/Dockerfile "$FIXTURE/sandbox/runtime/"
   git -C "$FIXTURE" init -q
   git -C "$FIXTURE" config user.name 'deploy-safe test'
   git -C "$FIXTURE" config user.email 'deploy-safe-test@invalid'
@@ -222,6 +226,21 @@ for marker in stopped stage-rsync installed restarted; do
 done
 if ! grep -q 'stage@example.test' "$STATE/ssh-args" || grep -q '87.106.103.185' "$STATE/ssh-args"; then
   echo "deploy did not use the host derived from REMOTE" >&2
+  exit 1
+fi
+
+rm -f "$STATE"/*
+PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" \
+  DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
+  scripts/deploy-safe.sh --restart-drained scripts/deploy-safe.sh >/dev/null
+for marker in draining restarted; do
+  if [[ ! -e "$STATE/$marker" ]]; then
+    echo "drained deployment missed step: $marker" >&2
+    exit 1
+  fi
+done
+if [[ -e "$STATE/drain-cleared" ]]; then
+  echo "drained deployment released the review drain" >&2
   exit 1
 fi
 

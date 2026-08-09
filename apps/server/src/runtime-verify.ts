@@ -200,14 +200,9 @@ async function runStepsAtSha(
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, content);
     }
-    // Prefer 770 owned by the container uid when chown is allowed; fall back to
-    // 777 only when we cannot transfer ownership (non-root host process).
-    try {
-      fs.chownSync(workdir, 1000, 1000);
-      fs.chmodSync(workdir, 0o770);
-    } catch {
-      fs.chmodSync(workdir, 0o777);
-    }
+    // Container uid 0 maps to this unprivileged service account under rootless
+    // Docker, so the service-owned checkout needs no ownership transfer.
+    fs.chmodSync(workdir, 0o770);
 
     // 2) materialize deps strictly from the immutable image's package cache.
     const install = await dependencies.runSandbox({
@@ -237,6 +232,14 @@ async function runStepsAtSha(
       };
     }
     if (install.exitCode !== 0) {
+      const installOutput = install.stderr || install.stdout;
+      if (!install.timedOut && isOfflineCacheMiss(installOutput)) {
+        return {
+          ran: false,
+          skippedReason: 'sandbox dependency cache does not contain this lockfile',
+          steps: [],
+        };
+      }
       return {
         ran: true,
         steps: [
@@ -246,7 +249,7 @@ async function runStepsAtSha(
             ok: false,
             timedOut: install.timedOut,
             durationMs: install.durationMs,
-            output: tail(install.stderr || install.stdout),
+            output: tail(installOutput),
           },
         ],
       };
@@ -303,6 +306,10 @@ async function runStepsAtSha(
   } finally {
     fs.rmSync(workdir, { recursive: true, force: true });
   }
+}
+
+function isOfflineCacheMiss(output: string): boolean {
+  return /(?:ENOTCACHED|ERR_PNPM_NO_OFFLINE_TARBALL|ERR_PNPM_META_FETCH_FAIL|Can't make a request in offline mode|not found in cache|is not in the cache)/i.test(output);
 }
 
 function cancelledResult(): RuntimeVerifyResult {

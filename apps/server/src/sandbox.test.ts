@@ -71,7 +71,7 @@ test('buildSandboxDockerArgs keeps the internal sandbox contract without host se
     assert.ok(args.includes('/tmp/orvex-review:/work:ro'));
     assert.ok(args.includes('ALL'));
     assert.ok(args.includes('no-new-privileges'));
-    assert.ok(args.includes('1000:1000'));
+    assert.ok(args.includes('0:0'));
     assert.deepEqual(args.filter((arg) => arg.startsWith('/')), [
       '/tmp:size=512m,noexec,nosuid,nodev',
       '/tmp/orvex-review:/work:ro',
@@ -88,6 +88,7 @@ test('buildSandboxDockerArgs keeps the internal sandbox contract without host se
 test('runtime readiness requires an enabled, digest-pinned image before probing Docker', async () => {
   assert.equal(isDigestPinnedSandboxImage('node:22'), false);
   assert.equal(isDigestPinnedSandboxImage(`node@sha256:${'f'.repeat(64)}`), true);
+  assert.equal(isDigestPinnedSandboxImage(`sha256:${'e'.repeat(64)}`), true);
 
   let probes = 0;
   const unavailable = await checkSandboxRuntimeReadiness({
@@ -101,7 +102,7 @@ test('runtime readiness requires an enabled, digest-pinned image before probing 
   });
   assert.deepEqual(unavailable, {
     ready: false,
-    reason: 'ORVEX_SANDBOX_IMAGE must be a digest-pinned image (for example registry/image@sha256:<64-hex>)',
+    reason: 'ORVEX_SANDBOX_IMAGE must be a registry digest or immutable local image ID (sha256:<64-hex>)',
   });
   assert.equal(probes, 0, 'a mutable image must never trigger a Docker probe');
 

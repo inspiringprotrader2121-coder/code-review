@@ -130,3 +130,55 @@ test('runtime verification fails closed before snapshotting when sandbox readine
     steps: [],
   });
 });
+
+test('offline dependency cache misses skip runtime evidence instead of blaming the PR', async () => {
+  const fetchSnapshot = (async () => new Map([
+    ['package.json', JSON.stringify({ scripts: { test: 'node --test' } })],
+    ['pnpm-lock.yaml', 'lockfileVersion: 9'],
+  ])) as typeof fetchRepoSnapshot;
+  const result = await runtimeVerify({} as never, 'owner', 'repo', 'head', {
+    dependencies: {
+      fetchSnapshot,
+      runSandbox: (async () => ({
+        exitCode: 1,
+        stdout: '',
+        stderr: 'ERR_PNPM_NO_OFFLINE_TARBALL A package is missing from the store',
+        timedOut: false,
+        cancelled: false,
+        durationMs: 10,
+      })) as typeof runInSandbox,
+      checkSandboxRuntimeReadiness: async () => ({ ready: true, image: PINNED_IMAGE }),
+    },
+  });
+
+  assert.deepEqual(result, {
+    ran: false,
+    skippedReason: 'sandbox dependency cache does not contain this lockfile',
+    steps: [],
+  });
+});
+
+test('real install failures remain runtime evidence', async () => {
+  const fetchSnapshot = (async () => new Map([
+    ['package.json', JSON.stringify({ scripts: { test: 'node --test' } })],
+    ['package-lock.json', '{}'],
+  ])) as typeof fetchRepoSnapshot;
+  const result = await runtimeVerify({} as never, 'owner', 'repo', 'head', {
+    dependencies: {
+      fetchSnapshot,
+      runSandbox: (async () => ({
+        exitCode: 1,
+        stdout: '',
+        stderr: 'npm error package-lock.json is invalid',
+        timedOut: false,
+        cancelled: false,
+        durationMs: 10,
+      })) as typeof runInSandbox,
+      checkSandboxRuntimeReadiness: async () => ({ ready: true, image: PINNED_IMAGE }),
+    },
+  });
+
+  assert.equal(result.ran, true);
+  assert.equal(result.steps[0]?.name, 'install');
+  assert.equal(result.steps[0]?.ok, false);
+});
