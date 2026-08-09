@@ -12,6 +12,7 @@ grep -q 'corepack prepare yarn@1.22.22 --activate' "$DOCKERFILE"
 grep -q 'DOCKER_HOST must be' "$SCRIPT"
 grep -q "grep -Eq '(^|=)rootless\$'" "$SCRIPT"
 grep -q -- '--pull=false' "$SCRIPT"
+grep -q -- '--provenance=false' "$SCRIPT"
 grep -q -- '--network none' "$SCRIPT"
 grep -q -- '--cap-drop ALL' "$SCRIPT"
 

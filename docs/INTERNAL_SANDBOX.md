@@ -112,6 +112,11 @@ The production `.env` is immutable by design. Use the existing approved
 configuration-management and guarded deployment workflow; do not edit the live
 server as a one-off and do not run raw `rsync`.
 
+Both local image builders disable BuildKit provenance wrappers. These images
+never leave the server, and omitting the generated attestation manifest keeps
+an unchanged build's local image ID reproducible between the initial build used
+to prepare configuration and the broker's guarded apply-time rebuild.
+
 The current application integration uses this internal Docker boundary for
 runtime verification. It enforces the service account's rootless Unix socket,
 Docker's reported rootless mode, an immutable local image ID or registry

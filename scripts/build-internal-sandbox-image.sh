@@ -17,7 +17,7 @@ docker info --format '{{range .SecurityOptions}}{{println .}}{{end}}' 2>/dev/nul
     exit 1
   }
 
-docker build --pull=false --tag "$IMAGE_TAG" "$ROOT/sandbox/runtime"
+docker build --pull=false --provenance=false --tag "$IMAGE_TAG" "$ROOT/sandbox/runtime"
 image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
 [[ $image_id =~ ^sha256:[a-f0-9]{64}$ ]] || {
   printf '[orvex-sandbox] ERROR: build returned an invalid image ID\n' >&2

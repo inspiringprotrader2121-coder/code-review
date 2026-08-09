@@ -150,14 +150,14 @@ check_network "$EGRESS_NETWORK" false
 CONFIGURED_IMAGE=$(read_nonsecret_configured_image) || fail 'immutable service environment is missing required broker configuration'
 
 if [[ $MODE == dry-run ]]; then
-  log "DRY RUN: would build $IMAGE_TAG from infra/agentic-egress with --pull=false and --network none"
+  log "DRY RUN: would build $IMAGE_TAG from infra/agentic-egress with --pull=false, --provenance=false and --network none"
   log "DRY RUN: would ensure internal network $INTERNAL_NETWORK and egress network $EGRESS_NETWORK"
   log "DRY RUN: would create a private temporary API-key mount and persistent private capability-signing key for $BROKER_NAME"
   log "DRY RUN: configured broker image is present and will be compared to the locally built image ID during --apply"
   exit 0
 fi
 
-as_service_user docker build --pull=false --network none --tag "$IMAGE_TAG" "$ROOT/infra/agentic-egress" >/dev/null
+as_service_user docker build --pull=false --provenance=false --network none --tag "$IMAGE_TAG" "$ROOT/infra/agentic-egress" >/dev/null
 IMAGE_ID=$(as_service_user docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
 [[ $IMAGE_ID =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'broker build did not return an immutable image ID'
 as_service_user mkdir -p "$STATE_DIR"

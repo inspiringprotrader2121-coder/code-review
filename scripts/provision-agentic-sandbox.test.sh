@@ -11,6 +11,7 @@ node --check "$BROKER"
 "$SCRIPT" --help >/dev/null
 
 rg -q '^ARG BASE_IMAGE=[^[:space:]]+@sha256:[a-f0-9]{64}$' "$DOCKERFILE"
+rg -q -- '--provenance=false' "$SCRIPT"
 rg -q -- '--network none' "$SCRIPT"
 rg -q -- '--internal --attachable' "$SCRIPT"
 rg -q -- '--read-only' "$SCRIPT"
