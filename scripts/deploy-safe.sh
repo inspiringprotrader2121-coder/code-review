@@ -69,23 +69,6 @@ else
   SOURCES=("${DEFAULT_SOURCES[@]}")
 fi
 
-# Release metadata is generated, never copied from the worktree. It lets the
-# running process prove that it is serving the exact source + dependency graph
-# that passed the staged Linux checks, without exposing any runtime settings.
-if ! RELEASE_COMMIT=$(git rev-parse --verify HEAD 2>/dev/null); then
-  echo "[deploy] unable to resolve the local Git commit for release metadata" >&2
-  exit 2
-fi
-if ! RELEASE_LOCKFILE_SHA256=$(shasum -a 256 pnpm-lock.yaml | awk '{print $1}'); then
-  echo "[deploy] unable to hash pnpm-lock.yaml for release metadata" >&2
-  exit 2
-fi
-if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$RELEASE_LOCKFILE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "[deploy] refusing malformed release metadata identity" >&2
-  exit 2
-fi
-RELEASE_ID="${RELEASE_COMMIT}.${RELEASE_LOCKFILE_SHA256}"
-
 for source in "${SOURCES[@]}"; do
   if [[ "$source" = /* || "$source" == *'..'* || ! -e "$source" ]]; then
     echo "[deploy] refusing invalid source: $source" >&2
@@ -104,6 +87,34 @@ done
 if [[ "$MODE" == "--validate-only" ]]; then
   exit 0
 fi
+
+# Release metadata is generated, never copied from the worktree. It lets the
+# running process prove that it is serving the exact source + dependency graph
+# that passed the staged Linux checks, without exposing any runtime settings.
+if ! RELEASE_COMMIT=$(git rev-parse --verify HEAD 2>/dev/null); then
+  if [[ "${DEPLOY_TEST_MODE:-0}" == "1" && "${REMOTE%%:*}" == "stage@example.test" && -f release.json ]]; then
+    RELEASE_COMMIT=$(node -e '
+      const value = require("./release.json");
+      if (!/^[0-9a-f]{40}$/.test(value.commit ?? "")) process.exit(1);
+      process.stdout.write(value.commit);
+    ') || {
+      echo "[deploy] unable to resolve staged test release metadata" >&2
+      exit 2
+    }
+  else
+    echo "[deploy] unable to resolve the local Git commit for release metadata" >&2
+    exit 2
+  fi
+fi
+if ! RELEASE_LOCKFILE_SHA256=$(shasum -a 256 pnpm-lock.yaml | awk '{print $1}'); then
+  echo "[deploy] unable to hash pnpm-lock.yaml for release metadata" >&2
+  exit 2
+fi
+if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$RELEASE_LOCKFILE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "[deploy] refusing malformed release metadata identity" >&2
+  exit 2
+fi
+RELEASE_ID="${RELEASE_COMMIT}.${RELEASE_LOCKFILE_SHA256}"
 
 base_cmd=(rsync -az --relative --delay-updates "${EXCLUDES[@]}" \
   -e "ssh -i \"$SSH_KEY\" -o BatchMode=yes -o ConnectTimeout=15")
@@ -125,7 +136,7 @@ if [[ "$MODE" == "--restart" ]]; then
     echo "[deploy] refusing malformed REMOTE: $REMOTE" >&2
     exit 2
   fi
-  if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+  if [[ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
     if [[ "${DEPLOY_TEST_MODE:-0}" != "1" || "$REMOTE_HOST" != "stage@example.test" ]]; then
       echo "[deploy] refusing restart from a dirty worktree; commit the exact release first" >&2
       exit 2

@@ -7,7 +7,13 @@ cd "$ROOT"
 scripts/deploy-safe.sh --validate-only
 scripts/deploy-safe.sh --validate-only .env.example
 
-TEST_RELEASE_COMMIT=$(git rev-parse --verify HEAD)
+if ! TEST_RELEASE_COMMIT=$(git rev-parse --verify HEAD 2>/dev/null); then
+  TEST_RELEASE_COMMIT=$(node -e '
+    const value = require("./release.json");
+    if (!/^[0-9a-f]{40}$/.test(value.commit ?? "")) process.exit(1);
+    process.stdout.write(value.commit);
+  ')
+fi
 TEST_RELEASE_LOCKFILE_SHA256=$(shasum -a 256 pnpm-lock.yaml | awk '{print $1}')
 TEST_RELEASE_ID="${TEST_RELEASE_COMMIT}.${TEST_RELEASE_LOCKFILE_SHA256}"
 export DEPLOY_READY_ATTEMPTS=2
@@ -40,6 +46,10 @@ grep -Fq 'rm -rf -- "$stage/$source"' scripts/deploy-safe.sh || {
 }
 grep -Fq 'install_backup_schedule' scripts/deploy-safe.sh || {
   echo "deploy does not install the database backup schedule" >&2
+  exit 1
+}
+grep -Fq '"${DEPLOY_TEST_MODE:-0}" == "1" && "${REMOTE%%:*}" == "stage@example.test"' scripts/deploy-safe.sh || {
+  echo "release metadata fallback is not restricted to the exact fake deployment host" >&2
   exit 1
 }
 
