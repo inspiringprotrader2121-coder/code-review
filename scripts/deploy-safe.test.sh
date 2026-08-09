@@ -52,6 +52,10 @@ fi
 
 scripts/deploy-safe.sh --validate-only
 scripts/deploy-safe.sh --validate-only .env.example
+grep -Fxq '  LICENSE' scripts/deploy-safe.sh || {
+  echo "deploy release manifest omits the README-linked license" >&2
+  exit 1
+}
 
 if ! TEST_RELEASE_COMMIT=$(git rev-parse --verify HEAD 2>/dev/null); then
   TEST_RELEASE_COMMIT=$(node -e '

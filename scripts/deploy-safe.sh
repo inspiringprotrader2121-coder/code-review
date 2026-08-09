@@ -33,6 +33,7 @@ DEFAULT_SOURCES=(
   infra
   scripts
   sandbox
+  LICENSE
   README.md
   PLAN.md
   ROADMAP.md
