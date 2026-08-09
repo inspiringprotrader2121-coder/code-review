@@ -9,7 +9,7 @@ import { createApp, DEFAULT_RELEASE_FILE } from './app.js';
 
 test('default release metadata path is rooted at the deployed repository', () => {
   assert.equal(path.basename(DEFAULT_RELEASE_FILE), 'release.json');
-  assert.equal(path.basename(path.dirname(DEFAULT_RELEASE_FILE)), 'code-review');
+  assert.equal(path.dirname(DEFAULT_RELEASE_FILE), path.resolve(process.cwd(), '../..'));
 });
 
 test('health is live-only while readiness checks both database and queue', async (t) => {
