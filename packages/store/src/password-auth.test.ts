@@ -56,6 +56,36 @@ test('social sign-in links verified provider identities to the existing account'
   assert.equal(githubUser.githubId, 42);
 });
 
+test('OAuth with verified email can claim an unverified password account (no permanent lockout)', () => {
+  const db = new AppDatabase(':memory:');
+  const passwordUser = db.createPasswordUser({ email: 'unverified@example.com', passwordHash: 'hash' });
+  assert.ok(passwordUser);
+  // Intentionally do NOT call setUserEmailVerified — signup never verified.
+  db.createSession(passwordUser.id);
+  assert.equal(db.getPasswordHash(passwordUser.id), 'hash');
+
+  const githubUser = db.upsertUserFromGitHub({
+    githubId: 99,
+    login: 'unverified-gh',
+    email: 'unverified@example.com',
+  });
+  assert.equal(githubUser.id, passwordUser.id);
+  assert.equal(githubUser.githubId, 99);
+  assert.equal(db.getPasswordHash(passwordUser.id), null, 'unverified password must be cleared to prevent ATO');
+  // password login must fail closed after the claim
+  assert.equal(db.getPasswordHash(passwordUser.id) == null, true);
+
+  const googleOnly = db.createPasswordUser({ email: 'unverified-g@example.com', passwordHash: 'hash' });
+  assert.ok(googleOnly);
+  const googleUser = db.upsertUserFromGoogle({
+    googleId: 'google-unverified',
+    email: 'unverified-g@example.com',
+    name: 'U',
+  });
+  assert.equal(googleUser.id, googleOnly.id);
+  assert.equal(db.getPasswordHash(googleOnly.id), null);
+});
+
 test('MFA state is optional, recovery codes are single-use, and challenges expire', () => {
   const db = new AppDatabase(':memory:');
   const user = db.upsertPasswordUser({ email: 'mfa@example.com', passwordHash: 'hash' });

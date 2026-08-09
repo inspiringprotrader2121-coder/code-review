@@ -1916,19 +1916,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
       if (existingEmail.githubId > 0) {
         throw new Error('This email is already linked to a different GitHub account');
       }
-      const passwordState = this.db
-        .prepare(`SELECT password_hash, email_verified_at FROM users WHERE id = ?`)
-        .get(existingEmail.id) as { password_hash: string | null; email_verified_at: string | null } | undefined;
-      if (passwordState?.password_hash && !passwordState.email_verified_at) {
-        throw new Error('This email belongs to an unverified password account; sign in there before linking GitHub');
-      }
+      // Verified OAuth email proves ownership — do not block unverified password
+      // accounts (that enabled email DoS / permanent OAuth lockout). Clear any
+      // unverified password credentials so an attacker who registered first
+      // cannot keep password access after the victim links OAuth.
       this.db
         .prepare(
           `UPDATE users
-           SET github_id = ?, login = ?, name = ?, avatar_url = ?, email = ?, email_verified_at = COALESCE(email_verified_at, ?)
+           SET github_id = ?, login = ?, name = ?, avatar_url = ?, email = ?,
+               email_verified_at = COALESCE(email_verified_at, ?),
+               password_hash = CASE
+                 WHEN password_hash IS NOT NULL AND email_verified_at IS NULL THEN NULL
+                 ELSE password_hash
+               END
            WHERE id = ?`,
         )
         .run(input.githubId, input.login, input.name ?? null, input.avatarUrl ?? null, email, new Date().toISOString(), existingEmail.id);
+      this.revokeCredentialsAfterOAuthClaim(existingEmail.id);
       return this.getUserById(existingEmail.id)!;
     }
 
@@ -1980,20 +1984,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
       if (linkedGoogleId?.google_id) {
         throw new Error('This email is already linked to a different Google account');
       }
-      const passwordState = this.db
-        .prepare(`SELECT password_hash, email_verified_at FROM users WHERE id = ?`)
-        .get(existingEmail.id) as { password_hash: string | null; email_verified_at: string | null } | undefined;
-      if (passwordState?.password_hash && !passwordState.email_verified_at) {
-        throw new Error('This email belongs to an unverified password account; sign in there before linking Google');
-      }
+      // Same as GitHub: verified Google email may claim an unverified password row.
+      // Drop unverified password credentials to prevent ATO after the link.
       this.db
         .prepare(
           `UPDATE users
            SET google_id = ?, name = COALESCE(?, name), avatar_url = COALESCE(?, avatar_url),
-               email_verified_at = COALESCE(email_verified_at, ?)
+               email_verified_at = COALESCE(email_verified_at, ?),
+               password_hash = CASE
+                 WHEN password_hash IS NOT NULL AND email_verified_at IS NULL THEN NULL
+                 ELSE password_hash
+               END
            WHERE id = ?`,
         )
         .run(input.googleId, input.name ?? null, input.avatarUrl ?? null, new Date().toISOString(), existingEmail.id);
+      this.revokeCredentialsAfterOAuthClaim(existingEmail.id);
       return this.getUserById(existingEmail.id)!;
     }
 
@@ -2555,6 +2560,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
 
   deleteSession(sessionId: string): void {
     this.db.prepare(`DELETE FROM sessions WHERE id = ?`).run(sessionId);
+  }
+
+  /**
+   * After OAuth claims an existing email row, drop live sessions. If the claim
+   * cleared an unverified password (see upsertUserFromGitHub/Google), also wipe
+   * MFA so a planted password account cannot retain second-factor control.
+   */
+  revokeCredentialsAfterOAuthClaim(userId: string): void {
+    this.deleteSessionsForUser(userId);
+    if (this.getPasswordHash(userId)) return;
+    this.db
+      .prepare(
+        `UPDATE user_security
+         SET totp_enabled = 0,
+             totp_secret_encrypted = NULL,
+             recovery_code_hashes_json = '[]',
+             last_totp_epoch = NULL,
+             updated_at = ?
+         WHERE user_id = ?`,
+      )
+      .run(new Date().toISOString(), userId);
   }
 
   deleteSessionsForUser(userId: string): number {
