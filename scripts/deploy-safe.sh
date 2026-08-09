@@ -200,7 +200,13 @@ REMOTE_UNLOCK
   }
   cleanup() {
     local status=$?
-    if ((drain_set)) && ! clear_drain; then status=20; fi
+    if ((drain_set)); then
+      if ((status == 0)); then
+        if ! clear_drain; then status=20; fi
+      else
+        echo "[deploy] deployment failed; preserving the production drain" >&2
+      fi
+    fi
     if ((lock_held)) && ! release_deploy_lock; then status=20; fi
     exit "$status"
   }

@@ -57,7 +57,7 @@ test(
       `orvex-review:processing-meta:${createHash('sha256').update(orphanEntry!).digest('hex')}`,
       String(Date.now() - 60_000),
     );
-    const restarted = new RedisReviewQueue(redisUrl!);
+    const restarted = new RedisReviewQueue(redisUrl!, { maxResumeAfterRestart: 2 });
     let restartedClosed = false;
     t.after(async () => {
       if (!restartedClosed) await restarted.close();
@@ -108,7 +108,7 @@ test(
     );
     await cleanup.del(`orvex-review:inflight:${prKey(dequeued!)}`);
 
-    const recovered = new RedisReviewQueue(redisUrl!);
+    const recovered = new RedisReviewQueue(redisUrl!, { maxResumeAfterRestart: 2 });
     t.after(async () => {
       await recovered.close();
     });
@@ -116,6 +116,39 @@ test(
     const again = await recovered.dequeue();
     assert.equal(again?.runId, 'run-after-reserve');
     await recovered.markFailed(again!, 'done');
+  },
+);
+
+test(
+  'Redis drops an orphaned paid claim by default instead of replaying it',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    await cleanup.flushdb();
+    const owner = new RedisReviewQueue(redisUrl!);
+    const restarted = new RedisReviewQueue(redisUrl!);
+    t.after(async () => {
+      await owner.close();
+      await restarted.close();
+      await cleanup.flushdb();
+      await cleanup.quit();
+    });
+
+    const payload = job('sha-no-replay', 100, 'opened');
+    await owner.enqueue(payload);
+    const claimed = await owner.dequeue();
+    assert.ok(claimed);
+    const [entry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    assert.ok(entry);
+    await cleanup.del(`orvex-review:inflight:${prKey(claimed!)}`);
+    await cleanup.set(
+      `orvex-review:processing-meta:${createHash('sha256').update(entry!).digest('hex')}`,
+      String(Date.now() - 60_000),
+    );
+
+    assert.equal(await restarted.recoverOrphans(), 0);
+    assert.equal(await cleanup.llen('orvex-review:processing'), 0);
+    assert.equal(await restarted.dequeue(), null);
   },
 );
 
@@ -372,8 +405,8 @@ test(
       String(Date.now() - 60_000),
     );
 
-    const a = new RedisReviewQueue(redisUrl!);
-    const b = new RedisReviewQueue(redisUrl!);
+    const a = new RedisReviewQueue(redisUrl!, { maxResumeAfterRestart: 2 });
+    const b = new RedisReviewQueue(redisUrl!, { maxResumeAfterRestart: 2 });
     t.after(async () => {
       await a.close();
       await b.close();

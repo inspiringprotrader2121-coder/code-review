@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { ReviewQueue } from '@orvex-review/queue';
 import { createAppDatabase, type AppDatabase } from '@orvex-review/store';
@@ -78,6 +79,7 @@ export interface CreateAppDependencies {
 }
 
 const RELEASE_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+export const DEFAULT_RELEASE_FILE = fileURLToPath(new URL('../../../release.json', import.meta.url));
 
 /**
  * Return only the safe release identifier from deployment metadata. Readiness
@@ -150,7 +152,7 @@ export function createApp(queue: ReviewQueue, dependencies: CreateAppDependencie
         activeJobs: getActiveJobCount(),
         draining: isDeployDraining(),
         codexAuth,
-        releaseId: readReleaseId(dependencies.releaseFile ?? `${process.cwd()}/release.json`),
+        releaseId: readReleaseId(dependencies.releaseFile ?? DEFAULT_RELEASE_FILE),
       },
       ok ? 200 : 503,
     );

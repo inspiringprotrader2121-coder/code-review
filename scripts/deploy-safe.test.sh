@@ -123,7 +123,7 @@ printf '%s\n' \
   '  if [[ "$SCRIPT" == *"release.json"* && "$SCRIPT" == *"lockfileSha256"* ]]; then printf "%s\n" "$*" >"$DEPLOY_TEST_STATE/release-metadata-args"; fi' \
   '  if [[ "$SCRIPT" == *"startOrRestart"* || "$SCRIPT" == *"pm2 restart"* || "$SCRIPT" == *"pm2 start /usr/bin/bash"* ]]; then : >"$DEPLOY_TEST_STATE/restarted"; fi' \
   '  if [[ "$SCRIPT" == *"touch --"* ]]; then : >"$DEPLOY_TEST_STATE/draining"; fi' \
-  '  if [[ "$SCRIPT" == *"rm -f --"* ]]; then : >"$DEPLOY_TEST_STATE/drain-cleared"; fi' \
+  '  if [[ "$SCRIPT" == *"rm -f -- \"\$1\""* ]]; then : >"$DEPLOY_TEST_STATE/drain-cleared"; fi' \
   '  : >"$DEPLOY_TEST_STATE/installed"' \
   'fi' >"$FAKE_BIN/ssh"
 chmod +x "$FAKE_BIN/rsync" "$FAKE_BIN/ssh"
@@ -209,6 +209,10 @@ if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_FAIL
   echo "deploy accepted failed post-restart readiness" >&2
   exit 1
 fi
+if [[ ! -e "$STATE/draining" || -e "$STATE/drain-cleared" ]]; then
+  echo "failed deployment did not preserve the drain" >&2
+  exit 1
+fi
 
 rm -f "$STATE"/*
 if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_MALFORMED=1 \
@@ -223,6 +227,10 @@ if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_RELE
   DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
   scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
   echo "deploy accepted a ready process running a different release" >&2
+  exit 1
+fi
+if [[ ! -e "$STATE/draining" || -e "$STATE/drain-cleared" ]]; then
+  echo "release mismatch did not preserve the drain" >&2
   exit 1
 fi
 

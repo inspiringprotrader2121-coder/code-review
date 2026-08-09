@@ -252,16 +252,14 @@ function claimToken(claim: string): string {
   const sep = claim.indexOf('\n');
   return sep >= 0 ? claim.slice(0, sep) : claim;
 }
-// Crash-loop guard for startup recovery: a job that kills the worker (OOM, native
-// crash) would otherwise be requeued by recoverOrphans on EVERY restart and crash
-// it again forever. Count how many times each job has been resumed after a
-// restart; past the cap, drop it with a loud log instead of requeueing.
+// Crash-loop and spend guard for startup recovery: a claimed review may already
+// have paid for several provider stages. Do not replay it by default. Operators
+// can opt into a bounded resume count when durable stage checkpoints exist.
 const RESUMED_PREFIX = 'orvex-review:resumed:';
-const configuredMaxResume = Number(process.env.ORVEX_MAX_RESUME_AFTER_RESTART ?? 2);
-const MAX_RESUME_AFTER_RESTART =
-  Number.isFinite(configuredMaxResume) && configuredMaxResume >= 0
-    ? Math.min(Math.floor(configuredMaxResume), 10)
-    : 2;
+
+export interface RedisReviewQueueOptions {
+  maxResumeAfterRestart?: number;
+}
 
 export class RedisReviewQueue implements ReviewQueue {
   private redis: Redis;
@@ -270,8 +268,15 @@ export class RedisReviewQueue implements ReviewQueue {
   // accidentally use the newer token to delete or renew that lock.
   private readonly lockTokens = new WeakMap<ReviewJobPayload, string>();
 
-  constructor(url: string) {
+  private readonly maxResumeAfterRestart: number;
+
+  constructor(url: string, options: RedisReviewQueueOptions = {}) {
     this.redis = new Redis(url);
+    const configured = options.maxResumeAfterRestart
+      ?? Number(process.env.ORVEX_MAX_RESUME_AFTER_RESTART ?? 0);
+    this.maxResumeAfterRestart = Number.isFinite(configured) && configured >= 0
+      ? Math.min(Math.floor(configured), 10)
+      : 0;
   }
 
   private providerKey(prefix: string, provider: string): string {
@@ -636,7 +641,7 @@ return 1
         entry,
         Date.now(),
         PROCESSING_RECOVERY_GRACE_MS,
-        MAX_RESUME_AFTER_RESTART,
+        this.maxResumeAfterRestart,
         token,
         raw,
       ));
@@ -644,7 +649,7 @@ return 1
       if (recovered.startsWith('dropped:')) {
         console.error(
           `[queue] DROPPING job ${idKey} — resumed ${recovered.slice('dropped:'.length)}x after restarts ` +
-            `(cap ${MAX_RESUME_AFTER_RESTART}); it appears to crash the worker. Investigate manually.`,
+            `(cap ${this.maxResumeAfterRestart}); it may already have incurred provider spend. Investigate manually.`,
         );
       }
     }
