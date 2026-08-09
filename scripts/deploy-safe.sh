@@ -115,7 +115,7 @@ if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ || ! "$RELEASE_LOCKFILE_SHA256" =~ ^
 fi
 RELEASE_ID="${RELEASE_COMMIT}.${RELEASE_LOCKFILE_SHA256}"
 
-base_cmd=(rsync -az --relative --delay-updates "${EXCLUDES[@]}" \
+base_cmd=(rsync -az --checksum --relative --delay-updates "${EXCLUDES[@]}" \
   -e "ssh -i \"$SSH_KEY\" -o BatchMode=yes -o ConnectTimeout=15")
 cmd=("${base_cmd[@]}")
 if ((${#DRY_RUN[@]} > 0)); then
@@ -286,7 +286,7 @@ stage=$2
 shift 2
 rm -rf "$stage"
 mkdir -p "$stage"
-rsync -a --delete \
+rsync -a --checksum --delete \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' \
@@ -330,6 +330,9 @@ CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore build
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:built-exports
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore typecheck
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore test
+[[ -f apps/server/dist/index.js ]]
+[[ -d node_modules ]]
+[[ -d apps/server/node_modules ]]
 REMOTE_CHECK
 
   parse_ready() {
@@ -436,10 +439,10 @@ live=$1
 backup=$2
 rm -rf "$backup"
 mkdir -p "$backup"
-rsync -a --delete \
+rsync -a --checksum --delete \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
-  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' --exclude 'build/' \
+  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'build/' \
   --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$live/" "$backup/"
 REMOTE_BACKUP
@@ -462,14 +465,30 @@ set -euo pipefail
 live=$1
 stage=$2
 backup=$3
-rsync -a --delete-delay \
+move_dependency_trees() {
+  local from=$1
+  local to=$2
+  local modules rel target
+  while IFS= read -r -d '' modules; do
+    rel=${modules#"$from"/}
+    target="$to/$rel"
+    mkdir -p -- "$(dirname -- "$target")"
+    rm -rf -- "$target"
+    mv -- "$modules" "$target"
+  done < <(
+    find "$from" \
+      \( -path "$from/node_modules.failed" -o -path "$from/.git" \) -prune -o \
+      -type d -name node_modules -print0 -prune
+  )
+}
+move_dependency_trees "$live" "$backup"
+rsync -a --checksum --delete-delay \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
-  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' --exclude 'build/' \
+  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'build/' \
   --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$stage/" "$live/"
-mv "$live/node_modules" "$backup/node_modules"
-mv "$stage/node_modules" "$live/node_modules"
+move_dependency_trees "$stage" "$live"
 REMOTE_APPLY
   }
 
@@ -519,14 +538,40 @@ REMOTE_BACKUP_SCHEDULE
 set -euo pipefail
 live=$1
 backup=$2
-rsync -a --delete-delay \
+move_dependency_trees() {
+  local from=$1
+  local to=$2
+  local modules rel target
+  while IFS= read -r -d '' modules; do
+    rel=${modules#"$from"/}
+    target="$to/$rel"
+    mkdir -p -- "$(dirname -- "$target")"
+    rm -rf -- "$target"
+    mv -- "$modules" "$target"
+  done < <(
+    find "$from" \
+      \( -path "$from/node_modules.failed" -o -path "$from/.git" \) -prune -o \
+      -type d -name node_modules -print0 -prune
+  )
+}
+if [[ -d "$live/node_modules" ]]; then
+  rm -rf -- "$live/node_modules.failed"
+  mv -- "$live/node_modules" "$live/node_modules.failed"
+fi
+while IFS= read -r -d '' modules; do
+  rm -rf -- "$modules"
+done < <(
+  find "$live" \
+    \( -path "$live/node_modules.failed" -o -path "$live/.git" \) -prune -o \
+    -type d -name node_modules -print0 -prune
+)
+rsync -a --checksum --delete-delay \
   --include '.env.example' \
   --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
-  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'dist/' --exclude 'build/' \
+  --exclude '.data/' --exclude 'node_modules/' --exclude 'node_modules.failed/' --exclude 'build/' \
   --exclude '*.tsbuildinfo' --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$backup/" "$live/"
-if [[ -d "$live/node_modules" ]]; then rm -rf "$live/node_modules.failed"; mv "$live/node_modules" "$live/node_modules.failed"; fi
-if [[ -d "$backup/node_modules" ]]; then mv "$backup/node_modules" "$live/node_modules"; fi
+move_dependency_trees "$backup" "$live"
 REMOTE_ROLLBACK
     then
       echo "[deploy] CRITICAL: rollback file restoration failed" >&2

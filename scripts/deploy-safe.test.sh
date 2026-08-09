@@ -89,6 +89,102 @@ if [[ $(grep -c -- "--exclude 'node_modules.failed/'" scripts/deploy-safe.sh) -n
   echo "deploy must exclude rollback-quarantined dependencies from every release path" >&2
   exit 1
 fi
+if [[ $(grep -c -- "--exclude 'dist/'" scripts/deploy-safe.sh) -ne 2 ]]; then
+  echo "deploy must exclude local/old dist while preserving staged Linux dist for apply and rollback" >&2
+  exit 1
+fi
+if [[ $(grep -c -- 'rsync -a.*--checksum' scripts/deploy-safe.sh) -ne 5 ]]; then
+  echo "deploy must checksum release bytes across upload, stage, backup, apply, and rollback" >&2
+  exit 1
+fi
+node <<'NODE'
+const { readFileSync } = require('node:fs');
+const source = readFileSync('scripts/deploy-safe.sh', 'utf8');
+function remoteBlock(name) {
+  const match = source.match(new RegExp(`<<'${name}'\\n([\\s\\S]*?)\\n${name}`));
+  if (!match) throw new Error(`missing ${name} block`);
+  return match[1];
+}
+if (!remoteBlock('REMOTE_STAGE').includes("--exclude 'dist/'")) {
+  throw new Error('stage initialization can retain stale live dist');
+}
+for (const name of ['REMOTE_BACKUP', 'REMOTE_APPLY', 'REMOTE_ROLLBACK']) {
+  if (remoteBlock(name).includes("--exclude 'dist/'")) {
+    throw new Error(`${name} drops the Linux-built or rollback dist tree`);
+  }
+}
+if (!source.includes('[[ -f apps/server/dist/index.js ]]')) {
+  throw new Error('staged release does not require the production entrypoint');
+}
+for (const name of ['REMOTE_APPLY', 'REMOTE_ROLLBACK']) {
+  const block = remoteBlock(name);
+  if (!block.includes('move_dependency_trees') || !block.includes("-name node_modules")) {
+    throw new Error(`${name} does not move every server-built workspace dependency tree`);
+  }
+}
+NODE
+
+extract_remote_block() {
+  node - "$1" <<'NODE'
+const { readFileSync } = require('node:fs');
+const marker = process.argv[2];
+const source = readFileSync('scripts/deploy-safe.sh', 'utf8');
+const match = source.match(new RegExp(`<<'${marker}'\\n([\\s\\S]*?)\\n${marker}`));
+if (!match) process.exit(1);
+process.stdout.write(match[1]);
+NODE
+}
+
+TRANSFER_FIXTURE=$(mktemp -d)
+trap 'rm -rf -- "$TRANSFER_FIXTURE"' EXIT
+TRANSFER_LIVE="$TRANSFER_FIXTURE/live"
+TRANSFER_STAGE="$TRANSFER_FIXTURE/stage"
+TRANSFER_BACKUP="$TRANSFER_FIXTURE/backup"
+mkdir -p \
+  "$TRANSFER_LIVE/apps/server/dist" \
+  "$TRANSFER_LIVE/apps/server/node_modules" \
+  "$TRANSFER_LIVE/node_modules" \
+  "$TRANSFER_LIVE/.data" \
+  "$TRANSFER_STAGE/apps/server/dist" \
+  "$TRANSFER_STAGE/apps/server/node_modules" \
+  "$TRANSFER_STAGE/node_modules" \
+  "$TRANSFER_BACKUP/apps/server/dist"
+printf 'old-dist\n' >"$TRANSFER_LIVE/apps/server/dist/index.js"
+printf 'old-source\n' >"$TRANSFER_LIVE/old-source.txt"
+printf 'old-root-deps\n' >"$TRANSFER_LIVE/node_modules/root.txt"
+printf 'old-workspace-deps\n' >"$TRANSFER_LIVE/apps/server/node_modules/server.txt"
+printf 'immutable-env\n' >"$TRANSFER_LIVE/.env"
+printf 'durable-data\n' >"$TRANSFER_LIVE/.data/runtime.txt"
+printf 'old-dist\n' >"$TRANSFER_BACKUP/apps/server/dist/index.js"
+printf 'old-source\n' >"$TRANSFER_BACKUP/old-source.txt"
+printf 'new-dist\n' >"$TRANSFER_STAGE/apps/server/dist/index.js"
+printf 'new-source\n' >"$TRANSFER_STAGE/new-source.txt"
+printf 'new-root-deps\n' >"$TRANSFER_STAGE/node_modules/root.txt"
+printf 'new-workspace-deps\n' >"$TRANSFER_STAGE/apps/server/node_modules/server.txt"
+
+extract_remote_block REMOTE_APPLY \
+  | bash -s -- "$TRANSFER_LIVE" "$TRANSFER_STAGE" "$TRANSFER_BACKUP"
+grep -Fxq 'new-dist' "$TRANSFER_LIVE/apps/server/dist/index.js"
+grep -Fxq 'new-root-deps' "$TRANSFER_LIVE/node_modules/root.txt"
+grep -Fxq 'new-workspace-deps' "$TRANSFER_LIVE/apps/server/node_modules/server.txt"
+grep -Fxq 'old-root-deps' "$TRANSFER_BACKUP/node_modules/root.txt"
+grep -Fxq 'old-workspace-deps' "$TRANSFER_BACKUP/apps/server/node_modules/server.txt"
+grep -Fxq 'immutable-env' "$TRANSFER_LIVE/.env"
+grep -Fxq 'durable-data' "$TRANSFER_LIVE/.data/runtime.txt"
+[[ ! -e "$TRANSFER_LIVE/old-source.txt" ]]
+
+extract_remote_block REMOTE_ROLLBACK \
+  | bash -s -- "$TRANSFER_LIVE" "$TRANSFER_BACKUP"
+grep -Fxq 'old-dist' "$TRANSFER_LIVE/apps/server/dist/index.js"
+grep -Fxq 'old-root-deps' "$TRANSFER_LIVE/node_modules/root.txt"
+grep -Fxq 'old-workspace-deps' "$TRANSFER_LIVE/apps/server/node_modules/server.txt"
+grep -Fxq 'new-root-deps' "$TRANSFER_LIVE/node_modules.failed/root.txt"
+grep -Fxq 'immutable-env' "$TRANSFER_LIVE/.env"
+grep -Fxq 'durable-data' "$TRANSFER_LIVE/.data/runtime.txt"
+[[ ! -e "$TRANSFER_LIVE/new-source.txt" ]]
+rm -rf -- "$TRANSFER_FIXTURE"
+trap - EXIT
+
 grep -Fq 'bash -s -- "$REMOTE_DIR" "$STAGE_DIR" "${SOURCES[@]}"' scripts/deploy-safe.sh || {
   echo "deploy does not pass selected sources to isolated stage preparation" >&2
   exit 1
