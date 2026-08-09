@@ -2,6 +2,20 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { startPeriodicRecovery } from './recovery-service.js';
 
+async function waitForSignal(signal: Promise<void>, label: string): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      signal,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), 10_000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 test(
   'periodic leader recovery alerts on failure without changing queue ownership',
   { timeout: 10_000 },
@@ -37,7 +51,7 @@ test(
     });
 
     try {
-      await alertSent;
+      await waitForSignal(alertSent, 'periodic recovery failure alert');
       assert.ok(calls >= 1);
       assert.ok(releases >= 1, 'failed recovery releases its token-CAS lease');
       assert.match(alerts[0]!, /^periodic-queue-recovery-failed:critical:/);
@@ -101,7 +115,7 @@ test(
     });
 
     try {
-      await alertSent;
+      await waitForSignal(alertSent, 'dead-letter alert');
       assert.equal(alerts.length, 1);
       assert.match(alerts[0]!, /^queue-dead-lettered:dead-1:/);
       assert.match(alerts[0]!, /operator replay is required/);

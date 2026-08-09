@@ -15,6 +15,23 @@ function sign(body: string): string {
   return `sha256=${createHmac('sha256', WEBHOOK_SECRET).update(body).digest('hex')}`;
 }
 
+async function waitForWorker(signal: Promise<void>): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      signal,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('timed out waiting for deterministic worker result')),
+          30_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 test(
   'Phase 0 characterizes signed webhook through queue, bounded worker, durable run, and read model',
   { timeout: 30_000 },
@@ -148,7 +165,7 @@ test(
 
     const installation = db.getInstallation(417);
     assert.ok(installation, 'the signed webhook binds an installation before queueing');
-    await workerFinalized;
+    await waitForWorker(workerFinalized);
     assert.equal(db.listReviewRuns(installation.tenantId).length, 1);
 
     const job = {
