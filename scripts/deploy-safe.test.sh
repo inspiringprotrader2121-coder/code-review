@@ -22,6 +22,10 @@ if [[ $(grep -c -- "--include '.env.example'" scripts/deploy-safe.sh) -ne 5 ]]; 
   echo "deploy must allow .env.example through upload, stage, backup, apply, and rollback" >&2
   exit 1
 fi
+if [[ $(grep -c -- "--exclude '.DS_Store'" scripts/deploy-safe.sh) -ne 5 ]]; then
+  echo "deploy must exclude macOS metadata from upload, stage, backup, apply, and rollback" >&2
+  exit 1
+fi
 grep -Fq 'bash -s -- "$REMOTE_DIR" "$STAGE_DIR" "${SOURCES[@]}"' scripts/deploy-safe.sh || {
   echo "deploy does not pass selected sources to isolated stage preparation" >&2
   exit 1

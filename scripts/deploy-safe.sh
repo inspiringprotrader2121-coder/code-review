@@ -7,6 +7,7 @@ SSH_KEY=${SSH_KEY:-/Users/johnboy/Documents/Documents - John’s MacBook Air/00_
 EXCLUDES=(
   --include '.env.example'
   --exclude '.git/'
+  --exclude '.DS_Store'
   --exclude '.env'
   --exclude '.env.*'
   --exclude '.data/'
@@ -259,7 +260,7 @@ rm -rf "$stage"
 mkdir -p "$stage"
 rsync -a --delete \
   --include '.env.example' \
-  --exclude '.git/' --exclude '.env' --exclude '.env.*' \
+  --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' \
   --exclude 'build/' --exclude '*.pem' --exclude '*.key' \
   --exclude '*.db' --exclude '*.db-*' --exclude '*.sqlite' --exclude '*.sqlite3' \
@@ -396,7 +397,7 @@ rm -rf "$backup"
 mkdir -p "$backup"
 rsync -a --delete \
   --include '.env.example' \
-  --exclude '.git/' --exclude '.env' --exclude '.env.*' \
+  --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
   --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$live/" "$backup/"
@@ -422,7 +423,7 @@ stage=$2
 backup=$3
 rsync -a --delete-delay \
   --include '.env.example' \
-  --exclude '.git/' --exclude '.env' --exclude '.env.*' \
+  --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
   --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$stage/" "$live/"
@@ -479,7 +480,7 @@ live=$1
 backup=$2
 rsync -a --delete-delay \
   --include '.env.example' \
-  --exclude '.git/' --exclude '.env' --exclude '.env.*' \
+  --exclude '.git/' --exclude '.DS_Store' --exclude '.env' --exclude '.env.*' \
   --exclude '.data/' --exclude 'node_modules/' --exclude 'dist/' --exclude 'build/' \
   --exclude '*.pem' --exclude '*.key' --exclude '*.db' --exclude '*.db-*' \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$backup/" "$live/"
