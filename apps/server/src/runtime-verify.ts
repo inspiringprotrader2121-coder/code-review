@@ -65,7 +65,9 @@ function detectPackageManager(files: Map<string, string>): { pm: string; install
   if (files.has('pnpm-lock.yaml')) {
     return {
       pm: 'pnpm',
-      installCmd: `${TOOLS_PATH} && npm i -g pnpm@9 --ignore-scripts && pnpm install --frozen-lockfile --ignore-scripts`,
+      // --ignore-pnpmfile: --ignore-scripts does NOT skip .pnpmfile.cjs hooks;
+      // those run with network=bridge and can RCE/exfil during "install only".
+      installCmd: `${TOOLS_PATH} && npm i -g pnpm@9 --ignore-scripts && pnpm install --frozen-lockfile --ignore-scripts --config.ignore-pnpmfile=true`,
     };
   }
   if (files.has('yarn.lock')) {

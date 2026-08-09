@@ -6,6 +6,9 @@ import {
   type RuntimeStep,
   type RuntimeVerifyResult,
 } from './runtime-verify.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 const step = (name: string, ok: boolean, over: Partial<RuntimeStep> = {}): RuntimeStep => ({
   name,
@@ -50,6 +53,12 @@ test('a NEW failure (passes at base) is blamed on the PR; pre-existing ones are 
 
 test('returns null when nothing ran', () => {
   assert.equal(formatRuntimeEvidence({ ran: false, skippedReason: 'no package.json', steps: [] }), null);
+});
+
+test('pnpm install disables pnpmfile hooks (ignore-scripts alone is not enough)', () => {
+  const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'runtime-verify.ts'), 'utf8');
+  assert.match(src, /ignore-pnpmfile/);
+  assert.match(src, /pnpm install --frozen-lockfile --ignore-scripts --config\.ignore-pnpmfile=true/);
 });
 
 test('base-vs-head classification marks only failures reproduced by the same base step', () => {
