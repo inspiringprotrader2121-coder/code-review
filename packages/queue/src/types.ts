@@ -50,6 +50,9 @@ export interface ReviewJobPayload {
   attempts?: number;
   /** Stable source identity for webhook-originated command jobs. */
   sourceEventId?: string;
+  /** Subscription queue priority. Higher values are selected first within a
+   * bounded dequeue window; FIFO ordering is preserved within one priority. */
+  priority?: number;
 }
 
 export interface EnqueueResult {
@@ -79,7 +82,8 @@ export interface QueueDepth {
 export interface ReviewQueue {
   enqueue(job: ReviewJobPayload): Promise<EnqueueResult>;
   dequeue(): Promise<ReviewJobPayload | null>;
-  markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<void>;
+  /** Returns false when this worker no longer owns the durable claim. */
+  markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<boolean | void>;
   /** Extend this job's in-flight lease while it is still running.
    *  The Redis lease is a fixed TTL taken at claim time; a long review can
    *  outlive it, at which point another worker's SET NX succeeds and the SAME
@@ -89,7 +93,8 @@ export interface ReviewQueue {
   /** Persist in-memory job mutations (e.g. runId after reserve) into the durable
    *  PROCESSING backup so recoverOrphans requeues with the same resume identity. */
   persistJob?(job: ReviewJobPayload): Promise<void>;
-  markFailed(job: ReviewJobPayload, error: string): Promise<void>;
+  /** Returns false when this worker no longer owns the durable claim. */
+  markFailed(job: ReviewJobPayload, error: string): Promise<boolean | void>;
   releaseLockAndDrain(prKey: string): Promise<ReviewJobPayload | null>;
   /** Startup cleanup: clear stale in-flight locks + requeue pending. Returns count. */
   recoverOrphans(): Promise<number>;
@@ -101,6 +106,14 @@ export interface ReviewQueue {
   setProviderCooldown?(provider: string, durationMs: number): Promise<void>;
   /** Snapshot of waiting / in-flight work for the operator monitor. */
   depth?(): Promise<QueueDepth>;
+  /**
+   * Elect one worker to perform a periodic orphan-recovery pass. Redis-backed
+   * queues use a short ownership lease so every PM2 process does not scan the
+   * same durable processing lists at once. Memory queues intentionally omit
+   * this: their state is local to one development process.
+   */
+  acquireRecoveryLease?(): Promise<string | null>;
+  releaseRecoveryLease?(token: string): Promise<void>;
   /** Liveness probe for /health — true if the backing store is reachable. */
   ping(): Promise<boolean>;
   close(): Promise<void>;

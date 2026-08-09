@@ -7,7 +7,7 @@ import {
   fetchPullRequest,
   getInstallationIdForRepo,
 } from '@orvex-review/github';
-import { TenantService } from '@orvex-review/tenants';
+import { TenantService, planFeatures } from '@orvex-review/tenants';
 import {
   isTransientLlmError,
   killAllCodexChildren,
@@ -91,12 +91,11 @@ export async function finalizeQueueJob(
   queue: Pick<ReviewQueue, 'markCompleted' | 'markFailed'>,
   job: ReviewJobPayload,
   opts: { draftSkipped: boolean; prClosedMidRun: boolean },
-): Promise<void> {
+): Promise<boolean> {
   if (opts.prClosedMidRun) {
-    await queue.markFailed(job, 'pr_closed_mid_run');
-    return;
+    return (await queue.markFailed(job, 'pr_closed_mid_run')) !== false;
   }
-  await queue.markCompleted(job, { draftSkipped: opts.draftSkipped });
+  return (await queue.markCompleted(job, { draftSkipped: opts.draftSkipped })) !== false;
 }
 
 /** A restart has no durable per-stage checkpoint, so replaying an interrupted
@@ -139,7 +138,8 @@ export async function returnLateDequeuedJob(
   queue: Pick<ReviewQueue, 'markFailed' | 'releaseLockAndDrain' | 'enqueue'>,
   job: ReviewJobPayload,
 ): Promise<'newer-pending' | 'requeued'> {
-  await queue.markFailed(job, 'worker stopped before review start');
+  const owned = (await queue.markFailed(job, 'worker stopped before review start')) !== false;
+  if (!owned) throw new Error(`review lease lost before returning late dequeue for ${prKey(job)}`);
   const pending = await queue.releaseLockAndDrain(prKey(job));
   if (pending) return 'newer-pending';
   await queue.enqueue({ ...job, enqueuedAt: new Date().toISOString() });
@@ -148,6 +148,27 @@ export async function returnLateDequeuedJob(
 
 export function shouldReturnDequeuedJob(running: boolean, draining: boolean): boolean {
   return !running || draining;
+}
+
+/**
+ * Redis workers elect a short-lived owner before scanning for orphaned queue
+ * records. The owner deliberately leaves the lease until TTL expiry after the
+ * scan, so staggered PM2 timers cannot each repeat the same global scan in one
+ * cadence. Memory queues retain their simple development behavior.
+ */
+export async function recoverOrphansAsLeader(
+  queue: Pick<
+    ReviewQueue,
+    'recoverOrphans' | 'acquireRecoveryLease'
+  >,
+): Promise<number | null> {
+  if (!queue.acquireRecoveryLease) {
+    return queue.recoverOrphans();
+  }
+
+  const token = await queue.acquireRecoveryLease();
+  if (!token) return null;
+  return queue.recoverOrphans();
 }
 
 const MAX_CONCURRENT = resolveWorkerConcurrency();
@@ -203,6 +224,7 @@ export function startWorkerLoop(
     // double overage charge. Renewing at a third of the TTL tolerates two missed
     // beats. A crashed worker stops renewing, so the lock still expires.
     let leaseLost = false;
+    let finalizedOwned = false;
     const leaseTimer = queue.renewLease
       ? setInterval(() => {
           queue.renewLease?.(job).catch((err) => {
@@ -311,11 +333,11 @@ export function startWorkerLoop(
       // A close-aborted review is not DONE for this SHA. Clearing its SEEN
       // claim lets a later `reopened` event run; any already-coalesced reopen
       // drains after the lock is released in finally below.
-      await finalizeQueueJob(queue, job, { draftSkipped, prClosedMidRun });
+      finalizedOwned = await finalizeQueueJob(queue, job, { draftSkipped, prClosedMidRun });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[worker] failed ${pk}:`, message);
-      await queue.markFailed(job, message);
+      finalizedOwned = (await queue.markFailed(job, message)) !== false;
       // Re-queue a TRANSIENT failure (bounded) so a rate-limit/network blip on a
       // `synchronize` doesn't leave that PR silently unreviewed — the webhook
       // already returned 200, so GitHub won't redeliver. Non-transient failures
@@ -349,9 +371,11 @@ export function startWorkerLoop(
       // resurrect a lease the completion path just compare-and-deleted.
       if (leaseTimer) clearInterval(leaseTimer);
       inFlight.delete(job);
-      const next = await queue.releaseLockAndDrain(pk);
-      if (next) {
-        console.log(`[worker] coalesced follow-up ${pk} @ ${next.headSha.slice(0, 7)}`);
+      if (finalizedOwned) {
+        const next = await queue.releaseLockAndDrain(pk);
+        if (next) {
+          console.log(`[worker] coalesced follow-up ${pk} @ ${next.headSha.slice(0, 7)}`);
+        }
       }
     }
     });
@@ -408,7 +432,7 @@ export function startWorkerLoop(
     pump().catch((err) => console.error('[worker] pump error', err));
   }, pollMs);
   const recoveryInterval = setInterval(() => {
-    queue.recoverOrphans().catch((err) => {
+    recoverOrphansAsLeader(queue).catch((err) => {
       const message = (err as Error).message;
       console.error('[worker] orphan recovery error', err);
       void sendOperationalAlert({
@@ -567,6 +591,7 @@ export async function enqueueManualReview(
     pr: input.pr,
     headSha: input.headSha ?? pr.headSha,
     action: 'manual',
+    priority: planFeatures(config.store.getTenantPlan(tenantId)).priority,
     enqueuedAt: new Date().toISOString(),
   };
 

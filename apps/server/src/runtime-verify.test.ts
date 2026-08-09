@@ -3,9 +3,14 @@ import assert from 'node:assert/strict';
 import {
   formatRuntimeEvidence,
   markPreExistingFailures,
+  runtimeVerify,
   type RuntimeStep,
   type RuntimeVerifyResult,
 } from './runtime-verify.js';
+import type { runInSandbox } from './sandbox.js';
+import type { fetchRepoSnapshot } from '@orvex-review/github';
+
+const PINNED_IMAGE = `registry.example/orvex-runtime@sha256:${'a'.repeat(64)}`;
 
 const step = (name: string, ok: boolean, over: Partial<RuntimeStep> = {}): RuntimeStep => ({
   name,
@@ -68,4 +73,60 @@ test('base-vs-head classification marks only failures reproduced by the same bas
   assert.equal(head.steps[1].preExisting, false, 'head-only failure remains attributable to the PR');
   assert.equal(head.steps[2].preExisting, false, 'a successful head step can never be pre-existing');
   assert.equal(head.baseSteps, base.steps);
+});
+
+test('runtime verification forwards cancellation to the sandbox and does not continue after cancellation', async () => {
+  const controller = new AbortController();
+  const receivedSignals: Array<AbortSignal | undefined> = [];
+  const fetchSnapshot = (async () => new Map([
+    ['package.json', JSON.stringify({ scripts: { typecheck: 'tsc --noEmit', test: 'node --test' } })],
+  ])) as typeof fetchRepoSnapshot;
+  const runSandbox = (async (opts) => {
+    receivedSignals.push(opts.signal);
+    controller.abort('review closed');
+    return {
+      exitCode: null,
+      stdout: '',
+      stderr: '[sandbox] cancelled',
+      timedOut: false,
+      cancelled: true,
+      durationMs: 1,
+    };
+  }) as typeof runInSandbox;
+
+  const result = await runtimeVerify({} as never, 'owner', 'repo', 'head', {
+    baseSha: 'base',
+    signal: controller.signal,
+    dependencies: {
+      fetchSnapshot,
+      runSandbox,
+      checkSandboxRuntimeReadiness: async () => ({ ready: true, image: PINNED_IMAGE }),
+    },
+  });
+
+  assert.deepEqual(receivedSignals, [controller.signal]);
+  assert.deepEqual(result, { ran: false, skippedReason: 'runtime verification cancelled', steps: [] });
+});
+
+test('runtime verification fails closed before snapshotting when sandbox readiness is unavailable', async () => {
+  let fetched = false;
+  const result = await runtimeVerify({} as never, 'owner', 'repo', 'head', {
+    dependencies: {
+      fetchSnapshot: (async () => {
+        fetched = true;
+        return new Map();
+      }) as typeof fetchRepoSnapshot,
+      checkSandboxRuntimeReadiness: async () => ({
+        ready: false,
+        reason: 'internal sandbox runtime or configured image is unavailable',
+      }),
+    },
+  });
+
+  assert.equal(fetched, false);
+  assert.deepEqual(result, {
+    ran: false,
+    skippedReason: 'sandbox unavailable: internal sandbox runtime or configured image is unavailable',
+    steps: [],
+  });
 });

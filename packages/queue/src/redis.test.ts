@@ -352,6 +352,37 @@ test(
 );
 
 test(
+  'Redis recovery lease elects one periodic recovery owner and fences stale release',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    await cleanup.flushdb();
+    const first = new RedisReviewQueue(redisUrl!);
+    const second = new RedisReviewQueue(redisUrl!);
+    t.after(async () => {
+      await first.close();
+      await second.close();
+      await cleanup.flushdb();
+      await cleanup.quit();
+    });
+
+    const firstToken = await first.acquireRecoveryLease!();
+    assert.ok(firstToken);
+    assert.equal(await second.acquireRecoveryLease!(), null);
+
+    // Simulate expiry/re-election. A stale owner must not delete the newer
+    // leader's lease during its finally block.
+    await cleanup.del('orvex-review:recovery-leader');
+    const secondToken = await second.acquireRecoveryLease!();
+    assert.ok(secondToken);
+    await first.releaseRecoveryLease!(firstToken!);
+    assert.equal(await first.acquireRecoveryLease!(), null);
+    await second.releaseRecoveryLease!(secondToken!);
+    assert.ok(await first.acquireRecoveryLease!());
+  },
+);
+
+test(
   'a stale worker cannot resurrect its obsolete SHA after a newer owner finishes',
   { skip: !redisUrl },
   async (t) => {
@@ -417,6 +448,31 @@ test(
     assert.equal(recovered[0]! + recovered[1]!, 1);
     assert.equal(await cleanup.llen('orvex-review:jobs'), 1);
     assert.equal(await cleanup.llen('orvex-review:processing'), 0);
+  },
+);
+
+test(
+  'Redis dequeue honors priority and reports pending depth without a key scan',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    await cleanup.flushdb();
+    const queue = new RedisReviewQueue(redisUrl!);
+    t.after(async () => {
+      await queue.close();
+      await cleanup.flushdb();
+      await cleanup.quit();
+    });
+
+    const low = { ...job('low', 91, 'manual'), priority: 0 };
+    const high = { ...job('high', 92, 'manual'), priority: 3 };
+    await queue.enqueue(low);
+    await queue.enqueue(high);
+    const claimedHigh = await queue.dequeue();
+    assert.equal(claimedHigh?.headSha, 'high');
+    await queue.enqueue({ ...job('high-next', 92, 'synchronize'), priority: 3 });
+    assert.equal((await queue.depth!()).waitingOnPr, 1);
+    assert.equal((await queue.dequeue())?.headSha, 'low');
   },
 );
 

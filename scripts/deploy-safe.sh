@@ -30,6 +30,8 @@ DEFAULT_SOURCES=(
   docs
   scripts/deploy-safe.sh
   scripts/deploy-safe.test.sh
+  scripts/provision-internal-sandbox.sh
+  scripts/provision-internal-sandbox.test.sh
   scripts/backup-db.mjs
   scripts/restore-db-drill.mjs
   scripts/orvex-backup.cron
@@ -92,19 +94,8 @@ fi
 # running process prove that it is serving the exact source + dependency graph
 # that passed the staged Linux checks, without exposing any runtime settings.
 if ! RELEASE_COMMIT=$(git rev-parse --verify HEAD 2>/dev/null); then
-  if [[ "${DEPLOY_TEST_MODE:-0}" == "1" && "${REMOTE%%:*}" == "stage@example.test" && -f release.json ]]; then
-    RELEASE_COMMIT=$(node -e '
-      const value = require("./release.json");
-      if (!/^[0-9a-f]{40}$/.test(value.commit ?? "")) process.exit(1);
-      process.stdout.write(value.commit);
-    ') || {
-      echo "[deploy] unable to resolve staged test release metadata" >&2
-      exit 2
-    }
-  else
-    echo "[deploy] unable to resolve the local Git commit for release metadata" >&2
-    exit 2
-  fi
+  echo "[deploy] unable to resolve the local Git commit for release metadata" >&2
+  exit 2
 fi
 if ! RELEASE_LOCKFILE_SHA256=$(shasum -a 256 pnpm-lock.yaml | awk '{print $1}'); then
   echo "[deploy] unable to hash pnpm-lock.yaml for release metadata" >&2
@@ -137,10 +128,18 @@ if [[ "$MODE" == "--restart" ]]; then
     exit 2
   fi
   if [[ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
-    if [[ "${DEPLOY_TEST_MODE:-0}" != "1" || "$REMOTE_HOST" != "stage@example.test" ]]; then
-      echo "[deploy] refusing restart from a dirty worktree; commit the exact release first" >&2
-      exit 2
-    fi
+    echo "[deploy] refusing restart from a dirty worktree; commit the exact release first" >&2
+    exit 2
+  fi
+
+  # Upload only bytes tracked by the exact release commit. A normal rsync from
+  # the checkout can include ignored caches or local-only files inside selected
+  # source directories even when `git status` is clean.
+  LOCAL_RELEASE=$(mktemp -d)
+  if ! git archive "$RELEASE_COMMIT" -- "${SOURCES[@]}" | tar -x -C "$LOCAL_RELEASE"; then
+    rm -rf -- "$LOCAL_RELEASE"
+    echo "[deploy] could not materialize the committed release sources" >&2
+    exit 2
   fi
 
   SSH=(ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE_HOST")
@@ -200,6 +199,7 @@ REMOTE_UNLOCK
   }
   cleanup() {
     local status=$?
+    rm -rf -- "$LOCAL_RELEASE"
     if ((drain_set)); then
       if ((status == 0)); then
         if ! clear_drain; then status=20; fi
@@ -288,7 +288,7 @@ for source in "$@"; do
   rm -rf -- "$stage/$source"
 done
 REMOTE_STAGE
-  "${stage_cmd[@]}"
+  (cd "$LOCAL_RELEASE" && "${stage_cmd[@]}")
 
   # release.json is a generated, non-secret deployment artifact. It must be in
   # the stage before tests and activation; the ordinary apply/backup/rollback
@@ -388,6 +388,10 @@ REMOTE_CHECK
   done
   if [[ "$IDLE" != "1" ]]; then
     echo "[deploy] aborting before touching live files: service did not become drained and idle" >&2
+    exit 3
+  fi
+  if [[ -z "$PREVIOUS_RELEASE_ID" ]]; then
+    echo "[deploy] aborting before touching live files: prior release identity is unavailable" >&2
     exit 3
   fi
 
@@ -533,23 +537,22 @@ REMOTE_ROLLBACK
     if ! rollback_release; then exit 20; fi
     exit 8
   fi
+  if ! install_backup_schedule; then
+    echo "[deploy] CRITICAL: could not install the local database backup schedule" >&2
+    if ! rollback_release; then exit 20; fi
+    exit 11
+  fi
   if ! clear_drain; then
     echo "[deploy] drain release failed; restoring the previous release" >&2
     if ! rollback_release; then exit 20; fi
     exit 10
   fi
   if ! ready_json "$READY_ATTEMPTS" "$READY_SLEEP_S" 1 0 "$RELEASE_ID" >/dev/null; then
-    echo "[deploy] app did not report healthy after releasing drain; restoring the previous release" >&2
+    echo "[deploy] app did not report healthy after releasing drain; preserving the new release under drain for investigation" >&2
     if ! set_drain; then
-      echo "[deploy] could not re-enable the drain before rollback" >&2
+      echo "[deploy] CRITICAL: could not re-enable the drain after the post-release health failure" >&2
     fi
-    if ! rollback_release; then exit 20; fi
     exit 9
-  fi
-  if ! install_backup_schedule; then
-    echo "[deploy] CRITICAL: could not install the local database backup schedule" >&2
-    if ! rollback_release; then exit 20; fi
-    exit 11
   fi
   "${SSH[@]}" bash -s -- "$STAGE_DIR" "$BACKUP_DIR" <<'REMOTE_CLEAN'
 set -euo pipefail

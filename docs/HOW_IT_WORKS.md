@@ -22,10 +22,10 @@ GitHub event ──▶ /webhooks/github ──▶ queue ──▶ worker ──�
    in-memory for dev. Jobs are deduped and per-PR locked so the same SHA isn't
    reviewed twice and commands never collide.
 3. **Worker** (`apps/server/src/queue-runner.ts`) — a bounded pump pulls jobs at
-   the resolved process capacity (default 8). With Codex CLI API-key mode enabled,
-   `ORVEX_CODEX_APIKEY_CONCURRENCY` can raise that capacity; keep it equal to
-   `ORVEX_MAX_CONCURRENT_REVIEWS`. Provider admission gates individual calls, so
-   an unrelated Luna call never serializes a whole review.
+   the worker ceiling set by `ORVEX_MAX_CONCURRENT_REVIEWS` (default 8).
+   `ORVEX_CODEX_APIKEY_CONCURRENCY` only caps simultaneous Codex CLI stages and
+   cannot raise that whole-review worker ceiling. Provider admission gates
+   individual calls, so an unrelated Luna call never serializes a whole review.
 4. **Review pipeline** (`apps/server/src/pipeline.ts`) — builds context, runs the
    review, verifies findings, posts the comment, records the run.
 
@@ -245,7 +245,7 @@ callback refuses to rebind an installation already owned by another workspace
 | `ORVEX_DEEPSEEK_API_KEY` / `ORVEX_DEEPSEEK_FLASH_MODEL` | required DeepSeek key + Flash model id (default `deepseek-v4-flash`) |
 | `QUEUE_BACKEND` | `redis` (prod) or `memory` |
 | `REDIS_URL` | Redis connection (with auth) |
-| `ORVEX_MAX_CONCURRENT_REVIEWS` | base reviews per worker process (default 8); keep equal to the API-key Codex capacity when Codex CLI is enabled |
+| `ORVEX_MAX_CONCURRENT_REVIEWS` | whole-review worker ceiling per process (default 8); Codex home concurrency cannot raise it |
 | `ORVEX_CODEX_APIKEY_CONCURRENCY` | parallel pinned Codex CLI processes sharing the API-key home (default 8; bounded to 32); this caps Codex stages and never raises the whole-review worker ceiling |
 | `ORVEX_CODEX_HOME` | dedicated API-key-authenticated Codex home; OAuth is refused |
 | `ORVEX_REVIEW_CONCURRENCY` | maximum concurrently scheduled stages within one review (default 3) |

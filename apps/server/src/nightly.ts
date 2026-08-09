@@ -109,6 +109,7 @@ export async function enqueueNightlyScans(
       pr: 0,
       headSha: 'nightly',
       scanDay,
+      priority: planFeatures(t.plan).priority,
       enqueuedAt: new Date().toISOString(),
     });
     enqueued++;

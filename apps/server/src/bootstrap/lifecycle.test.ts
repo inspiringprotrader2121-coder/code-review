@@ -25,6 +25,10 @@ test('startup recovery precedes worker start and shutdown order is idempotent', 
   } as unknown as ReviewQueue;
 
   const lifecycle = await startApplicationLifecycle(db, queue, 90_000, {
+    prepareSandboxRuntime: async () => {
+      events.push('sandbox');
+      return { enabled: true, removedContainers: 2, image: 'runtime@sha256:test' };
+    },
     cleanupCheckouts: () => {
       events.push('cleanup');
       return 0;
@@ -43,6 +47,7 @@ test('startup recovery precedes worker start and shutdown order is idempotent', 
   });
 
   assert.deepEqual(events, [
+    'sandbox',
     'cleanup',
     'stale:90000',
     'prune',
@@ -54,6 +59,33 @@ test('startup recovery precedes worker start and shutdown order is idempotent', 
   await lifecycle.shutdown();
   await lifecycle.shutdown();
   assert.deepEqual(events.slice(-3), ['nightly-stop', 'worker-stop', 'queue-close']);
+});
+
+test('enabled sandbox preparation failure prevents all recovery and worker startup', async () => {
+  const events: string[] = [];
+  const alerts: string[] = [];
+  const db = {
+    failStaleRunningRuns: () => { events.push('stale'); return 0; },
+    pruneEphemeralData: () => { events.push('prune'); return 0; },
+  } as unknown as AppDatabase;
+  const queue = {
+    recoverOrphans: async () => { events.push('recover'); return 0; },
+  } as unknown as ReviewQueue;
+
+  await assert.rejects(
+    startApplicationLifecycle(db, queue, 60_000, {
+      prepareSandboxRuntime: async () => { throw new Error('docker timeout'); },
+      cleanupCheckouts: () => { events.push('cleanup'); return 0; },
+      startWorker: () => { events.push('worker-start'); return async () => {}; },
+      startNightly: () => { events.push('nightly-start'); return () => {}; },
+      retryMeterEvents: async () => undefined,
+      sendAlert: async (input) => { alerts.push(`${input.event}:${input.severity}`); return true; },
+      log: { log: () => {}, error: () => {} },
+    }),
+    /docker timeout/,
+  );
+  assert.deepEqual(events, []);
+  assert.deepEqual(alerts, ['internal-sandbox-startup-failed:critical']);
 });
 
 test('failed queue recovery alerts and prevents worker startup', async () => {
@@ -71,6 +103,7 @@ test('failed queue recovery alerts and prevents worker startup', async () => {
       cleanupCheckouts: () => 0,
       startWorker: () => { throw new Error('worker must not start'); },
       startNightly: () => () => {},
+      prepareSandboxRuntime: async () => ({ enabled: false, removedContainers: 0 }),
       retryMeterEvents: async () => undefined,
       sendAlert: async (input) => {
         alerts.push(`${input.event}:${input.severity}`);

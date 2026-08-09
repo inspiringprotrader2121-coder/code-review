@@ -315,10 +315,10 @@ function boundedEnvInt(name: string, fallback: number, min: number, max: number)
  *  1. the feature flag is on;
  *  2. the plan designates an OpenAI-model pass 1 (other tiers were never
  *     designed for it, and shouldn't get CLI-routed by accident);
- *  3. the repo is ALLOWLISTED. codex runs with
- *     `--dangerously-bypass-approvals-and-sandbox` — a real shell as this OS
- *     user with filesystem and network access, against attacker-authored PR
- *     code. This is a security boundary, not a preference. Unset = no repo.
+ *  3. the repo is explicitly allowlisted, OR the internal sandbox has been
+ *     enabled and explicitly verified. The latter additionally requires the
+ *     CLI allowlist wildcard, which is rejected before that verification gate.
+ *     This is a security boundary, not a preference. Unset = no repo.
  */
 /**
  * Re-export pass-budget helpers so existing `from './pipeline.js'` test imports keep working.
@@ -552,7 +552,6 @@ export function providerConfigurationIssue(
   }
   return null;
 }
-
 
 const LIMIT_NUDGE_COOLDOWN_MS = 30 * 60_000;
 
@@ -914,7 +913,9 @@ async function executeReview(
   // all key on head_sha.
   if (runId && effectiveSha !== job.headSha) {
     console.log(`[worker] head moved ${job.headSha.slice(0, 7)} → ${effectiveSha.slice(0, 7)} since enqueue; recording run on effective SHA`);
-    config.store.setReviewRunHeadSha(runId, effectiveSha);
+    if (!config.store.setReviewRunHeadSha(runId, effectiveSha)) {
+      throw new Error('review run ownership lost before head synchronization');
+    }
   }
 
   const labels = await fetchPrLabels(octokit, ref);
@@ -966,6 +967,7 @@ async function executeReview(
   // current process; a 5s authoritative GitHub poll provides the durable
   // fallback across restarts or future multi-process workers.
   let prClosedMidRun = false;
+  let runOwnershipLost = false;
   const reviewAbortController = new AbortController();
   const cancelClosedReview = () => {
     if (!prClosedMidRun) {
@@ -974,6 +976,15 @@ async function executeReview(
     }
     if (!reviewAbortController.signal.aborted) {
       reviewAbortController.abort('pr_closed_mid_run');
+    }
+  };
+  const cancelForOwnershipLoss = () => {
+    if (!runOwnershipLost) {
+      runOwnershipLost = true;
+      console.warn(`[worker] review run ownership lost for PR #${number} — aborting active paid calls`);
+    }
+    if (!reviewAbortController.signal.aborted) {
+      reviewAbortController.abort('review_run_ownership_lost');
     }
   };
   const parentSignal = activeReviewSignal();
@@ -985,7 +996,7 @@ async function executeReview(
     ? Math.min(900_000, Math.max(1_000, Math.floor(configuredAbortPoll)))
     : 5_000;
   const abortPoll = setInterval(() => {
-    if (runId) config.store.heartbeatReviewRun(runId);
+    if (runId && !config.store.heartbeatReviewRun(runId)) cancelForOwnershipLoss();
     isPrStillOpen(octokit, ref)
       .then((open) => {
         if (!open) cancelClosedReview();
@@ -1101,7 +1112,7 @@ async function executeReview(
     usage[accounted.tier].in += accounted.inputTokens;
     usage[accounted.tier].out += accounted.outputTokens;
     if (runId) {
-      config.store.recordReviewRunUsage({
+      const recorded = config.store.recordReviewRunUsage({
         runId,
         tenantId,
         provider: accounted.provider,
@@ -1116,12 +1127,13 @@ async function executeReview(
         tokenSource: u.tokenSource ?? (target.api === 'chat' ? 'estimate' : 'provider'),
         attemptId: u.attemptId,
       });
+      if (!recorded) cancelForOwnershipLoss();
     }
   };
   const onAttemptFor = (tier: PassTier, passName: string) => (event: LlmAttemptEvent) => {
     if (!runId) return;
     if (event.phase === 'started') {
-      config.store.startReviewRunAttempt({
+      const started = config.store.startReviewRunAttempt({
         id: event.attemptId,
         runId,
         tenantId,
@@ -1135,15 +1147,17 @@ async function executeReview(
         keyIndex: event.keyIndex,
         startedAt: event.startedAt,
       });
+      if (!started) cancelForOwnershipLoss();
       return;
     }
-    config.store.completeReviewRunAttempt({
+    const completed = config.store.completeReviewRunAttempt({
       id: event.attemptId,
       outcome: event.outcome,
       durationMs: event.durationMs,
       completedAt: event.completedAt,
       error: event.error,
     });
+    if (!completed) cancelForOwnershipLoss();
   };
   // full-file contents used by both the review call and the verification pass
   let reviewContextFiles: Array<{ path: string; content: string }> = [];
@@ -2289,12 +2303,19 @@ async function executeReview(
   // ALWAYS post a review — even with zero findings — so a completed review is
   // never silent. A clean review still reports the files it read, an assessment,
   // and what it checked for.
+  if (runId && !config.store.heartbeatReviewRun(runId)) cancelForOwnershipLoss();
+  if (runOwnershipLost) {
+    throw new Error('review run ownership lost before publication; discarding this worker result');
+  }
   if (config.leaseValid && !(await config.leaseValid())) {
     throw new Error('review lease lost before publication; discarding this worker result');
   }
   // The webhook/poll signal stays active through verification. Re-check GitHub
   // immediately before publication as the final non-atomic boundary backstop.
   if (reviewAbortController.signal.aborted || !(await isPrStillOpen(octokit, ref))) {
+    if (runOwnershipLost) {
+      throw new Error('review run ownership lost before publication; discarding this worker result');
+    }
     console.log(`[worker] PR #${number} closed before publication — discarding results, not posting`);
     return {
       findingCount: 0,
@@ -2515,11 +2536,23 @@ async function executeReview(
   if (plan.codeExecution && process.env.ORVEX_CODE_EXECUTION === '1') {
     try {
       console.log(`[worker] tier-2 runtime verify (plan=${plan.id}) PR #${number}…`);
-      const rv = await runtimeVerify(octokit, owner, repo, effectiveSha, { baseSha: pr.baseSha });
+      const rv = await runtimeVerify(octokit, owner, repo, effectiveSha, {
+        baseSha: pr.baseSha,
+        signal: reviewAbortController.signal,
+      });
       const evidence = formatRuntimeEvidence(rv);
       if (evidence) {
-        await octokit.rest.issues.createComment({ owner, repo, issue_number: number, body: evidence });
-        console.log(`[worker] tier-2 runtime verify posted: ran=${rv.ran} steps=${rv.steps.length}`);
+        const mayPublish = await mayPublishRuntimeEvidence(
+          reviewAbortController.signal,
+          config.leaseValid,
+          () => isPrStillOpen(octokit, ref),
+        );
+        if (mayPublish) {
+          await octokit.rest.issues.createComment({ owner, repo, issue_number: number, body: evidence });
+          console.log(`[worker] tier-2 runtime verify posted: ran=${rv.ran} steps=${rv.steps.length}`);
+        } else {
+          console.log(`[worker] tier-2 runtime verify evidence discarded: review no longer owns an open PR`);
+        }
       } else {
         console.log(`[worker] tier-2 runtime verify skipped: ${rv.skippedReason}`);
       }
@@ -2553,6 +2586,23 @@ async function executeReview(
   } finally {
     clearInterval(abortPoll);
     parentSignal?.removeEventListener('abort', cancelClosedReview);
+  }
+}
+
+/** Runtime evidence is a second GitHub write after the main review. Re-check
+ * lease ownership and cancellation so a displaced worker cannot post late. */
+export async function mayPublishRuntimeEvidence(
+  signal: AbortSignal,
+  leaseValid: WorkerConfig['leaseValid'],
+  isOpen: () => Promise<boolean>,
+): Promise<boolean> {
+  if (signal.aborted) return false;
+  if (leaseValid && !(await leaseValid())) return false;
+  if (signal.aborted) return false;
+  try {
+    return (await isOpen()) && !signal.aborted;
+  } catch {
+    return false;
   }
 }
 

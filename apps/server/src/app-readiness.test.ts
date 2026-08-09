@@ -76,6 +76,42 @@ test('health is live-only while readiness checks both database and queue', async
   createAppDatabase().close();
 });
 
+test('readiness reports Redis-wide in-flight work from the queue ledger', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-app-global-ready-'));
+  const db = new AppDatabase(':memory:');
+  const queue = {
+    async ping() { return true; },
+    async depth() { return { queued: 2, waitingOnPr: 1, inFlight: 4, oldestQueuedAt: null }; },
+  } as unknown as ReviewQueue;
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const app = createApp(queue, { db, releaseFile: path.join(dir, 'missing-release.json') });
+  const ready = await app.request('/ready');
+  assert.equal(ready.status, 200);
+  assert.equal((await ready.json() as Record<string, unknown>).activeJobs, 4);
+});
+
+test('readiness fails closed when the queue-wide activity probe cannot be read', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-app-global-ready-fail-'));
+  const db = new AppDatabase(':memory:');
+  const queue = {
+    async ping() { return true; },
+    async depth() { throw new Error('Redis depth unavailable'); },
+  } as unknown as ReviewQueue;
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const app = createApp(queue, { db, releaseFile: path.join(dir, 'missing-release.json') });
+  const ready = await app.request('/ready');
+  assert.equal(ready.status, 503);
+  assert.equal((await ready.json() as Record<string, unknown>).queue, 'down');
+});
+
 test('readiness exposes only a valid release identity from injected metadata', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-release-readiness-'));
   const releaseFile = path.join(dir, 'release.json');

@@ -210,6 +210,7 @@ export function webhookRoutes(queue: ReviewQueue, dependencies: WebhookRouteDepe
       action: 'command',
       fix,
       sourceEventId: extra?.sourceEventId ?? fix?.sourceEventId,
+      priority: planFeatures(db.getTenantPlan(installation.tenantId)).priority,
       enqueuedAt: new Date().toISOString(),
     };
     const result = await queue.enqueue(job);
@@ -985,6 +986,7 @@ export function webhookRoutes(queue: ReviewQueue, dependencies: WebhookRouteDepe
       pr,
       headSha,
       action: action as ReviewJobPayload['action'],
+      priority: planFeatures(db.getTenantPlan(installation.tenantId)).priority,
       enqueuedAt: new Date().toISOString(),
     };
 

@@ -16,15 +16,22 @@ const SEEN_PREFIX = 'orvex-review:seen:';
 const DONE_PREFIX = 'orvex-review:done:';
 const INFLIGHT_PREFIX = 'orvex-review:inflight:';
 const PENDING_PREFIX = 'orvex-review:pending:';
+const PENDING_COUNT_KEY = 'orvex-review:pending-count';
 const PROCESSING_KEY = 'orvex-review:processing';
 const PROCESSING_META_PREFIX = 'orvex-review:processing-meta:';
 const PROVIDER_LEASE_PREFIX = 'orvex-review:provider-leases:';
 const PROVIDER_COOLDOWN_PREFIX = 'orvex-review:provider-cooldown:';
+const RECOVERY_LEASE_KEY = 'orvex-review:recovery-leader';
 // Recovery runs periodically while workers are active. A longer grace covers
 // the dequeue→claim handoff and a brief Redis/CPU stall without requeueing a
 // payload that its original worker is still about to claim.
 const PROCESSING_RECOVERY_GRACE_MS = 30_000;
 const PROVIDER_LEASE_TTL_MS = 960_000;
+// Recovery is an administrative scan, not a job lease. Keep one owner for
+// longer than the 30-second worker interval so multiple PM2 processes cannot
+// repeatedly scan and alert for the same orphan state. A crash releases it by
+// expiry; normal completion compare-and-deletes it immediately.
+const RECOVERY_LEASE_TTL_MS = 90_000;
 
 const ACQUIRE_PROVIDER_LEASE_LUA = `
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
@@ -42,6 +49,12 @@ if requested > current then
   return requested
 end
 return current`;
+
+const RELEASE_RECOVERY_LEASE_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0`;
 
 const RECOVER_PROCESSING_LUA = `
 local cur = redis.call('GET', KEYS[3])
@@ -83,6 +96,8 @@ local raw = redis.call('LINDEX', KEYS[1], 0)
 if not raw then return false end
 if raw ~= ARGV[1] then return 'retry' end
 redis.call('LPOP', KEYS[1])
+local pendingCount = tonumber(redis.call('GET', KEYS[5]) or '0')
+if pendingCount > 0 then redis.call('DECR', KEYS[5]) end
 redis.call('DEL', KEYS[3])
 redis.call('RPUSH', KEYS[4], raw)
 return raw`;
@@ -115,6 +130,7 @@ if ARGV[2] == 'review' then
 end
 if coalesced == 0 then
   redis.call('RPUSH', KEYS[2], ARGV[1])
+  redis.call('INCR', KEYS[3])
 end`;
 
 // ATOMIC enqueue decision (closes the enqueue→coalesce TOCTOU): check the PR's
@@ -124,7 +140,7 @@ end`;
 // once the PR goes idle). Serialized against the drain, every interleaving is
 // safe: lock held → pending (the drain pops it); lock gone → main queue.
 // KEYS[1]=seen key, KEYS[2]=inflight key, KEYS[3]=pending list,
-// KEYS[4]=main queue. ARGV[4] is the seen-key prefix, used to release the
+// KEYS[4]=main queue, KEYS[5]=pending counter. ARGV[4] is the seen-key prefix, used to release the
 // superseded automatic review's marker when coalescing.
 const ENQUEUE_LUA = `
 if redis.call('SET', KEYS[1], '1', 'EX', ARGV[3], 'NX') == false then
@@ -150,6 +166,7 @@ if redis.call('EXISTS', KEYS[2]) == 1 then
   end
   if coalesced == 1 then return 'coalesced' end
   redis.call('RPUSH', KEYS[3], ARGV[1])
+  redis.call('INCR', KEYS[5])
   return 'coalesced'
 end
 redis.call('RPUSH', KEYS[4], ARGV[1])
@@ -159,7 +176,8 @@ return 'enqueued'`;
 // is already in flight — coalesce into pending, as ONE step (same TOCTOU as
 // enqueue: a non-atomic claim-then-stash could strand the job behind a drain
 // that already ran).
-// KEYS[1]=inflight key, KEYS[2]=pending list. ARGV[1]=raw job, ARGV[2]=kind,
+// KEYS[1]=inflight key, KEYS[2]=pending list, KEYS[3]=pending counter.
+// ARGV[1]=raw job, ARGV[2]=kind,
 // ARGV[3]=lock TTL seconds, ARGV[4]=immutable claim token, ARGV[5]=seen prefix.
 const CLAIM_LUA = `
 local ok = redis.call('SET', KEYS[1], ARGV[4] .. '\\n' .. ARGV[1], 'EX', ARGV[3], 'NX')
@@ -171,8 +189,26 @@ return 'pending'`;
 // with the immutable claim token lets finalization/recovery distinguish two
 // workers that handled byte-identical payloads at different times.
 const DEQUEUE_LUA = `
-local raw = redis.call('LPOP', KEYS[1])
-if not raw then return false end
+local count = math.min(50, redis.call('LLEN', KEYS[1]))
+if count == 0 then return false end
+local selectedIndex = 0
+local selectedPriority = -1000000
+for i = 0, count - 1 do
+  local candidate = redis.call('LINDEX', KEYS[1], i)
+  local priority = 0
+  local ok, decoded = pcall(cjson.decode, candidate)
+  if ok and decoded and tonumber(decoded.priority) then
+    priority = math.floor(tonumber(decoded.priority))
+  end
+  if priority > selectedPriority then
+    selectedPriority = priority
+    selectedIndex = i
+  end
+end
+local raw = redis.call('LINDEX', KEYS[1], selectedIndex)
+local marker = ARGV[1] .. ':reserved'
+redis.call('LSET', KEYS[1], selectedIndex, marker)
+redis.call('LREM', KEYS[1], 1, marker)
 redis.call('RPUSH', KEYS[2], ARGV[1] .. '\\n' .. raw)
 return raw`;
 
@@ -182,6 +218,8 @@ return raw`;
 const DRAIN_LUA = `
 local raw = redis.call('LPOP', KEYS[1])
 if not raw then return false end
+local pendingCount = tonumber(redis.call('GET', KEYS[3]) or '0')
+if pendingCount > 0 then redis.call('DECR', KEYS[3]) end
 redis.call('RPUSH', KEYS[2], raw)
 return raw`;
 
@@ -269,6 +307,7 @@ export class RedisReviewQueue implements ReviewQueue {
   private readonly lockTokens = new WeakMap<ReviewJobPayload, string>();
 
   private readonly maxResumeAfterRestart: number;
+  private pendingRecoveryCursor = '0';
 
   constructor(url: string, options: RedisReviewQueueOptions = {}) {
     this.redis = new Redis(url);
@@ -349,6 +388,16 @@ export class RedisReviewQueue implements ReviewQueue {
     );
   }
 
+  async acquireRecoveryLease(): Promise<string | null> {
+    const token = randomUUID();
+    const acquired = await this.redis.set(RECOVERY_LEASE_KEY, token, 'PX', RECOVERY_LEASE_TTL_MS, 'NX');
+    return acquired === 'OK' ? token : null;
+  }
+
+  async releaseRecoveryLease(token: string): Promise<void> {
+    await this.redis.eval(RELEASE_RECOVERY_LEASE_LUA, 1, RECOVERY_LEASE_KEY, token);
+  }
+
   async enqueue(job: ReviewJobPayload): Promise<EnqueueResult> {
     const idKey = jobIdempotencyKey(job);
     const pk = prKey(job);
@@ -375,11 +424,12 @@ export class RedisReviewQueue implements ReviewQueue {
     // queue. This prevents a failed enqueue from stranding the idempotency key.
     const result = await this.redis.eval(
       ENQUEUE_LUA,
-      4,
+      5,
       `${SEEN_PREFIX}${idKey}`,
       `${INFLIGHT_PREFIX}${pk}`,
       `${PENDING_PREFIX}${pk}`,
       QUEUE_KEY,
+      PENDING_COUNT_KEY,
       raw,
       kind,
       86400,
@@ -437,9 +487,10 @@ export class RedisReviewQueue implements ReviewQueue {
 
       const claimed = await this.redis.eval(
         CLAIM_LUA,
-        2,
+        3,
         `${INFLIGHT_PREFIX}${pk}`,
         `${PENDING_PREFIX}${pk}`,
+        PENDING_COUNT_KEY,
         raw as string,
         job.kind ?? 'review',
         LEASE_TTL_SECONDS,
@@ -459,7 +510,7 @@ export class RedisReviewQueue implements ReviewQueue {
     return null;
   }
 
-  async markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<void> {
+  async markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<boolean> {
     let doneKeys: string[];
     if (opts?.draftSkipped) {
       doneKeys = [`${DONE_PREFIX}${draftSkipIdempotencyKey(job)}`];
@@ -476,6 +527,7 @@ export class RedisReviewQueue implements ReviewQueue {
     if (!(await this.finalizeOwnedClaim(job, false, doneKeys))) {
       throw new Error(`review lease lost before completion for ${prKey(job)}`);
     }
+    return true;
   }
 
   async renewLease(job: ReviewJobPayload): Promise<void> {
@@ -501,9 +553,9 @@ export class RedisReviewQueue implements ReviewQueue {
    */
   async persistJob(job: ReviewJobPayload): Promise<void> {
     const claim = this.lockTokens.get(job);
-    if (!claim) return;
+    if (!claim) throw new Error(`review lease lost before job persistence for ${prKey(job)}`);
     const separator = claim.indexOf('\n');
-    if (separator < 0) return;
+    if (separator < 0) throw new Error(`invalid review claim before job persistence for ${prKey(job)}`);
     const token = claim.slice(0, separator);
     const oldRaw = claim.slice(separator + 1);
     const newRaw = JSON.stringify(job);
@@ -538,7 +590,10 @@ return 1
       newClaim,
       LEASE_TTL_SECONDS,
     );
-    if (Number(replaced) !== 1) return;
+    if (Number(replaced) !== 1) {
+      this.lockTokens.delete(job);
+      throw new Error(`review lease lost before job persistence for ${prKey(job)}`);
+    }
 
     const oldMeta = processingMetaKey(claim);
     const newMeta = processingMetaKey(newClaim);
@@ -552,8 +607,8 @@ return 1
     this.lockTokens.set(job, newClaim);
   }
 
-  async markFailed(job: ReviewJobPayload, _error: string): Promise<void> {
-    await this.finalizeOwnedClaim(job, true);
+  async markFailed(job: ReviewJobPayload, _error: string): Promise<boolean> {
+    return this.finalizeOwnedClaim(job, true);
   }
 
   private async finalizeOwnedClaim(
@@ -586,9 +641,10 @@ return 1
   async releaseLockAndDrain(prKeyStr: string): Promise<ReviewJobPayload | null> {
     const raw = (await this.redis.eval(
       DRAIN_LUA,
-      2,
+      3,
       `${PENDING_PREFIX}${prKeyStr}`,
       QUEUE_KEY,
+      PENDING_COUNT_KEY,
     )) as string | null | false;
     if (!raw) return null;
 
@@ -654,7 +710,9 @@ return 1
       }
     }
 
-    const pendingKeys = await this.scanKeys(`${PENDING_PREFIX}*`);
+    const pendingPage = await this.scanKeysPage(`${PENDING_PREFIX}*`, this.pendingRecoveryCursor, 500);
+    this.pendingRecoveryCursor = pendingPage.cursor;
+    const pendingKeys = pendingPage.keys;
     for (const key of pendingKeys) {
       const pendingPrKey = key.slice(PENDING_PREFIX.length);
       if (await this.redis.exists(`${INFLIGHT_PREFIX}${pendingPrKey}`)) continue;
@@ -666,16 +724,18 @@ return 1
           job = JSON.parse(raw) as ReviewJobPayload;
         } catch {
           // Remove malformed queue input; it cannot be executed safely.
-          await this.redis.lrem(key, 1, raw);
+          const removed = await this.redis.lrem(key, 1, raw);
+          await this.decrementPendingAfterMalformedRemoval(removed);
           continue;
         }
         const moved = await this.redis.eval(
           RECOVER_PENDING_LUA,
-          4,
+          5,
           key,
           `${INFLIGHT_PREFIX}${pendingPrKey}`,
           `${SEEN_PREFIX}${jobIdempotencyKey(job)}`,
           QUEUE_KEY,
+          PENDING_COUNT_KEY,
           raw,
         );
         if (!moved) break;
@@ -686,15 +746,31 @@ return 1
     return requeued; // recovered in-flight + drained pending
   }
 
-  private async scanKeys(pattern: string): Promise<string[]> {
+  private async decrementPendingAfterMalformedRemoval(removed: number): Promise<void> {
+    if (removed <= 0) return;
+    await this.redis.eval(
+      `local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+       if current <= 0 then return 0 end
+       return redis.call('DECRBY', KEYS[1], math.min(current, tonumber(ARGV[1])))`,
+      1,
+      PENDING_COUNT_KEY,
+      removed,
+    );
+  }
+
+  private async scanKeysPage(
+    pattern: string,
+    cursor: string,
+    limit: number,
+  ): Promise<{ cursor: string; keys: string[] }> {
     const keys: string[] = [];
-    let cursor = '0';
+    let next = cursor;
     do {
-      const result = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
-      cursor = result[0];
+      const result = await this.redis.scan(next, 'MATCH', pattern, 'COUNT', 100);
+      next = result[0];
       keys.push(...result[1]);
-    } while (cursor !== '0');
-    return keys;
+    } while (next !== '0' && keys.length < limit);
+    return { cursor: next, keys: keys.slice(0, limit) };
   }
 
   async ping(): Promise<boolean> {
@@ -708,11 +784,7 @@ return 1
   async depth(): Promise<import('./types.js').QueueDepth> {
     const queued = await this.redis.llen(QUEUE_KEY);
     const inFlight = await this.redis.llen(PROCESSING_KEY);
-    let waitingOnPr = 0;
-    const pendingKeys = await this.scanKeys(`${PENDING_PREFIX}*`);
-    for (const key of pendingKeys) {
-      waitingOnPr += await this.redis.llen(key);
-    }
+    const waitingOnPr = Math.max(0, Number(await this.redis.get(PENDING_COUNT_KEY)) || 0);
     let oldestQueuedAt: string | null = null;
     if (queued > 0) {
       const head = await this.redis.lindex(QUEUE_KEY, 0);

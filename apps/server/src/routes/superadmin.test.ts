@@ -35,8 +35,8 @@ test('super-admin cost API returns model, tenant, margin, and run detail', async
     pr: 12,
     headSha: 'sha12',
     action: 'opened',
-    status: 'completed',
-    durationMs: 2400,
+    status: 'running',
+    durationMs: 0,
   });
   db.recordReviewRunUsage({
     runId: run.id,
@@ -52,6 +52,7 @@ test('super-admin cost API returns model, tenant, margin, and run detail', async
     costUsd: 0.0054,
     tokenSource: 'provider',
   });
+  db.completeReviewRun(run.id, { status: 'completed', durationMs: 2400 });
   db.recordStripeRevenueEvent({
     eventId: 'evt_profit',
     eventType: 'invoice.paid',

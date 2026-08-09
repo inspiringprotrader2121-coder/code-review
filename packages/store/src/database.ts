@@ -427,9 +427,13 @@ CREATE TABLE IF NOT EXISTS workspace_settings (
 
 export class AppDatabase {
   private db: Database.Database;
-  private readonly workerId = process.env.ORVEX_WORKER_ID?.trim() || `${process.pid}:${randomUUID()}`;
+  private readonly workerId: string;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, workerId?: string) {
+    // A configured worker id names a PM2 slot, not one lifetime of that slot.
+    // Add a boot-unique fence so a replacement process cannot impersonate the
+    // process whose review it resumed. Tests may inject a fixed id explicitly.
+    this.workerId = workerId?.trim() || `${process.env.ORVEX_WORKER_ID?.trim() || process.pid}:${randomUUID()}`;
     const resolvedDbPath = path.resolve(dbPath);
     const checkoutRoot = path.resolve(process.env.ORVEX_CHECKOUT_ROOT ?? process.cwd());
     const relativeToCheckout = path.relative(checkoutRoot, resolvedDbPath);
@@ -451,20 +455,172 @@ export class AppDatabase {
     // Multi-process writers (docs allow scaling workers on one SQLite file) wait
     // briefly on SQLITE_BUSY instead of failing the quota/lock update.
     this.db.pragma('busy_timeout = 5000');
-    this.db.exec(SCHEMA_V2);
-    this.migrateLegacyPrReviews();
-    this.migrateUserAuthColumns();
-    this.migrateUserSecurityColumns();
-    this.migrateTenantPlan();
-    this.migrateTenantBillingColumns();
-    this.migratePrepaidCreditLedger();
-    this.migrateRepoAutomationToggles();
-    this.migrateReviewRunCostColumns();
-    this.migrateReviewRunLifecycleColumns();
+    this.runSchemaMigrations();
+    // This is a repair operation rather than a schema migration. Keep it on
+    // every boot so terminal runs from an interrupted older process cannot
+    // leave a provider attempt permanently marked running.
     this.reconcileTerminalReviewRunAttempts();
-    this.migratePrReviewColumns();
-    this.migrateRevenueIndexes();
-    this.migrateWebhookEventColumns();
+  }
+
+  /**
+   * The database historically used idempotent upgrade methods at every boot.
+   * Keep those methods intact, but record their ordered application so a
+   * deployed binary cannot silently reinterpret migration history. Never edit
+   * a published entry: add a new migration instead.
+   *
+   * The checksum covers the executable migration payload, not a hand-written
+   * description. Changing an already-applied migration therefore blocks boot
+   * instead of silently reinterpreting history.
+   */
+  private runSchemaMigrations(): void {
+    this.db.exec(`
+CREATE TABLE IF NOT EXISTS orvex_schema_migrations (
+  version INTEGER PRIMARY KEY CHECK (version > 0),
+  name TEXT NOT NULL UNIQUE,
+  checksum TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+`);
+
+    type Migration = {
+      version: number;
+      name: string;
+      payload: string;
+      apply: () => void;
+    };
+    const migrations: Migration[] = [
+      { version: 1, name: 'baseline-schema-v2', payload: SCHEMA_V2, apply: () => this.db.exec(SCHEMA_V2) },
+      { version: 2, name: 'legacy-pr-reviews', payload: this.migrateLegacyPrReviews.toString(), apply: () => this.migrateLegacyPrReviews() },
+      { version: 3, name: 'user-auth-columns', payload: this.migrateUserAuthColumns.toString(), apply: () => this.migrateUserAuthColumns() },
+      { version: 4, name: 'user-security-columns', payload: this.migrateUserSecurityColumns.toString(), apply: () => this.migrateUserSecurityColumns() },
+      { version: 5, name: 'tenant-plan', payload: this.migrateTenantPlan.toString(), apply: () => this.migrateTenantPlan() },
+      { version: 6, name: 'tenant-billing-columns', payload: this.migrateTenantBillingColumns.toString(), apply: () => this.migrateTenantBillingColumns() },
+      { version: 7, name: 'prepaid-credit-ledger', payload: this.migratePrepaidCreditLedger.toString(), apply: () => this.migratePrepaidCreditLedger() },
+      { version: 8, name: 'repo-automation-toggles', payload: this.migrateRepoAutomationToggles.toString(), apply: () => this.migrateRepoAutomationToggles() },
+      { version: 9, name: 'review-run-cost-columns', payload: this.migrateReviewRunCostColumns.toString(), apply: () => this.migrateReviewRunCostColumns() },
+      { version: 10, name: 'review-run-lifecycle-integrity', payload: this.migrateReviewRunLifecycleColumns.toString(), apply: () => this.migrateReviewRunLifecycleColumns() },
+      { version: 11, name: 'pr-review-columns', payload: this.migratePrReviewColumns.toString(), apply: () => this.migratePrReviewColumns() },
+      { version: 12, name: 'stripe-revenue-indexes', payload: this.migrateRevenueIndexes.toString(), apply: () => this.migrateRevenueIndexes() },
+      { version: 13, name: 'webhook-claim-token', payload: this.migrateWebhookEventColumns.toString(), apply: () => this.migrateWebhookEventColumns() },
+      { version: 14, name: 'review-attempt-lineage-integrity', payload: this.migrateReviewAttemptLineageIntegrity.toString(), apply: () => this.migrateReviewAttemptLineageIntegrity() },
+    ];
+    const checksumFor = (migration: Migration): string =>
+      createHash('sha256')
+        .update(`orvex-schema-migration-v2:${migration.version}:${migration.name}:${migration.payload}`)
+        .digest('hex');
+    const applied = this.db
+      .prepare(`SELECT version, name, checksum FROM orvex_schema_migrations ORDER BY version ASC`)
+      .all() as Array<{ version: number; name: string; checksum: string }>;
+
+    for (let index = 0; index < applied.length; index += 1) {
+      const actual = applied[index]!;
+      const expected = migrations[index];
+      if (!expected || actual.version !== expected.version) {
+        throw new Error(
+          `schema migration ledger version mismatch at position ${index + 1}: found ${actual.version}`,
+        );
+      }
+      if (actual.name !== expected.name) {
+        throw new Error(
+          `schema migration ledger name mismatch at version ${actual.version}: found ${actual.name}`,
+        );
+      }
+      if (actual.checksum !== checksumFor(expected)) {
+        throw new Error(`schema migration ledger checksum mismatch at version ${actual.version} (${actual.name})`);
+      }
+    }
+
+    for (let index = applied.length; index < migrations.length; index += 1) {
+      const migration = migrations[index]!;
+      this.db.transaction(() => {
+        migration.apply();
+        this.db
+          .prepare(
+            `INSERT INTO orvex_schema_migrations (version, name, checksum, applied_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(migration.version, migration.name, checksumFor(migration), new Date().toISOString());
+      })();
+    }
+  }
+
+  private migrateReviewAttemptLineageIntegrity(): void {
+    const invalidParent = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM review_run_attempts child
+         LEFT JOIN review_run_attempts parent
+           ON parent.id = child.parent_attempt_id
+          AND parent.run_id = child.run_id
+          AND parent.tenant_id = child.tenant_id
+         WHERE child.parent_attempt_id IS NOT NULL AND parent.id IS NULL`,
+      )
+      .get() as { n: number };
+    const invalidUsage = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n
+         FROM review_run_usage usage
+         LEFT JOIN review_run_attempts attempt
+           ON attempt.id = usage.attempt_id
+          AND attempt.run_id = usage.run_id
+          AND attempt.tenant_id = usage.tenant_id
+         WHERE usage.attempt_id IS NOT NULL AND attempt.id IS NULL`,
+      )
+      .get() as { n: number };
+    if (invalidParent.n > 0 || invalidUsage.n > 0) {
+      throw new Error(
+        `review attempt lineage integrity failed: ${invalidParent.n} invalid parent(s), ${invalidUsage.n} invalid usage link(s)`,
+      );
+    }
+    this.db.exec(`
+CREATE TRIGGER IF NOT EXISTS trg_review_attempt_parent_same_run_insert
+BEFORE INSERT ON review_run_attempts
+WHEN NEW.parent_attempt_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM review_run_attempts parent
+  WHERE parent.id = NEW.parent_attempt_id
+    AND parent.run_id = NEW.run_id
+    AND parent.tenant_id = NEW.tenant_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'review attempt parent lineage mismatch');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_review_attempt_parent_same_run_update
+BEFORE UPDATE OF parent_attempt_id, run_id, tenant_id ON review_run_attempts
+WHEN NEW.parent_attempt_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM review_run_attempts parent
+  WHERE parent.id = NEW.parent_attempt_id
+    AND parent.run_id = NEW.run_id
+    AND parent.tenant_id = NEW.tenant_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'review attempt parent lineage mismatch');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_review_usage_attempt_same_run_insert
+BEFORE INSERT ON review_run_usage
+WHEN NEW.attempt_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM review_run_attempts attempt
+  WHERE attempt.id = NEW.attempt_id
+    AND attempt.run_id = NEW.run_id
+    AND attempt.tenant_id = NEW.tenant_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'review usage attempt lineage mismatch');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_review_usage_attempt_same_run_update
+BEFORE UPDATE OF attempt_id, run_id, tenant_id ON review_run_usage
+WHEN NEW.attempt_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM review_run_attempts attempt
+  WHERE attempt.id = NEW.attempt_id
+    AND attempt.run_id = NEW.run_id
+    AND attempt.tenant_id = NEW.tenant_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'review usage attempt lineage mismatch');
+END;
+`);
   }
 
   /** Add later pr_reviews columns (codex thread id, manual-review candidates) to existing DBs. */
@@ -1437,9 +1593,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
             `UPDATE review_runs
              SET status = 'skipped', skip_reason = 'interrupted by restart',
                  completed_at = ?, worker_id = NULL
-             WHERE id = ? AND status = 'running'`,
+             WHERE id = ? AND status = 'running' AND worker_id = ?`,
           )
-          .run(new Date().toISOString(), id);
+          .run(new Date().toISOString(), id, this.workerId);
         if (res.changes > 0) {
           // Wallet debit stays until resume completes or is abandoned; resume
           // reuses this run id so a second debit is not charged.
@@ -3055,8 +3211,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
    *  worker fetches the PR a newer commit may have landed — the run must be
    *  recorded on the SHA that was really reviewed (cooldown/dedup/scorecard all
    *  key on head_sha). */
-  setReviewRunHeadSha(id: string, headSha: string): void {
-    this.db.prepare(`UPDATE review_runs SET head_sha = ? WHERE id = ?`).run(headSha, id);
+  setReviewRunHeadSha(id: string, headSha: string): boolean {
+    return this.db
+      .prepare(
+        `UPDATE review_runs SET head_sha = ?
+         WHERE id = ? AND status = 'running' AND worker_id = ?`,
+      )
+      .run(headSha, id, this.workerId).changes > 0;
   }
 
   /**
@@ -3134,7 +3295,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
        *  as 2 units by completedReviewUnitsSince. */
       deep?: boolean;
     },
-  ): void {
+  ): boolean {
     const usageTotals = this.db
       .prepare(
         `SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -3152,7 +3313,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
              input_tokens = ?, output_tokens = ?, cost_usd = ?,
              new_findings_json = ?,
              deep = COALESCE(?, deep), completed_at = ?, worker_id = NULL
-         WHERE id = ? AND status = 'running'`,
+         WHERE id = ? AND status = 'running' AND worker_id = ?`,
       )
       .run(
         patch.status,
@@ -3169,6 +3330,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         patch.deep === undefined ? null : patch.deep ? 1 : 0,
         completedAt,
         id,
+        this.workerId,
       );
     if (completed.changes > 0) {
       const danglingOutcome: ReviewRunAttemptOutcome = patch.status === 'skipped' ? 'cancelled' : 'failed';
@@ -3181,12 +3343,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         )
         .run(danglingOutcome, patch.error ?? patch.skipReason ?? 'review ended before attempt completion', completedAt, completedAt, id);
     }
+    return completed.changes > 0;
   }
 
-  startReviewRunAttempt(input: Omit<ReviewRunAttempt, 'outcome' | 'durationMs' | 'completedAt'>): void {
+  startReviewRunAttempt(input: Omit<ReviewRunAttempt, 'outcome' | 'durationMs' | 'completedAt'>): boolean {
     const run = this.db
-      .prepare(`SELECT tenant_id FROM review_runs WHERE id = ?`)
-      .get(input.runId) as { tenant_id: string } | undefined;
+      .prepare(`SELECT tenant_id, status, worker_id FROM review_runs WHERE id = ?`)
+      .get(input.runId) as { tenant_id: string; status: ReviewRunStatus; worker_id: string | null } | undefined;
     if (!run || run.tenant_id !== input.tenantId) {
       throw new Error(`review attempt parent mismatch for run ${input.runId}`);
     }
@@ -3198,12 +3361,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         throw new Error(`review attempt lineage mismatch for ${input.id}`);
       }
     }
-    this.db
+    if (run.status !== 'running' || run.worker_id !== this.workerId) return false;
+    // Repeat the ownership check in the insert itself. Another worker can mark
+    // this row interrupted and resume it between the validation above and this
+    // statement; that worker must be the only one that can create attempts.
+    return this.db
       .prepare(
         `INSERT INTO review_run_attempts
          (id, run_id, tenant_id, parent_attempt_id, provider, model, tier, pass_name,
           transport, retry_index, key_index, outcome, error, duration_ms, started_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, 0, ?, NULL)`,
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, 0, ?, NULL
+         WHERE EXISTS (
+           SELECT 1 FROM review_runs
+           WHERE id = ? AND tenant_id = ? AND status = 'running' AND worker_id = ?
+         )`,
       )
       .run(
         input.id,
@@ -3218,7 +3389,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         input.retryIndex,
         input.keyIndex,
         input.startedAt,
-      );
+        input.runId,
+        input.tenantId,
+        this.workerId,
+      ).changes > 0;
   }
 
   completeReviewRunAttempt(input: {
@@ -3235,9 +3409,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
       .prepare(
         `UPDATE review_run_attempts
          SET outcome = ?, error = ?, duration_ms = ?, completed_at = ?
-         WHERE id = ? AND outcome = 'running'`,
+         WHERE id = ? AND outcome = 'running'
+           AND EXISTS (
+             SELECT 1 FROM review_runs
+             WHERE review_runs.id = review_run_attempts.run_id
+               AND review_runs.status = 'running'
+               AND review_runs.worker_id = ?
+           )`,
       )
-      .run(input.outcome, input.error ?? null, Math.floor(input.durationMs), input.completedAt, input.id).changes > 0;
+      .run(input.outcome, input.error ?? null, Math.floor(input.durationMs), input.completedAt, input.id, this.workerId).changes > 0;
   }
 
   listReviewRunAttempts(runId: string): ReviewRunAttempt[] {
@@ -3267,14 +3447,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
   /** Persist one provider usage event as soon as the provider reports it. */
   recordReviewRunUsage(
     input: Omit<ReviewRunUsage, 'id' | 'createdAt'> & { createdAt?: string },
-  ): ReviewRunUsage {
+  ): ReviewRunUsage | null {
     const run = this.db
-      .prepare(`SELECT tenant_id FROM review_runs WHERE id = ?`)
-      .get(input.runId) as { tenant_id: string } | undefined;
+      .prepare(`SELECT tenant_id, status, worker_id FROM review_runs WHERE id = ?`)
+      .get(input.runId) as { tenant_id: string; status: ReviewRunStatus; worker_id: string | null } | undefined;
     if (!run) throw new Error(`cannot record usage for unknown review run ${input.runId}`);
     if (run.tenant_id !== input.tenantId) {
       throw new Error(`review usage tenant mismatch for run ${input.runId}`);
     }
+    if (input.attemptId) {
+      const attempt = this.db
+        .prepare(`SELECT run_id, tenant_id FROM review_run_attempts WHERE id = ?`)
+        .get(input.attemptId) as { run_id: string; tenant_id: string } | undefined;
+      if (!attempt || attempt.run_id !== input.runId || attempt.tenant_id !== input.tenantId) {
+        throw new Error(`review usage attempt lineage mismatch for ${input.attemptId}`);
+      }
+    }
+    if (run.status !== 'running' || run.worker_id !== this.workerId) return null;
     for (const [name, value] of Object.entries({
       inputTokens: input.inputTokens,
       outputTokens: input.outputTokens,
@@ -3286,13 +3475,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
     }
     const id = randomUUID();
     const createdAt = input.createdAt ?? new Date().toISOString();
-    this.db
+    // Usage belongs to the process that owns the live run. The SQL check closes
+    // the hand-off race after the read above, and terminal rows stay immutable.
+    const recorded = this.db
       .prepare(
         `INSERT INTO review_run_usage
          (id, run_id, tenant_id, provider, model, tier, pass_name,
           input_tokens, output_tokens, input_rate_per_m, output_rate_per_m,
           cost_usd, token_source, attempt_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM review_runs
+           WHERE id = ? AND tenant_id = ? AND status = 'running' AND worker_id = ?
+         )`,
       )
       .run(
         id,
@@ -3310,7 +3505,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         input.tokenSource,
         input.attemptId ?? null,
         createdAt,
+        input.runId,
+        input.tenantId,
+        this.workerId,
       );
+    if (recorded.changes === 0) return null;
     return { ...input, id, createdAt };
   }
 

@@ -6,6 +6,7 @@ import {
   returnLateDequeuedJob,
   resolveMaxJobRetries,
   resolveWorkerConcurrency,
+  recoverOrphansAsLeader,
   shouldReturnDequeuedJob,
   startWorkerLoop,
   waitForReservedDequeues,
@@ -45,6 +46,32 @@ test('a drain arriving during dequeue returns the untouched claim', () => {
   assert.equal(shouldReturnDequeuedJob(true, false), false);
   assert.equal(shouldReturnDequeuedJob(false, false), true);
   assert.equal(shouldReturnDequeuedJob(true, true), true);
+});
+
+test('periodic recovery runs under one distributed recovery lease', async () => {
+  let recoveries = 0;
+  const follower = {
+    async recoverOrphans() { recoveries += 1; return 0; },
+    async acquireRecoveryLease() { return null; },
+  };
+  assert.equal(await recoverOrphansAsLeader(follower), null);
+  assert.equal(recoveries, 0);
+
+  const leader = {
+    async recoverOrphans() { recoveries += 1; return 0; },
+    async acquireRecoveryLease() { return 'leader-token'; },
+    async releaseRecoveryLease() { throw new Error('cadence lease must expire, not release early'); },
+  };
+  assert.equal(await recoverOrphansAsLeader(leader), 0);
+  assert.equal(recoveries, 1);
+});
+
+test('memory-style queues retain direct periodic recovery', async () => {
+  let recoveries = 0;
+  assert.equal(await recoverOrphansAsLeader({
+    async recoverOrphans() { recoveries += 1; return 0; },
+  }), 0);
+  assert.equal(recoveries, 1);
 });
 
 test('restart interruption is failed without re-enqueuing paid stages', async () => {

@@ -100,7 +100,19 @@ export class MemoryReviewQueue implements ReviewQueue {
     // second review while one is already in-flight for the same PR (coalesce it
     // to pending instead).
     for (let i = 0; i < 50; i++) {
-      const job = this.state.queue.shift();
+      const window = Math.min(50, this.state.queue.length);
+      let selected = 0;
+      let selectedPriority = Number.NEGATIVE_INFINITY;
+      for (let index = 0; index < window; index++) {
+        const priority = Number.isFinite(this.state.queue[index]?.priority)
+          ? Math.floor(this.state.queue[index]!.priority!)
+          : 0;
+        if (priority > selectedPriority) {
+          selected = index;
+          selectedPriority = priority;
+        }
+      }
+      const [job] = this.state.queue.splice(selected, 1);
       if (!job) return null;
       const pk = prKey(job);
 
@@ -122,12 +134,13 @@ export class MemoryReviewQueue implements ReviewQueue {
     return null;
   }
 
-  async markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<void> {
+  async markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<boolean> {
+    if (this.state.inFlight.get(prKey(job)) !== job) return false;
     if (opts?.draftSkipped) {
       this.state.completed.add(draftSkipIdempotencyKey(job));
       trimSet(this.state.completed);
       this.state.inFlight.delete(prKey(job));
-      return;
+      return true;
     }
     const idKey = jobIdempotencyKey(job);
     this.state.completed.add(idKey);
@@ -139,12 +152,15 @@ export class MemoryReviewQueue implements ReviewQueue {
     }
     trimSet(this.state.completed);
     this.state.inFlight.delete(prKey(job));
+    return true;
   }
 
-  async markFailed(job: ReviewJobPayload, _error: string): Promise<void> {
+  async markFailed(job: ReviewJobPayload, _error: string): Promise<boolean> {
+    if (this.state.inFlight.get(prKey(job)) !== job) return false;
     const idKey = jobIdempotencyKey(job);
     this.state.seen.delete(idKey);
     this.state.inFlight.delete(prKey(job));
+    return true;
   }
 
   async releaseLockAndDrain(prKeyStr: string): Promise<ReviewJobPayload | null> {

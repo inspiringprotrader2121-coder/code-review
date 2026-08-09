@@ -3,7 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fetchRepoSnapshot, type createInstallationOctokit } from '@orvex-review/github';
 import { redactSecrets, sanitizeFindingText } from '@orvex-review/review';
-import { assertWorkdirWithinQuota, runInSandbox } from './sandbox.js';
+import {
+  assertWorkdirWithinQuota,
+  checkSandboxRuntimeReadiness,
+  runInSandbox,
+  type SandboxRuntimeReadiness,
+} from './sandbox.js';
 import { noteActiveCheckoutDir } from './active-reviews.js';
 
 /**
@@ -41,7 +46,26 @@ export interface RuntimeVerifyResult {
   baseSteps?: RuntimeStep[];
 }
 
-const IMAGE = process.env.ORVEX_SANDBOX_IMAGE ?? 'node:22';
+export interface RuntimeVerifyDependencies {
+  fetchSnapshot: typeof fetchRepoSnapshot;
+  runSandbox: typeof runInSandbox;
+  checkSandboxRuntimeReadiness: (signal?: AbortSignal) => Promise<SandboxRuntimeReadiness>;
+}
+
+export interface RuntimeVerifyOptions {
+  baseSha?: string;
+  /** Owning review's cancellation signal, forwarded to every sandbox run. */
+  signal?: AbortSignal;
+  /** Test seam for lifecycle coverage without Docker or GitHub calls. */
+  dependencies?: Partial<RuntimeVerifyDependencies>;
+}
+
+const defaultRuntimeVerifyDependencies: RuntimeVerifyDependencies = {
+  fetchSnapshot: fetchRepoSnapshot,
+  runSandbox: runInSandbox,
+  checkSandboxRuntimeReadiness: (signal) => checkSandboxRuntimeReadiness({ signal }),
+};
+
 function positiveEnvNumber(name: string, fallback: number, max: number): number {
   const value = Number(process.env[name] ?? fallback);
   return Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), max) : fallback;
@@ -49,32 +73,29 @@ function positiveEnvNumber(name: string, fallback: number, max: number): number 
 const STEP_TIMEOUT_MS = positiveEnvNumber('ORVEX_SANDBOX_STEP_TIMEOUT_MS', 240_000, 900_000);
 const INSTALL_TIMEOUT_MS = positiveEnvNumber('ORVEX_SANDBOX_INSTALL_TIMEOUT_MS', 300_000, 900_000);
 
-// Package managers are installed HERE (under the /work bind mount) so they
-// survive from the install container into the separate, network-isolated test
-// container (the per-container /tmp tmpfs does not persist across runs).
+// Package managers and dependency caches must be baked into the reviewed,
+// digest-pinned runtime image. Customer lockfiles never receive network egress.
 const TOOLS_PREFIX = '/work/.orvex-tools';
 const TOOLS_PATH = `export NPM_CONFIG_PREFIX=${TOOLS_PREFIX} && export PATH=${TOOLS_PREFIX}/bin:$PATH`;
 
 function detectPackageManager(files: Map<string, string>): { pm: string; installCmd: string } {
   // --ignore-scripts is CRITICAL: it stops package lifecycle scripts (pre/post
-  // install, prepare) from running arbitrary code during the networked install
-  // phase. We also do NOT use `corepack enable` — it writes shims to the
-  // read-only root FS (EROFS) and fetches the repo-pinned package-manager
-  // version (another code-fetch vector); install a pinned pnpm/yarn from the npm
-  // registry into the persistent /work prefix instead.
+  // install, prepare) from running arbitrary code. Offline mode is equally
+  // critical: an attacker-controlled lockfile or .npmrc cannot reach arbitrary
+  // internet/private endpoints from the runtime boundary.
   if (files.has('pnpm-lock.yaml')) {
     return {
       pm: 'pnpm',
-      installCmd: `${TOOLS_PATH} && npm i -g pnpm@9 --ignore-scripts && pnpm install --frozen-lockfile --ignore-scripts`,
+      installCmd: `${TOOLS_PATH} && pnpm install --offline --frozen-lockfile --ignore-scripts`,
     };
   }
   if (files.has('yarn.lock')) {
     return {
       pm: 'yarn',
-      installCmd: `${TOOLS_PATH} && npm i -g yarn --ignore-scripts && yarn install --frozen-lockfile --ignore-scripts`,
+      installCmd: `${TOOLS_PATH} && yarn install --offline --frozen-lockfile --ignore-scripts`,
     };
   }
-  return { pm: 'npm', installCmd: 'npm ci --ignore-scripts || npm install --ignore-scripts' };
+  return { pm: 'npm', installCmd: 'npm ci --offline --ignore-scripts' };
 }
 
 /** Verification steps declared by the project (typecheck/build + test). */
@@ -100,9 +121,19 @@ export async function runtimeVerify(
   owner: string,
   repo: string,
   sha: string,
-  opts: { baseSha?: string } = {},
+  opts: RuntimeVerifyOptions = {},
 ): Promise<RuntimeVerifyResult> {
-  const head = await runStepsAtSha(octokit, owner, repo, sha);
+  const dependencies = { ...defaultRuntimeVerifyDependencies, ...opts.dependencies };
+  if (opts.signal?.aborted) return cancelledResult();
+  // Perform the fail-closed host/image preflight before fetching a checkout or
+  // constructing a workdir. The verifier must never fall back to a mutable
+  // image or leave Docker to pull one as part of a customer review.
+  const readiness = await dependencies.checkSandboxRuntimeReadiness(opts.signal);
+  if (!readiness.ready) {
+    return { ran: false, skippedReason: `sandbox unavailable: ${readiness.reason}`, steps: [] };
+  }
+  if (opts.signal?.aborted) return cancelledResult();
+  const head = await runStepsAtSha(octokit, owner, repo, sha, readiness.image, opts.signal, dependencies);
   // BASE-VS-HEAD: a HEAD-only run blames the PR for failures that already exist
   // on main. When the head fails and we know the base, run the SAME steps at
   // base and mark each failure that reproduces there as pre-existing. (Skipped
@@ -111,7 +142,8 @@ export async function runtimeVerify(
   if (!head.ran || head.steps.every((s) => s.ok) || !opts.baseSha || opts.baseSha === sha) {
     return head;
   }
-  const base = await runStepsAtSha(octokit, owner, repo, opts.baseSha);
+  if (opts.signal?.aborted) return cancelledResult();
+  const base = await runStepsAtSha(octokit, owner, repo, opts.baseSha, readiness.image, opts.signal, dependencies);
   if (base.ran) {
     markPreExistingFailures(head, base);
   }
@@ -135,14 +167,19 @@ async function runStepsAtSha(
   owner: string,
   repo: string,
   sha: string,
+  image: string,
+  signal: AbortSignal | undefined,
+  dependencies: RuntimeVerifyDependencies,
 ): Promise<RuntimeVerifyResult> {
+  if (signal?.aborted) return cancelledResult();
   // 1) materialize the repo at head into an isolated temp dir
   let snapshot: Map<string, string>;
   try {
-    snapshot = await fetchRepoSnapshot(octokit, owner, repo, sha, { maxFileBytes: 1_000_000, maxTotalBytes: 200_000_000 });
+    snapshot = await dependencies.fetchSnapshot(octokit, owner, repo, sha, { maxFileBytes: 1_000_000, maxTotalBytes: 200_000_000 });
   } catch (err) {
     return { ran: false, skippedReason: `snapshot failed: ${(err as Error).message}`, steps: [] };
   }
+  if (signal?.aborted) return cancelledResult();
   const pkgJson = snapshot.get('package.json');
   if (!pkgJson) return { ran: false, skippedReason: 'no package.json (non-Node project)', steps: [] };
 
@@ -172,14 +209,16 @@ async function runStepsAtSha(
       fs.chmodSync(workdir, 0o777);
     }
 
-    // 2) install deps — the ONE phase allowed network access
-    const install = await runInSandbox({
+    // 2) materialize deps strictly from the immutable image's package cache.
+    const install = await dependencies.runSandbox({
       workdir,
-      image: IMAGE,
+      image,
       command: installCmd,
-      network: 'bridge',
+      network: 'none',
       timeoutMs: INSTALL_TIMEOUT_MS,
+      signal,
     });
+    if (install.cancelled || signal?.aborted) return cancelledResult();
     try {
       assertWorkdirWithinQuota(workdir);
     } catch (err) {
@@ -229,13 +268,15 @@ async function runStepsAtSha(
         });
         break;
       }
-      const r = await runInSandbox({
+      const r = await dependencies.runSandbox({
         workdir,
-        image: IMAGE,
+        image,
         command: step.command,
         network: 'none',
         timeoutMs: STEP_TIMEOUT_MS,
+        signal,
       });
+      if (r.cancelled || signal?.aborted) return cancelledResult();
       results.push({
         name: step.name,
         command: step.command,
@@ -262,6 +303,10 @@ async function runStepsAtSha(
   } finally {
     fs.rmSync(workdir, { recursive: true, force: true });
   }
+}
+
+function cancelledResult(): RuntimeVerifyResult {
+  return { ran: false, skippedReason: 'runtime verification cancelled', steps: [] };
 }
 
 /** Last ~2k chars of output — the failing tail is what matters as evidence. */

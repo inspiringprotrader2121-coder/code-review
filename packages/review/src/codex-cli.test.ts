@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   buildCodexPrompt,
+  buildCodexExecArgs,
   assertCodexRuntimeReady,
   capCodexDiffFiles,
   clearCodexAuthModeCache,
@@ -63,9 +64,9 @@ test('missing repoId is refused even with a populated allowlist', () => {
   });
 });
 
-test('"*" opts out of the check (documented escape hatch)', () => {
+test('"*" is refused until Codex has a credential-isolating runner', () => {
   withRepos('*', () => {
-    assert.equal(isCodexRepoAllowed('anything/at-all'), true);
+    assert.equal(isCodexRepoAllowed('anything/at-all'), false);
   });
 });
 
@@ -229,6 +230,41 @@ test('Codex CLI model substitutions are detected and fail closed', () => {
     codexAnnouncedModelFallback('network transport unavailable; falling back to polling'),
     false,
   );
+});
+
+test('Codex execution arguments require the native read-only sandbox', () => {
+  const args = buildCodexExecArgs({
+    model: DEFAULT_CODEX_CLI_MODEL,
+    reasoningEffort: 'max',
+    cwd: '/tmp/review-checkout',
+    lastMessageFile: '/tmp/last-message.txt',
+  });
+
+  assert.deepEqual(args.slice(0, 4), ['exec', '--model', DEFAULT_CODEX_CLI_MODEL, '--json']);
+  assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2), ['--sandbox', 'read-only']);
+  assert.ok(args.includes('--ignore-user-config'));
+  assert.ok(args.includes('--ignore-rules'));
+  assert.ok(args.includes('--skip-git-repo-check'));
+  assert.ok(args.includes('model_reasoning_effort="max"'));
+  assert.ok(args.includes('shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","CODEX_API_KEY","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY"]'));
+  assert.ok(args.includes('--cd'));
+  assert.equal(args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+  assert.equal(args.includes('--ephemeral'), false, 'sessions must remain resumable');
+});
+
+test('Codex resume arguments preserve the session and do not reset its checkout', () => {
+  const args = buildCodexExecArgs({
+    model: DEFAULT_CODEX_CLI_MODEL,
+    reasoningEffort: 'max',
+    threadId: 'existing-thread',
+    cwd: '/tmp/ignored-on-resume',
+    lastMessageFile: '/tmp/last-message.txt',
+  });
+
+  assert.equal(args.includes('--cd'), false);
+  assert.deepEqual(args.slice(-3), ['resume', 'existing-thread', '-']);
+  assert.ok(args.includes('--sandbox'));
+  assert.equal(args[args.indexOf('--sandbox') + 1], 'read-only');
 });
 
 test('resolveCodexHomeConcurrency: API-key homes honor bounded parallel capacity', (t) => {
@@ -476,7 +512,10 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:12, outpu
   const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[];
   assert.deepEqual(args.slice(0, 3), ['exec', '--model', DEFAULT_CODEX_CLI_MODEL]);
   assert.ok(args.includes('model_reasoning_effort="max"'));
-  assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  assert.deepEqual(args.slice(args.indexOf('--sandbox'), args.indexOf('--sandbox') + 2), ['--sandbox', 'read-only']);
+  assert.ok(args.includes('--ignore-user-config'));
+  assert.ok(args.includes('--ignore-rules'));
+  assert.equal(args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
 });
 
 test('actual Codex child model substitution on stdout fails closed', async (t) => {
@@ -498,20 +537,31 @@ const { spawn } = require('node:child_process');
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'});
 fs.writeFileSync(process.env.GRANDCHILD_FILE, String(child.pid));
 setInterval(() => {}, 1000);
-`);
+  `);
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
   const grandchildFile = path.join(fixture.dir, 'grandchild.pid');
+  const usage: Array<{ inputTokens: number; outputTokens: number; tokenSource?: string }> = [];
+  const pending = runCodexExecForTest('review', {
+    binaryPath: fixture.binary,
+    hardMs: 5_000,
+    inactivityMs: 2_000,
+    env: { ...process.env, GRANDCHILD_FILE: grandchildFile },
+    onUsage: (event) => usage.push(event),
+  });
+  await waitForFile(grandchildFile);
   await assert.rejects(
-    runCodexExecForTest('review', {
-      binaryPath: fixture.binary,
-      hardMs: 2_000,
-      inactivityMs: 500,
-      env: { ...process.env, GRANDCHILD_FILE: grandchildFile },
-    }),
+    pending,
     /produced no output/,
   );
   const grandchildPid = Number(readFileSync(grandchildFile, 'utf8'));
   assert.equal(await waitForExit(grandchildPid), true, 'grandchild process group member was killed');
+  assert.deepEqual(usage, [{
+    inputTokens: 50_000,
+    outputTokens: 5_000,
+    tokenSource: 'estimate',
+    model: DEFAULT_CODEX_CLI_MODEL,
+    provider: 'codex-cli',
+  }]);
 });
 
 test('post-spawn cancellation kills the actual Codex process group', async (t) => {

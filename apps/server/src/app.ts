@@ -115,6 +115,7 @@ export function createApp(queue: ReviewQueue, dependencies: CreateAppDependencie
   app.get('/ready', async (c) => {
     let dbOk = false;
     let queueOk = false;
+    let globalInFlight = 0;
     try {
       db.pingDb();
       dbOk = true;
@@ -123,8 +124,14 @@ export function createApp(queue: ReviewQueue, dependencies: CreateAppDependencie
     }
     try {
       queueOk = await queue.ping();
+      // Redis PROCESSING is shared by all PM2 workers. Reading it here makes
+      // deploy-safe wait for work owned by another process rather than trusting
+      // only the process which happened to answer this HTTP request.
+      if (queueOk && queue.depth) {
+        globalInFlight = (await queue.depth()).inFlight;
+      }
     } catch {
-      /* queueOk stays false */
+      queueOk = false;
     }
     const ok = dbOk && queueOk;
     // activeJobs lets deploys WAIT FOR IDLE before restarting (deploy-safe.sh):
@@ -149,7 +156,7 @@ export function createApp(queue: ReviewQueue, dependencies: CreateAppDependencie
         ok,
         db: dbOk ? 'ok' : 'down',
         queue: queueOk ? 'ok' : 'down',
-        activeJobs: getActiveJobCount(),
+        activeJobs: Math.max(getActiveJobCount(), globalInFlight),
         draining: isDeployDraining(),
         codexAuth,
         releaseId: readReleaseId(dependencies.releaseFile ?? DEFAULT_RELEASE_FILE),

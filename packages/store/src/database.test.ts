@@ -1,11 +1,118 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { AppDatabase } from './database.js';
 
 function freshDb(): AppDatabase {
   return new AppDatabase(':memory:');
 }
+
+type MigrationRow = { version: number; name: string; checksum: string; applied_at: string };
+
+function migrationRows(database: AppDatabase): MigrationRow[] {
+  const raw = (database as unknown as { db: { prepare: (sql: string) => { all: () => MigrationRow[] } } }).db;
+  return raw.prepare(`SELECT version, name, checksum, applied_at FROM orvex_schema_migrations ORDER BY version`).all();
+}
+
+test('migration ledger records the full ordered schema history on first boot', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-migrations-'));
+  try {
+    const db = new AppDatabase(path.join(directory, 'store.db'));
+    const rows = migrationRows(db);
+    assert.deepEqual(
+      rows.map(({ version, name }) => ({ version, name })),
+      [
+        'baseline-schema-v2',
+        'legacy-pr-reviews',
+        'user-auth-columns',
+        'user-security-columns',
+        'tenant-plan',
+        'tenant-billing-columns',
+        'prepaid-credit-ledger',
+        'repo-automation-toggles',
+        'review-run-cost-columns',
+        'review-run-lifecycle-integrity',
+        'pr-review-columns',
+        'stripe-revenue-indexes',
+        'webhook-claim-token',
+        'review-attempt-lineage-integrity',
+      ].map((name, index) => ({ version: index + 1, name })),
+    );
+    for (const row of rows) {
+      assert.match(row.checksum, /^[a-f0-9]{64}$/);
+      assert.ok(Number.isFinite(Date.parse(row.applied_at)));
+    }
+    const raw = (db as unknown as {
+      db: { prepare: (sql: string) => { all: () => Array<{ name: string }> } };
+    }).db;
+    const lineageTriggers = raw
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_review_%_same_run_%' ORDER BY name`)
+      .all();
+    assert.equal(lineageTriggers.length, 4);
+    db.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('migration ledger is unchanged on repeat boot', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-migrations-'));
+  try {
+    const dbPath = path.join(directory, 'store.db');
+    const first = new AppDatabase(dbPath);
+    const before = migrationRows(first);
+    first.close();
+
+    const second = new AppDatabase(dbPath);
+    assert.deepEqual(migrationRows(second), before);
+    second.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a populated pre-ledger database is upgraded without changing its data', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-migrations-'));
+  try {
+    const dbPath = path.join(directory, 'store.db');
+    const beforeLedger = new AppDatabase(dbPath);
+    const user = beforeLedger.upsertUserFromGitHub({ githubId: 77, login: 'pre-ledger-user' });
+    const raw = (beforeLedger as unknown as {
+      db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
+    }).db;
+    raw.prepare(`DROP TABLE orvex_schema_migrations`).run();
+    beforeLedger.close();
+
+    const upgraded = new AppDatabase(dbPath);
+    assert.equal(upgraded.getUserByGitHubId(77)?.id, user.id);
+    assert.equal(migrationRows(upgraded).length, 14);
+    upgraded.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('migration ledger rejects historical checksum or version mismatches', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-migrations-'));
+  try {
+    const dbPath = path.join(directory, 'store.db');
+    const checksumDb = new AppDatabase(dbPath);
+    const raw = (checksumDb as unknown as { db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } } }).db;
+    raw.prepare(`UPDATE orvex_schema_migrations SET checksum = 'changed' WHERE version = 1`).run();
+    checksumDb.close();
+    assert.throws(() => new AppDatabase(dbPath), /migration ledger checksum mismatch/);
+
+    const versionDb = new AppDatabase(path.join(directory, 'version.db'));
+    const versionRaw = (versionDb as unknown as { db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } } }).db;
+    versionRaw.prepare(`UPDATE orvex_schema_migrations SET version = 99 WHERE version = 14`).run();
+    versionDb.close();
+    assert.throws(() => new AppDatabase(path.join(directory, 'version.db')), /migration ledger version mismatch/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('users: upsert by github id updates profile, keeps id', () => {
   const db = freshDb();
@@ -182,6 +289,75 @@ test('provider attempts persist retry lineage and terminal review cleanup', () =
   );
 });
 
+test('usage and retry lineage cannot cross review-run boundaries', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('lineage');
+  const firstRun = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'lineage',
+    repo: 'api',
+    pr: 1,
+    headSha: 'sha-1',
+    action: 'manual',
+  });
+  const secondRun = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'lineage',
+    repo: 'api',
+    pr: 2,
+    headSha: 'sha-2',
+    action: 'manual',
+  });
+  db.startReviewRunAttempt({
+    id: 'first-run-attempt',
+    runId: firstRun,
+    tenantId: tenant.id,
+    provider: 'deepseek',
+    model: 'deepseek-v4-flash',
+    tier: 'deepseek-flash',
+    transport: 'chat',
+    retryIndex: 0,
+    keyIndex: 0,
+    startedAt: new Date().toISOString(),
+  });
+
+  assert.throws(
+    () => db.startReviewRunAttempt({
+      id: 'cross-run-child',
+      runId: secondRun,
+      tenantId: tenant.id,
+      parentAttemptId: 'first-run-attempt',
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      tier: 'deepseek-flash',
+      transport: 'chat',
+      retryIndex: 1,
+      keyIndex: 0,
+      startedAt: new Date().toISOString(),
+    }),
+    /lineage mismatch/,
+  );
+  assert.throws(
+    () => db.recordReviewRunUsage({
+      runId: secondRun,
+      tenantId: tenant.id,
+      provider: 'deepseek',
+      model: 'deepseek-v4-flash',
+      tier: 'deepseek-flash',
+      inputTokens: 1,
+      outputTokens: 1,
+      inputRatePerM: 1,
+      outputRatePerM: 1,
+      costUsd: 0.000002,
+      tokenSource: 'provider',
+      attemptId: 'first-run-attempt',
+    }),
+    /usage attempt lineage mismatch/,
+  );
+});
+
 test('interruptReviewRun marks running rows so resumeReviewRun can reopen them', () => {
   const db = freshDb();
   const tenant = db.createTenant('interrupt');
@@ -222,6 +398,89 @@ test('interruptReviewRun marks running rows so resumeReviewRun can reopen them',
     }),
     'resumed',
   );
+});
+
+test('review-run lifecycle writes are fenced to the worker that owns the running row', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-ownership-'));
+  try {
+    const dbPath = path.join(directory, 'shared.db');
+    const staleWorker = new AppDatabase(dbPath, 'worker-a');
+    const activeWorker = new AppDatabase(dbPath, 'worker-b');
+    const tenant = staleWorker.createTenant('ownership');
+    const runInput = {
+      tenantId: tenant.id,
+      installationId: 9,
+      owner: 'ownership',
+      repo: 'api',
+      pr: 3,
+      headSha: 'original-sha',
+      action: 'synchronize',
+    };
+    const runId = staleWorker.startReviewRun(runInput);
+
+    assert.equal(staleWorker.interruptReviewRun(runId), true);
+    assert.equal(activeWorker.resumeReviewRun(runId, runInput), 'resumed');
+    assert.equal(activeWorker.setReviewRunHeadSha(runId, 'replacement-sha'), true);
+
+    assert.equal(staleWorker.setReviewRunHeadSha(runId, 'stale-sha'), false);
+    assert.equal(staleWorker.interruptReviewRun(runId), false);
+    assert.equal(staleWorker.completeReviewRun(runId, { status: 'failed', durationMs: 1, error: 'stale worker' }), false);
+
+    assert.equal(
+      activeWorker.startReviewRunAttempt({
+        id: 'replacement-attempt',
+        runId,
+        tenantId: tenant.id,
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        tier: 'deepseek-flash',
+        transport: 'chat',
+        retryIndex: 0,
+        keyIndex: 0,
+        startedAt: new Date().toISOString(),
+      }),
+      true,
+    );
+    assert.equal(
+      staleWorker.completeReviewRunAttempt({
+        id: 'replacement-attempt',
+        outcome: 'failed',
+        durationMs: 1,
+        completedAt: new Date().toISOString(),
+        error: 'stale worker',
+      }),
+      false,
+    );
+    assert.equal(
+      staleWorker.recordReviewRunUsage({
+        runId,
+        tenantId: tenant.id,
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        tier: 'deepseek-flash',
+        inputTokens: 1,
+        outputTokens: 1,
+        inputRatePerM: 1,
+        outputRatePerM: 1,
+        costUsd: 0.000002,
+        tokenSource: 'provider',
+        attemptId: 'replacement-attempt',
+      }),
+      null,
+    );
+
+    const run = activeWorker.listReviewRuns(tenant.id, 1)[0]!;
+    assert.equal(run.status, 'running');
+    assert.equal(run.headSha, 'replacement-sha');
+    assert.equal(activeWorker.listReviewRunAttempts(runId)[0]?.outcome, 'running');
+    assert.deepEqual(activeWorker.listReviewRunUsage(runId), []);
+
+    assert.equal(activeWorker.completeReviewRun(runId, { status: 'completed', durationMs: 2 }), true);
+    assert.equal(staleWorker.completeReviewRun(runId, { status: 'failed', durationMs: 3 }), false);
+    assert.equal(activeWorker.listReviewRuns(tenant.id, 1)[0]?.status, 'completed');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('durable storage rejects database files anywhere inside the checkout', () => {

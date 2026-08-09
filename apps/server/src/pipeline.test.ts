@@ -15,6 +15,7 @@ import {
   modelForReviewStage,
   modelForPlanWithTier,
   maxRiskProbes,
+  mayPublishRuntimeEvidence,
   modelForRiskHunt,
   providerConfigurationIssue,
   runPostPublicationStep,
@@ -223,6 +224,33 @@ test('post-publication finalizers are non-fatal after GitHub accepted a review',
   );
 });
 
+test('runtime evidence requires a fresh lease and an un-cancelled open PR', async () => {
+  const controller = new AbortController();
+  let openChecks = 0;
+  assert.equal(
+    await mayPublishRuntimeEvidence(controller.signal, async () => false, async () => {
+      openChecks++;
+      return true;
+    }),
+    false,
+  );
+  assert.equal(openChecks, 0, 'lease loss must prevent the GitHub evidence check and comment');
+
+  const cancelled = new AbortController();
+  cancelled.abort('review closed');
+  assert.equal(
+    await mayPublishRuntimeEvidence(cancelled.signal, async () => true, async () => {
+      assert.fail('cancelled reviews must not check or comment');
+    }),
+    false,
+  );
+
+  assert.equal(
+    await mayPublishRuntimeEvidence(controller.signal, async () => true, async () => true),
+    true,
+  );
+});
+
 test('usage attribution labels the default no-base-url client as Anthropic', () => {
   assert.equal(
     usageProvider({ apiKey: 'key', model: 'claude-sonnet', api: undefined }, 'review'),
@@ -405,13 +433,22 @@ test('dual-model deep-dive fails closed instead of substituting another model', 
   );
 });
 
-test('canRunAgentic: all three conditions are load-bearing', (t) => {
-  const prev = { flag: process.env.ORVEX_CODEX_CLI, repos: process.env.ORVEX_CODEX_CLI_REPOS };
+test('canRunAgentic keeps wildcard tenant access closed until a real runner exists', (t) => {
+  const prev = {
+    flag: process.env.ORVEX_CODEX_CLI,
+    repos: process.env.ORVEX_CODEX_CLI_REPOS,
+    codeExecution: process.env.ORVEX_CODE_EXECUTION,
+    sandboxVerified: process.env.ORVEX_INTERNAL_SANDBOX_VERIFIED,
+  };
   t.after(() => {
     if (prev.flag === undefined) delete process.env.ORVEX_CODEX_CLI;
     else process.env.ORVEX_CODEX_CLI = prev.flag;
     if (prev.repos === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
     else process.env.ORVEX_CODEX_CLI_REPOS = prev.repos;
+    if (prev.codeExecution === undefined) delete process.env.ORVEX_CODE_EXECUTION;
+    else process.env.ORVEX_CODE_EXECUTION = prev.codeExecution;
+    if (prev.sandboxVerified === undefined) delete process.env.ORVEX_INTERNAL_SANDBOX_VERIFIED;
+    else process.env.ORVEX_INTERNAL_SANDBOX_VERIFIED = prev.sandboxVerified;
   });
 
   process.env.ORVEX_CODEX_CLI = '1';
@@ -419,18 +456,26 @@ test('canRunAgentic: all three conditions are load-bearing', (t) => {
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), true);
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'ACME/API'), true, 'allowlist is case-insensitive');
 
-  // 3. repo NOT allowlisted — codex runs an unsandboxed shell, so this is a
-  //    security boundary. A third-party tenant must never reach it on plan alone.
+  // A third-party tenant cannot reach Codex before the internal sandbox has
+  // been enabled and explicitly verified.
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'evil/repo'), false);
   // 2. wrong tier
   assert.equal(canRunAgentic({ modelTier: 'standard' }, 'acme/api'), false);
   // 1. flag off
   process.env.ORVEX_CODEX_CLI = '0';
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), false);
-  // fail-closed when the allowlist is unset entirely
+  // Fail closed when the allowlist is unset entirely.
   process.env.ORVEX_CODEX_CLI = '1';
   delete process.env.ORVEX_CODEX_CLI_REPOS;
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api'), false, 'unset allowlist = never');
+
+  // An environment attestation is not a machine-enforced credential boundary.
+  process.env.ORVEX_CODEX_CLI_REPOS = '*';
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'tenant/repo'), false);
+  process.env.ORVEX_CODE_EXECUTION = '1';
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'tenant/repo'), false);
+  process.env.ORVEX_INTERNAL_SANDBOX_VERIFIED = '1';
+  assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'tenant/repo'), false);
 });
 
 test('canRunInvestigate: multi-model only, not dual-model, not when Codex agentic', (t) => {

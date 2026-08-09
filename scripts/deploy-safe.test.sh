@@ -4,6 +4,29 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
+# The real checkout can be intentionally dirty while this test is running. Run
+# the restart flow from a disposable committed fixture so production never needs
+# a dirty-tree bypass. The fixture's ssh binary is a local recorder, not ssh.
+if [[ "${DEPLOY_SAFE_TEST_FIXTURE:-0}" != "1" ]]; then
+  FIXTURE=$(mktemp -d)
+  trap 'rm -rf "$FIXTURE"' EXIT
+  git archive HEAD | tar -x -C "$FIXTURE"
+  mkdir -p "$FIXTURE/scripts"
+  cp \
+    scripts/deploy-safe.sh \
+    scripts/deploy-safe.test.sh \
+    scripts/provision-internal-sandbox.sh \
+    scripts/provision-internal-sandbox.test.sh \
+    "$FIXTURE/scripts/"
+  git -C "$FIXTURE" init -q
+  git -C "$FIXTURE" config user.name 'deploy-safe test'
+  git -C "$FIXTURE" config user.email 'deploy-safe-test@invalid'
+  git -C "$FIXTURE" add -A
+  git -C "$FIXTURE" commit -qm 'deploy-safe test fixture'
+  DEPLOY_SAFE_TEST_FIXTURE=1 bash "$FIXTURE/scripts/deploy-safe.test.sh"
+  exit $?
+fi
+
 scripts/deploy-safe.sh --validate-only
 scripts/deploy-safe.sh --validate-only .env.example
 
@@ -22,7 +45,6 @@ export DEPLOY_IDLE_ATTEMPTS=2
 export DEPLOY_IDLE_SLEEP_S=0
 export REMOTE='stage@example.test:/srv/orvex/'
 export DEPLOY_DRAIN_PATH=/tmp/stage-deploy-drain
-export DEPLOY_TEST_MODE=1
 
 if [[ $(grep -c -- "--include '.env.example'" scripts/deploy-safe.sh) -ne 5 ]]; then
   echo "deploy must allow .env.example through upload, stage, backup, apply, and rollback" >&2
@@ -48,10 +70,10 @@ grep -Fq 'install_backup_schedule' scripts/deploy-safe.sh || {
   echo "deploy does not install the database backup schedule" >&2
   exit 1
 }
-grep -Fq '"${DEPLOY_TEST_MODE:-0}" == "1" && "${REMOTE%%:*}" == "stage@example.test"' scripts/deploy-safe.sh || {
-  echo "release metadata fallback is not restricted to the exact fake deployment host" >&2
+if rg -q 'DEPLOY_TEST_MODE|stage@example\.test' scripts/deploy-safe.sh; then
+  echo "deploy script retains a test-mode or host-name deployment bypass" >&2
   exit 1
-}
+fi
 
 node <<'NODE'
 const config = require('./ecosystem.config.cjs');
@@ -105,6 +127,7 @@ printf '%s\n' \
   'printf "%s\n" "$*" >>"$DEPLOY_TEST_STATE/ssh-args"' \
   'if [[ "$*" == *curl* ]]; then' \
   '  release_id=${DEPLOY_TEST_RELEASE_ID:-missing}' \
+  '  if [[ ! -e "$DEPLOY_TEST_STATE/restarted" && "${DEPLOY_TEST_PREVIOUS_RELEASE_MISSING:-0}" == 1 ]]; then release_id=missing; fi' \
   '  if [[ -e "$DEPLOY_TEST_STATE/restarted" && "${DEPLOY_TEST_POST_READY_RELEASE_MISMATCH:-0}" == 1 ]]; then release_id=wrong-release; fi' \
   '  if [[ -e "$DEPLOY_TEST_STATE/restarted" && "${DEPLOY_TEST_POST_READY_FAIL:-0}" == 1 ]]; then exit 22; fi' \
   '  if [[ -e "$DEPLOY_TEST_STATE/restarted" && "${DEPLOY_TEST_POST_READY_MALFORMED:-0}" == 1 ]]; then printf "{\"activeJobs\":0}\n"; exit 0; fi' \
@@ -231,6 +254,38 @@ if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_RELE
 fi
 if [[ ! -e "$STATE/draining" || -e "$STATE/drain-cleared" ]]; then
   echo "release mismatch did not preserve the drain" >&2
+  exit 1
+fi
+
+rm -f "$STATE"/*
+if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_PREVIOUS_RELEASE_MISSING=1 \
+  DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
+  scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
+  echo "deploy accepted an unavailable prior release identity" >&2
+  exit 1
+fi
+if [[ -e "$STATE/stopped" || -e "$STATE/live-rsync" || -e "$STATE/restarted" ]]; then
+  echo "deploy touched the live release without a verified rollback identity" >&2
+  exit 1
+fi
+if [[ ! -e "$STATE/draining" || -e "$STATE/drain-cleared" ]]; then
+  echo "missing prior identity did not preserve the drain" >&2
+  exit 1
+fi
+
+# This local fake transport is the test fixture: it records invocations but
+# cannot open a network connection. A dirty source must be rejected before it.
+rm -f "$STATE"/*
+DIRTY_FIXTURE="$ROOT/.deploy-safe-dirty-test-$$"
+trap 'rm -rf "$FAKE_BIN" "$STATE" "$DIRTY_FIXTURE"' EXIT
+touch "$DIRTY_FIXTURE"
+if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" \
+  scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
+  echo "deploy accepted a dirty worktree" >&2
+  exit 1
+fi
+if [[ -e "$STATE/ssh-args" || -e "$STATE/stage-rsync" || -e "$STATE/live-rsync" ]]; then
+  echo "dirty-tree rejection attempted the test transport" >&2
   exit 1
 fi
 

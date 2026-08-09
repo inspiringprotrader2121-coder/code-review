@@ -62,6 +62,17 @@ test('different PRs are unaffected — each still runs concurrently', async () =
   assert.notEqual(a!.pr, b!.pr);
 });
 
+test('dequeue honors plan priority while preserving FIFO within one tier', async () => {
+  const q = new MemoryReviewQueue();
+  await q.enqueue(job({ pr: 1, headSha: 'low', action: 'manual', priority: 0 }));
+  await q.enqueue(job({ pr: 2, headSha: 'high-first', action: 'manual', priority: 3 }));
+  await q.enqueue(job({ pr: 3, headSha: 'high-second', action: 'manual', priority: 3 }));
+
+  assert.equal((await q.dequeue())?.headSha, 'high-first');
+  assert.equal((await q.dequeue())?.headSha, 'high-second');
+  assert.equal((await q.dequeue())?.headSha, 'low');
+});
+
 test('ready_for_review is not deduped against a prior draft opened skip on the same SHA', async () => {
   const q = new MemoryReviewQueue();
   const opened = job({ headSha: 'shaDraft', action: 'opened' });

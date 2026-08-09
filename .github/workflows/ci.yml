@@ -18,7 +18,8 @@ jobs:
     timeout-minutes: 20
     services:
       redis:
-        image: redis:7.4-alpine
+        # Official Redis 7.4.9 Alpine manifest pinned by digest for reproducible CI.
+        image: redis:7.4.9-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
         ports:
           - 6379:6379
         options: >-
@@ -26,8 +27,6 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 20
-    env:
-      REDIS_TEST_URL: redis://127.0.0.1:6379/15
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -58,6 +57,11 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Redis queue concurrency and recovery tests
+        env:
+          REDIS_TEST_URL: redis://127.0.0.1:6379/15
+        run: pnpm --filter @orvex-review/queue test
 
       - name: Backup and deploy-safe script tests
         run: |

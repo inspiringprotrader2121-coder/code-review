@@ -81,7 +81,7 @@ test('persists per-model usage and builds operator profitability analytics', () 
     stripeCustomerId: 'cus_acme',
     stripeSubscriptionStatus: 'active',
   });
-  const run = d.recordReviewRun({
+  const runId = d.startReviewRun({
     tenantId: tenant.id,
     installationId: 1,
     owner: 'acme',
@@ -89,12 +89,22 @@ test('persists per-model usage and builds operator profitability analytics', () 
     pr: 42,
     headSha: 'sha42',
     action: 'manual',
-    status: 'completed',
-    durationMs: 1000,
-    createdAt: '2026-08-05T10:00:00.000Z',
   });
+  assert.equal(d.startReviewRunAttempt({
+    id: 'attempt-1',
+    runId,
+    tenantId: tenant.id,
+    provider: 'deepseek',
+    model: 'deepseek-v4-flash',
+    tier: 'deepseek-flash',
+    passName: 'verification',
+    transport: 'responses',
+    retryIndex: 0,
+    keyIndex: 0,
+    startedAt: new Date().toISOString(),
+  }), true);
   d.recordReviewRunUsage({
-    runId: run.id,
+    runId,
     tenantId: tenant.id,
     provider: 'deepseek',
     model: 'deepseek-v4-flash',
@@ -107,8 +117,8 @@ test('persists per-model usage and builds operator profitability analytics', () 
     costUsd: 0.168,
     tokenSource: 'provider',
     attemptId: 'attempt-1',
-    createdAt: '2026-08-05T10:01:00.000Z',
   });
+  d.completeReviewRun(runId, { status: 'completed', durationMs: 1000 });
   assert.equal(d.recordStripeRevenueEvent({
     eventId: 'evt_invoice_42',
     eventType: 'invoice.paid',

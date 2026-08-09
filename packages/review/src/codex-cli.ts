@@ -65,25 +65,28 @@ export const DEFAULT_CODEX_CLI_REASONING_EFFORT = 'max';
 
 /**
  * FIRST-PARTY REPO ALLOWLIST — defense in depth, INDEPENDENT of the
- * ORVEX_CODEX_CLI feature flag. codex runs with
- * `--dangerously-bypass-approvals-and-sandbox` and shell access inside the repo
- * checkout, i.e. it can execute whatever a malicious PR puts in the repo (build
- * scripts, hooks, "test fixtures"). Diff-only input does not remove shell or
- * network capability, so the complete invocation is limited to repos listed in
- * ORVEX_CODEX_CLI_REPOS (comma-separated "owner/repo", case-insensitive;
- * "*" disables the check — NOT recommended). Unset/empty = no repo is ever
- * reviewed by Codex, no matter what the caller or the feature flag says.
+ * ORVEX_CODEX_CLI feature flag. Codex can inspect and run read-only commands
+ * inside a checkout, including content supplied by an untrusted pull request.
+ * The native sandbox constrains those commands, but diff-only input still does
+ * not remove prompt-injection or network-risk considerations. The complete
+ * invocation is therefore limited to repos listed in ORVEX_CODEX_CLI_REPOS
+ * (comma-separated "owner/repo", case-insensitive; wildcards are refused).
+ * Unset/empty = no repo is ever reviewed by Codex, no matter
+ * what the caller or the feature flag says.
  */
-export function codexAllowedRepos(): string[] {
-  return (process.env.ORVEX_CODEX_CLI_REPOS ?? '')
+export function codexAllowedRepos(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.ORVEX_CODEX_CLI_REPOS ?? '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
 }
 
-export function isCodexRepoAllowed(repoId: string | undefined): boolean {
-  const allow = codexAllowedRepos();
-  if (allow.includes('*')) return true;
+export function isCodexRepoAllowed(
+  repoId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const allow = codexAllowedRepos(env);
+  if (allow.includes('*')) return false;
   if (!repoId) return false;
   return allow.includes(repoId.toLowerCase());
 }
@@ -292,9 +295,10 @@ function shellEnv(codexHome?: string, homeIdx?: number): NodeJS.ProcessEnv {
   ];
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '' };
   for (const k of ALLOWED_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
-  // ISOLATE the reviewer's OAuth: use a DEDICATED CODEX_HOME so interactive codex
-  // sessions / other agents on the same box can't rotate & revoke the server's
-  // refresh token. Login once per home with this same CODEX_HOME set.
+  // Codex authenticates from a dedicated API-key CODEX_HOME. Native read-only
+  // sandboxing controls model-generated shell commands; it is NOT treated here
+  // as a credential boundary for CODEX_HOME. Keep this allowlisted-repo gate in
+  // place until auth is provided through a separately enforced runner boundary.
   if (codexHome) env.CODEX_HOME = codexHome;
   // RESIDENTIAL/ISP PROXY per account: OpenAI revokes ChatGPT sessions whose
   // traffic pattern looks suspicious (a datacenter IP is the classic trigger —
@@ -766,6 +770,49 @@ export function trimCodexPrompt(prompt: string, maxChars: number): string {
   );
 }
 
+export interface CodexExecArgsOptions {
+  model: string;
+  reasoningEffort?: string;
+  threadId?: string;
+  cwd: string;
+  lastMessageFile: string;
+}
+
+/**
+ * Build the only production Codex execution shape. Native sandbox startup is
+ * intentionally fail-closed: a host that cannot initialize it returns an error
+ * rather than silently running an unsandboxed agent. `--ephemeral` is omitted
+ * because review sessions must remain resumable.
+ *
+ * `--ignore-user-config` keeps mutable CODEX_HOME config.toml out of the run,
+ * while API-key authentication still comes from CODEX_HOME. It must not be read
+ * as an assertion that the native read-only sandbox hides CODEX_HOME from every
+ * model-generated process; that needs a separately enforced runner boundary.
+ */
+export function buildCodexExecArgs(options: CodexExecArgsOptions): string[] {
+  const args = [
+    'exec',
+    '--model', options.model,
+    '--json',
+    '--sandbox', 'read-only',
+    '--ignore-user-config',
+    '--ignore-rules',
+    '-c', 'shell_environment_policy.exclude=["CODEX_HOME","OPENAI_API_KEY","CODEX_API_KEY","HTTP_PROXY","HTTPS_PROXY","ALL_PROXY","NO_PROXY"]',
+    '--skip-git-repo-check',
+    '--output-last-message', options.lastMessageFile,
+  ];
+
+  // --cd is only valid when starting a brand-new session; resume ignores it.
+  if (!options.threadId) args.push('--cd', options.cwd);
+  if (options.reasoningEffort) {
+    // The Codex configuration key is model_reasoning_effort.
+    args.push('-c', `model_reasoning_effort="${options.reasoningEffort}"`);
+  }
+  if (options.threadId) args.push('resume', options.threadId);
+  args.push('-');
+  return args;
+}
+
 async function runCodexExec(
   prompt: string,
   opts: {
@@ -912,36 +959,13 @@ async function runCodexExecInner(
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-codex-'));
   const lastMsgFile = path.join(tmpDir, 'last-message.txt');
 
-  const args = ['exec'];
-  args.push(
-    '--model',
-    opts.model,
-    '--json',
-    // Bypass codex's own sandbox: its bwrap read-only mode FAILS to initialize on
-    // this host (bwrap loopback/netns error), which blocks codex from running the
-    // shell commands it uses to AGENTICALLY explore the repo — degrading it to a
-    // shallow one-shot review. The server is a dedicated VM (externally sandboxed),
-    // which is exactly what this flag is intended for. See prompt note re: untrusted
-    // PR content — the anti-injection guard in buildUserPrompt is the mitigation.
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--skip-git-repo-check',
-    '--output-last-message',
-    lastMsgFile,
-  );
-  // --cd is only valid when starting a brand-new session; resume ignores it. Use
-  // the repo checkout when provided so codex can agentically sweep the whole repo.
-  if (!opts.threadId) {
-    args.push('--cd', opts.cwd ?? tmpDir);
-  }
-  if (opts.reasoningEffort) {
-    // CORRECT codex config key is `model_reasoning_effort`; the old
-    // `reasoning_effort` was silently ignored → codex ran at default (low) effort.
-    args.push('-c', `model_reasoning_effort="${opts.reasoningEffort}"`);
-  }
-  if (opts.threadId) {
-    args.push('resume', opts.threadId);
-  }
-  args.push('-');
+  const args = buildCodexExecArgs({
+    model: opts.model,
+    reasoningEffort: opts.reasoningEffort,
+    threadId: opts.threadId,
+    cwd: opts.cwd ?? tmpDir,
+    lastMessageFile: lastMsgFile,
+  });
 
   return new Promise((resolve, reject) => {
     const child = spawn(opts.binaryPath ?? codexBinary(), args, {
@@ -949,8 +973,8 @@ async function runCodexExecInner(
       cwd: tmpDir,
       stdio: ['pipe', 'pipe', 'pipe'],
       // Own process group, so the timeout below can kill codex AND any
-      // grandchildren it spawned (it runs with the sandbox bypassed). Without
-      // this, `process.kill(-pid)` would target our own group.
+      // grandchildren it spawned. Without this, `process.kill(-pid)` would
+      // target our own group.
       detached: true,
     });
 
@@ -968,6 +992,21 @@ async function runCodexExecInner(
     let cleaned = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    let timeoutUsageReported = false;
+    const reportTimeoutUsageFloor = () => {
+      if (timeoutUsageReported) return;
+      timeoutUsageReported = true;
+      const floorIn = Number(process.env.ORVEX_CODEX_USAGE_FLOOR_INPUT ?? 50_000);
+      const floorOut = Number(process.env.ORVEX_CODEX_USAGE_FLOOR_OUTPUT ?? 5_000);
+      opts.onUsage?.({
+        inputTokens: Number.isFinite(floorIn) && floorIn > 0 ? Math.floor(floorIn) : 50_000,
+        outputTokens: Number.isFinite(floorOut) && floorOut > 0 ? Math.floor(floorOut) : 5_000,
+        tokenSource: 'estimate',
+        model: opts.model,
+        provider: 'codex-cli',
+      });
+      console.warn('[codex-cli] timed-out attempt recorded a conservative COGS floor estimate');
+    };
     const onCancel = () => {
       killProcessGroup();
       finish(() => {
@@ -997,6 +1036,7 @@ async function runCodexExecInner(
     const rejectForTimeout = (message: string) => {
       killProcessGroup();
       finish(() => {
+        reportTimeoutUsageFloor();
         cleanup();
         reject(new Error(message));
       });
@@ -1199,6 +1239,13 @@ export function runCodexExecForTest(
     hardMs?: number;
     inactivityMs?: number;
     env?: NodeJS.ProcessEnv;
+    onUsage?: (usage: {
+      inputTokens: number;
+      outputTokens: number;
+      tokenSource?: 'provider' | 'estimate';
+      model?: string;
+      provider?: string;
+    }) => void;
   },
 ): Promise<{ text: string; threadId: string }> {
   return runCodexExecInner(prompt, {
@@ -1211,6 +1258,7 @@ export function runCodexExecForTest(
       inactivityMs: opts.inactivityMs ?? 1_000,
     },
     testEnv: opts.env ?? process.env,
+    onUsage: opts.onUsage,
   });
 }
 
@@ -1298,8 +1346,8 @@ function isStaleThreadError(message: string): boolean {
 }
 
 /**
- * Run a review pass through the official `codex` CLI (OAuth/login flow), not the
- * OpenAI API. A new Codex session is started when `threadId` is omitted; the same
+ * Run a review pass through the official `codex` CLI using its dedicated API-key
+ * home. A new Codex session is started when `threadId` is omitted; the same
  * `threadId` can be passed back to resume the session for re-reviews of the same PR.
  */
 export async function runCodexCliReview(
@@ -1307,9 +1355,9 @@ export async function runCodexCliReview(
   opts: CodexCliReviewOptions = {},
 ): Promise<CodexCliReviewResult> {
   if (opts.signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
-  // Codex runs with sandbox bypass on the dedicated worker VM. Diff-only prompt
-  // input does not remove its shell/network capability, so the repository
-  // allowlist gates the entire CLI invocation, not only checkout access.
+  // Native read-only sandboxing still is not a credential-isolating runner.
+  // The repository allowlist gates the entire CLI invocation, not only checkout
+  // access, until that stronger boundary exists.
   if (!isCodexRepoAllowed(opts.repoId)) {
     throw new Error(`Codex CLI review refused for non-allowlisted repository ${opts.repoId ?? '(unknown repo)'}`);
   }

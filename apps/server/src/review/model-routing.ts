@@ -59,8 +59,13 @@ export function canRunCodexCli(
     && (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model');
 }
 
-export function canRunAgentic(plan: { modelTier?: ModelTier }, repoId: string): boolean {
-  return canRunCodexCli(plan) && isCodexRepoAllowed(repoId);
+export function canRunAgentic(
+  plan: { modelTier?: ModelTier },
+  repoId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (!canRunCodexCli(plan, env)) return false;
+  return isCodexRepoAllowed(repoId, env);
 }
 
 export function canRunInvestigate(
