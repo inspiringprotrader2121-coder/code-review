@@ -2,7 +2,17 @@
 set -euo pipefail
 
 REMOTE=${REMOTE:-orvex@87.106.103.185:/home/orvex/code-review/}
-SSH_KEY=${SSH_KEY:-/Users/johnboy/Documents/Documents - John’s MacBook Air/00_Documents_Hub/Keys_Secrets/Websites/87.106/orvex/server_access_ed25519}
+# Never embed a machine-local key path in the repo. Prefer explicit SSH_KEY, then
+# common private key names under ~/.ssh.
+if [[ -z "${SSH_KEY:-}" ]]; then
+  for _candidate in "${HOME}/.ssh/orvex_ed25519" "${HOME}/.ssh/id_ed25519" "${HOME}/.ssh/id_rsa"; do
+    if [[ -f "$_candidate" ]]; then
+      SSH_KEY=$_candidate
+      break
+    fi
+  done
+fi
+unset _candidate
 
 EXCLUDES=(
   --include '.env.example'
@@ -87,6 +97,11 @@ if [[ "$MODE" == "--validate-only" ]]; then
   exit 0
 fi
 
+if [[ -z "${SSH_KEY:-}" || ! -f "$SSH_KEY" ]]; then
+  echo "[deploy] SSH_KEY is unset or missing — export SSH_KEY=/path/to/deploy_key" >&2
+  exit 2
+fi
+
 base_cmd=(rsync -az --relative --delay-updates "${EXCLUDES[@]}" \
   -e "ssh -i \"$SSH_KEY\" -o BatchMode=yes -o ConnectTimeout=15")
 cmd=("${base_cmd[@]}")
@@ -125,6 +140,19 @@ if [[ "$MODE" == "--restart" ]]; then
   done
   stage_cmd+=("${SOURCES[@]}" "${REMOTE_HOST}:${STAGE_DIR}/")
   LOCK_DIR=${DEPLOY_LOCK_DIR:-${DRAIN_PATH}.lock}
+  # Mis-set DEPLOY_LOCK_DIR (e.g. a data directory) must never be reclaimed with
+  # rm -rf. Require a *.lock basename and a non-trivial absolute path.
+  case "$LOCK_DIR" in
+    /*/*.lock|/*.lock) ;;
+    *)
+      echo "[deploy] refusing unsafe DEPLOY_LOCK_DIR=$LOCK_DIR (must be absolute and end in .lock)" >&2
+      exit 2
+      ;;
+  esac
+  if [[ ${#LOCK_DIR} -lt 12 ]]; then
+    echo "[deploy] refusing unsafe DEPLOY_LOCK_DIR=$LOCK_DIR (path too short)" >&2
+    exit 2
+  fi
   drain_set=0
   lock_held=0
 
@@ -209,7 +237,18 @@ now=$(date +%s)
 age=$((now - meta_epoch))
 if ((meta_epoch > 0 && age > stale_s)); then
   echo "[deploy] lock is STALE (age ${age}s > ${stale_s}s) — reclaiming: $(tr '\n' ' ' <"$lock/meta" 2>/dev/null || echo 'no metadata')" >&2
-  rm -rf -- "$lock"
+  # Fail closed: only reclaim a directory that contains our meta file alone.
+  # Never rm -rf, and never delete meta when other entries exist (mis-set LOCK_DIR).
+  other=$(find -- "$lock" -mindepth 1 -maxdepth 1 ! -name meta -print -quit 2>/dev/null || true)
+  if [[ -n "$other" ]]; then
+    echo "[deploy] refusing to reclaim non-empty lock dir: $lock" >&2
+    exit 4
+  fi
+  rm -f -- "$lock/meta"
+  if ! rmdir -- "$lock" 2>/dev/null; then
+    echo "[deploy] refusing to reclaim non-empty lock dir: $lock" >&2
+    exit 4
+  fi
   if mkdir -- "$lock" 2>/dev/null; then
     write_meta
     exit 0

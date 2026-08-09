@@ -34,6 +34,18 @@ grep -q 'flock -n' scripts/deploy-safe.sh || {
   echo "deploy lock takeover is not guarded by flock" >&2
   exit 1
 }
+grep -Fq 'rmdir -- "$lock"' scripts/deploy-safe.sh || {
+  echo "deploy stale-lock reclaim must use rmdir (not rm -rf) so mis-set LOCK_DIR cannot wipe data" >&2
+  exit 1
+}
+grep -Eq 'SSH_KEY is unset or missing' scripts/deploy-safe.sh || {
+  echo "deploy must require SSH_KEY instead of a hardcoded local path" >&2
+  exit 1
+}
+if grep -F 'Documents - John' scripts/deploy-safe.sh >/dev/null; then
+  echo "deploy still embeds a machine-local SSH key path" >&2
+  exit 1
+fi
 
 assert_rejected() {
   local source=$1
@@ -51,6 +63,9 @@ assert_rejected apps/server/node_modules
 FAKE_BIN=$(mktemp -d)
 STATE=$(mktemp -d)
 trap 'rm -rf "$FAKE_BIN" "$STATE"' EXIT
+# Script no longer hardcodes a personal key path; tests must supply one.
+: >"$STATE/deploy_key"
+export SSH_KEY="$STATE/deploy_key"
 
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -71,15 +86,27 @@ printf '%s\n' \
   'elif [[ "$*" == *"bash -s"* ]]; then' \
   '  SCRIPT=$(cat)' \
   '  if [[ "$*" == *.lock* ]]; then' \
-  '    if [[ "$SCRIPT" == *rmdir* ]]; then rm -f "$DEPLOY_TEST_STATE/lock" "$DEPLOY_TEST_STATE/lock-stale"; elif [[ -e "$DEPLOY_TEST_STATE/lock" && ! -e "$DEPLOY_TEST_STATE/lock-stale" ]]; then exit 75; else : >"$DEPLOY_TEST_STATE/lock"; rm -f "$DEPLOY_TEST_STATE/lock-stale"; fi' \
+  '    # Acquire heredoc contains write_meta/mkdir; unlock is only rm meta + rmdir.' \
+  '    # Do not key off bare "rmdir" — stale reclaim also uses rmdir.' \
+  '    if [[ "$SCRIPT" == *write_meta* || "$SCRIPT" == *"mkdir --"* ]]; then' \
+  '      if [[ -e "$DEPLOY_TEST_STATE/lock" && ! -e "$DEPLOY_TEST_STATE/lock-stale" ]]; then exit 75; else : >"$DEPLOY_TEST_STATE/lock"; rm -f "$DEPLOY_TEST_STATE/lock-stale"; fi' \
+  '    elif [[ "$SCRIPT" == *rmdir* ]]; then' \
+  '      rm -f "$DEPLOY_TEST_STATE/lock" "$DEPLOY_TEST_STATE/lock-stale"' \
+  '    fi' \
   '  fi' \
   '  if [[ "$SCRIPT" == *"pnpm@11.7.0"* && "${DEPLOY_TEST_STAGE_FAIL:-0}" == 1 ]]; then exit 23; fi' \
   '  if [[ "$SCRIPT" == *"startOrRestart"* || "$SCRIPT" == *"pm2 restart"* || "$SCRIPT" == *"pm2 start /usr/bin/bash"* ]]; then : >"$DEPLOY_TEST_STATE/restarted"; fi' \
   '  if [[ "$SCRIPT" == *"touch --"* ]]; then : >"$DEPLOY_TEST_STATE/draining"; fi' \
-  '  if [[ "$SCRIPT" == *"rm -f --"* ]]; then : >"$DEPLOY_TEST_STATE/drain-cleared"; fi' \
+  '  if [[ "$SCRIPT" == *"rm -f --"* && "$SCRIPT" != *write_meta* ]]; then : >"$DEPLOY_TEST_STATE/drain-cleared"; fi' \
   '  : >"$DEPLOY_TEST_STATE/installed"' \
   'fi' >"$FAKE_BIN/ssh"
 chmod +x "$FAKE_BIN/rsync" "$FAKE_BIN/ssh"
+
+restore_ssh_key() {
+  : >"$STATE/deploy_key"
+  export SSH_KEY="$STATE/deploy_key"
+}
+restore_ssh_key
 
 if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_READY_MODE=busy \
   DEPLOY_IDLE_ATTEMPTS=2 DEPLOY_IDLE_SLEEP_S=0 \
@@ -93,6 +120,7 @@ if [[ -e "$STATE/live-rsync" || -e "$STATE/stopped" ]]; then
 fi
 
 rm -f "$STATE"/*
+restore_ssh_key
 : >"$STATE/lock"
 if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" \
   scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
@@ -118,6 +146,7 @@ if [[ -e "$STATE/lock-stale" ]]; then
   exit 1
 fi
 rm -f "$STATE"/*
+restore_ssh_key
 
 if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_STAGE_FAIL=1 \
   DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
@@ -131,6 +160,7 @@ if [[ -e "$STATE/stopped" || -e "$STATE/restarted" ]]; then
 fi
 
 rm -f "$STATE"/*
+restore_ssh_key
 PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" \
   REMOTE='stage@example.test:/srv/orvex/' DEPLOY_DRAIN_PATH=/tmp/stage-deploy-drain \
   DEPLOY_TEST_POST_READY_BUSY=1 \
@@ -148,6 +178,7 @@ if ! grep -q 'stage@example.test' "$STATE/ssh-args" || grep -q '87.106.103.185' 
 fi
 
 rm -f "$STATE"/*
+restore_ssh_key
 if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_FAIL=1 \
   DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
   scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
@@ -156,6 +187,7 @@ if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_FAIL
 fi
 
 rm -f "$STATE"/*
+restore_ssh_key
 if PATH="$FAKE_BIN:$PATH" DEPLOY_TEST_STATE="$STATE" DEPLOY_TEST_POST_READY_MALFORMED=1 \
   DEPLOY_READY_ATTEMPTS=2 DEPLOY_READY_SLEEP_S=0 \
   scripts/deploy-safe.sh --restart scripts/deploy-safe.sh >/dev/null 2>&1; then
