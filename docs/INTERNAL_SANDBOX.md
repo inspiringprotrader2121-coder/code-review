@@ -81,6 +81,11 @@ separate, reviewed local configuration change and normal safe deployment:
 # the immutable local image ID used below.
 export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
 /home/orvex/code-review/scripts/build-internal-sandbox-image.sh
+
+# Read-only broker preflight. After the two image IDs have been applied through
+# production configuration management, --apply builds and starts the broker.
+sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --dry-run
+sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --apply
 ```
 
 ```dotenv
@@ -96,6 +101,11 @@ ORVEX_CODE_EXECUTION=1
 # image must contain approved package-manager binaries and offline dependency
 # caches; customer lockfiles receive no network egress.
 ORVEX_SANDBOX_IMAGE=sha256:<64-hex-local-image-id>
+
+# Run Codex/Luna inside the same rootless boundary. The agent container receives
+# a short-lived signed capability, never the upstream OpenAI API key.
+ORVEX_CODEX_CONTAINER_RUNTIME=1
+ORVEX_CODEX_EGRESS_BROKER_IMAGE=sha256:<64-hex-local-image-id>
 ```
 
 The production `.env` is immutable by design. Use the existing approved
@@ -111,10 +121,14 @@ write its own bind-mounted temporary checkout. Dependency installation is
 offline-only; missing cached packages skip runtime evidence with an explicit
 internal reason rather than blaming the PR or opening egress.
 
-It does **not** yet place the Codex/Luna agent process inside that boundary. Do
-not remove the explicit repository allowlist or enable untrusted agentic
-execution until the separate credential-isolating Codex runner is implemented,
-tested, and deployed.
+When `ORVEX_CODEX_CONTAINER_RUNTIME=1`, Codex/Luna also runs inside this
+boundary. Its container has only the private checkout and the internal broker
+network. A service-owned signing key creates a unique, bounded capability for
+each container; the OpenAI API key stays mounted only inside the broker. The
+broker has the separate egress network, enforces destination, concurrency,
+request-count, response-size and timeout bounds, and must be pinned by immutable
+local image ID. Keep the explicit repository allowlist as an independent
+authorization control.
 
 ## Failure Handling
 
