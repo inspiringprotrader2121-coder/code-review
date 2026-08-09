@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LlmReviewResponseSchema } from './types.js';
-import { normalizeLlmResponse } from './llm.js';
+import { normalizeLlmResponse, REVIEW_INCOMPLETE_SUMMARY, runLlmReview } from './llm.js';
 
 test('normalizeLlmResponse maps MiniMax severity vocabulary to P-levels', () => {
   const raw = {
@@ -52,4 +52,44 @@ test('normalizeLlmResponse defaults unknown severity to info (fail toward nitpic
   assert.equal(parsed.findings[0].severity, 'info');
   assert.equal(parsed.findings[0].confidence, 1);
   assert.equal(parsed.findings[0].category, 'general');
+});
+
+test('an invalid discovery response is not replayed as another paid call', async (t) => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: 'not valid json' } }] })}\n\n`),
+        );
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`),
+        );
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+    return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const result = await runLlmReview(
+    [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
+    {
+      apiKey: 'test-key',
+      model: 'MiniMax-M3',
+      baseUrl: 'https://minimax.test/v1',
+      api: 'chat',
+      maxTokens: 16_000,
+    },
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(result.summary, REVIEW_INCOMPLETE_SUMMARY);
+  assert.deepEqual(result.findings, []);
 });

@@ -36,8 +36,9 @@ completion) so the dashboard shows it live.
 
 For each changed file the pipeline builds **deep context** and reviews against it.
 
-- **Full changed files** — not just the diff hunks, so logic elsewhere in the same
-  file (guards, error handling) is visible.
+- **Prioritized diff + focused changed-file source** — every normal PR keeps its
+  complete diff; oversized diffs are fairly sampled with omission markers, and
+  bounded source windows add nearby guards, error handling, and control flow.
 - **Import/dependency neighborhood** — files the change imports and files that
   import the change (`packages/github/src/repo-context.ts`).
 - **Repo index retrieval** — a dependency-free TF-IDF index over code identifiers
@@ -46,18 +47,19 @@ For each changed file the pipeline builds **deep context** and reviews against i
   it doesn't directly import.
 
 Depth is enforced in the harness (not left to the model) and scaled **by plan**.
-Required stages are scheduled with bounded concurrency, then provider-specific
-local and Redis leases pace each provider independently. Luna is serialized;
-DeepSeek and MiniMax can use their separately configured capacities:
+Required stages are scheduled with bounded concurrency. Before any paid lane
+starts, provider-specific cooldown admission checks the whole required stack;
+local and Redis leases then pace each provider independently. Luna is serialized;
+DeepSeek and MiniMax use their separately configured capacities:
 
 - **Passes** — the review runs N times over the change + neighborhood + top-K
   index files; findings accumulate and dedupe by fingerprint.
-- **Whole-repo sweep** (Verify plans only) — the rest of the repo is examined
-  against the change in size-bounded batches (many files per batch) for exhaustive
-  coverage, scheduled within the same bounded review workload.
+- **Agentic repository inspection** (higher tiers, allowlisted repositories) —
+  Luna may inspect relevant call sites and tests from a read-only checkout. The
+  older expensive whole-repo sweep is disabled on every plan.
 - **Adversarial verification** — a second skeptical model pass tries to *refute*
-  each finding against the source; it fails open (never drops a real finding on an
-  error, after retries). Fix verification fails closed (never commits an unverified
+  each finding against the source; unavailable verification demotes rather than
+  deletes candidates. Fix verification fails closed (never commits an unverified
   change).
 
 Neither the review passes nor the verifier read the PR author's explanation —
@@ -74,7 +76,7 @@ enabled, Orvex performs five to ten complete independent samples at a low
 temperature, then uses a bounded merge step to group candidate duplicates. A
 finding needs to recur in at least two distinct samples before it is posted
 normally; one-off candidates remain visible for manual review instead of being
-discarded. Whole-repo sweep work is reserved before repetition, and the feature
+discarded. Optional fixed diagnostics are reserved before repetition, and the feature
 falls back to one ordinary review when the call budget cannot support five full
 samples. Enable it only after measuring both precision and recall against the
 pinned evaluation corpus; this behavior does not imply a measured recall gain.
@@ -244,27 +246,30 @@ callback refuses to rebind an installation already owned by another workspace
 | `ORVEX_MAX_CONCURRENT_REVIEWS` | reviews per worker process (default 4) |
 | `ORVEX_CODEX_HOME` | dedicated API-key-authenticated Codex home; OAuth is refused |
 | `ORVEX_REVIEW_CONCURRENCY` | maximum concurrently scheduled stages within one review (default 3) |
-| `ORVEX_PROVIDER_CONCURRENCY_LUNA` / `_DEEPSEEK` / `_MINIMAX` | provider-specific local and Redis-coordinated ceilings (defaults 1/2/2) |
-| `ORVEX_PROVIDER_LEASE_WAIT_MS` | maximum wait for a distributed provider slot (default 30 seconds) |
-| `ORVEX_BACKOFF_THRESHOLD` / `ORVEX_BACKOFF_MS` | failed-job circuit threshold and Redis-shared review-stack cooldown |
+| `ORVEX_PROVIDER_CONCURRENCY_LUNA` / `_DEEPSEEK` / `_MINIMAX` | provider-specific local and Redis-coordinated ceilings (defaults 1/1/2) |
+| `ORVEX_PROVIDER_LEASE_WAIT_MS` | optional distributed-slot wait bound; default `0` queues until available/cancelled |
+| `ORVEX_MAX_JOB_RETRIES` | opt-in whole-review replay after failure (default 0 to prevent duplicate spend) |
+| `ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS` / `ORVEX_MINIMAX_MAX_OUTPUT_TOKENS` | completion ceilings (default 32000); reasoning effort remains max |
+| `ORVEX_MAX_DIFF_CHARS` | aggregate raw-diff budget (default 96000); oversized files are fairly sampled with visible omission markers |
+| `ORVEX_MAX_CHANGED_CHARS` / `ORVEX_MAX_RELATED_CHARS` / `ORVEX_MAX_OTHER_CHARS` | per-pass supporting-context budgets after the prioritized diff |
 | `ORVEX_MONTHLY_COGS_CAP_USD` | rolling provider-cost safety ceiling for non-custom plans (default $250) |
 | `ORVEX_AGENT_ARCHIVE_MAX_BYTES` | compressed agent checkout cap (default 150 MB) |
-| `ORVEX_SWEEP_FILE_CHARS` | per-file read depth in the whole-repo sweep (default 10000) |
+| `ORVEX_SWEEP_FILE_CHARS` | legacy sweep read cap; normal plan sweeps are disabled |
 | `ORVEX_REVIEW_MAX_CALLS` | hard cap on model calls per review (default 28) |
 | `ORVEX_REVIEW_AGGREGATION_RUNS` | `1` disables repeat aggregation; otherwise 5–10 complete samples |
 | `ORVEX_REVIEW_AGGREGATION_MIN_OCCURRENCES` | distinct samples required for a normal finding (default 2) |
 | `ORVEX_REVIEW_AGGREGATION_TEMPERATURE` | sampling temperature for repeated API calls (default 0.2) |
 | `ORVEX_REVIEW_AGGREGATION_MAX_CANDIDATES` | bounded candidates sent to the merge step (default 120) |
-| `ORVEX_OPENAI_MODEL` / `ORVEX_CODEX_CLI_MODEL` | configured Luna ids; the agentic runtime is pinned and fails closed with no substitute model/provider |
-| `ORVEX_OPENAI_REASONING_EFFORT` / `ORVEX_CODEX_CLI_REASONING_EFFORT` | documented as `max`; production review routing enforces max |
+| `ORVEX_OPENAI_MODEL` / `ORVEX_OPENAI_REASONING_EFFORT` | direct native-Responses diagnostics only; normal high-tier agentic reviews are code-pinned to `gpt-5.6-luna` at max effort with no env override or substitute |
 | `ORVEX_INVESTIGATE` | `1` enables the optional sandboxed investigate pass |
 | `ORVEX_INVESTIGATE_TIER` | investigate model: `deepseek-flash` (default), `deepseek`, `openai`, or `standard` |
 | `ORVEX_INVESTIGATE_MAX_STEPS` | max tool-loop rounds (default 8) |
 | `ORVEX_RISK_HUNT` | `1` enables the optional additive Flash risk-hunt pass on high-risk diffs |
 | `ORVEX_LLM_MAX_TOTAL_MS` | independent hard cap for each non-Codex provider attempt (maximum/default 300 seconds) |
+| `ORVEX_CODEX_TIMEOUT_MS` | Codex/Luna wall-clock cap (maximum/default 300 seconds); the pinned CLI has no output-token flag |
 | `ORVEX_RATELIMIT_MAX_RETRIES` / `ORVEX_RATELIMIT_TOTAL_WAIT_MS` | at most two attempts and 60 seconds total rate-limit sleep |
 | `ORVEX_RUNNING_STALE_MS` | startup stale-heartbeat threshold (default 15 minutes; minimum 60 seconds) |
-| `ORVEX_REVIEW_THINKING` | review stages retain reasoning on across retries |
+| `ORVEX_REVIEW_THINKING` | review stages retain maximum reasoning; timed-out or invalid complete calls are not replayed |
 | `ORVEX_CODE_EXECUTION` | `1` enables Verify-tier runtime verification (off by default) |
 | `ORVEX_MAX_SANDBOXES` | global concurrent sandbox cap (default 2) |
 | `ORVEX_NIGHTLY_SCANS` | `1` enables nightly whole-repo scans (off by default) |

@@ -8,6 +8,8 @@ import {
   buildReviewPassAngles,
   effectiveReviewConfig,
   failedRequiredLensIds,
+  contextForReviewPass,
+  maxOutputTokensForModel,
   modelForInvestigate,
   modelForPass,
   modelForPlanWithTier,
@@ -98,6 +100,44 @@ test('required paid model stacks fail closed when a provider is missing', () => 
     }) ?? '',
     /DeepSeek v4 Flash review provider/,
   );
+});
+
+test('provider output ceilings preserve max reasoning while bounding long generations', () => {
+  assert.equal(maxOutputTokensForModel('deepseek-v4-flash', {}), 32_000);
+  assert.equal(maxOutputTokensForModel('MiniMax-M3', {}), 32_000);
+  assert.equal(
+    maxOutputTokensForModel('deepseek-v4-flash', { ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS: '999999' }),
+    64_000,
+  );
+  assert.equal(maxOutputTokensForModel('gpt-5.6-luna', {}), undefined);
+});
+
+test('review lenses rotate changed files and receive only relevant cross-file context', () => {
+  const context = {
+    treePaths: ['src/a.ts'],
+    changedContents: ['a', 'b', 'c', 'd'].map((path) => ({ path, content: path })),
+    related: [{ path: 'callee', content: 'callee' }],
+    dependents: [{ path: 'caller', content: 'caller' }],
+    others: [{ path: 'other', content: 'other' }],
+  };
+
+  const deep = contextForReviewPass(context, 1);
+  assert.deepEqual(deep.changedContents?.map((file) => file.path), ['a', 'b', 'c', 'd']);
+  assert.ok(deep.related);
+  assert.equal(deep.dependents, undefined);
+  assert.equal(deep.others, undefined);
+
+  const callers = contextForReviewPass(context, 2);
+  assert.deepEqual(callers.changedContents?.map((file) => file.path), ['d', 'c', 'b', 'a']);
+  assert.ok(callers.dependents);
+  assert.equal(callers.related, undefined);
+  assert.equal(callers.others, undefined);
+
+  const breadth = contextForReviewPass(context, 3);
+  assert.deepEqual(breadth.changedContents?.map((file) => file.path), ['c', 'd', 'a', 'b']);
+  assert.ok(breadth.related);
+  assert.ok(breadth.others);
+  assert.equal(breadth.dependents, undefined);
 });
 
 test('usage accounting clamps malformed provider token counts instead of poisoning cost totals', () => {

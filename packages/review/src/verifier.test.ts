@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyVerdicts,
+  buildVerifierFileBlocks,
   formatFindingProvenance,
   isProtectedSourceTier,
   isWeakVerifierTier,
@@ -9,6 +10,7 @@ import {
   parsePositiveIntEnv,
   SEVERITY_INSTRUCTIONS,
   shouldRescueHedgedRejection,
+  verifyFindings,
 } from './verifier.js';
 import type { ReviewFinding } from './finding.js';
 
@@ -328,6 +330,68 @@ test('parsePositiveIntEnv rejects NaN and non-positive values', () => {
   assert.equal(parsePositiveIntEnv('0', 10), 10);
   assert.equal(parsePositiveIntEnv('-5', 10), 10);
   assert.equal(parsePositiveIntEnv('42', 10), 42);
+});
+
+test('verifier source bounds disclose per-file truncation and total omissions', () => {
+  const source = Array.from({ length: 220 }, (_, index) => `line ${index + 1}: ${'x'.repeat(20)}`).join('\n');
+  const blocks = buildVerifierFileBlocks(
+    [finding({ file: 'a.js', line: 110, message: 'the changed handler is unsafe' })],
+    [
+      { path: 'a.js', content: source },
+      { path: 'b.js', content: source },
+    ],
+    'ORVEX_DATA_test',
+    160,
+    420,
+  ).join('\n');
+
+  assert.match(blocks, /SOURCE COVERAGE:/);
+  assert.match(blocks, /source characters omitted|other ranges omitted/);
+  assert.match(blocks, /b\.js/);
+  assert.match(blocks, /not included because the total verification context budget was exhausted/);
+});
+
+test('verifier clamps an out-of-range finding line to a non-empty EOF excerpt', () => {
+  const source = Array.from({ length: 220 }, (_, index) => `line ${index + 1}: value`).join('\n');
+  const blocks = buildVerifierFileBlocks(
+    [finding({ file: 'a.js', line: 99_999, message: 'reported beyond EOF' })],
+    [{ path: 'a.js', content: source }],
+    'ORVEX_DATA_test',
+    2_000,
+    3_000,
+  ).join('\n');
+
+  assert.match(blocks, /line 220: value/);
+  assert.match(blocks, /Source excerpt: lines 140-220 of 220/);
+});
+
+test('verification does not replay a failed paid provider call', async (t) => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response('provider unavailable', { status: 503 });
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const candidate = finding({ severity: 'P2', message: 'concrete failure' });
+  const result = await verifyFindings(
+    [candidate],
+    [{ path: 'a.js', content: 'function broken() { throw new Error(); }' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.test/v1',
+      api: 'chat',
+      reasoningEffort: 'max',
+      maxTokens: 32_000,
+    },
+  );
+
+  assert.equal(result.status, 'unavailable');
+  assert.equal(calls, 1);
 });
 
 test('the verifier keeps the promotion rules for classes it measurably under-rates', () => {

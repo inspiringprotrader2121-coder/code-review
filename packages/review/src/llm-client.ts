@@ -84,7 +84,7 @@ export interface LlmClientOptions {
 }
 
 /** Typed cancellation is deliberately non-transient: a closed PR must never
- * enter provider retry/failover loops or trip the provider circuit breaker. */
+ * enter provider retry/failover loops or publish a provider cooldown. */
 export class ReviewCancelledError extends Error {
   override name = 'ReviewCancelledError';
 
@@ -208,14 +208,19 @@ const localProviderCooldownUntil = new Map<string, number>();
 
 function providerConcurrency(provider: string): number {
   const normalized = provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
-  const defaults: Record<string, number> = { LUNA: 1, DEEPSEEK: 2, MINIMAX: 2 };
+  // Two max-reasoning Flash passes on one key compete for the same generation
+  // throughput and both can cross the wall-clock cap. Serialize DeepSeek while
+  // keeping independent providers concurrent.
+  const defaults: Record<string, number> = { LUNA: 1, DEEPSEEK: 1, MINIMAX: 2 };
   const fallback = defaults[normalized] ?? 4;
   const raw = process.env[`ORVEX_PROVIDER_CONCURRENCY_${normalized}`];
   const parsed = raw === undefined || raw.trim() === '' ? fallback : Number(raw);
   return Number.isFinite(parsed) && parsed >= 1 ? Math.min(32, Math.floor(parsed)) : fallback;
 }
 
-function providerBucket(opts: Pick<LlmClientOptions, 'model' | 'baseUrl' | 'api'>): string {
+export function providerBucketForTarget(
+  opts: Pick<LlmClientOptions, 'model' | 'baseUrl' | 'api'>,
+): string {
   const identity = `${opts.model} ${opts.baseUrl ?? ''}`.toLowerCase();
   if (identity.includes('luna') || identity.includes('api.openai.com')) return 'luna';
   if (identity.includes('deepseek')) return 'deepseek';
@@ -289,21 +294,7 @@ export async function withProviderCallSlot<T>(
   let leaseToken: string | undefined;
   try {
     throwIfCancelled(signal);
-    const now = Date.now();
-    const localCooldown = Math.max(0, (localProviderCooldownUntil.get(provider) ?? 0) - now);
-    const localStackCooldown = Math.max(0, (localProviderCooldownUntil.get('review-stack') ?? 0) - now);
-    const [distributedCooldown, distributedStackCooldown] = providerCoordinator
-      ? await Promise.all([
-          providerCoordinator.getProviderCooldownMs(provider),
-          providerCoordinator.getProviderCooldownMs('review-stack'),
-        ])
-      : [0, 0];
-    const cooldownMs = Math.max(
-      localCooldown,
-      localStackCooldown,
-      distributedCooldown,
-      distributedStackCooldown,
-    );
+    const cooldownMs = await getProviderCooldownMs(provider);
     if (cooldownMs > 0) {
       throw new Error(`429 provider ${provider} cooldown active; retry-after: ${Math.ceil(cooldownMs / 1000)}`);
     }
@@ -313,8 +304,35 @@ export async function withProviderCallSlot<T>(
         providerConcurrency(provider),
         signal,
       );
+      // A prior holder may have published a cooldown immediately before it
+      // released the lease. Waiters passed the first check before blocking, so
+      // re-check after acquisition and refuse to start paid work in that window.
+      const postLeaseCooldownMs = await getProviderCooldownMs(provider);
+      if (postLeaseCooldownMs > 0) {
+        throw new Error(
+          `429 provider ${provider} cooldown active; retry-after: ${Math.ceil(postLeaseCooldownMs / 1000)}`,
+        );
+      }
     }
-    return await fn();
+    try {
+      return await fn();
+    } catch (error) {
+      const message = (error as Error)?.message ?? String(error);
+      // Publish the provider-specific cooldown while the distributed lease is
+      // still held. Otherwise the next worker can acquire the released lease in
+      // the small gap before the outer retry loop records the cooldown, causing
+      // an avoidable cross-process retry stampede.
+      const durationMs = signal?.aborted ? undefined : providerCooldownForFailure(message);
+      if (durationMs !== undefined) {
+        await setProviderCooldown(provider, durationMs).catch((cooldownError) => {
+          console.error(
+            `[llm] failed to publish distributed ${provider} cooldown:`,
+            (cooldownError as Error).message,
+          );
+        });
+      }
+      throw error;
+    }
   } finally {
     if (leaseToken && providerCoordinator) {
       await providerCoordinator.releaseProviderLease(provider, leaseToken).catch((err) => {
@@ -332,6 +350,14 @@ export async function setProviderCooldown(provider: string, durationMs: number):
     Math.max(localProviderCooldownUntil.get(provider) ?? 0, Date.now() + bounded),
   );
   if (providerCoordinator) await providerCoordinator.setProviderCooldown(provider, bounded);
+}
+
+export async function getProviderCooldownMs(provider: string): Promise<number> {
+  const local = Math.max(0, (localProviderCooldownUntil.get(provider) ?? 0) - Date.now());
+  const distributed = providerCoordinator
+    ? await providerCoordinator.getProviderCooldownMs(provider)
+    : 0;
+  return Math.max(local, distributed);
 }
 
 export function resolveMaxOutputTokens(explicit?: number): number {
@@ -418,6 +444,27 @@ export function isRetryableRateLimit(message: string): boolean {
   );
 }
 
+/** Provider-scoped circuit duration for failures that indicate the provider is
+ * unavailable. Timeouts are not replayed, but they still cool that provider so
+ * a large queue cannot immediately repeat the same failure in parallel. */
+function providerCooldownForFailure(message: string): number | undefined {
+  if (isOversizedModelRequest(message)) return undefined;
+  if (/insufficient_quota|exceeded your current quota|billing_hard_limit/i.test(message)) {
+    return 300_000;
+  }
+  const status = /\brequest failed\s*\(\s*(\d{3})\b/i.exec(message)?.[1];
+  if (status === '402' && /credit|insufficient|afford|top-?up/i.test(message)) {
+    return 300_000;
+  }
+  const advertised = parseRetryAfterMs(message);
+  if (advertised !== undefined) return Math.min(300_000, Math.max(2_000, advertised));
+  if (isRetryableRateLimit(message)) return 2_000;
+  if (/\b(?:408|425|5\d\d)\b|fetch failed|econn|socket hang|wall-clock cap|timed?\s*out|stalled|produced no output/i.test(message)) {
+    return 30_000;
+  }
+  return undefined;
+}
+
 const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
     throwIfCancelled(signal);
@@ -433,6 +480,34 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) onAbort();
   });
+
+/** Wait before starting a multi-provider ensemble when any required provider is
+ * cooling down. This prevents sibling providers from spending on a review that
+ * cannot complete, without pausing jobs that use an independent provider set. */
+export async function waitForProviderAvailability(
+  providers: readonly string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const required = [...new Set(providers.filter(Boolean))];
+  let announced = false;
+  for (;;) {
+    throwIfCancelled(signal);
+    const waits = await Promise.all(required.map((provider) => getProviderCooldownMs(provider)));
+    const waitMs = Math.max(0, ...waits);
+    if (waitMs <= 0) {
+      if (announced) console.log(`[llm] required provider cooldown cleared (${required.join(', ')})`);
+      return;
+    }
+    if (!announced) {
+      console.warn(
+        `[llm] delaying review before paid calls: required provider cooldown active ` +
+          `for up to ${Math.ceil(waitMs / 1000)}s (${required.join(', ')})`,
+      );
+      announced = true;
+    }
+    await sleep(Math.min(waitMs, 1_000), signal);
+  }
+}
 
 /**
  * Public entry point. Wraps same-provider key rotation below in a
@@ -458,29 +533,36 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
   const maxWaitMs = Math.min(300_000, Math.max(1_000, finite(process.env.ORVEX_RATELIMIT_MAX_WAIT_MS, 60_000)));
   const baseMs = Math.min(60_000, Math.max(250, finite(process.env.ORVEX_RATELIMIT_BASE_MS, 2_000)));
   // TOTAL sleep budget across this call. Each attempt replays the whole key
-  // rotation chain, and `runLlmReview` wraps the result in a
-  // second retry — so an unbounded per-attempt wait compounded into tens of
-  // minutes of a worker slot held asleep. That starves the queue AND hides
-  // failures from the circuit breaker (which only counts *failed jobs*), so the
-  // breaker never trips while every slot naps. Bound the total, not just each nap.
+  // rotation chain, so an unbounded per-attempt wait compounds into minutes of
+  // a worker slot held asleep. Bound the total; the provider-specific cooldown
+  // admission handles later reviews without replaying this ensemble.
   const totalWaitBudgetMs = Math.min(
     60_000,
     Math.max(5_000, finite(process.env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 60_000)),
   );
-  const provider = providerBucket(opts);
+  const provider = providerBucketForTarget(opts);
   const lineage = { lastAttemptId: undefined as string | undefined };
   let sleptMs = 0;
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     throwIfCancelled(opts.signal);
+    let enteredProviderCall = false;
     try {
       return await withProviderCallSlot(
         provider,
-        () => llmChatWithKeyRotation(system, user, opts, attempt, lineage),
+        () => {
+          enteredProviderCall = true;
+          return llmChatWithKeyRotation(system, user, opts, attempt, lineage);
+        },
         opts.signal,
       );
     } catch (err) {
-      lastErr = err as Error;
+      lastErr = opts.signal?.aborted && !isReviewCancelledError(err)
+        ? new ReviewCancelledError()
+        : err as Error;
+      if (!enteredProviderCall) {
+        recordProviderAdmissionFailure(opts, attempt, lineage, lastErr);
+      }
       if (isReviewCancelledError(lastErr) || opts.signal?.aborted) throw new ReviewCancelledError();
       if (attempt === maxAttempts - 1 || !isRetryableRateLimit(lastErr.message)) throw lastErr;
       // Honor the provider's advertised retry-after; otherwise exponential
@@ -514,9 +596,49 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
           `(attempt ${attempt + 1}/${maxAttempts}): ${lastErr.message.slice(0, 140)}`,
       );
       await sleep(waitMs, opts.signal);
+      // The first failed request publishes its cooldown before releasing the
+      // distributed lease. Wait out any longer advertised/provider window too,
+      // so this retry cannot fail at admission a few milliseconds early.
+      await waitForProviderAvailability([provider], opts.signal);
     }
   }
   throw lastErr!;
+}
+
+function recordProviderAdmissionFailure(
+  opts: LlmClientOptions,
+  retryIndex: number,
+  lineage: { lastAttemptId?: string },
+  error: Error,
+): void {
+  if (!opts.onAttempt) return;
+  const attemptId = randomUUID();
+  const timestamp = new Date().toISOString();
+  const transport = opts.api === 'responses'
+    ? 'responses'
+    : opts.api === 'anthropic' || (!opts.baseUrl && opts.api !== 'chat')
+      ? 'anthropic'
+      : 'chat';
+  opts.onAttempt({
+    phase: 'started',
+    attemptId,
+    parentAttemptId: lineage.lastAttemptId,
+    retryIndex,
+    keyIndex: 0,
+    provider: providerName(opts.baseUrl, opts.api),
+    model: opts.model,
+    transport,
+    startedAt: timestamp,
+  });
+  lineage.lastAttemptId = attemptId;
+  opts.onAttempt({
+    phase: 'finished',
+    attemptId,
+    outcome: attemptOutcome(error),
+    error: error.message.slice(0, 2_000),
+    durationMs: 0,
+    completedAt: timestamp,
+  });
 }
 
 function attemptOutcome(error: unknown): LlmAttemptOutcome {

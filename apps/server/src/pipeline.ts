@@ -29,6 +29,7 @@ import {
 } from '@orvex-review/rules';
 import {
   applyCheckboxLine,
+  assertCodexRuntimeReady,
   buildReviewPassAngles,
   checkImportBindings,
   commandTrigger,
@@ -54,6 +55,7 @@ import {
   aggregateRepeatedFindings,
   readReviewAggregationConfig,
   partitionVerifiedFindings,
+  providerBucketForTarget,
   reconcileFixedOnHead,
   dropSelfNegatingFindings,
   runLlmReview,
@@ -65,6 +67,7 @@ import {
   selectRiskProbes,
   toStoredFinding,
   verifyFindings,
+  waitForProviderAvailability,
   type ReviewFinding,
   type ReviewPromptContext,
   type ReviewSurfaceFinding,
@@ -197,6 +200,9 @@ export interface LlmTarget {
   api?: 'chat' | 'responses' | 'anthropic';
   /** reasoning effort for /v1/responses models ('low'|'medium'|'high'|'xhigh') */
   reasoningEffort?: string;
+  /** Provider-specific completion ceiling. This bounds max-reasoning duration;
+   * it does not lower reasoning effort. */
+  maxTokens?: number;
 }
 
 export interface WorkerConfig {
@@ -287,12 +293,64 @@ export async function runPostPublicationStep(
 }
 
 function premiumTarget(config: WorkerConfig): LlmTarget {
-  return { apiKey: config.llmApiKey, baseUrl: config.llmBaseUrl, model: config.llmModel, api: config.llmApi };
+  return {
+    apiKey: config.llmApiKey,
+    baseUrl: config.llmBaseUrl,
+    model: config.llmModel,
+    api: config.llmApi,
+    maxTokens: maxOutputTokensForModel(config.llmModel),
+  };
 }
 
 function boundedEnvInt(name: string, fallback: number, min: number, max: number): number {
   const value = Number(process.env[name] ?? fallback);
   return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
+}
+
+export function maxOutputTokensForModel(
+  model: string,
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  const normalized = model.toLowerCase();
+  const key = normalized.includes('deepseek')
+    ? 'ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS'
+    : normalized.includes('minimax')
+      ? 'ORVEX_MINIMAX_MAX_OUTPUT_TOKENS'
+      : undefined;
+  if (!key) return undefined;
+  const parsed = Number(env[key] ?? 32_000);
+  return Number.isFinite(parsed)
+    ? Math.min(64_000, Math.max(16_000, Math.floor(parsed)))
+    : 32_000;
+}
+
+/** Give each independent lens only the cross-file evidence it needs. The diff
+ * remains present in every pass, while changed-file ordering rotates so a
+ * bounded source-context budget covers different files across the ensemble. */
+export function contextForReviewPass(
+  context: ReviewPromptContext,
+  modelPassIndex: number,
+): ReviewPromptContext {
+  const changed = [...(context.changedContents ?? [])];
+  if (modelPassIndex === 2) changed.reverse();
+  if (modelPassIndex >= 3 && changed.length > 1) {
+    const midpoint = Math.floor(changed.length / 2);
+    changed.push(...changed.splice(0, midpoint));
+  }
+  const common: ReviewPromptContext = {
+    treePaths: context.treePaths,
+    changedContents: changed,
+  };
+  if (modelPassIndex === 1) {
+    return { ...common, related: context.related };
+  }
+  if (modelPassIndex === 2) {
+    return { ...common, dependents: context.dependents };
+  }
+  if (modelPassIndex >= 3) {
+    return { ...common, related: context.related, others: context.others };
+  }
+  return { ...common, related: context.related, dependents: context.dependents, others: context.others };
 }
 
 /** The model + cost-tier for a given review PASS.
@@ -604,8 +662,15 @@ export function loadWorkerConfig(): WorkerConfig {
           (stdApi === 'anthropic' ? 'https://api.minimax.io/anthropic' : 'https://api.minimax.io/v1'),
         model: stdModelName,
         api: stdApi,
+        maxTokens: maxOutputTokensForModel(stdModelName),
       }
-    : { apiKey: premiumApiKey, baseUrl: premiumBaseUrl, model: premiumModel, api: premiumApi };
+    : {
+        apiKey: premiumApiKey,
+        baseUrl: premiumBaseUrl,
+        model: premiumModel,
+        api: premiumApi,
+        maxTokens: maxOutputTokensForModel(premiumModel),
+      };
 
   // Native direct OpenAI target for explicit diagnostics/evaluation. Purchased
   // high-tier Luna discovery is CLI-only and never substitutes this transport.
@@ -645,6 +710,7 @@ export function loadWorkerConfig(): WorkerConfig {
         baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
         model: process.env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
         reasoningEffort: 'max',
+        maxTokens: maxOutputTokensForModel(process.env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro'),
       }
     : null;
 
@@ -656,6 +722,7 @@ export function loadWorkerConfig(): WorkerConfig {
         baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
         model: process.env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
         reasoningEffort: 'max',
+        maxTokens: maxOutputTokensForModel(process.env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash'),
       }
     : null;
 
@@ -704,7 +771,7 @@ export interface ProcessResult {
 // full input at this rate and never discount for cache hits (see below).
 //
 //   tier            model             in      out     cached-in   long-context
-//   premium         GLM-5.2           1.40    4.40    0.26        (3x peak surcharge 14-18 Beijing)
+//   premium         legacy target     env-priced (used only by explicit legacy routes)
 //   standard        MiniMax-M3        0.30    1.20    0.06        >512K in -> 0.60 / 2.40
 //   openai          gpt-5.6-luna      0.20    1.20    0.02        >272K in -> 0.40 / 1.80
 //   deepseek        deepseek-v4-pro   0.435   0.87    0.003625
@@ -715,10 +782,9 @@ export interface ProcessResult {
 //     — a repeated 36k prefix measured 99.99% cached on Luna — and cached input
 //     is 10% (Luna), 20% (MiniMax) or <1% (DeepSeek) of the miss rate. Providers
 //     do report cached_tokens; wiring that through would sharpen this materially.
-//  2. Long-context surcharges are NOT modelled. Review prompts run ~180k input,
-//     under both thresholds, so this is currently inert — but an agentic codex
-//     pass has been observed at 1.1M cumulative tokens, and any SINGLE call over
-//     272k would bill Luna at 2x in / 1.5x out for the whole request.
+//  2. Long-context surcharges are NOT modelled. Focused API prompts stay below
+//     the configured thresholds; agentic Codex usage is tracked from its own
+//     reported cumulative token counts.
 // Every rate stays env-overridable so a price change needs no deploy.
 function positiveEnvNumber(name: string, fallback: number, max = 1_000_000): number {
   const raw = process.env[name];
@@ -1727,15 +1793,12 @@ async function executeReview(
               0,
               200,
             ),
-            // Per-file cap raised so LARGE changed files are shown in FULL — a
-            // bug past the old 32k cutoff (e.g. line 1600+ of a big file) was
-            // invisible to the model. GLM-5.2's 1M window has room.
+            // Retain enough changed-file source for hunk-focused prompt windows
+            // and agentic call-site inspection without dumping every full file
+            // into each API pass.
             maxFileBytes: boundedEnvInt('ORVEX_CTX_FILE_BYTES', 120_000, 0, 1_000_000),
-            // Pull in enough of the rest of the repo to feed the whole-repo
-            // sweep below (it batches these files); ORVEX_REPO_SWEEP_MAX_FILES
-            // controls how deep the sweep goes.
-            // Plan-driven: retrieve top-K relevant files for the passes (all
-            // tiers), plus extra files only for the Verify whole-repo sweep.
+            // Plan-driven top-K relevant files for focused cross-file evidence.
+            // The old whole-repo sweep is disabled on every tier.
             maxOthers:
               plan.retrievalTopK
               + (highRiskDiff && process.env.ORVEX_RISK_HUNT === '1' ? 8 : 0)
@@ -1760,9 +1823,9 @@ async function executeReview(
     }
 
     // Depth is enforced HERE, in the harness, and scaled BY PLAN — not left to
-    // how long one model call decides to think. Higher tiers get more passes and
-    // (Verify only) an exhaustive whole-repo sweep. Findings accumulate and
-    // dedupe by fingerprint; a hard call-count cap prevents runaway.
+    // how long one model call decides to think. Higher tiers get the fixed four
+    // discovery lenses plus verification. Findings accumulate and dedupe by
+    // fingerprint; a hard call-count cap prevents runaway.
     // Reviewers and verifier receive diff and code context only — PR title/body
     // are a prompt-injection channel and reach no model prompt anywhere.
     const baseCtx: ReviewPromptContext = { ...(reviewContext ?? {}) };
@@ -1773,6 +1836,7 @@ async function executeReview(
         model: target.model,
         api: target.api,
         reasoningEffort: target.reasoningEffort,
+        maxTokens: target.maxTokens,
         temperature,
         context: ctx,
         signal: reviewAbortController.signal,
@@ -1781,11 +1845,8 @@ async function executeReview(
       });
 
     const passes = Math.max(1, plan.reviewPasses);
-    // Tuned so a Verify review is a genuinely deep ~10 minutes (not a 3-minute
-    // burst that's indistinguishable from the base tier): more calls, deeper
-    // per-file sweep reads (below), and MODERATE concurrency so the work spreads
-    // out rather than finishing all at once. Review has few calls, so a lower
-    // concurrency barely affects it — this mainly paces the many-call Verify tier.
+    // Bound the number of stages and their scheduling concurrency. Provider
+    // semaphores and Redis leases apply the stricter per-provider capacities.
     const configuredMaxCalls = Number(process.env.ORVEX_REVIEW_MAX_CALLS ?? 28);
     const maxCalls = Number.isFinite(configuredMaxCalls)
       ? Math.min(100, Math.max(passes, Math.floor(configuredMaxCalls)))
@@ -1796,11 +1857,9 @@ async function executeReview(
       : 3;
     const accumulated: ReviewFinding[] = [];
 
-    // Build the full list of review calls up front — N passes over the change +
-    // its neighborhood + top-K index files, plus (Verify only) whole-repo sweep
-    // batches over the rest — then run them all with BOUNDED CONCURRENCY. Same
-    // coverage as before, but parallel instead of sequential, so a deep review
-    // finishes in a fraction of the wall-clock.
+    // Build the complete fixed pass list over the prioritized diff, neighborhood,
+    // and top-K evidence. Lanes overlap where independent, while provider gates
+    // serialize calls that share constrained capacity.
     const passOthers = (reviewContext?.others ?? []).slice(
       0,
       plan.retrievalTopK + (highRiskDiff && process.env.ORVEX_RISK_HUNT === '1' ? 8 : 0),
@@ -1859,6 +1918,11 @@ async function executeReview(
       && !requestedCodexCli
     ) {
       throw new Error('high-tier review requires pinned Codex CLI Luna; ORVEX_CODEX_CLI is not enabled');
+    }
+    if (requestedCodexCli) {
+      // Required-stage preflight happens before the parallel call list starts.
+      // A missing binary/auth home must not let Flash/MiniMax spend first.
+      assertCodexRuntimeReady();
     }
     const wantInvestigate = canRunInvestigate(plan, { useCodexCli: requestedCodexCli });
     const investigateModel = wantInvestigate ? modelForInvestigate(config) : null;
@@ -1920,11 +1984,12 @@ async function executeReview(
       // Route by the angle's stable modelIdx, not compacted array position —
       // otherwise skipping removed-behavior shifts breadth onto Flash.
       const { target, tier } = modelForPass(config, plan, angle.modelIdx, useCodexCli);
+      const lensContext = contextForReviewPass(passCtx, angle.modelIdx);
       reviewCalls.push({
         label: `pass ${p + 1}/${totalDiscoverySlots} (${angle.tag}) [${target.model}]`,
         kind: 'pass',
         mode: useCodexCli && tier === 'openai' ? 'agentic' : 'api',
-        ctx: angle.focus ? { ...passCtx, extraFocus: angle.focus } : passCtx,
+        ctx: angle.focus ? { ...lensContext, extraFocus: angle.focus } : lensContext,
         target,
         tier,
         passTag: angle.tag,
@@ -1936,11 +2001,12 @@ async function executeReview(
     for (const [i, extra] of DEEP_EXTRA_ANGLES.entries()) {
       const extraUsesCodex = extra.modelIdx === 0 && useCodexCli;
       const { target, tier } = modelForPass(config, plan, extra.modelIdx, extraUsesCodex);
+      const lensContext = contextForReviewPass(passCtx, extra.modelIdx);
       reviewCalls.push({
         label: `pass ${discoveryPasses + i + 1}/${totalDiscoverySlots} (${extra.tag}) [${target.model}]`,
         kind: 'pass',
         mode: extraUsesCodex ? 'agentic' : 'api',
-        ctx: { ...passCtx, extraFocus: extra.focus },
+        ctx: { ...lensContext, extraFocus: extra.focus },
         target,
         tier,
         passTag: extra.tag,
@@ -2171,6 +2237,19 @@ async function executeReview(
       );
     }
 
+    // Provider-specific admission happens once for the complete required stack,
+    // before any paid lane starts. If Luna is cooling, high-tier work waits but
+    // lower tiers (which require only DeepSeek + MiniMax) remain independent.
+    // This replaces the old shared review-stack circuit that stopped every plan.
+    const requiredProviders = toRun
+      .filter((call) => call.kind === 'pass' && !call.bestEffort)
+      .map((call) =>
+        call.mode === 'agentic'
+          ? 'luna'
+          : providerBucketForTarget(call.target),
+      );
+    await waitForProviderAvailability(requiredProviders, reviewAbortController.signal);
+
     type Outcome = {
       ok: boolean;
       transient: boolean;
@@ -2244,6 +2323,7 @@ async function executeReview(
             baseUrl: call.target.baseUrl,
             api: call.target.api,
             reasoningEffort: call.target.reasoningEffort,
+            maxTokens: call.target.maxTokens,
             context: call.ctx,
             signal: reviewAbortController.signal,
             onUsage: onUsageFor(call.tier, call.target, call.label ?? 'investigate'),
@@ -2508,6 +2588,7 @@ async function executeReview(
             baseUrl: llm.baseUrl,
             api: llm.api,
             reasoningEffort: llm.reasoningEffort,
+            maxTokens: llm.maxTokens,
             temperature: aggregation.temperature,
             json: true,
             signal: reviewAbortController.signal,
@@ -2676,6 +2757,7 @@ async function executeReview(
       baseUrl: llm.baseUrl,
       api: llm.api,
       reasoningEffort: llm.reasoningEffort,
+      maxTokens: llm.maxTokens,
       strict: plan.deepVerify,
       verifierTier: verificationTier,
       signal: reviewAbortController.signal,

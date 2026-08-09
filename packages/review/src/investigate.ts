@@ -29,6 +29,7 @@ export interface InvestigateOptions {
   baseUrl?: string;
   api?: 'chat' | 'responses' | 'anthropic';
   reasoningEffort?: string;
+  maxTokens?: number;
   /** Cancel the tool loop and any active provider call when the PR closes. */
   signal?: AbortSignal;
   context?: ReviewPromptContext;
@@ -461,6 +462,7 @@ export async function runInvestigateReview(
     baseUrl: opts.baseUrl,
     api: opts.api,
     reasoningEffort: opts.reasoningEffort,
+    maxTokens: opts.maxTokens,
     signal: opts.signal,
     json: true as const,
     onUsage: opts.onUsage,

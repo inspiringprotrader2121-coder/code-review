@@ -136,6 +136,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.52.0
         version: 0.52.0
+      '@openai/codex':
+        specifier: 0.147.0
+        version: 0.147.0
       '@orvex-review/rules':
         specifier: workspace:*
         version: link:../rules

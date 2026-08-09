@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { safePromptData } from './prompt-safety.js';
+import { safePromptData, safePromptLabel } from './prompt-safety.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -219,14 +219,15 @@ function numEnv(name: string, fallback: number, min = 1): number {
   return parsed;
 }
 
-const MAX_TREE_PATHS = numEnv('ORVEX_MAX_TREE_PATHS', 3000);
-const MAX_CHANGED_CHARS = numEnv('ORVEX_MAX_CHANGED_CHARS', 180_000);
-const MAX_RELATED_CHARS = numEnv('ORVEX_MAX_RELATED_CHARS', 60_000);
-const MAX_OTHER_CHARS = numEnv('ORVEX_MAX_OTHER_CHARS', 40_000);
-const FULL_CHANGED_FILE_CHARS = numEnv('ORVEX_FULL_CHANGED_FILE_CHARS', 120_000);
-const CHANGED_CONTEXT_LINES = numEnv('ORVEX_CHANGED_CONTEXT_LINES', 80);
-const MAX_CHANGED_CHUNKS_PER_FILE = numEnv('ORVEX_MAX_CHANGED_CHUNKS_PER_FILE', 6);
-const MAX_CHANGED_CHUNK_CHARS = numEnv('ORVEX_MAX_CHANGED_CHUNK_CHARS', 24_000);
+const MAX_TREE_PATHS = numEnv('ORVEX_MAX_TREE_PATHS', 400);
+const MAX_DIFF_CHARS = numEnv('ORVEX_MAX_DIFF_CHARS', 96_000);
+const MAX_CHANGED_CHARS = numEnv('ORVEX_MAX_CHANGED_CHARS', 64_000);
+const MAX_RELATED_CHARS = numEnv('ORVEX_MAX_RELATED_CHARS', 24_000);
+const MAX_OTHER_CHARS = numEnv('ORVEX_MAX_OTHER_CHARS', 8_000);
+const FULL_CHANGED_FILE_CHARS = numEnv('ORVEX_FULL_CHANGED_FILE_CHARS', 12_000);
+const CHANGED_CONTEXT_LINES = numEnv('ORVEX_CHANGED_CONTEXT_LINES', 32);
+const MAX_CHANGED_CHUNKS_PER_FILE = numEnv('ORVEX_MAX_CHANGED_CHUNKS_PER_FILE', 4);
+const MAX_CHANGED_CHUNK_CHARS = numEnv('ORVEX_MAX_CHANGED_CHUNK_CHARS', 12_000);
 
 interface ChangedHunk {
   start: number;
@@ -240,6 +241,39 @@ interface SourceChunk extends ChangedHunk {
 interface SourceRange extends ChangedHunk {
   focusStart: number;
   focusEnd: number;
+}
+
+function fairDiffBudgets(lengths: readonly number[], totalBudget: number): number[] {
+  const budgets = lengths.map(() => 0);
+  let remaining = totalBudget;
+  let pending = lengths.map((_, index) => index).filter((index) => lengths[index]! > 0);
+  while (remaining > 0 && pending.length > 0) {
+    const share = Math.max(1, Math.floor(remaining / pending.length));
+    let progressed = false;
+    for (const index of pending) {
+      if (remaining <= 0) break;
+      const needed = lengths[index]! - budgets[index]!;
+      const granted = Math.min(needed, share, remaining);
+      if (granted > 0) {
+        budgets[index]! += granted;
+        remaining -= granted;
+        progressed = true;
+      }
+    }
+    pending = pending.filter((index) => budgets[index]! < lengths[index]!);
+    if (!progressed) break;
+  }
+  return budgets;
+}
+
+function sampleDiff(patch: string, budget: number): string {
+  if (patch.length <= budget) return patch;
+  const marker = `\n... [${patch.length - budget} diff chars omitted; sampled start and end] ...\n`;
+  if (budget <= marker.length + 2) return marker.slice(0, budget);
+  const contentBudget = budget - marker.length;
+  const head = Math.ceil(contentBudget / 2);
+  const tail = Math.floor(contentBudget / 2);
+  return `${patch.slice(0, head)}${marker}${patch.slice(-tail)}`;
 }
 
 function changedHunks(patch: string | undefined): ChangedHunk[] {
@@ -396,9 +430,11 @@ export function buildUserPrompt(
   files: Array<{ filename: string; status: string; patch?: string }>,
   context?: ReviewPromptContext,
 ): string {
-  const sections = files.map((f) => {
-    const patch = safePromptData(f.patch ?? '(no patch — binary or too large)');
-    return `### ${safePromptData(f.filename)} (${safePromptData(f.status)})\n\`\`\`diff\n${patch}\n\`\`\``;
+  const safePatches = files.map((f) => safePromptData(f.patch ?? '(no patch — binary or too large)'));
+  const patchBudgets = fairDiffBudgets(safePatches.map((patch) => patch.length), MAX_DIFF_CHARS);
+  const sections = files.map((f, index) => {
+    const patch = sampleDiff(safePatches[index]!, patchBudgets[index]!);
+    return `### ${safePromptLabel(f.filename)} (${safePromptLabel(f.status)})\n\`\`\`diff\n${patch}\n\`\`\``;
   });
 
   // PROMPT CACHING: extraFocus (the per-PASS lens instruction — general vs
@@ -434,42 +470,59 @@ export function buildUserPrompt(
       'guards, and error handling; do not assume code omitted from a large file is safe or unsafe.',
     );
     let used = 0;
-    const omitted: string[] = [];
-    for (const f of context.changedContents) {
+    const omitted = new Set<string>();
+    const entries = context.changedContents.map((f) => {
       const patch = files.find((file) => file.filename === f.path)?.patch;
-      const totalLines = f.content.split('\n').length;
-      const allHunks = changedHunks(patch).length;
       const chunks = chunkChangedFileContext(f.content, patch);
+      return {
+        file: f,
+        chunks,
+        totalLines: f.content.split('\n').length,
+        allHunks: changedHunks(patch).length,
+        emitted: 0,
+      };
+    });
+    for (const entry of entries) {
       // selectHunks samples at most MAX_CHANGED_CHUNKS_PER_FILE windows, so a
       // file with more hunks than that has changed regions with NO source
       // context. Say which, instead of letting the model assume it saw them.
-      if (allHunks > chunks.length) omitted.push(`${f.path} (${allHunks - chunks.length} of ${allHunks} changed regions not shown)`);
-      let emitted = 0;
-      for (const chunk of chunks) {
-        const label = chunks.length === 1 && chunk.start === 1 && chunk.end === totalLines
+      if (entry.allHunks > entry.chunks.length) {
+        omitted.add(
+          `${safePromptLabel(entry.file.path)} (${entry.allHunks - entry.chunks.length} of ${entry.allHunks} changed regions not shown)`,
+        );
+      }
+    }
+    // Round-robin chunks across files. The previous file-major loop let one
+    // large early file consume the entire budget and hide every later changed
+    // file. The diff is still first; this makes the supplemental source fair.
+    const rounds = Math.max(0, ...entries.map((entry) => entry.chunks.length));
+    for (let round = 0; round < rounds; round++) {
+      for (const entry of entries) {
+        const chunk = entry.chunks[round];
+        if (!chunk) continue;
+        const label = entry.chunks.length === 1 && chunk.start === 1 && chunk.end === entry.totalLines
           ? 'full file'
-          : `lines ${chunk.start}-${chunk.end} of ${totalLines} — around changed hunk`;
-        const block = `\n### ${safePromptData(f.path)} (${label})\n\`\`\`\n${safePromptData(chunk.content)}\n\`\`\``;
+          : `lines ${chunk.start}-${chunk.end} of ${entry.totalLines} — around changed hunk`;
+        const block = `\n### ${safePromptLabel(entry.file.path)} (${label})\n\`\`\`\n${safePromptData(chunk.content)}\n\`\`\``;
         // `continue`, not `break`: one oversized chunk must not starve later
         // changed files. The full diff remains above even when a chunk is skipped.
         if (used + block.length > MAX_CHANGED_CHARS) continue;
         parts.push(block);
         used += block.length;
-        emitted++;
+        entry.emitted++;
       }
-      // The 4x budget cut (700k → 180k) means whole changed files now fall off
-      // the end. Previously they vanished with no marker at all, so the model
-      // could not distinguish "this file has no interesting code" from "this
-      // file was never shown" — which is the single biggest driver of confident
-      // "the guard is missing" false positives.
-      if (emitted === 0) omitted.push(`${f.path} (no source shown — context budget exhausted)`);
     }
-    if (omitted.length > 0) {
+    for (const entry of entries) {
+      if (entry.emitted === 0) {
+        omitted.add(`${safePromptLabel(entry.file.path)} (no source shown — context budget exhausted)`);
+      }
+    }
+    if (omitted.size > 0) {
       parts.push(
         '',
-        `⚠ Source context was NOT included for ${omitted.length} item(s) below. Their diffs ARE above.`,
+        `⚠ Source context was NOT included for ${omitted.size} item(s) below. Their diffs ARE above.`,
         'Do NOT report that code is missing, unguarded, or uncleaned in these — you have not seen them:',
-        ...omitted.map((o) => `  - ${o}`),
+        ...Array.from(omitted, (o) => `  - ${o}`),
       );
     }
   }
@@ -485,17 +538,35 @@ export function buildUserPrompt(
     // and keep packing the rest — a single large related file must not starve
     // every later related file AND every dependent file of their context.
     let used = 0;
+    const skippedRelated: string[] = [];
+    const skippedDependents: string[] = [];
     for (const r of context.related ?? []) {
-      const block = `\n### ${safePromptData(r.path)} (imported by changed code)\n\`\`\`\n${safePromptData(r.content)}\n\`\`\``;
-      if (used + block.length > MAX_RELATED_CHARS) continue;
+      const safePath = safePromptLabel(r.path);
+      const block = `\n### ${safePath} (imported by changed code)\n\`\`\`\n${safePromptData(r.content)}\n\`\`\``;
+      if (used + block.length > MAX_RELATED_CHARS) {
+        skippedRelated.push(safePath);
+        continue;
+      }
       parts.push(block);
       used += block.length;
     }
     for (const d of context.dependents ?? []) {
-      const block = `\n### ${safePromptData(d.path)} (imports the changed code — check for breakage)\n\`\`\`\n${safePromptData(d.content)}\n\`\`\``;
-      if (used + block.length > MAX_RELATED_CHARS) continue;
+      const safePath = safePromptLabel(d.path);
+      const block = `\n### ${safePath} (imports the changed code — check for breakage)\n\`\`\`\n${safePromptData(d.content)}\n\`\`\``;
+      if (used + block.length > MAX_RELATED_CHARS) {
+        skippedDependents.push(safePath);
+        continue;
+      }
       parts.push(block);
       used += block.length;
+    }
+    if (skippedRelated.length > 0 || skippedDependents.length > 0) {
+      parts.push(
+        '',
+        'Cross-file coverage notice: these files were not included because the context budget was exhausted.',
+        ...skippedRelated.map((path) => `  - related: ${path}`),
+        ...skippedDependents.map((path) => `  - dependent: ${path}`),
+      );
     }
   }
 
@@ -506,11 +577,23 @@ export function buildUserPrompt(
       'The remaining repo files, so you can check contracts, config, and conventions anywhere.',
     );
     let used = 0;
+    const skippedOthers: string[] = [];
     for (const o of context.others) {
-      const block = `\n### ${safePromptData(o.path)}\n\`\`\`\n${safePromptData(o.content)}\n\`\`\``;
-      if (used + block.length > MAX_OTHER_CHARS) continue; // skip the oversized one, keep packing
+      const safePath = safePromptLabel(o.path);
+      const block = `\n### ${safePath}\n\`\`\`\n${safePromptData(o.content)}\n\`\`\``;
+      if (used + block.length > MAX_OTHER_CHARS) {
+        skippedOthers.push(safePath);
+        continue; // skip the oversized one, keep packing
+      }
       parts.push(block);
       used += block.length;
+    }
+    if (skippedOthers.length > 0) {
+      parts.push(
+        '',
+        'Repository-context coverage notice: these files were not included because the context budget was exhausted.',
+        ...skippedOthers.map((path) => `  - ${path}`),
+      );
     }
   }
 

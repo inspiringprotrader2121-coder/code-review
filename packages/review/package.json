@@ -14,6 +14,7 @@
     "test": "node --import tsx --test src/**/*.test.ts"
   },
   "dependencies": {
+    "@openai/codex": "0.147.0",
     "@orvex-review/rules": "workspace:*",
     "@orvex-review/store": "workspace:*",
     "@anthropic-ai/sdk": "^0.52.0",

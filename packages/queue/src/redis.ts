@@ -44,7 +44,20 @@ end
 return current`;
 
 const RECOVER_PROCESSING_LUA = `
-if redis.call('EXISTS', KEYS[3]) == 1 then return 'live' end
+local cur = redis.call('GET', KEYS[3])
+if cur then
+  -- Tokenized processing entries distinguish an obsolete worker from a newer
+  -- owner of byte-identical job JSON. Legacy raw-only entries remain live while
+  -- any lock exists and are recovered after that lock disappears.
+  if ARGV[5] == '' then return 'live' end
+  local sep = string.find(cur, '\\n', 1, true)
+  local curToken = sep and string.sub(cur, 1, sep - 1) or cur
+  if curToken == ARGV[5] then return 'live' end
+  local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+  if removed == 0 then return 'claimed-by-peer' end
+  redis.call('DEL', KEYS[2])
+  return 'superseded'
+end
 local started = tonumber(redis.call('GET', KEYS[2]) or '')
 if not started then
   redis.call('SET', KEYS[2], ARGV[2], 'EX', 3600, 'NX')
@@ -61,7 +74,7 @@ local resumes = redis.call('INCR', KEYS[6])
 redis.call('EXPIRE', KEYS[6], 86400)
 if resumes > tonumber(ARGV[4]) then return 'dropped:' .. tostring(resumes) end
 redis.call('DEL', KEYS[7])
-redis.call('RPUSH', KEYS[8], ARGV[1])
+redis.call('RPUSH', KEYS[8], ARGV[6])
 return 'requeued'`;
 
 const RECOVER_PENDING_LUA = `
@@ -154,13 +167,13 @@ if ok then return 'claimed' end
 ${COALESCE_SNIPPET}
 return 'pending'`;
 
-// Move one job into a durable processing list atomically. If the worker dies
-// before it claims the PR lock, startup recovery can find this payload and put
-// it back on the main queue instead of losing it between LPOP and SET NX.
+// Move one job into a durable processing list atomically. Prefixing the raw job
+// with the immutable claim token lets finalization/recovery distinguish two
+// workers that handled byte-identical payloads at different times.
 const DEQUEUE_LUA = `
 local raw = redis.call('LPOP', KEYS[1])
 if not raw then return false end
-redis.call('RPUSH', KEYS[2], raw)
+redis.call('RPUSH', KEYS[2], ARGV[1] .. '\\n' .. raw)
 return raw`;
 
 // Release the PR lock and move one coalesced follow-up back to the main queue
@@ -172,8 +185,17 @@ if not raw then return false end
 redis.call('RPUSH', KEYS[2], raw)
 return raw`;
 
-function processingMetaKey(raw: string): string {
-  return `${PROCESSING_META_PREFIX}${createHash('sha256').update(raw).digest('hex')}`;
+function processingMetaKey(entry: string): string {
+  return `${PROCESSING_META_PREFIX}${createHash('sha256').update(entry).digest('hex')}`;
+}
+
+function parseProcessingEntry(entry: string): { token: string; raw: string } {
+  const separator = entry.indexOf('\n');
+  if (separator < 0) return { token: '', raw: entry };
+  return {
+    token: entry.slice(0, separator),
+    raw: entry.slice(separator + 1),
+  };
 }
 
 // Compare-and-delete / compare-and-EXTEND against the immutable claim TOKEN
@@ -200,13 +222,22 @@ return 0`;
 // only after ownership is proven, in the same Lua transaction as claim release.
 // A stale worker can therefore neither finalize nor poison deduplication.
 // KEYS: inflight, processing, metadata, seen, followed by zero or more DONE keys.
-// ARGV: token, raw job, delete-seen flag, DONE ttl seconds.
+// ARGV: token, tokenized processing entry, delete-seen flag, DONE ttl seconds.
 const FINALIZE_CLAIM_LUA = `
 local cur = redis.call('GET', KEYS[1])
-if not cur then return 0 end
-local sep = string.find(cur, '\\n', 1, true)
-local curToken = sep and string.sub(cur, 1, sep - 1) or cur
-if curToken ~= ARGV[1] then return 0 end
+local curToken = nil
+if cur then
+  local sep = string.find(cur, '\\n', 1, true)
+  curToken = sep and string.sub(cur, 1, sep - 1) or cur
+end
+if not curToken or curToken ~= ARGV[1] then
+  -- This worker no longer owns the PR. Retire only its exact durable payload so
+  -- orphan recovery cannot resurrect an obsolete SHA after the newer owner
+  -- finishes. The current owner's differently serialized payload is untouched.
+  redis.call('LREM', KEYS[2], 1, ARGV[2])
+  redis.call('DEL', KEYS[3])
+  return 0
+end
 for i = 5, #KEYS do
   redis.call('SET', KEYS[i], '1', 'EX', ARGV[4])
 end
@@ -250,11 +281,15 @@ export class RedisReviewQueue implements ReviewQueue {
 
   async acquireProviderLease(provider: string, limit: number, signal?: AbortSignal): Promise<string> {
     const token = randomUUID();
-    const configuredWait = Number(process.env.ORVEX_PROVIDER_LEASE_WAIT_MS ?? 30_000);
-    const maxWaitMs = Number.isFinite(configuredWait)
-      ? Math.min(300_000, Math.max(1_000, Math.floor(configuredWait)))
-      : 30_000;
-    const deadline = Date.now() + maxWaitMs;
+    // Queue behind the distributed provider limit by default. A 30-second wait
+    // cap made healthy workers fail whenever the current max-reasoning call ran
+    // longer than 30 seconds. Set a positive value only for an operator-owned
+    // bound; zero/unset waits until a slot is available or the review cancels.
+    const configuredWait = Number(process.env.ORVEX_PROVIDER_LEASE_WAIT_MS ?? 0);
+    const maxWaitMs = Number.isFinite(configuredWait) && configuredWait > 0
+      ? Math.min(3_600_000, Math.max(1_000, Math.floor(configuredWait)))
+      : undefined;
+    const deadline = maxWaitMs === undefined ? undefined : Date.now() + maxWaitMs;
     const key = this.providerKey(PROVIDER_LEASE_PREFIX, provider);
     for (;;) {
       if (signal?.aborted) throw new Error('review cancelled while waiting for provider lease');
@@ -268,7 +303,7 @@ export class RedisReviewQueue implements ReviewQueue {
         token,
       );
       if (acquired === token) return token;
-      if (Date.now() >= deadline) {
+      if (deadline !== undefined && Date.now() >= deadline) {
         throw new Error(`429 provider ${provider} distributed concurrency saturated; retry-after: 1`);
       }
       await new Promise<void>((resolve, reject) => {
@@ -356,13 +391,21 @@ export class RedisReviewQueue implements ReviewQueue {
     // and (b) PRs already being processed. The queue→processing move is atomic,
     // so a crash before claim leaves a recoverable payload.
     for (let i = 0; i < 50; i++) {
-      const raw = (await this.redis.eval(DEQUEUE_LUA, 2, QUEUE_KEY, PROCESSING_KEY)) as string | null | false;
+      const token = randomUUID();
+      const raw = (await this.redis.eval(
+        DEQUEUE_LUA,
+        2,
+        QUEUE_KEY,
+        PROCESSING_KEY,
+        token,
+      )) as string | null | false;
       if (!raw) return null;
+      const processingEntry = `${token}\n${raw as string}`;
       let job: ReviewJobPayload;
       try {
         job = JSON.parse(raw as string) as ReviewJobPayload;
       } catch {
-        await this.redis.lrem(PROCESSING_KEY, 1, raw as string);
+        await this.redis.lrem(PROCESSING_KEY, 1, processingEntry);
         continue;
       }
       const pk = prKey(job);
@@ -371,7 +414,7 @@ export class RedisReviewQueue implements ReviewQueue {
       // Also skip ready_for_review when the bare SHA was already successfully reviewed.
       const doneHere = await this.redis.exists(`${DONE_PREFIX}${jobIdempotencyKey(job)}`);
       if (doneHere) {
-        await this.redis.lrem(PROCESSING_KEY, 1, raw as string);
+        await this.redis.lrem(PROCESSING_KEY, 1, processingEntry);
         continue;
       }
       const bare = reviewShaIdempotencyKey(job);
@@ -383,11 +426,10 @@ export class RedisReviewQueue implements ReviewQueue {
         job.action !== 'manual' &&
         (await this.redis.exists(`${DONE_PREFIX}${bare}`))
       ) {
-        await this.redis.lrem(PROCESSING_KEY, 1, raw as string);
+        await this.redis.lrem(PROCESSING_KEY, 1, processingEntry);
         continue;
       }
 
-      const token = randomUUID();
       const claimed = await this.redis.eval(
         CLAIM_LUA,
         2,
@@ -400,14 +442,13 @@ export class RedisReviewQueue implements ReviewQueue {
         SEEN_PREFIX,
       );
       if (claimed === 'pending') {
-        await this.redis.lrem(PROCESSING_KEY, 1, raw as string);
+        await this.redis.lrem(PROCESSING_KEY, 1, processingEntry);
         continue;
       }
-      await this.redis.set(processingMetaKey(raw as string), String(Date.now()), 'EX', 3600);
-      // Keep the raw payload in PROCESSING until markCompleted/markFailed. If
-      // the worker dies after claiming, a later recovery can see the payload
-      // without stealing a live lock from another worker.
-      this.lockTokens.set(job, `${token}\n${raw as string}`);
+      await this.redis.set(processingMetaKey(processingEntry), String(Date.now()), 'EX', 3600);
+      // Keep the tokenized payload in PROCESSING until finalization. Recovery
+      // can identify this exact claim without touching a newer owner.
+      this.lockTokens.set(job, processingEntry);
       return job;
     }
     return null;
@@ -487,15 +528,15 @@ return 1
       PROCESSING_KEY,
       lockKey,
       token,
-      oldRaw,
-      newRaw,
+      claim,
+      newClaim,
       newClaim,
       LEASE_TTL_SECONDS,
     );
     if (Number(replaced) !== 1) return;
 
-    const oldMeta = processingMetaKey(oldRaw);
-    const newMeta = processingMetaKey(newRaw);
+    const oldMeta = processingMetaKey(claim);
+    const newMeta = processingMetaKey(newClaim);
     const startedAt = await this.redis.get(oldMeta);
     if (startedAt !== null) {
       await this.redis.set(newMeta, startedAt, 'EX', 3600);
@@ -520,17 +561,16 @@ return 1
     const separator = claim.indexOf('\n');
     if (separator < 0) return false;
     const token = claim.slice(0, separator);
-    const raw = claim.slice(separator + 1);
     const finalized = await this.redis.eval(
       FINALIZE_CLAIM_LUA,
       4 + doneKeys.length,
       `${INFLIGHT_PREFIX}${prKey(job)}`,
       PROCESSING_KEY,
-      processingMetaKey(raw),
+      processingMetaKey(claim),
       `${SEEN_PREFIX}${jobIdempotencyKey(job)}`,
       ...doneKeys,
       token,
-      raw,
+      claim,
       deleteSeen ? '1' : '0',
       604800,
     );
@@ -565,15 +605,16 @@ return 1
     // elapsed, it is safe to return to the main queue.
     let requeued = 0;
     const processing = await this.redis.lrange(PROCESSING_KEY, 0, -1);
-    for (const raw of processing) {
+    for (const entry of processing) {
+      const { token, raw } = parseProcessingEntry(entry);
       let job: ReviewJobPayload;
       try {
         job = JSON.parse(raw) as ReviewJobPayload;
       } catch {
         // Malformed processing entry has no valid ownership identity and cannot
         // be recovered. Removal is atomic enough because no worker can parse it.
-        await this.redis.lrem(PROCESSING_KEY, 1, raw);
-        await this.redis.del(processingMetaKey(raw));
+        await this.redis.lrem(PROCESSING_KEY, 1, entry);
+        await this.redis.del(processingMetaKey(entry));
         continue;
       }
       const idKey = jobIdempotencyKey(job);
@@ -585,17 +626,19 @@ return 1
         RECOVER_PROCESSING_LUA,
         8,
         PROCESSING_KEY,
-        processingMetaKey(raw),
+        processingMetaKey(entry),
         `${INFLIGHT_PREFIX}${prKey(job)}`,
         `${DONE_PREFIX}${idKey}`,
         `${DONE_PREFIX}${automatic ? bare : idKey}`,
         `${RESUMED_PREFIX}${idKey}`,
         `${SEEN_PREFIX}${idKey}`,
         QUEUE_KEY,
-        raw,
+        entry,
         Date.now(),
         PROCESSING_RECOVERY_GRACE_MS,
         MAX_RESUME_AFTER_RESTART,
+        token,
+        raw,
       ));
       if (recovered === 'requeued') requeued++;
       if (recovered.startsWith('dropped:')) {

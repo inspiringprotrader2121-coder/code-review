@@ -1,10 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   buildCodexPrompt,
+  assertCodexRuntimeReady,
   capCodexDiffFiles,
   clearCodexAuthModeCache,
   codexAnnouncedModelFallback,
@@ -13,6 +16,7 @@ import {
   DEFAULT_CODEX_CLI_MODEL,
   detectCodexAuthMode,
   isCodexRepoAllowed,
+  normalizeCodexAttemptError,
   resolveCodexBinary,
   resolveCodexHomeConcurrency,
   resolveCodexRateLimitPolicy,
@@ -160,13 +164,49 @@ test('detectCodexAuthMode reads auth_mode from CODEX_HOME', () => {
 
 test('Codex model and binary are pinned locally before any stale global path', () => {
   assert.equal(DEFAULT_CODEX_CLI_MODEL, 'gpt-5.6-luna');
-  const root = '/srv/orvex';
-  const local = path.join(root, 'node_modules', '.bin', 'codex');
-  assert.equal(resolveCodexBinary(root, '/old/global/codex', (candidate) => candidate === local), local);
-  assert.throws(
-    () => resolveCodexBinary(root, '/global/codex', () => false),
-    /pinned Codex CLI is missing/,
+  const pinned = '/srv/orvex/node_modules/@openai/codex/bin/codex.js';
+  assert.equal(
+    resolveCodexBinary('/old/global/codex', () => pinned, (candidate) => candidate === pinned),
+    pinned,
   );
+  assert.throws(
+    () => resolveCodexBinary('/global/codex', () => { throw new Error('missing'); }, () => false),
+    /pinned Codex CLI .*is missing/,
+  );
+});
+
+test('Codex binary resolution works from the production apps/server cwd', () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+  const moduleUrl = pathToFileURL(path.join(root, 'packages/review/src/codex-cli.ts')).href;
+  const script = `import { resolveCodexBinary } from ${JSON.stringify(moduleUrl)}; console.log(resolveCodexBinary());`;
+  const child = spawnSync(
+    process.execPath,
+    ['--import', 'tsx', '--input-type=module', '-e', script],
+    {
+      cwd: path.join(root, 'apps/server'),
+      env: { ...process.env, ORVEX_CODEX_CLI_PATH: '/tmp/unpinned-codex' },
+      encoding: 'utf8',
+    },
+  );
+  assert.equal(child.status, 0, child.stderr);
+  assert.match(child.stdout.trim(), /@openai[+/]codex@0\.147\.0.*\/bin\/codex\.js$/);
+  assert.doesNotMatch(child.stdout, /apps\/server\/node_modules\/\.bin/);
+});
+
+test('Codex runtime preflight requires an API-key-authenticated home', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-codex-preflight-'));
+  try {
+    writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-test' }));
+    clearCodexAuthModeCache();
+    assert.match(assertCodexRuntimeReady([dir]), /@openai.*codex.*bin\/codex\.js/);
+
+    writeFileSync(path.join(dir, 'auth.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { refresh: 'x' } }));
+    clearCodexAuthModeCache();
+    assert.throws(() => assertCodexRuntimeReady([dir]), /API-key-authenticated/);
+  } finally {
+    clearCodexAuthModeCache();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('Codex CLI model substitutions are detected and fail closed', () => {
@@ -208,7 +248,7 @@ test('resolveCodexHomeConcurrency: every auth mode is locked to one', (t) => {
 });
 
 test('resolveCodexTimeouts bounds wall and silence timers', () => {
-  assert.deepEqual(resolveCodexTimeouts({}), { hardMs: 480_000, inactivityMs: 180_000 });
+  assert.deepEqual(resolveCodexTimeouts({}), { hardMs: 300_000, inactivityMs: 180_000 });
   assert.deepEqual(
     resolveCodexTimeouts({
       ORVEX_CODEX_TIMEOUT_MS: '120000',
@@ -221,7 +261,7 @@ test('resolveCodexTimeouts bounds wall and silence timers', () => {
       ORVEX_CODEX_TIMEOUT_MS: '9999999',
       ORVEX_CODEX_INACTIVITY_TIMEOUT_MS: '1',
     }),
-    { hardMs: 900_000, inactivityMs: 30_000 },
+    { hardMs: 300_000, inactivityMs: 30_000 },
   );
 });
 
@@ -239,6 +279,17 @@ test('Codex rate-limit recovery permits at most one bounded retry', () => {
     }),
     { maxAttempts: 2, maxWaitMs: 60_000, totalWaitBudgetMs: 60_000 },
   );
+});
+
+test('Codex lease-wait cancellation is normalized before attempt telemetry', () => {
+  const controller = new AbortController();
+  controller.abort();
+  const normalized = normalizeCodexAttemptError(
+    new Error('review cancelled while waiting for provider lease'),
+    controller.signal,
+  );
+  assert.equal(normalized.name, 'ReviewCancelledError');
+  assert.match(normalized.message, /codex-cli review cancelled/);
 });
 
 test('CountingSemaphore allows up to N concurrent runners', async () => {
@@ -312,6 +363,14 @@ async function waitForExit(pid: number): Promise<boolean> {
   return false;
 }
 
+async function waitForFile(file: string): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    if (existsSync(file)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`fixture did not create ${file}`);
+}
+
 test('actual Codex child receives pinned model/reasoning arguments and returns output', async (t) => {
   const fixture = fakeCodex(`
 const fs = require('node:fs');
@@ -369,6 +428,33 @@ setInterval(() => {}, 1000);
   );
   const grandchildPid = Number(readFileSync(grandchildFile, 'utf8'));
   assert.equal(await waitForExit(grandchildPid), true, 'grandchild process group member was killed');
+});
+
+test('post-spawn cancellation kills the actual Codex process group', async (t) => {
+  const fixture = fakeCodex(`
+const fs = require('node:fs');
+const { spawn } = require('node:child_process');
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio:'ignore'});
+fs.writeFileSync(process.env.GRANDCHILD_FILE, String(child.pid));
+console.log(JSON.stringify({type:'thread.started', thread_id:'fixture-cancel'}));
+setInterval(() => {}, 1000);
+`);
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const grandchildFile = path.join(fixture.dir, 'cancel-grandchild.pid');
+  const controller = new AbortController();
+  const pending = runCodexExecForTest('review', {
+    binaryPath: fixture.binary,
+    hardMs: 2_000,
+    inactivityMs: 2_000,
+    signal: controller.signal,
+    env: { ...process.env, GRANDCHILD_FILE: grandchildFile },
+  });
+
+  await waitForFile(grandchildFile);
+  controller.abort('pr_closed_mid_run');
+  await assert.rejects(pending, /cancelled/i);
+  const grandchildPid = Number(readFileSync(grandchildFile, 'utf8'));
+  assert.equal(await waitForExit(grandchildPid), true, 'cancel killed the grandchild process group member');
 });
 
 test('hard timeout settles despite delayed close and removes the temporary output directory', async (t) => {

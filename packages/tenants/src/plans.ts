@@ -20,9 +20,9 @@ export interface PlanFeatures {
   reviewPasses: number;
   /** how many index-retrieved relevant files feed the review passes (cross-file depth) */
   retrievalTopK: number;
-  /** Tier 2: exhaustive whole-repo sweep in batches beyond the top-K */
+  /** Legacy sweep switch. Disabled for every current plan. */
   repoSweep: boolean;
-  /** extra repo files the sweep covers (only when repoSweep) */
+  /** Legacy sweep file cap (only when repoSweep). */
   sweepMaxFiles: number;
   /** may commit fixes (`@orvex fix`, apply-fix checkbox) — paid tiers only */
   autofix: boolean;

@@ -126,55 +126,26 @@ export async function runLlmReview(
       onAttempt: opts.onAttempt,
     });
 
-  // Production review targets are configured at max effort. Preserve reasoning
-  // across retries so parse/transport recovery never silently becomes a cheaper,
-  // weaker review than the customer purchased.
+  // Production review targets are configured at max effort.
   const reviewThinking = true;
   const parseReview = (text: string) =>
     LlmReviewResponseSchema.parse(normalizeLlmResponse(extractJsonLoose(text)));
 
-  // Both the model call AND the JSON extraction/validation are inside the retry:
-  // an unparseable payload (e.g. the model wrapping its answer in a ```bash
-  // block) must retry, then degrade gracefully — never crash
-  // the whole review job the way an uncaught JSON.parse used to.
+  // One discovery request only. llmChat owns its one bounded same-provider
+  // rate-limit retry; replaying a complete max-reasoning call for malformed JSON
+  // doubled spend without adding evidence. Invalid output degrades visibly and
+  // the required-lens gate prevents it from being reported as a clean review.
   let parsed: LlmReviewResponse;
   try {
     parsed = parseReview(await call(reviewThinking));
   } catch (err) {
-    const firstMessage = (err as Error).message;
     if (isReviewCancelledError(err) || opts.signal?.aborted) throw err;
-    // A hard timeout already consumed the complete per-call budget. Starting a
-    // second long request hid provider failures for another 5-8 minutes and
-    // doubled spend. Surface it immediately so the required-pass gate can stop
-    // the review without posting partial results.
-    if (/wall-clock cap|timed?\s*out|stalled/i.test(firstMessage)) throw err;
-    // A rate limit ALREADY consumed its full wait-and-retry budget inside
-    // llmChat. Re-entering with reasoning off just replays the whole
-    // same-provider key-rotation chain against the same closed window, doubling
-    // both the attempt count and the time a worker slot is held. Fail now so the
-    // job requeues and the circuit breaker can actually see it.
-    if (isRetryableRateLimit(firstMessage)) throw err;
-    // A provider that rejects `temperature` outright rejects it identically on
-    // the retry, so the sample is lost to a parameter the call does not need.
-    const rejectedTemperature = /temperature/i.test(firstMessage);
-    console.warn(
-      '[llm] review call/parse failed, retrying with reasoning on' +
-        `${rejectedTemperature ? ' and temperature dropped' : ''}:`,
-      firstMessage,
-    );
-    try {
-      parsed = parseReview(await call(reviewThinking, rejectedTemperature ? undefined : opts.temperature));
-    } catch (err2) {
-      if (isReviewCancelledError(err2) || opts.signal?.aborted) throw err2;
-      const msg = (err2 as Error).message;
-      // A rate-limit / transport failure is NOT a clean review — propagate it so
-      // the job FAILS (and can be retried when quota recovers) instead of silently
-      // posting an empty "0 findings" review. Only a genuine unparseable model
-      // payload degrades to empty.
-      if (isTransientLlmError(msg)) throw err2;
-      console.error('[llm] review unparseable after retry — returning empty:', msg);
-      return { findings: [], summary: REVIEW_INCOMPLETE_SUMMARY };
-    }
+    const message = (err as Error).message;
+    // Rate-limit, transport and timeout failures are not clean reviews. Preserve
+    // them so provider cooldown/admission and the required-pass gate can act.
+    if (isTransientLlmError(message) || isRetryableRateLimit(message)) throw err;
+    console.error('[llm] review response invalid — returning incomplete without replay:', message);
+    return { findings: [], summary: REVIEW_INCOMPLETE_SUMMARY };
   }
 
   // Generous backstop against a runaway model, not a quality gate — the rules

@@ -11,7 +11,6 @@ import {
   CountingSemaphore,
   isTransientLlmError,
   killAllCodexChildren,
-  setProviderCooldown,
   setCodexChildListener,
 } from '@orvex-review/review';
 import { canRunCodexCli, processReviewJob, loadWorkerConfig } from './pipeline.js';
@@ -52,7 +51,6 @@ export function isDeployDraining(): boolean {
 }
 import { processAskJob, processExplainJob, processFixJob, processResolveJob } from './autofix.js';
 import { processScanJob } from './nightly.js';
-import { INITIAL_BACKOFF_STATE, nextBackoffState, isPaused, type BackoffState } from './backoff.js';
 import { sendOperationalAlert } from './alerts.js';
 
 const POLL_MS = 500;
@@ -62,14 +60,6 @@ function boundedEnvInt(name: string, fallback: number, min: number, max: number)
   const value = Number(process.env[name] ?? fallback);
   return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : fallback;
 }
-
-/**
- * Circuit breaker: after this many CONSECUTIVE provider rate-limit/quota/network
- * failures across the worker, stop dequeuing new jobs for BACKOFF_MS instead of
- * continuing to fail job after job. See backoff.ts for the incident this fixes.
- */
-const BACKOFF_THRESHOLD = boundedEnvInt('ORVEX_BACKOFF_THRESHOLD', 3, 1, 1_000);
-const BACKOFF_MS = boundedEnvInt('ORVEX_BACKOFF_MS', 300_000, 1_000, 86_400_000);
 
 /**
  * How many jobs this process runs at once. Reviews are minutes-long LLM calls,
@@ -85,6 +75,16 @@ export function resolveWorkerConcurrency(env: NodeJS.ProcessEnv = process.env): 
     : 4;
 }
 
+/** A failed model ensemble may already have incurred most of a review's cost.
+ * Never replay the entire automatic review unless the operator explicitly opts
+ * in; the next push or an explicit command remains retryable. */
+export function resolveMaxJobRetries(env: NodeJS.ProcessEnv = process.env): number {
+  const requested = Number(env.ORVEX_MAX_JOB_RETRIES ?? 0);
+  return Number.isFinite(requested)
+    ? Math.min(Math.max(Math.floor(requested), 0), 1)
+    : 0;
+}
+
 /** Keep queue dedup semantics aligned with the review outcome. A PR lifecycle
  * cancellation is charged/persisted as a failed run when usage exists, but it
  * must not create a successful DONE marker for that SHA. */
@@ -98,6 +98,53 @@ export async function finalizeQueueJob(
     return;
   }
   await queue.markCompleted(job, { draftSkipped: opts.draftSkipped });
+}
+
+/** A restart has no durable per-stage checkpoint, so replaying an interrupted
+ * job would repeat every paid model stage. Persist it as interrupted and wait
+ * for a new push or explicit user retry. */
+export async function failInterruptedJobs(
+  queue: Pick<ReviewQueue, 'markFailed'>,
+  store: { interruptReviewRun(runId: string): void },
+  jobs: Iterable<ReviewJobPayload>,
+): Promise<number> {
+  let failed = 0;
+  for (const job of jobs) {
+    if (job.runId) store.interruptReviewRun(job.runId);
+    await queue.markFailed(job, 'interrupted by restart');
+    failed++;
+  }
+  return failed;
+}
+
+/** A dequeue can be reserved while Redis is slow. Bound shutdown's wait for
+ * those reservations: an unresolved Redis operation either never claimed a job
+ * or left it in the durable PROCESSING list for orphan recovery. */
+export async function waitForReservedDequeues(
+  getActive: () => number,
+  getInFlight: () => number,
+  timeoutMs = 2_000,
+  pollMs = 25,
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (getActive() > getInFlight() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.max(1, pollMs)));
+  }
+  return getActive() <= getInFlight();
+}
+
+/** Return a job whose dequeue completed after shutdown began. A coalesced newer
+ * PR update wins; otherwise the untouched job is safe to enqueue again because
+ * no review stage has started. */
+export async function returnLateDequeuedJob(
+  queue: Pick<ReviewQueue, 'markFailed' | 'releaseLockAndDrain' | 'enqueue'>,
+  job: ReviewJobPayload,
+): Promise<'newer-pending' | 'requeued'> {
+  await queue.markFailed(job, 'worker stopped before review start');
+  const pending = await queue.releaseLockAndDrain(prKey(job));
+  if (pending) return 'newer-pending';
+  await queue.enqueue({ ...job, enqueuedAt: new Date().toISOString() });
+  return 'requeued';
 }
 
 // One agentic Luna review per process/API-key home. Lower-tier reviews bypass
@@ -134,8 +181,6 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     if (queue.depth) return queue.depth();
     return { queued: 0, waitingOnPr: 0, inFlight: active, oldestQueuedAt: null };
   };
-  let backoff: BackoffState = INITIAL_BACKOFF_STATE;
-
   const processOne = async (job: ReviewJobPayload) => {
     inFlight.add(job);
     const pk = prKey(job);
@@ -257,10 +302,6 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
       // claim lets a later `reopened` event run; any already-coalesced reopen
       // drains after the lock is released in finally below.
       await finalizeQueueJob(queue, job, { draftSkipped, prClosedMidRun });
-      backoff = nextBackoffState(backoff, 'success', Date.now(), {
-        threshold: BACKOFF_THRESHOLD,
-        backoffMs: BACKOFF_MS,
-      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[worker] failed ${pk}:`, message);
@@ -268,15 +309,11 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
       // Re-queue a TRANSIENT failure (bounded) so a rate-limit/network blip on a
       // `synchronize` doesn't leave that PR silently unreviewed — the webhook
       // already returned 200, so GitHub won't redeliver. Non-transient failures
-      // (real bugs) are NOT retried; the circuit breaker still pauses the pump.
+      // (real bugs) are NOT retried.
       const attempts = (job.attempts ?? 0) + 1;
-      // Clamped: a garbage env (NaN) must not silently disable retries, and an
-      // absurd value must not retry a poison job forever. At most one complete
-      // automatic-review replay; provider calls already have one bounded retry.
-      const MAX_JOB_RETRIES = (() => {
-        const n = Number(process.env.ORVEX_MAX_JOB_RETRIES ?? 1);
-        return Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 0), 1) : 1;
-      })();
+      // Clamped and opt-in. Replaying a whole multi-model ensemble after one
+      // late timeout doubled production spend without producing a verdict.
+      const MAX_JOB_RETRIES = resolveMaxJobRetries();
       // A user-triggered @orvex review is never silently rerun in full after a
       // provider timeout: that multiplies spend and can keep a PR busy for tens
       // of minutes. Automatic webhook jobs retain bounded transient retries.
@@ -297,34 +334,6 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
           });
         }
       }
-      const wasPaused = isPaused(backoff, Date.now());
-      backoff = nextBackoffState(
-        backoff,
-        isTransientLlmError(message) ? 'transient_failure' : 'other_failure',
-        Date.now(),
-        { threshold: BACKOFF_THRESHOLD, backoffMs: BACKOFF_MS },
-      );
-      if (!wasPaused && isPaused(backoff, Date.now())) {
-        try {
-          await setProviderCooldown('review-stack', BACKOFF_MS);
-        } catch (cooldownError) {
-          const cooldownMessage = (cooldownError as Error).message;
-          console.error('[worker] could not publish distributed provider cooldown:', cooldownMessage);
-          void sendOperationalAlert({
-            event: 'provider-cooldown-publish-failed',
-            severity: 'critical',
-            message: `Local provider circuit opened but distributed cooldown failed: ${cooldownMessage}`,
-          });
-        }
-        console.warn(
-          `[worker] ${backoff.consecutiveFailures} consecutive provider failures — pausing new reviews for ${Math.round(BACKOFF_MS / 1000)}s (provider looks rate-limited/out of quota)`,
-        );
-        void sendOperationalAlert({
-          event: 'worker-provider-circuit-open',
-          severity: 'critical',
-          message: `${backoff.consecutiveFailures} consecutive provider failures; new reviews paused for ${Math.round(BACKOFF_MS / 1000)}s.`,
-        });
-      }
     } finally {
       // Stop heartbeating BEFORE releasing the lock, so a renewal can never
       // resurrect a lease the completion path just compare-and-deleted.
@@ -342,23 +351,10 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   // when it settles, so at most MAX_CONCURRENT run at once and the queue keeps
   // draining as slots free up.
   const pump = async () => {
-    // Re-checked PER ITERATION below too: a deploy-drain flag or a tripped
-    // circuit breaker appearing MID-LOOP must stop further dequeues in this
-    // same tick, not just the next one.
+    // Re-checked PER ITERATION below too: a deploy-drain flag appearing
+    // mid-loop must stop further dequeues in this same tick.
     while (active < MAX_CONCURRENT) {
       if (!running || isDeployDraining()) return;
-      if (isPaused(backoff, Date.now())) return; // circuit breaker tripped — don't hammer a down/exhausted provider
-      if ((await queue.getProviderCooldownMs?.('review-stack') ?? 0) > 0) return;
-      if (backoff.pausedUntil > 0) {
-        const recoveredFailures = backoff.consecutiveFailures;
-        backoff = INITIAL_BACKOFF_STATE;
-        console.log(`[worker] provider circuit recovered after ${recoveredFailures} consecutive failure(s)`);
-        void sendOperationalAlert({
-          event: 'worker-provider-circuit-recovered',
-          severity: 'warning',
-          message: `Provider circuit cooldown elapsed after ${recoveredFailures} consecutive failures; queue processing resumed.`,
-        });
-      }
       // Reserve the slot BEFORE the async dequeue so two overlapping pump ticks
       // can't both pass the guard and exceed MAX_CONCURRENT; release it if the
       // dequeue turns up empty.
@@ -373,6 +369,18 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
       }
       if (!job) {
         active--;
+        break;
+      }
+      if (!running) {
+        // Shutdown began while dequeue was awaiting Redis. No paid stage has
+        // started, so release the claim and put the untouched job back safely.
+        try {
+          await returnLateDequeuedJob(queue, job);
+        } catch (err) {
+          console.error('[worker] shutdown: could not return late-dequeued job', err);
+        } finally {
+          active--;
+        }
         break;
       }
       // .catch keeps a processOne rejection (e.g. releaseLockAndDrain throwing)
@@ -401,12 +409,9 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
   }, RECOVERY_MS);
   recoveryInterval.unref?.();
 
-  // Graceful shutdown. Release the lock + dedup keys for every interrupted job
-  // and RE-QUEUE it so it resumes after the restart — a deploy must never eat a
-  // review (real incident: PR #78's near-complete review was discarded by a
-  // deploy restart, leaving the PR silently unreviewed). Cost protection stays:
-  // each job may be resumed at most ONCE (resumedAfterRestart flag), so a
-  // crash/restart LOOP can't re-run the same expensive review forever.
+  // Graceful shutdown. The safe deploy drains before restart. If its deadline is
+  // exceeded, fail the interrupted run rather than replaying a paid ensemble
+  // from the beginning; there is no durable per-stage checkpoint yet.
   return async () => {
     running = false;
     clearInterval(interval);
@@ -433,14 +438,20 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     // represented in `inFlight`, then requeue that complete snapshot below.
     if (active > inFlight.size) {
       console.error('[worker] shutdown: waiting for pending dequeue slot(s) to resolve before exit');
-      while (active > inFlight.size) {
-        await new Promise((r) => setTimeout(r, 250));
+      const settled = await waitForReservedDequeues(
+        () => active,
+        () => inFlight.size,
+      );
+      if (!settled) {
+        console.error(
+          '[worker] shutdown: dequeue handoff did not settle; leaving any claimed payload for durable orphan recovery',
+        );
       }
     }
     if (inFlight.size === 0) {
       return;
     }
-    // Kill any in-flight codex agent BEFORE requeueing. codex children are
+    // Kill any in-flight Codex agent before finalizing interruption. Children are
     // spawned `detached` (own process group, so a timeout can kill their
     // grandchildren), which also means they OUTLIVE this worker — every deploy
     // would otherwise orphan an unsandboxed agent still running against a PR
@@ -452,31 +463,16 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     } catch (err) {
       console.warn('[worker] shutdown: codex kill failed:', (err as Error).message);
     }
-    let requeued = 0;
-    let dropped = 0;
-    // Mark reserved runs interrupted BEFORE requeue so resumeReviewRun can reopen
-    // the same row after restart (status must be skipped/interrupted, not running).
     const store = loadWorkerConfig().store;
-    for (const job of inFlight) {
-      try {
-        if (job.runId) {
-          store.interruptReviewRun(job.runId);
-        }
-        await queue.markFailed(job, 'interrupted by restart');
-        if (!job.resumedAfterRestart) {
-          await queue.enqueue({ ...job, resumedAfterRestart: true, enqueuedAt: new Date().toISOString() });
-          requeued += 1;
-        } else {
-          dropped += 1; // already resumed once — don't loop
-        }
-      } catch (err) {
-        console.error('[worker] shutdown handling failed for a job', err);
-      }
+    try {
+      const failed = await failInterruptedJobs(queue, store, inFlight);
+      console.log(
+        `[worker] shutdown: ${failed} interrupted review(s) left failed; ` +
+          'no automatic paid-stage replay',
+      );
+    } catch (err) {
+      console.error('[worker] shutdown handling failed for interrupted jobs', err);
     }
-    console.log(
-      `[worker] shutdown: ${inFlight.size} interrupted — ${requeued} re-queued to resume after restart` +
-        (dropped > 0 ? `, ${dropped} dropped (already resumed once)` : ''),
-    );
   };
 }
 

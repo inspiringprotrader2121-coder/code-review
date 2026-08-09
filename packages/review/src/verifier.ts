@@ -1,7 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { llmChat, extractJsonLoose, type LlmAttemptEvent } from './llm-client.js';
-import { isTransientLlmError } from './llm.js';
 import { redactSecrets } from './redact.js';
 import {
   findingProvenance,
@@ -34,12 +33,12 @@ export function parsePositiveIntEnv(raw: string | undefined, fallback: number): 
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
-// Luna TPM (not context window) is the binding constraint for oversized verify
-// calls. Defaults target ~40k tokens/batch so concurrent reviews can still share
-// a 200k TPM budget without collapsing ORVEX_MAX_CONCURRENT_REVIEWS.
-const MAX_VERIFY_FILE_CHARS = parsePositiveIntEnv(process.env.ORVEX_VERIFY_FILE_CHARS, 80_000);
-const MAX_VERIFY_TOTAL_CHARS = parsePositiveIntEnv(process.env.ORVEX_VERIFY_TOTAL_CHARS, 160_000);
-const MAX_FINDINGS_PER_BATCH = parsePositiveIntEnv(process.env.ORVEX_VERIFY_BATCH_SIZE, 4);
+// Verification needs the finding's own file and direct evidence, not another
+// repository dump. Keep each batch near ~24k input tokens so max-reasoning Flash
+// can finish inside the same hard wall used by discovery calls.
+const MAX_VERIFY_FILE_CHARS = parsePositiveIntEnv(process.env.ORVEX_VERIFY_FILE_CHARS, 32_000);
+const MAX_VERIFY_TOTAL_CHARS = parsePositiveIntEnv(process.env.ORVEX_VERIFY_TOTAL_CHARS, 96_000);
+const MAX_FINDINGS_PER_BATCH = parsePositiveIntEnv(process.env.ORVEX_VERIFY_BATCH_SIZE, 3);
 
 export interface VerifierOptions {
   apiKey: string;
@@ -49,6 +48,8 @@ export interface VerifierOptions {
   api?: 'chat' | 'responses' | 'anthropic';
   /** reasoning effort for /v1/responses models */
   reasoningEffort?: string;
+  /** Completion ceiling; reasoning effort remains unchanged. */
+  maxTokens?: number;
   /** Cancel verification when the reviewed PR closes or merges. */
   signal?: AbortSignal;
   /**
@@ -328,37 +329,23 @@ export function partitionVerifiedFindings(
   return result;
 }
 
-/**
- * Verification gates real outcomes (posting findings, committing fixes), so a
- * transient provider error must not decide them. Retry with backoff before any
- * fail-open/fail-closed policy kicks in.
- */
+/** Verification is already fail-safe: unavailable candidates remain visible or
+ * move to manual review. Do not replay a paid max-reasoning call here; llmChat
+ * itself owns the single bounded same-provider rate-limit retry. */
 async function llmChatWithRetry(
   system: string,
   user: string,
   opts: Parameters<typeof llmChat>[2],
-  attempts = 3,
 ): Promise<string> {
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      return await llmChat(system, user, opts);
-    } catch (err) {
-      lastErr = err;
-      if (opts.signal?.aborted) throw err;
-      const msg = (err as Error).message;
-      console.warn(`[verifier] call failed (attempt ${i + 1}/${attempts}):`, msg);
-      // Only retry TRANSIENT failures (rate-limit / network / 5xx). Retrying a
-      // 400/401/parse error just wastes ~2 more inactivity windows (up to ~45 min
-      // combined) before failing open — fail fast on those instead.
-      if (!isTransientLlmError(msg)) break;
-      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2_000 * (i + 1)));
-    }
+  try {
+    return await llmChat(system, user, opts);
+  } catch (err) {
+    console.warn('[verifier] call failed (no whole-call replay):', (err as Error).message);
+    throw err;
   }
-  throw lastErr;
 }
 
-function buildFileBlocks(
+export function buildVerifierFileBlocks(
   findings: ReviewFinding[],
   files: Array<{ path: string; content: string }>,
   sent: string,
@@ -367,6 +354,7 @@ function buildFileBlocks(
 ): string[] {
   const stripSentinel = (s: string) => s.replace(/ORVEX_DATA_[0-9a-f]{4,}/gi, 'ORVEX_DATA_[x]');
   const fileBlocks: string[] = [];
+  const omittedPaths: string[] = [];
   let used = 0;
   const wanted = new Set(findings.map((f) => f.file));
   const mentioned = new Set<string>();
@@ -399,21 +387,45 @@ function buildFileBlocks(
     // Prefer a window around the finding line when we have one, so a large file
     // does not spend the whole budget on an unrelated prefix.
     let content = f.content;
+    const coverage: string[] = [];
     const lineHits = findings.filter((x) => x.file === f.path && typeof x.line === 'number');
     if (lineHits.length > 0 && content.length > maxFileChars) {
       const lines = content.split('\n');
-      const centers = lineHits.map((x) => Math.max(0, (x.line ?? 1) - 1));
+      const lastLineIndex = Math.max(0, lines.length - 1);
+      const centers = lineHits.map((x) =>
+        Math.min(lastLineIndex, Math.max(0, (x.line ?? 1) - 1)),
+      );
       const radius = Math.max(80, Math.floor(maxFileChars / 80));
       const start = Math.max(0, Math.min(...centers) - radius);
       const end = Math.min(lines.length, Math.max(...centers) + radius);
       content = lines.slice(start, end).join('\n');
+      if (start > 0 || end < lines.length) {
+        coverage.push(`Source excerpt: lines ${start + 1}-${end} of ${lines.length}; other ranges omitted.`);
+      }
     }
-    const body = stripSentinel(redactSecrets(content.slice(0, maxFileChars)));
+    const clipped = content.slice(0, maxFileChars);
+    if (clipped.length < content.length) {
+      coverage.push(`${content.length - clipped.length} additional source characters omitted by the per-file budget.`);
+    }
+    const body = stripSentinel(redactSecrets(clipped));
     const safePath = stripSentinel(f.path).replace(/[\r\n]+/g, ' ');
-    const block = `### ${safePath}\n${sent}\n${body}\n${sent}`;
-    if (used + block.length > maxTotalChars) continue;
+    const coverageNotice = coverage.length > 0
+      ? `[SOURCE COVERAGE: ${coverage.join(' ')}]\n`
+      : '';
+    const block = `### ${safePath}\n${sent}\n${coverageNotice}${body}\n${sent}`;
+    if (used + block.length > maxTotalChars) {
+      omittedPaths.push(safePath);
+      continue;
+    }
     fileBlocks.push(block);
     used += block.length;
+  }
+  if (omittedPaths.length > 0) {
+    fileBlocks.push(
+      '### Source coverage notice\n' +
+        `${omittedPaths.length} file(s) were not included because the total verification context budget was exhausted:\n` +
+        omittedPaths.map((path) => `- ${path}`).join('\n'),
+    );
   }
   return fileBlocks;
 }
@@ -602,7 +614,7 @@ async function verifyFindingsBatch(
     )
     .join('\n\n');
 
-  const fileBlocks = buildFileBlocks(findings, files, SENT, opts.maxFileChars, opts.maxTotalChars);
+  const fileBlocks = buildVerifierFileBlocks(findings, files, SENT, opts.maxFileChars, opts.maxTotalChars);
   const findingBlock = `${SENT}\n${stripSentinel(findingList)}\n${SENT}`;
 
   const recallInstructions = [
@@ -715,6 +727,7 @@ async function verifyFindingsBatch(
       baseUrl: opts.baseUrl,
       api: opts.api,
       reasoningEffort: opts.reasoningEffort,
+      maxTokens: opts.maxTokens,
       signal: opts.signal,
       json: true,
       onUsage: opts.onUsage,

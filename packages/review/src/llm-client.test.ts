@@ -5,6 +5,8 @@ import {
   llmChat,
   ReviewCancelledError,
   setProviderCooldown,
+  withProviderCallSlot,
+  waitForProviderAvailability,
   type LlmAttemptEvent,
   type LlmProviderCoordinator,
 } from './llm-client.js';
@@ -122,6 +124,7 @@ test('an explicit max reasoning effort is never downgraded on a retry-style call
         baseUrl: 'https://example.test/v1',
         api: 'chat',
         reasoningEffort: 'max',
+        maxTokens: 32_000,
         thinking: false,
       });
     },
@@ -129,6 +132,7 @@ test('an explicit max reasoning effort is never downgraded on a retry-style call
 
   assert.equal(captured.length, 1);
   assert.equal(captured[0].body.reasoning_effort, 'max');
+  assert.equal(captured[0].body.max_completion_tokens, 32_000);
 });
 
 test('environment drift cannot disable default reasoning or MiniMax thinking', async (t) => {
@@ -204,7 +208,7 @@ test('rate-limit failure never contacts a configured substitute endpoint', async
   await assert.rejects(
     llmChat('sys', 'user', {
       apiKey: 'primary-key',
-      model: 'deepseek-v4-flash',
+      model: 'primary-review-model',
       baseUrl: 'https://primary.example/v1',
       api: 'chat',
       reasoningEffort: 'max',
@@ -262,6 +266,37 @@ test('provider-specific LLM concurrency hands off slots without exceeding the co
     llmChat('sys', 'one', { apiKey: 'test-key', model: 'm', baseUrl: 'https://example.test/v1', api: 'responses', thinking: false }),
     llmChat('sys', 'two', { apiKey: 'test-key', model: 'm', baseUrl: 'https://example.test/v1', api: 'responses', thinking: false }),
   ]);
+  assert.equal(maximum, 1);
+});
+
+test('DeepSeek max-reasoning calls serialize by default', async (t) => {
+  const previous = process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK;
+  delete process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK;
+  const originalFetch = globalThis.fetch;
+  let active = 0;
+  let maximum = 0;
+  globalThis.fetch = (async () => {
+    active++;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    active--;
+    return new Response(chatStream('{"findings":[]}'), { status: 200 });
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    if (previous === undefined) delete process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK;
+    else process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK = previous;
+  });
+
+  const target = {
+    apiKey: 'test-key',
+    model: 'deepseek-v4-flash',
+    baseUrl: 'https://api.deepseek.com/v1',
+    api: 'chat' as const,
+    reasoningEffort: 'max',
+    maxTokens: 32_000,
+  };
+  await Promise.all([llmChat('sys', 'one', target), llmChat('sys', 'two', target)]);
   assert.equal(maximum, 1);
 });
 
@@ -448,7 +483,7 @@ test('every actual provider request emits durable retry lineage and retries at m
   assert.equal(finishes[1]!.outcome, 'succeeded');
 });
 
-test('a distributed review-stack circuit blocks every provider before fetch', async (t) => {
+test('provider cooldowns delay only reviews that require that provider', async (t) => {
   const previousRetries = process.env.ORVEX_RATELIMIT_MAX_RETRIES;
   process.env.ORVEX_RATELIMIT_MAX_RETRIES = '1';
   const cooldowns = new Map<string, number>();
@@ -465,6 +500,7 @@ test('a distributed review-stack circuit blocks every provider before fetch', as
   configureLlmProviderCoordinator(coordinator);
   const originalFetch = globalThis.fetch;
   let calls = 0;
+  const events: LlmAttemptEvent[] = [];
   globalThis.fetch = (async () => {
     calls++;
     return new Response(chatStream('{"findings":[]}'), { status: 200 });
@@ -476,15 +512,177 @@ test('a distributed review-stack circuit blocks every provider before fetch', as
     else process.env.ORVEX_RATELIMIT_MAX_RETRIES = previousRetries;
   });
 
-  await setProviderCooldown('review-stack', 250);
+  const target = {
+    apiKey: 'test-key',
+    model: 'independent-model',
+    baseUrl: 'https://provider-a.test/v1',
+    api: 'chat' as const,
+    onAttempt: (event: LlmAttemptEvent) => events.push(event),
+  };
+  await setProviderCooldown('luna', 250);
+  await waitForProviderAvailability(['provider-a-test']);
+  await llmChat('sys', 'user', target);
+  assert.equal(calls, 1, 'an independent provider remains available');
+
+  await setProviderCooldown('provider-a-test', 250);
+  const eventCountBeforeAdmissionFailure = events.length;
+  await assert.rejects(llmChat('sys', 'user', target), /provider-a-test cooldown active/i);
+  assert.equal(calls, 1, 'the provider-specific cooldown still blocks its own network call');
+  const admissionEvents = events.slice(eventCountBeforeAdmissionFailure);
+  assert.equal(admissionEvents.length, 2, 'pre-network rejection still has a durable lifecycle');
+  assert.equal(admissionEvents[0]?.phase, 'started');
+  assert.equal(admissionEvents[1]?.phase, 'finished');
+  if (admissionEvents[1]?.phase === 'finished') {
+    assert.equal(admissionEvents[1].outcome, 'rate_limited');
+  }
+});
+
+test('cancellation during a distributed lease wait is recorded as cancelled', async (t) => {
+  const coordinator: LlmProviderCoordinator = {
+    async acquireProviderLease(_provider, _limit, signal) {
+      return new Promise<string>((_resolve, reject) => {
+        const fail = () => reject(new Error('review cancelled while waiting for provider lease'));
+        signal?.addEventListener('abort', fail, { once: true });
+        if (signal?.aborted) fail();
+      });
+    },
+    async releaseProviderLease() {},
+    async getProviderCooldownMs() { return 0; },
+    async setProviderCooldown() {},
+  };
+  configureLlmProviderCoordinator(coordinator);
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response(chatStream('{"findings":[]}'), { status: 200 });
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    configureLlmProviderCoordinator();
+    globalThis.fetch = originalFetch;
+  });
+
+  const controller = new AbortController();
+  const events: LlmAttemptEvent[] = [];
+  const pending = llmChat('sys', 'user', {
+    apiKey: 'test-key',
+    model: 'lease-cancel-model',
+    baseUrl: 'https://lease-cancel.test/v1',
+    api: 'chat',
+    signal: controller.signal,
+    onAttempt: (event) => events.push(event),
+  });
+  setTimeout(() => controller.abort(), 10);
+
+  await assert.rejects(pending, ReviewCancelledError);
+  assert.equal(calls, 0);
+  const finished = events.find((event) => event.phase === 'finished');
+  assert.equal(finished?.phase, 'finished');
+  if (finished?.phase === 'finished') assert.equal(finished.outcome, 'cancelled');
+});
+
+test('a distributed lease waiter rechecks cooldown before starting paid work', async (t) => {
+  let cooldownReads = 0;
+  let releases = 0;
+  const coordinator: LlmProviderCoordinator = {
+    async acquireProviderLease() { return 'waiter-lease'; },
+    async releaseProviderLease() { releases++; },
+    async getProviderCooldownMs() {
+      cooldownReads++;
+      return cooldownReads === 1 ? 0 : 250;
+    },
+    async setProviderCooldown() {},
+  };
+  configureLlmProviderCoordinator(coordinator);
+  t.after(() => configureLlmProviderCoordinator());
+
+  let paidCalls = 0;
   await assert.rejects(
-    llmChat('sys', 'user', {
-      apiKey: 'test-key',
-      model: 'deepseek-v4-flash',
-      baseUrl: 'https://api.deepseek.com/v1',
-      api: 'chat',
+    withProviderCallSlot('handoff-provider', async () => {
+      paidCalls++;
     }),
-    /review-stack|cooldown active|rate-limited/i,
+    /cooldown active/i,
   );
+
+  assert.equal(paidCalls, 0);
+  assert.equal(releases, 1, 'the rejected waiter releases its distributed lease');
+});
+
+test('200 synthetic review arrivals obey worker and provider backpressure', async (t) => {
+  const previous = {
+    luna: process.env.ORVEX_PROVIDER_CONCURRENCY_LUNA,
+    deepseek: process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK,
+    minimax: process.env.ORVEX_PROVIDER_CONCURRENCY_MINIMAX,
+  };
+  process.env.ORVEX_PROVIDER_CONCURRENCY_LUNA = '1';
+  process.env.ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK = '1';
+  process.env.ORVEX_PROVIDER_CONCURRENCY_MINIMAX = '2';
+  configureLlmProviderCoordinator();
+  t.after(() => {
+    for (const [key, value] of Object.entries({
+      ORVEX_PROVIDER_CONCURRENCY_LUNA: previous.luna,
+      ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: previous.deepseek,
+      ORVEX_PROVIDER_CONCURRENCY_MINIMAX: previous.minimax,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const active = new Map<string, number>();
+  const peaks = new Map<string, number>();
+  const providerCall = (provider: string) => withProviderCallSlot(provider, async () => {
+    const current = (active.get(provider) ?? 0) + 1;
+    active.set(provider, current);
+    peaks.set(provider, Math.max(peaks.get(provider) ?? 0, current));
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    active.set(provider, Math.max(0, (active.get(provider) ?? 1) - 1));
+  });
+
+  await setProviderCooldown('luna', 250);
+  let nextJob = 0;
+  let activeReviews = 0;
+  let peakReviews = 0;
+  let firstLowCompletedAt = Number.POSITIVE_INFINITY;
+  let firstLunaStartedAt = Number.POSITIVE_INFINITY;
+  const jobs = Array.from({ length: 200 }, (_, index) => (index % 2 === 0 ? 'high' : 'low'));
+  const worker = async () => {
+    for (;;) {
+      const index = nextJob++;
+      if (index >= jobs.length) return;
+      activeReviews++;
+      peakReviews = Math.max(peakReviews, activeReviews);
+      try {
+        const providers = jobs[index] === 'high'
+          ? ['luna', 'deepseek', 'minimax']
+          : ['deepseek', 'minimax'];
+        await waitForProviderAvailability(providers);
+        if (providers.includes('luna')) firstLunaStartedAt = Math.min(firstLunaStartedAt, Date.now());
+        await Promise.all(providers.map(providerCall));
+        if (jobs[index] === 'low') firstLowCompletedAt = Math.min(firstLowCompletedAt, Date.now());
+      } finally {
+        activeReviews--;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: 4 }, worker));
+
+  assert.equal(peakReviews, 4);
+  assert.equal(peaks.get('luna'), 1);
+  assert.equal(peaks.get('deepseek'), 1);
+  assert.equal(peaks.get('minimax'), 2);
+  assert.ok(firstLowCompletedAt < firstLunaStartedAt, 'Luna cooldown must not block lower-tier provider work');
+});
+
+test('a review cancelled during provider admission starts no paid calls', async () => {
+  const controller = new AbortController();
+  await setProviderCooldown('queued-cancel-provider', 250);
+  let calls = 0;
+  const pending = waitForProviderAvailability(['queued-cancel-provider'], controller.signal)
+    .then(() => { calls++; });
+  setTimeout(() => controller.abort(), 10);
+
+  await assert.rejects(pending, ReviewCancelledError);
   assert.equal(calls, 0);
 });

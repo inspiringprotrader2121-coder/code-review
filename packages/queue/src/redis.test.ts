@@ -47,12 +47,14 @@ test(
     assert.equal(await queue.releaseLockAndDrain(prKey(pending)), null);
     const claimedOrphan = await queue.dequeue();
     assert.deepEqual(claimedOrphan, orphan);
+    const [orphanEntry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    assert.ok(orphanEntry);
 
     await queue.close();
     queueClosed = true;
     await cleanup.del(`orvex-review:inflight:${prKey(orphan)}`);
     await cleanup.set(
-      `orvex-review:processing-meta:${createHash('sha256').update(JSON.stringify(orphan)).digest('hex')}`,
+      `orvex-review:processing-meta:${createHash('sha256').update(orphanEntry!).digest('hex')}`,
       String(Date.now() - 60_000),
     );
     const restarted = new RedisReviewQueue(redisUrl!);
@@ -96,11 +98,12 @@ test(
     dequeued!.runId = 'run-after-reserve';
     await queue.persistJob!(dequeued!);
 
-    const persistedRaw = JSON.stringify(dequeued);
+    const [persistedEntry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    assert.ok(persistedEntry);
     // Age past PROCESSING_RECOVERY_GRACE_MS and drop the live lease so recovery
     // requeues the persisted payload (including runId).
     await cleanup.set(
-      `orvex-review:processing-meta:${createHash('sha256').update(persistedRaw).digest('hex')}`,
+      `orvex-review:processing-meta:${createHash('sha256').update(persistedEntry!).digest('hex')}`,
       String(Date.now() - 60_000),
     );
     await cleanup.del(`orvex-review:inflight:${prKey(dequeued!)}`);
@@ -168,17 +171,22 @@ test(
     const raw = JSON.stringify(stale);
     const lockKey = `orvex-review:inflight:${prKey(stale!)}`;
     const seenKey = `orvex-review:seen:${jobIdempotencyKey(stale!)}`;
+    const [staleEntry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    assert.ok(staleEntry);
+    const currentEntry = `new-owner-token\n${raw}`;
 
     // Simulate lease expiry followed by another worker claiming this same
-    // durable payload. The old worker still holds its prior token locally.
+    // durable payload. The old worker still holds its prior token locally, but
+    // PROCESSING now belongs to the newer immutable claim.
     await cleanup.set(lockKey, `new-owner-token\n${raw}`, 'EX', 900);
+    await cleanup.lset('orvex-review:processing', 0, currentEntry);
     await assert.rejects(
       queue.markCompleted(stale!),
       /lease lost before completion/,
     );
 
     assert.match((await cleanup.get(lockKey)) ?? '', /^new-owner-token\n/);
-    assert.deepEqual(await cleanup.lrange('orvex-review:processing', 0, -1), [raw]);
+    assert.deepEqual(await cleanup.lrange('orvex-review:processing', 0, -1), [currentEntry]);
     assert.equal(await cleanup.exists(seenKey), 1);
     assert.equal(
       await cleanup.exists(`orvex-review:done:${jobIdempotencyKey(stale!)}`),
@@ -221,6 +229,126 @@ test(
 );
 
 test(
+  'hundreds of simultaneous reviews drain exactly once across Redis workers',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    await cleanup.flushdb();
+    const workers = Array.from({ length: 8 }, () => new RedisReviewQueue(redisUrl!));
+    t.after(async () => {
+      await Promise.all(workers.map((worker) => worker.close()));
+      await cleanup.flushdb();
+      await cleanup.quit();
+    });
+
+    const jobs = Array.from({ length: 200 }, (_, index) => ({
+      ...job(`sha-load-${index}`, 1_000 + index, 'opened' as const),
+      enqueuedAt: new Date(Date.UTC(2026, 7, 5, 18, 0, index)).toISOString(),
+    }));
+    const accepted = await Promise.all(
+      jobs.map((payload, index) => workers[index % workers.length]!.enqueue(payload)),
+    );
+    assert.equal(accepted.filter((result) => result.reason === 'enqueued').length, jobs.length);
+    assert.equal((await workers[0]!.depth!()).queued, jobs.length);
+
+    const duplicates = await Promise.all(
+      jobs.map((payload, index) => workers[index % workers.length]!.enqueue(payload)),
+    );
+    assert.equal(duplicates.filter((result) => result.reason === 'duplicate').length, jobs.length);
+
+    const completed = new Set<string>();
+    await Promise.all(
+      workers.map(async (worker) => {
+        while (true) {
+          const claimed = await worker.dequeue();
+          if (!claimed) return;
+          const key = jobIdempotencyKey(claimed);
+          assert.equal(completed.has(key), false, `duplicate claim for ${key}`);
+          completed.add(key);
+          await worker.markCompleted(claimed);
+          assert.equal(await worker.releaseLockAndDrain(prKey(claimed)), null);
+        }
+      }),
+    );
+
+    assert.equal(completed.size, jobs.length);
+    const depth = await workers[0]!.depth!();
+    assert.equal(depth.queued, 0);
+    assert.equal(depth.waitingOnPr, 0);
+    assert.equal(depth.inFlight, 0);
+  },
+);
+
+test(
+  'distributed provider leases cap a burst across many workers',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    await cleanup.flushdb();
+    const workers = Array.from({ length: 6 }, () => new RedisReviewQueue(redisUrl!));
+    t.after(async () => {
+      await Promise.all(workers.map((worker) => worker.close()));
+      await cleanup.flushdb();
+      await cleanup.quit();
+    });
+
+    let active = 0;
+    let peak = 0;
+    await Promise.all(
+      Array.from({ length: 48 }, async (_, index) => {
+        const worker = workers[index % workers.length]!;
+        const token = await worker.acquireProviderLease('deepseek', 2);
+        active += 1;
+        peak = Math.max(peak, active);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        } finally {
+          active -= 1;
+          await worker.releaseProviderLease('deepseek', token);
+        }
+      }),
+    );
+
+    assert.equal(peak, 2);
+    assert.equal(active, 0);
+  },
+);
+
+test(
+  'a stale worker cannot resurrect its obsolete SHA after a newer owner finishes',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    await cleanup.flushdb();
+    const staleWorker = new RedisReviewQueue(redisUrl!);
+    const currentWorker = new RedisReviewQueue(redisUrl!);
+    t.after(async () => {
+      await Promise.all([staleWorker.close(), currentWorker.close()]);
+      await cleanup.flushdb();
+      await cleanup.quit();
+    });
+
+    const stale = job('sha-stale-owner', 1_900, 'opened');
+    assert.equal((await staleWorker.enqueue(stale)).accepted, true);
+    const staleClaim = await staleWorker.dequeue();
+    assert.ok(staleClaim);
+
+    await cleanup.del(`orvex-review:inflight:${prKey(stale)}`);
+    const current = job('sha-current-owner', stale.pr, 'synchronize');
+    assert.equal((await currentWorker.enqueue(current)).accepted, true);
+    const currentClaim = await currentWorker.dequeue();
+    assert.deepEqual(currentClaim, current);
+
+    await staleWorker.markFailed(staleClaim!, 'lease lost');
+    await currentWorker.markCompleted(currentClaim!);
+    assert.equal(await currentWorker.releaseLockAndDrain(prKey(current)), null);
+
+    assert.equal(await currentWorker.recoverOrphans(), 0);
+    assert.equal(await currentWorker.dequeue(), null, 'the stale SHA was retired, not requeued');
+  },
+);
+
+test(
   'two workers atomically recover an orphan exactly once',
   { skip: !redisUrl },
   async (t) => {
@@ -231,11 +359,12 @@ test(
     await owner.enqueue(payload);
     const claimed = await owner.dequeue();
     assert.ok(claimed);
+    const [processingEntry] = await cleanup.lrange('orvex-review:processing', 0, -1);
+    assert.ok(processingEntry);
     await owner.close();
-    const raw = JSON.stringify(claimed);
     await cleanup.del(`orvex-review:inflight:${prKey(claimed!)}`);
     await cleanup.set(
-      `orvex-review:processing-meta:${createHash('sha256').update(raw).digest('hex')}`,
+      `orvex-review:processing-meta:${createHash('sha256').update(processingEntry!).digest('hex')}`,
       String(Date.now() - 60_000),
     );
 

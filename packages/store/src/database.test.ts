@@ -184,6 +184,7 @@ test('interruptReviewRun marks running rows so resumeReviewRun can reopen them',
   const runId = db.startReviewRun(input);
   assert.equal(db.interruptReviewRun(runId), true);
   assert.equal(db.interruptReviewRun(runId), false, 'already interrupted');
+  assert.equal(db.listReviewRuns(tenant.id, 1)[0]?.skipReason, 'interrupted by restart');
   assert.equal(
     db.resumeReviewRun(runId, {
       tenantId: input.tenantId,

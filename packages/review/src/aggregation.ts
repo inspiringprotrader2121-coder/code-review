@@ -72,7 +72,7 @@ export interface EffectiveReviewAggregation extends ReviewAggregationConfig {
 }
 
 /**
- * Reserve non-repeated calls (for example a whole-repo sweep) before repeating
+ * Reserve non-repeated calls (for example an explicit diagnostic) before repeating
  * a review. If the remaining budget cannot fund at least five full samples, do
  * the normal one-sample review instead of silently truncating coverage.
  */

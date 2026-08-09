@@ -1389,9 +1389,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
   }
 
   /**
-   * Atomically mark a still-running review as interrupted so a graceful
-   * shutdown requeue can resume the SAME row via resumeReviewRun (no second
-   * trial/hourly slot). Returns true when the row was still running.
+   * Atomically mark a still-running review as interrupted. Automatic shutdown
+   * does not replay paid stages; an explicit recovery may still reopen the same
+   * row via resumeReviewRun without consuming another quota slot.
    */
   interruptReviewRun(id: string): boolean {
     if (!id) return false;
@@ -1400,7 +1400,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         const res = this.db
           .prepare(
             `UPDATE review_runs
-             SET status = 'skipped', skip_reason = 'interrupted by restart — retried',
+             SET status = 'skipped', skip_reason = 'interrupted by restart',
                  completed_at = ?, worker_id = NULL
              WHERE id = ? AND status = 'running'`,
           )

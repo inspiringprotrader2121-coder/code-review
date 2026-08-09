@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
@@ -29,7 +30,7 @@ export interface CodexCliReviewOptions {
   signal?: AbortSignal;
   /** cross-file context: repo tree + imported files */
   context?: ReviewPromptContext;
-  /** a read-only repo checkout codex may explore for a whole-repo sweep.
+  /** A read-only repo checkout Codex may explore for call sites and tests.
    *  Only honored when `repoId` is on the ORVEX_CODEX_CLI_REPOS allowlist —
    *  otherwise the checkout is REFUSED and the review runs diff-only. */
   cwd?: string;
@@ -177,8 +178,8 @@ export function resolveCodexTimeouts(env: NodeJS.ProcessEnv = process.env): {
   inactivityMs: number;
 } {
   const hardMs = Math.min(
-    900_000,
-    Math.max(60_000, finiteEnv(env.ORVEX_CODEX_TIMEOUT_MS, 480_000)),
+    300_000,
+    Math.max(60_000, finiteEnv(env.ORVEX_CODEX_TIMEOUT_MS, 300_000)),
   );
   const inactivityMs = Math.min(
     hardMs,
@@ -208,6 +209,16 @@ export function resolveCodexRateLimitPolicy(env: NodeJS.ProcessEnv = process.env
     Math.max(5_000, finiteEnv(env.ORVEX_CODEX_RATELIMIT_TOTAL_WAIT_MS, 60_000)),
   );
   return { maxAttempts, maxWaitMs, totalWaitBudgetMs };
+}
+
+export function normalizeCodexAttemptError(
+  error: unknown,
+  signal?: AbortSignal,
+): Error {
+  if (signal?.aborted && !(error instanceof ReviewCancelledError)) {
+    return new ReviewCancelledError('codex-cli review cancelled');
+  }
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 /** Live codex children, so a worker shutdown can kill them. `detached: true`
@@ -246,17 +257,23 @@ export function killAllCodexChildren(): number {
   return killed;
 }
 
+const moduleRequire = createRequire(import.meta.url);
+
 export function resolveCodexBinary(
-  cwd = process.cwd(),
   _configuredPath = process.env.ORVEX_CODEX_CLI_PATH,
+  resolvePackage: (specifier: string) => string = (specifier) => moduleRequire.resolve(specifier),
   exists: (candidate: string) => boolean = fs.existsSync,
 ): string {
-  // The root package pins a known Luna-compatible CLI. Fail closed if that exact
-  // dependency is absent: a global/configured binary may be a different version
-  // and has previously substituted a much more expensive model.
-  const local = path.join(cwd, 'node_modules', '.bin', 'codex');
-  if (exists(local)) return local;
-  throw new Error(`pinned Codex CLI is missing at ${local}; refusing unpinned fallback binary`);
+  // Resolve the executable from this package's exact dependency graph. This is
+  // independent of process.cwd() (production starts in apps/server) and cannot
+  // drift to PATH or an operator-configured global binary.
+  try {
+    const pinned = resolvePackage('@openai/codex/bin/codex.js');
+    if (exists(pinned)) return pinned;
+  } catch {
+    // Fall through to the same fail-closed error without exposing resolver data.
+  }
+  throw new Error('pinned Codex CLI package @openai/codex is missing; refusing unpinned fallback binary');
 }
 
 function codexBinary(): string {
@@ -452,6 +469,18 @@ export function detectCodexAuthMode(codexHome?: string): CodexAuthMode {
   }
   authModeCache.set(dir, { mode, expiresAt: Date.now() + AUTH_MODE_CACHE_TTL_MS });
   return mode;
+}
+
+/** Fail before any sibling model call can spend money when the required Luna
+ * runtime is unavailable. */
+export function assertCodexRuntimeReady(
+  homes: readonly (string | undefined)[] = CODEX_HOME_POOL,
+): string {
+  const binary = resolveCodexBinary();
+  if (!homes.some((home) => detectCodexAuthMode(home) === 'apikey')) {
+    throw new Error('codex-cli Luna requires at least one API-key-authenticated Codex home');
+  }
+  return binary;
 }
 
 /** Clear auth-mode cache (tests). */
@@ -773,8 +802,9 @@ async function runCodexExec(
         return result;
       },
       (error) => {
-        const message = (error as Error)?.message ?? String(error);
-        const outcome = error instanceof ReviewCancelledError
+        const normalized = normalizeCodexAttemptError(error, opts.signal);
+        const message = normalized.message;
+        const outcome = normalized instanceof ReviewCancelledError
           ? 'cancelled'
           : /wall-clock cap|timed?\s*out|produced no output/i.test(message)
             ? 'timed_out'
@@ -789,7 +819,7 @@ async function runCodexExec(
           completedAt: new Date().toISOString(),
           error: message.slice(0, 2_000),
         });
-        throw error;
+        throw normalized;
       },
     );
   };
