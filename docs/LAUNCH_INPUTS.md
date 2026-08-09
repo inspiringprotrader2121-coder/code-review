@@ -7,16 +7,13 @@ self-serve signup broadly:
 - **Billing:** confirm the live Stripe price IDs, monthly prices, included
   units, overage rates, refund policy, tax handling, and cancellation policy
   match the public pricing page.
-- **Pro economics:** the current 10-review/hour ceiling permits up to 7,200
-  reviews in a 30-day period. Measure the real p95 provider cost per normal and
-  deep review, then approve that exposure or set a monthly spend/capacity
-  guard before paid traffic starts. The live database currently shows 149
-  completed reviews in the last 30 days at an average recorded cost of about
-  `$0.324` and a maximum of about `$1.032`; at the current ceiling that implies
-  roughly `$2,335` average-cost exposure per Pro workspace per month.
-- **Provider capacity:** confirm rate limits and fallback capacity for every
-  configured model provider at the expected launch concurrency. A missing
-  required provider now fails closed instead of silently degrading a review.
+- **Pro economics:** measure current p50/p95 provider cost per normal and deep
+  review from instrumented production attempts, then approve the monthly hard
+  ceiling and COGS guard before paid traffic starts. Do not rely on historical
+  snapshots after model, price, or pass-budget changes.
+- **Provider capacity:** confirm rate limits for every required provider at the
+  configured per-provider concurrency. Missing required providers fail closed;
+  there is no substitute-model capacity path.
 - **Data processing:** confirm the provider/subprocessor list, data-processing
   terms, retention period, deletion workflow, and applicable jurisdictions with
   counsel. The product accepts deletion and export requests at

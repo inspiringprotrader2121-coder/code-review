@@ -68,6 +68,7 @@ import {
   type ReviewFinding,
   type ReviewPromptContext,
   type ReviewSurfaceFinding,
+  type LlmAttemptEvent,
   summarizeModelContribution,
   tagFindingProvenance,
   formatModelContribution,
@@ -82,7 +83,7 @@ import {
 import { planFeatures } from '@orvex-review/tenants';
 import { runtimeVerify, formatRuntimeEvidence } from './runtime-verify.js';
 import { formatLimitBlockedComment, loadAccountQuotaStatus, monthlyCogsCapUsd } from './quota-status.js';
-import { noteActiveCheckoutDir } from './active-reviews.js';
+import { activeReviewSignal, noteActiveCheckoutDir } from './active-reviews.js';
 import { isVerificationEnabled } from './verify-gate.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -94,7 +95,8 @@ import { pipeline as streamPipeline } from 'node:stream/promises';
 /**
  * Download + extract the repo at `ref` into a temp dir for agentic exploration
  * (Codex CLI or the sandboxed investigate tier). Fail-safe: returns null on any
- * error and the review falls back to diff+context only.
+ * error. Agentic reviews fail closed if this checkout is unavailable; optional
+ * investigate-only callers may still continue without the extra tool pass.
  */
 async function checkoutRepoForAgent(
   octokit: ReturnType<typeof createInstallationOctokit>,
@@ -181,7 +183,7 @@ async function checkoutRepoForAgent(
         /* best-effort */
       }
     }
-    console.warn('[worker] repo checkout failed (diff-only fallback):', (err as Error).message);
+    console.warn('[worker] repo checkout failed:', (err as Error).message);
     return null;
   }
 }
@@ -217,9 +219,8 @@ export interface WorkerConfig {
    *  key. Distinct model weights, so it is genuine ensemble diversity rather
    *  than a re-run of v4 Pro. */
   deepseekFlashModel: LlmTarget | null;
-  /** optional DeepSeek model (reasoning-heavy, cheap) — a standalone pass
-   *  target for 'multi-model' tiers, and the automatic fallback when codex
-   *  CLI's OAuth is down. null when ORVEX_DEEPSEEK_API_KEY is not set. */
+  /** optional DeepSeek model (reasoning-heavy, cheap) for explicit diagnostic
+   *  routes. It is never a substitute for a contracted Luna/Flash stage. */
   deepseekModel: LlmTarget | null;
   maxFileBytes: number;
   maxFiles: number;
@@ -261,6 +262,30 @@ export function failedRequiredLensIds(
   });
 }
 
+/** Keep purchased core stages ahead of sweeps and opt-in diagnostic calls. */
+export function takeReviewCallsByPriority<T>(
+  core: readonly T[],
+  optional: readonly T[],
+  maxCalls: number,
+): T[] {
+  return [...core, ...optional].slice(0, Math.max(0, Math.floor(maxCalls)));
+}
+
+/** A review already published to GitHub must never be re-run because a local
+ * accounting/state/check-run finalizer failed afterwards. */
+export async function runPostPublicationStep(
+  label: string,
+  action: () => unknown | Promise<unknown>,
+): Promise<boolean> {
+  try {
+    await action();
+    return true;
+  } catch (err) {
+    console.error(`[worker] post-publication ${label} failed (non-fatal):`, (err as Error).message);
+    return false;
+  }
+}
+
 function premiumTarget(config: WorkerConfig): LlmTarget {
   return { apiKey: config.llmApiKey, baseUrl: config.llmBaseUrl, model: config.llmModel, api: config.llmApi };
 }
@@ -275,13 +300,12 @@ function boundedEnvInt(name: string, fallback: number, min: number, max: number)
  *    MiniMax (thorough breadth, and it reasons hard where codex's deep-dive skips).
  *  - 'multi-model'  → FOUR discovery passes for max blind-spot diversity:
  *    pass 1 Luna/Codex (general), pass 2 DeepSeek v4 Flash (deep-dive),
- *    pass 3 Flash again on removed-behavior/callers (Pro via ORVEX_PASS3_ON_DEEPSEEK_PRO),
- *    pass 4 MiniMax (perf/completeness). Pure API billing — no OAuth fragility.
+ *    pass 3 Flash again on removed-behavior/callers, pass 4 MiniMax
+ *    (perf/completeness), followed by a separate Flash verification pass.
  *  - 'dual-model' → TWO discovery passes: MiniMax (general) + DeepSeek v4 Flash
  *    (deep-dive). Flash also runs the end-of-review verify pass.
- *  - 'openai'   → the OpenAI reasoning model (gpt-5.x/Luna) on every pass.
- *  - 'hybrid'   → pass 1 (general) on MiniMax, pass 2+ (deep-dive) on GLM-5.2.
- *  - 'standard' → MiniMax on every pass.  'premium' → GLM on every pass. */
+ * Legacy model-tier values remain readable for stored configuration, but the
+ * public plans route only through the dual-model and multi-model tracks above. */
 /**
  * Can this review run the AGENTIC path (codex CLI with a repo checkout) instead
  * of a one-shot API call? This is the ONLY place the question is answered.
@@ -297,25 +321,32 @@ function boundedEnvInt(name: string, fallback: number, min: number, max: number)
  */
 export function canRunAgentic(plan: { modelTier?: ModelTier }, repoId: string): boolean {
   return (
-    process.env.ORVEX_CODEX_CLI === '1' &&
-    (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model') &&
+    canRunCodexCli(plan) &&
     isCodexRepoAllowed(repoId)
+  );
+}
+
+/** High-tier Luna always uses the pinned Codex CLI with API-key auth. Repo
+ * allowlisting controls whether the CLI receives a checkout, not whether the
+ * required Luna pass silently changes transport/provider. */
+export function canRunCodexCli(plan: { modelTier?: ModelTier }): boolean {
+  return (
+    process.env.ORVEX_CODEX_CLI === '1'
+    && (plan.modelTier === 'codex-hybrid' || plan.modelTier === 'multi-model')
   );
 }
 
 /**
  * Sandboxed investigate tier (DeepSeek v4 Flash + read-only tools).
  *
- * On for multi-model (Verify*) plans when Codex CLI is NOT already providing an
- * agentic pass. Dual-model (free/Starter/Pro) stays at MiniMax + Flash discovery
- * + Flash verify only — no investigate, to keep the cheap two-model track.
- * Kill-switch: ORVEX_INVESTIGATE=0.
+ * This is an explicit diagnostic extension, not part of the normal plan. Keeping
+ * it opt-in preserves the advertised four-reviewer-plus-verifier contract.
  */
 export function canRunInvestigate(
   plan: { id?: string; modelTier?: ModelTier },
   opts: { useCodexCli: boolean },
 ): boolean {
-  if (process.env.ORVEX_INVESTIGATE === '0') return false;
+  if (process.env.ORVEX_INVESTIGATE !== '1') return false;
   if (opts.useCodexCli) return false; // Codex already explores the checkout
   return plan.modelTier === 'multi-model' || plan.modelTier === 'codex-hybrid';
 }
@@ -323,15 +354,14 @@ export function canRunInvestigate(
 /**
  * Additive Flash risk-hunt pass for high-risk diffs only.
  *
- * Best-effort recall lens — never required, never bypasses the verifier.
- * Kill-switch: ORVEX_RISK_HUNT=0. Requires Flash (refuses MiniMax fallback so
- * we do not spend an extra pass without the hunting edge that justified it).
+ * Best-effort recall lens — never required, never bypasses the verifier, and is
+ * opt-in so normal reviews retain their fixed call contract.
  */
 export function canRunRiskHunt(
   plan: { modelTier?: ModelTier },
   opts: { highRisk: boolean; hasFlash: boolean },
 ): boolean {
-  if (process.env.ORVEX_RISK_HUNT === '0') return false;
+  if (process.env.ORVEX_RISK_HUNT !== '1') return false;
   if (!opts.highRisk || !opts.hasFlash) return false;
   return (
     plan.modelTier === 'dual-model'
@@ -401,11 +431,11 @@ export function modelForPass(
   agentic = false,
 ): { target: LlmTarget; tier: PassTier } {
   if (plan.modelTier === 'codex-hybrid') {
-    // general → codex (CLI if enabled, else paid API); deep-dive + further passes → MiniMax
+    // general → pinned Codex CLI only; deep-dive + further passes → MiniMax
     if (passIndex === 0 && config.codexCliModel && agentic) {
       return { target: config.codexCliModel, tier: 'openai' };
     }
-    if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
+    if (passIndex === 0) throw new Error('high-tier Luna requires the pinned Codex CLI; direct API substitution is disabled');
     return { target: config.standardModel, tier: 'standard' };
   }
   if (plan.modelTier === 'multi-model') {
@@ -418,39 +448,36 @@ export function modelForPass(
     if (passIndex === 0 && config.codexCliModel && agentic) {
       return { target: config.codexCliModel, tier: 'openai' };
     }
-    if (passIndex === 0 && config.openaiModel) return { target: config.openaiModel, tier: 'openai' };
+    if (passIndex === 0) throw new Error('high-tier Luna requires the pinned Codex CLI; direct API substitution is disabled');
     // pass 2 (deep-dive) → DeepSeek v4 Flash (currently the stronger DeepSeek
     // for hunting subtle defects a first read misses).
-    if (passIndex === 1 && config.deepseekFlashModel) {
-      return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
-    }
-    if (passIndex === 1 && config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
-    // pass 3 (removed-behavior / caller audit) → Flash again by default (cheap
-    // second angle on a DIFFERENT lens). Model diversity used to prefer Pro
-    // here; set ORVEX_PASS3_ON_DEEPSEEK_PRO=1 to restore Pro as the independent
-    // reasoner if ablation shows Flash-twice loses unique caller/removal bugs.
-    if (passIndex === 2) {
-      if (process.env.ORVEX_PASS3_ON_DEEPSEEK_PRO === '1' && config.deepseekModel) {
-        return { target: config.deepseekModel, tier: 'deepseek' };
-      }
+    if (passIndex === 1) {
       if (config.deepseekFlashModel) {
         return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
       }
-      if (config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+      throw new Error('DeepSeek v4 Flash is required for multi-model pass 2');
     }
-    // pass 4 (perf/completeness breadth) + any missing-key fallback → MiniMax.
+    // pass 3 (removed-behavior / caller audit) → Flash again on a different lens.
+    // This route is fixed so configuration drift cannot silently substitute Pro.
+    if (passIndex === 2) {
+      if (config.deepseekFlashModel) {
+        return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
+      }
+      throw new Error('DeepSeek v4 Flash is required for multi-model pass 3');
+    }
+    // pass 4 (perf/completeness breadth) → MiniMax.
     return { target: config.standardModel, tier: 'standard' };
   }
   if (plan.modelTier === 'dual-model') {
     // TWO-MODEL entry track: MiniMax general + DeepSeek v4 Flash deep-dive.
     // Flash (not Pro) keeps the paid/free entry stack cheap while still giving
-    // a second independent reasoner. Falls back to Pro, then MiniMax, if Flash
-    // isn't configured.
+    // a second independent reasoner. Provider validation fails closed if Flash
+    // is unavailable rather than silently changing the purchased model stack.
     if (passIndex === 1) {
       if (config.deepseekFlashModel) {
         return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
       }
-      if (config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
+      throw new Error('DeepSeek v4 Flash is required for dual-model pass 2');
     }
     return { target: config.standardModel, tier: 'standard' };
   }
@@ -474,31 +501,17 @@ export function modelForPlanWithTier(
   plan: { modelTier?: ModelTier },
 ): { target: LlmTarget; tier: PassTier } {
   // VERIFICATION IS THE PRECISION GATE — it decides what the customer actually
-  // sees. Prefer DeepSeek v4 Flash as challenger on every modern tier: cheap,
-  // strong on premise checks, and independent of MiniMax discovery on dual-model
-  // / of Luna discovery on multi-model. Escape hatches:
-  //   ORVEX_VERIFY_ON_STANDARD=1 → MiniMax (legacy weak+rescue path)
-  //   ORVEX_VERIFY_ON_OPENAI=1   → Luna (explicit only; not the default)
-  //   ORVEX_VERIFY_ON_DEEPSEEK_PRO=1 → DeepSeek Pro instead of Flash
+  // sees. The modern paid tiers use Flash as a fixed, separately metered stage;
+  // env drift must not silently change the fifth model call.
   if (
     plan.modelTier === 'multi-model'
     || plan.modelTier === 'codex-hybrid'
     || plan.modelTier === 'dual-model'
   ) {
-    if (process.env.ORVEX_VERIFY_ON_STANDARD === '1') {
-      return { target: config.standardModel, tier: 'standard' };
-    }
-    if (process.env.ORVEX_VERIFY_ON_OPENAI === '1' && config.openaiModel) {
-      return { target: config.openaiModel, tier: 'openai' };
-    }
-    if (process.env.ORVEX_VERIFY_ON_DEEPSEEK_PRO === '1' && config.deepseekModel) {
-      return { target: config.deepseekModel, tier: 'deepseek' };
-    }
     if (config.deepseekFlashModel) {
       return { target: config.deepseekFlashModel, tier: 'deepseek-flash' };
     }
-    if (config.deepseekModel) return { target: config.deepseekModel, tier: 'deepseek' };
-    return { target: config.standardModel, tier: 'standard' };
+    throw new Error('DeepSeek v4 Flash is required for verification on this plan');
   }
   if (plan.modelTier === 'standard' || plan.modelTier === 'openai') {
     return { target: config.standardModel, tier: 'standard' };
@@ -512,6 +525,33 @@ export function modelForPlan(config: WorkerConfig, plan: { modelTier?: ModelTier
 }
 
 let sharedStore: AppDatabase | null = null;
+
+export function validateNativeOpenAiResponsesConfig(
+  baseUrl: string,
+  api: string | undefined,
+): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new Error('ORVEX_OPENAI_BASE_URL must be a valid native OpenAI URL');
+  }
+  if (
+    parsed.protocol !== 'https:'
+    || parsed.hostname.toLowerCase() !== 'api.openai.com'
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+    || parsed.pathname.replace(/\/+$/, '') !== '/v1'
+  ) {
+    throw new Error('direct Luna configuration must use https://api.openai.com/v1; gateways and custom paths are refused');
+  }
+  if (api !== undefined && api !== '' && api !== 'responses') {
+    throw new Error('direct Luna configuration must use the OpenAI Responses API, not chat/completions');
+  }
+  return 'https://api.openai.com/v1';
+}
 
 export function loadWorkerConfig(): WorkerConfig {
   const github = loadGitHubConfigFromEnv();
@@ -567,44 +607,44 @@ export function loadWorkerConfig(): WorkerConfig {
       }
     : { apiKey: premiumApiKey, baseUrl: premiumBaseUrl, model: premiumModel, api: premiumApi };
 
-  // Optional OpenAI reasoning model via /v1/responses. Verify's first pass uses
-  // this direct API target when configured; it can be enabled or changed without
-  // a code deployment.
+  // Native direct OpenAI target for explicit diagnostics/evaluation. Purchased
+  // high-tier Luna discovery is CLI-only and never substitutes this transport.
   const openaiKey = process.env.ORVEX_OPENAI_API_KEY;
-  const openaiModel: LlmTarget | null = openaiKey
-    ? {
+  let openaiModel: LlmTarget | null = null;
+  if (openaiKey) {
+    const openaiBaseUrl = validateNativeOpenAiResponsesConfig(
+      process.env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+      process.env.ORVEX_OPENAI_API,
+    );
+    openaiModel = {
         apiKey: openaiKey,
-        baseUrl: process.env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
+        baseUrl: openaiBaseUrl,
         model: process.env.ORVEX_OPENAI_MODEL ?? 'gpt-5.6-luna',
-        // 'responses' for OpenAI's native gpt-5.x endpoint; 'chat' for
-        // OpenAI-compatible gateways (OpenRouter etc. — verified live: streams
-        // and accepts reasoning_effort on /chat/completions).
-        api: process.env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
-        reasoningEffort: process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'max',
-      }
-    : null;
+        api: 'responses',
+        reasoningEffort: 'max',
+      };
+  }
 
-  // Optional local Codex CLI (OAuth/login) used for codex-hybrid pass 1 instead
-  // of the paid OpenAI API.
+  // Pinned local Codex CLI used for high-tier Luna. Runtime auth validation
+  // rejects OAuth/unknown homes and accepts API-key authentication only.
   const codexCliModel: LlmTarget | null =
     process.env.ORVEX_CODEX_CLI === '1'
       ? {
           apiKey: '',
-          model: process.env.ORVEX_CODEX_CLI_MODEL?.trim() || DEFAULT_CODEX_CLI_MODEL,
-          reasoningEffort: process.env.ORVEX_CODEX_CLI_REASONING_EFFORT?.trim() || DEFAULT_CODEX_CLI_REASONING_EFFORT,
+          model: DEFAULT_CODEX_CLI_MODEL,
+          reasoningEffort: DEFAULT_CODEX_CLI_REASONING_EFFORT,
         }
       : null;
 
-  // Optional DeepSeek model — reasoning-heavy, cheap, no OAuth. Standalone pass
-  // target for 'multi-model' tiers, and codex-hybrid's automatic pass-1
-  // fallback when the CLI's OAuth session is down.
+  // Optional DeepSeek model — reasoning-heavy, cheap, no OAuth. Kept for
+  // explicit diagnostic routes; it never substitutes for Luna or Flash.
   const deepseekKey = process.env.ORVEX_DEEPSEEK_API_KEY;
   const deepseekModel: LlmTarget | null = deepseekKey
     ? {
         apiKey: deepseekKey,
         baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
         model: process.env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
-        reasoningEffort: process.env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+        reasoningEffort: 'max',
       }
     : null;
 
@@ -615,7 +655,7 @@ export function loadWorkerConfig(): WorkerConfig {
         apiKey: deepseekKey,
         baseUrl: process.env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
         model: process.env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
-        reasoningEffort: process.env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
+        reasoningEffort: 'max',
       }
     : null;
 
@@ -646,6 +686,8 @@ export interface ProcessResult {
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;
+  /** GitHub accepted the review. Local finalizer failures must not retry it. */
+  published?: boolean;
   /** severity/file/line of what this run NEWLY posted — deep-vs-normal scorecard */
   newFindings?: Array<{ severity: string; file: string; line?: number }>;
   /** `@orvex deep` only: did at least one of the EXTRA deep lenses actually
@@ -1034,18 +1076,26 @@ export function providerConfigurationIssue(
   config: WorkerConfig,
   repoId?: string,
 ): string | null {
-  const needsIndependentReviewer = plan.modelTier === 'dual-model' || plan.modelTier === 'multi-model';
-  if (needsIndependentReviewer && !config.deepseekModel && !config.deepseekFlashModel) {
-    return 'The independent review provider is not configured. This review was not run; contact support to restore provider capacity.';
+  const fixedTrack = plan.modelTier === 'dual-model' || plan.modelTier === 'multi-model';
+  if (fixedTrack && !/^minimax(?:-|$)/i.test(config.standardModel.model.trim())) {
+    return 'The MiniMax review provider is not configured for this plan. This review was not run; contact support to restore provider capacity.';
+  }
+  if (
+    fixedTrack &&
+    (!config.deepseekFlashModel || config.deepseekFlashModel.model.trim().toLowerCase() !== 'deepseek-v4-flash')
+  ) {
+    return 'The DeepSeek v4 Flash review provider is not configured. This review was not run; contact support to restore provider capacity.';
   }
   const codexAvailable =
     Boolean(config.codexCliModel && repoId && canRunAgentic(plan, repoId));
+  const directLunaAvailable =
+    config.openaiModel?.model.trim().toLowerCase() === DEFAULT_CODEX_CLI_MODEL;
   if (
     (plan.modelTier === 'multi-model' || plan.modelTier === 'codex-hybrid') &&
-    !config.openaiModel &&
+    !directLunaAvailable &&
     !codexAvailable
   ) {
-    return 'The frontier review provider is not configured for this plan. This review was not run; contact support to restore provider capacity.';
+    return 'The Luna review provider is not configured for this plan. This review was not run; contact support to restore provider capacity.';
   }
   return null;
 }
@@ -1290,37 +1340,45 @@ export async function processReviewJob(
       Boolean(result.skipReason) &&
       Boolean((result.inputTokens ?? 0) > 0 || (result.outputTokens ?? 0) > 0 || (result.costUsd ?? 0) > 0);
     const deliveredDeep = Boolean(job.deep) && result.deepLensesRan === true;
-    config.store.completeReviewRun(runId, {
-      status: result.skipReason && !consumedProviderBudget ? 'skipped' : result.skipReason ? 'failed' : 'completed',
-      skipReason: result.skipReason,
-      error: consumedProviderBudget ? `review did not complete: ${result.skipReason}` : undefined,
-      durationMs: Date.now() - startedAt,
-      findingsNew: result.newCount,
-      findingsFixed: result.fixedCount,
-      findingsOpen: result.findingCount,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      costUsd: result.costUsd,
-      newFindings: result.newFindings,
-      // Correct the row's `deep` flag to what was actually DELIVERED — the
-      // scorecard and completedReviewUnitsSince both read this column.
-      deep: deliveredDeep,
-    });
-    // Prepaid overage: refund the wallet debit when the review never spent
-    // provider budget. Completed / failed-with-spend keeps the debit.
-    if (result.skipReason && !consumedProviderBudget) {
-      config.store.refundOverageCredits(runId, `refund: ${result.skipReason}`);
-    } else if (
-      Boolean(job.deep) &&
-      !deliveredDeep &&
-      plan.overageCentsPerReview !== null &&
-      config.store.overageDebitNetCents(runId) > 0
-    ) {
-      // Reserved 2× for deep but lenses did not run — keep at most 1×.
-      config.store.reconcileOverageDebit(
-        runId,
-        plan.overageCentsPerReview,
-        'reconcile: deep lenses did not run',
+    try {
+      config.store.completeReviewRun(runId, {
+        status: result.skipReason && !consumedProviderBudget ? 'skipped' : result.skipReason ? 'failed' : 'completed',
+        skipReason: result.skipReason,
+        error: consumedProviderBudget ? `review did not complete: ${result.skipReason}` : undefined,
+        durationMs: Date.now() - startedAt,
+        findingsNew: result.newCount,
+        findingsFixed: result.fixedCount,
+        findingsOpen: result.findingCount,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        costUsd: result.costUsd,
+        newFindings: result.newFindings,
+        // Correct the row's `deep` flag to what was actually DELIVERED — the
+        // scorecard and completedReviewUnitsSince both read this column.
+        deep: deliveredDeep,
+      });
+      // Prepaid overage: refund the wallet debit when the review never spent
+      // provider budget. Completed / failed-with-spend keeps the debit.
+      if (result.skipReason && !consumedProviderBudget) {
+        config.store.refundOverageCredits(runId, `refund: ${result.skipReason}`);
+      } else if (
+        Boolean(job.deep) &&
+        !deliveredDeep &&
+        plan.overageCentsPerReview !== null &&
+        config.store.overageDebitNetCents(runId) > 0
+      ) {
+        // Reserved 2× for deep but lenses did not run — keep at most 1×.
+        config.store.reconcileOverageDebit(
+          runId,
+          plan.overageCentsPerReview,
+          'reconcile: deep lenses did not run',
+        );
+      }
+    } catch (err) {
+      if (!result.published) throw err;
+      console.error(
+        '[worker] post-publication review-run accounting failed (non-fatal):',
+        (err as Error).message,
       );
     }
     return result;
@@ -1379,7 +1437,7 @@ async function executeReview(
   const verificationTarget = modelForPlanWithTier(config, plan);
   const llm = verificationTarget.target;
   const verificationTier = verificationTarget.tier;
-  const reviewModel = modelForPass(config, plan, 0).target.model;
+  const reviewModel = modelForPass(config, plan, 0, canRunCodexCli(plan)).target.model;
   console.log(`[worker] plan=${plan.id} review=${reviewModel} verify=${llm.model}`);
 
   console.log(
@@ -1444,6 +1502,41 @@ async function executeReview(
     console.log(`[worker] skip PR #${number}: ${skipReason}`);
     return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason };
   }
+
+  // One cancellation signal follows every paid transport used by this review.
+  // The close/merge webhook aborts the active-review signal immediately in the
+  // current process; a 5s authoritative GitHub poll provides the durable
+  // fallback across restarts or future multi-process workers.
+  let prClosedMidRun = false;
+  const reviewAbortController = new AbortController();
+  const cancelClosedReview = () => {
+    if (!prClosedMidRun) {
+      prClosedMidRun = true;
+      console.warn(`[worker] PR #${number} closed mid-review — aborting active paid calls`);
+    }
+    if (!reviewAbortController.signal.aborted) {
+      reviewAbortController.abort('pr_closed_mid_run');
+    }
+  };
+  const parentSignal = activeReviewSignal();
+  parentSignal?.addEventListener('abort', cancelClosedReview, { once: true });
+  if (parentSignal?.aborted) cancelClosedReview();
+
+  const configuredAbortPoll = Number(process.env.ORVEX_ABORT_POLL_MS ?? 5_000);
+  const abortPollMs = Number.isFinite(configuredAbortPoll)
+    ? Math.min(900_000, Math.max(1_000, Math.floor(configuredAbortPoll)))
+    : 5_000;
+  const abortPoll = setInterval(() => {
+    if (runId) config.store.heartbeatReviewRun(runId);
+    isPrStillOpen(octokit, ref)
+      .then((open) => {
+        if (!open) cancelClosedReview();
+      })
+      .catch(() => {});
+  }, abortPollMs);
+  abortPoll.unref?.();
+
+  try {
 
   const priorState = config.store.getState({ installationId, owner, repo, pr: number });
   // Codex CLI session id for this PR — re-used across re-reviews so the model
@@ -1538,12 +1631,12 @@ async function executeReview(
     deepseek: { in: 0, out: 0 },
     'deepseek-flash': { in: 0, out: 0 },
   };
-  const attemptId = randomUUID();
   const onUsageFor = (tier: PassTier, target: LlmTarget, passName: string) => (u: {
     inputTokens: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     model?: string;
+    attemptId?: string;
     provider?: string;
   }) => {
     const accounted = accountUsage(tier, target, passName, u);
@@ -1563,9 +1656,36 @@ async function executeReview(
         outputRatePerM: accounted.outputRatePerM,
         costUsd: accounted.costUsd,
         tokenSource: u.tokenSource ?? (target.api === 'chat' ? 'estimate' : 'provider'),
-        attemptId,
+        attemptId: u.attemptId,
       });
     }
+  };
+  const onAttemptFor = (tier: PassTier, passName: string) => (event: LlmAttemptEvent) => {
+    if (!runId) return;
+    if (event.phase === 'started') {
+      config.store.startReviewRunAttempt({
+        id: event.attemptId,
+        runId,
+        tenantId,
+        parentAttemptId: event.parentAttemptId,
+        provider: event.provider,
+        model: event.model,
+        tier,
+        passName,
+        transport: event.transport,
+        retryIndex: event.retryIndex,
+        keyIndex: event.keyIndex,
+        startedAt: event.startedAt,
+      });
+      return;
+    }
+    config.store.completeReviewRunAttempt({
+      id: event.attemptId,
+      outcome: event.outcome,
+      durationMs: event.durationMs,
+      completedAt: event.completedAt,
+      error: event.error,
+    });
   };
   // full-file contents used by both the review call and the verification pass
   let reviewContextFiles: Array<{ path: string; content: string }> = [];
@@ -1597,13 +1717,13 @@ async function executeReview(
             // capped, and only when the risk gate fired (not a global cost raise).
             maxRelated: boundedEnvInt(
               'ORVEX_CTX_RELATED',
-              highRiskDiff && process.env.ORVEX_RISK_HUNT !== '0' ? 18 : 12,
+              highRiskDiff && process.env.ORVEX_RISK_HUNT === '1' ? 18 : 12,
               0,
               200,
             ),
             maxDependents: boundedEnvInt(
               'ORVEX_CTX_DEPENDENTS',
-              highRiskDiff && process.env.ORVEX_RISK_HUNT !== '0' ? 12 : 8,
+              highRiskDiff && process.env.ORVEX_RISK_HUNT === '1' ? 12 : 8,
               0,
               200,
             ),
@@ -1618,7 +1738,7 @@ async function executeReview(
             // tiers), plus extra files only for the Verify whole-repo sweep.
             maxOthers:
               plan.retrievalTopK
-              + (highRiskDiff && process.env.ORVEX_RISK_HUNT !== '0' ? 8 : 0)
+              + (highRiskDiff && process.env.ORVEX_RISK_HUNT === '1' ? 8 : 0)
               + (plan.repoSweep ? plan.sweepMaxFiles : 0),
           },
         );
@@ -1655,7 +1775,9 @@ async function executeReview(
         reasoningEffort: target.reasoningEffort,
         temperature,
         context: ctx,
+        signal: reviewAbortController.signal,
         onUsage: onUsageFor(tier, target, passName),
+        onAttempt: onAttemptFor(tier, passName),
       });
 
     const passes = Math.max(1, plan.reviewPasses);
@@ -1681,7 +1803,7 @@ async function executeReview(
     // finishes in a fraction of the wall-clock.
     const passOthers = (reviewContext?.others ?? []).slice(
       0,
-      plan.retrievalTopK + (highRiskDiff && process.env.ORVEX_RISK_HUNT !== '0' ? 8 : 0),
+      plan.retrievalTopK + (highRiskDiff && process.env.ORVEX_RISK_HUNT === '1' ? 8 : 0),
     );
     const passCtx = { ...baseCtx, others: passOthers };
 
@@ -1716,11 +1838,11 @@ async function executeReview(
       modelPassIndex?: number;
       /** Explicit low temperature used only by repeated API samples. */
       temperature?: number;
-      // Best-effort passes (the perf/completeness breadth lens, the optional
-      // `deep` extra lenses) enrich the review but must NEVER discard it: if one
-      // times out or errors, the review still posts from the passes that
-      // completed. The core general + deep-dive reasoners remain required.
+      // Optional `deep`/diagnostic extras enrich the review but must never
+      // discard it. Purchased discovery stages are required.
       bestEffort?: boolean;
+      /** Repeated Codex samples use independent sessions. */
+      freshAgenticSession?: boolean;
     };
     const tagFindings = (got: ReviewFinding[], tier: PassTier, passTag?: string) => {
       for (const f of got) {
@@ -1730,33 +1852,41 @@ async function executeReview(
     // ONE answer to "does this review run agentically?", used by every site
     // below. Previously this decision was re-derived in five places with subtly
     // different conditions, which is how the pass-1 routing bug got in.
-    const requestedCodexCli = canRunAgentic(plan, `${owner}/${repo}`);
+    const requestedCodexCli = canRunCodexCli(plan);
+    const allowCodexCheckout = canRunAgentic(plan, `${owner}/${repo}`);
+    if (
+      (plan.modelTier === 'multi-model' || plan.modelTier === 'codex-hybrid')
+      && !requestedCodexCli
+    ) {
+      throw new Error('high-tier review requires pinned Codex CLI Luna; ORVEX_CODEX_CLI is not enabled');
+    }
     const wantInvestigate = canRunInvestigate(plan, { useCodexCli: requestedCodexCli });
     const investigateModel = wantInvestigate ? modelForInvestigate(config) : null;
     // Read-only checkout for Codex and/or the sandboxed investigate tier.
     // Cleanup is guaranteed via the outer finally below — even if call-list
     // construction throws before the LLM run loop.
     const agentRepoDir =
-      requestedCodexCli || wantInvestigate
+      allowCodexCheckout || wantInvestigate
         ? await checkoutRepoForAgent(octokit, owner, repo, effectiveSha)
         : null;
     try {
-    // A failed checkout must change the route, not just the working directory.
-    // Otherwise a successful CLI/API parse could falsely report a full agentic
-    // pass even though the repo exploration capability never ran.
-    const useCodexCli = requestedCodexCli && Boolean(agentRepoDir);
-    const codexRepoDir = useCodexCli ? agentRepoDir : null;
+    // Agentic Luna is a required high-tier stage. A checkout failure must fail
+    // closed before any provider call, never become direct API Luna, MiniMax, or
+    // another model that would misrepresent the purchased reviewer lineup.
+    if (allowCodexCheckout && !agentRepoDir) {
+      throw new Error('agentic Luna repository checkout fetch failed; no substitute model was run');
+    }
+    const useCodexCli = requestedCodexCli;
+    const codexRepoDir = allowCodexCheckout ? agentRepoDir : null;
     if (codexRepoDir) {
       console.log(`[worker] codex repo sweep: checked out ${owner}/${repo}@${effectiveSha.slice(0, 7)}`);
+    } else if (useCodexCli) {
+      console.log(`[worker] codex diff-only review: ${owner}/${repo} is not checkout-allowlisted`);
     } else if (wantInvestigate && agentRepoDir) {
       console.log(`[worker] investigate checkout: ${owner}/${repo}@${effectiveSha.slice(0, 7)}`);
     } else if (wantInvestigate && !agentRepoDir) {
       console.warn('[worker] investigate skipped: repo checkout unavailable');
       skippedLenses.push('investigate (repository checkout unavailable)');
-    }
-    if (requestedCodexCli && !agentRepoDir) {
-      console.warn('[worker] agentic pass downgraded: repo checkout unavailable');
-      skippedLenses.push('agentic repository exploration (checkout unavailable)');
     }
     if (wantInvestigate && !investigateModel) {
       skippedLenses.push('investigate (provider unavailable)');
@@ -1804,12 +1934,12 @@ async function executeReview(
       });
     }
     for (const [i, extra] of DEEP_EXTRA_ANGLES.entries()) {
-      // deep extras always take the plain API path, so codex is never routable here
-      const { target, tier } = modelForPass(config, plan, extra.modelIdx, false);
+      const extraUsesCodex = extra.modelIdx === 0 && useCodexCli;
+      const { target, tier } = modelForPass(config, plan, extra.modelIdx, extraUsesCodex);
       reviewCalls.push({
         label: `pass ${discoveryPasses + i + 1}/${totalDiscoverySlots} (${extra.tag}) [${target.model}]`,
         kind: 'pass',
-        mode: 'api',
+        mode: extraUsesCodex ? 'agentic' : 'api',
         ctx: { ...passCtx, extraFocus: extra.focus },
         target,
         tier,
@@ -1884,7 +2014,7 @@ async function executeReview(
         `[worker] risk hunt enabled on ${riskHuntModel.target.model} (high-risk diff): `
           + hunts.map((h) => h.tag).join(', '),
       );
-    } else if (highRiskDiff && process.env.ORVEX_RISK_HUNT !== '0' && !riskHuntModel) {
+    } else if (highRiskDiff && process.env.ORVEX_RISK_HUNT === '1' && !riskHuntModel) {
       skippedLenses.push('risk-hunt (DeepSeek Flash unavailable)');
     }
 
@@ -1971,32 +2101,31 @@ async function executeReview(
           if (sample === 0) {
             return { ...call, label: `${call.label} sample 1/${aggregation.effectiveRuns}`, sample };
           }
-          // Agentic Codex sessions are deliberately sequential and stateful.
-          // Repeated samples must be independent, so samples 1+ select the
-          // equivalent direct API target rather than resuming a shared CLI
-          // conversation.
-          const routed = modelForPass(config, plan, call.modelPassIndex ?? 0, false);
+          // Repeated Luna samples stay on the pinned CLI, but start independent
+          // sessions so recurrence is not measured inside one conversation.
+          const repeatedAgentic = call.mode === 'agentic';
+          const routed = modelForPass(config, plan, call.modelPassIndex ?? 0, repeatedAgentic);
           return {
             ...call,
             label: `${call.label} sample ${sample + 1}/${aggregation.effectiveRuns}`,
-            mode: 'api',
+            mode: repeatedAgentic ? 'agentic' : 'api',
             target: routed.target,
             tier: routed.tier,
             sample,
             temperature: aggregation.temperature,
+            freshAgenticSession: repeatedAgentic,
           };
         }),
       ).flat();
-      // Pin investigate + risk-hunt under the call budget the same way the
-      // non-aggregation branch does — a full repeated sample grid must not
-      // silently truncate them.
+      // A complete repeated grid is the measured aggregation unit. Optional
+      // sweeps/diagnostics may use only the remaining budget and can never
+      // displace one of those reviewer samples.
       const fixedBonus = [...investigateCalls, ...riskHuntCalls];
-      const bonusRoom = Math.max(0, maxCalls - fixedBonus.length);
-      toRun = [
-        ...repeatedCalls.slice(0, bonusRoom),
-        ...fixedBonus,
-        ...sweepCalls,
-      ].slice(0, maxCalls);
+      toRun = takeReviewCallsByPriority(
+        repeatedCalls,
+        [...sweepCalls, ...fixedBonus],
+        maxCalls,
+      );
       if (investigateCalls.length > 0 && !toRun.some((call) => call.mode === 'investigate')) {
         console.warn('[worker] investigate skipped: maxCalls budget exhausted before investigate');
         skippedLenses.push('investigate (call budget exhausted)');
@@ -2008,16 +2137,18 @@ async function executeReview(
         skippedLenses.push(`risk-hunt (call budget exhausted, ${dropped} probe(s))`);
       }
     } else {
-      // Keep investigate + risk-hunt even under a tight maxCalls budget — they
-      // are appended last but are the point of the sandboxed / risk tiers.
+      // Core plan passes are first and maxCalls is bounded to at least the plan's
+      // pass count, so diagnostics can never replace Luna/Flash/Flash/MiniMax.
       const bonus = reviewCalls.filter(
         (call) => call.mode === 'investigate' || call.passTag === 'risk-hunt',
       );
-      const rest = reviewCalls.filter(
-        (call) => call.mode !== 'investigate' && call.passTag !== 'risk-hunt',
+      const core = passCalls.slice(0, discoveryPasses);
+      const deepExtras = passCalls.slice(discoveryPasses);
+      toRun = takeReviewCallsByPriority(
+        core,
+        [...deepExtras, ...sweepCalls, ...bonus],
+        maxCalls,
       );
-      const room = Math.max(0, maxCalls - bonus.length);
-      toRun = [...rest.slice(0, room), ...bonus].slice(0, maxCalls);
       if (
         reviewCalls.some((call) => call.mode === 'investigate')
         && !toRun.some((call) => call.mode === 'investigate')
@@ -2039,30 +2170,6 @@ async function executeReview(
           `concurrency=${concurrency}${aggregation.enabled ? `, aggregation=${aggregation.effectiveRuns}x/${aggregation.minOccurrences}` : ''}`,
       );
     }
-
-    // Mid-run abort: a Verify review can run ~10 minutes across many calls — if
-    // the PR closes/merges partway through (the real incident this fixes: a
-    // backlog job finishing a full expensive review on a PR closed minutes into
-    // the run), stop starting NEW calls and skip posting entirely. Calls already
-    // in flight finish naturally (aborting a live HTTP request mid-stream isn't
-    // worth the added risk); checking before every new call is what stops the
-    // bulk of the remaining work. Best-effort: a failed check never itself
-    // aborts the review.
-    let prClosedMidRun = false;
-    const configuredAbortPoll = Number(process.env.ORVEX_ABORT_POLL_MS ?? 45_000);
-    const abortPollMs = Number.isFinite(configuredAbortPoll)
-      ? Math.min(900_000, Math.max(5_000, Math.floor(configuredAbortPoll)))
-      : 45_000;
-    const abortPoll = setInterval(() => {
-      isPrStillOpen(octokit, ref)
-        .then((open) => {
-          if (!open && !prClosedMidRun) {
-            prClosedMidRun = true;
-            console.warn(`[worker] PR #${number} closed mid-review — stopping further model calls`);
-          }
-        })
-        .catch(() => {});
-    }, abortPollMs);
 
     type Outcome = {
       ok: boolean;
@@ -2095,17 +2202,19 @@ async function executeReview(
         if (call.mode === 'agentic') {
           try {
             const { response, threadId } = await runCodexCliReview(filesForLlm, {
-              threadId: codexThreadId,
+              threadId: call.freshAgenticSession ? undefined : codexThreadId,
               model: call.target.model,
               reasoningEffort: call.target.reasoningEffort,
               context: call.ctx,
               cwd: codexRepoDir ?? undefined,
               repoId: `${owner}/${repo}`,
+              signal: reviewAbortController.signal,
               // Without this the agentic pass — by far the most expensive — was
               // reported as $0 and spend was invisible exactly where it matters.
               onUsage: onUsageFor(call.tier, call.target, call.label ?? 'codex pass'),
+              onAttempt: onAttemptFor(call.tier, call.label ?? 'codex pass'),
             });
-            codexThreadId = threadId;
+            if (!call.freshAgenticSession) codexThreadId = threadId;
             const got = llmFindingsToReviewFindings(response.findings);
             tagFindings(got, call.tier, call.passTag); // codex findings → protected in verification
             const degraded = got.length === 0 && response.summary === REVIEW_INCOMPLETE_SUMMARY;
@@ -2117,54 +2226,10 @@ async function executeReview(
             if (isOversizedModelRequest(msg)) {
               codexThreadId = undefined;
             }
-            // FALLBACK CHAIN on a codex CLI failure (mechanical — spawn/sandbox
-            // error, bad key, etc. With API-key auth there's no more "OAuth
-            // revoked" case). Try same-model plain API first (still the
-            // intended frontier pass, just without repo exploration); only
-            // drop to DeepSeek if that's unavailable/also fails.
-            if (config.openaiModel) {
-              try {
-                console.error(
-                  `[worker] ${call.label} codex CLI failed — retrying as plain API call (${config.openaiModel.model}): ${msg.slice(0, 140)}`,
-                );
-                const llm = await runReview(call.ctx, config.openaiModel, 'openai', `${call.label} [api-fallback]`);
-                const got = llmFindingsToReviewFindings(llm.findings);
-                tagFindings(got, 'openai', call.passTag);
-                const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
-                console.log(`[worker] ${call.label} [api-fallback]: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
-                return {
-                  ok: !degraded,
-                  transient: false,
-                  // A plain API fallback preserves findings but does not provide
-                  // the repo-agent capability promised by this pass.
-                  degraded: true,
-                  summary: llm.summary,
-                  findings: got,
-                };
-              } catch (apiErr) {
-                console.error(`[worker] ${call.label} plain API fallback also failed: ${(apiErr as Error).message.slice(0, 140)}`);
-              }
-            }
-            // CHEAP BACKUP REVIEWER: last resort — DeepSeek (heavy reasoner,
-            // cheap, no OAuth) instead of losing the frontier pass entirely.
-            // Dormant unless ORVEX_DEEPSEEK_API_KEY is set. Findings take the
-            // normal (unprotected) verifier gate.
-            if (!config.deepseekModel) throw err;
-            console.error(`[worker] ${call.label} falling back to DeepSeek (${config.deepseekModel.model})`);
-            const llm = await runReview(call.ctx, config.deepseekModel, 'deepseek', `${call.label} [deepseek-fallback]`);
-            const got = llmFindingsToReviewFindings(llm.findings);
-            tagFindings(got, 'deepseek', call.passTag);
-            const degraded = got.length === 0 && llm.summary === REVIEW_INCOMPLETE_SUMMARY;
-            console.log(`[worker] ${call.label} [deepseek-fallback]: +${got.length} findings${degraded ? ' (degraded/unparseable)' : ''}`);
-            return {
-              ok: !degraded,
-              transient: false,
-              // DeepSeek fallback is useful evidence, but it is not equivalent
-              // to the configured frontier agentic pass.
-              degraded: true,
-              summary: llm.summary,
-              findings: got,
-            };
+            console.error(
+              `[worker] ${call.label} Codex CLI failed; refusing substitute model/API: ${msg.slice(0, 160)}`,
+            );
+            throw err;
           }
         }
 
@@ -2180,7 +2245,9 @@ async function executeReview(
             api: call.target.api,
             reasoningEffort: call.target.reasoningEffort,
             context: call.ctx,
+            signal: reviewAbortController.signal,
             onUsage: onUsageFor(call.tier, call.target, call.label ?? 'investigate'),
+            onAttempt: onAttemptFor(call.tier, call.label ?? 'investigate'),
           });
           const got = llmFindingsToReviewFindings(response.findings);
           tagFindings(got, call.tier, call.passTag ?? 'investigate');
@@ -2212,8 +2279,7 @@ async function executeReview(
     };
 
     let outcomes: Outcome[];
-    try {
-      // Agentic Codex calls share one session per PR, so they must run
+    // Agentic Codex calls share one session per PR, so they must run
       // sequentially RELATIVE TO EACH OTHER (the resumed thread is stateful).
       // But they are INDEPENDENT of the API/investigate passes, which only feed
       // the same final aggregation — so run the whole agentic lane IN PARALLEL
@@ -2227,7 +2293,7 @@ async function executeReview(
       // the serialized lane still applies threadId in order, so the first call
       // resumes the prior PR session and later sweeps resume the fresh one.
       const cliCalls = toRun.filter((c) => c.mode === 'agentic');
-      const investigateCalls = toRun.filter((c) => c.mode === 'investigate');
+      const investigateLaneCalls = toRun.filter((c) => c.mode === 'investigate');
       const apiCalls = toRun.filter((c) => c.mode === 'api');
       // Describe the outcome from the CALL, in exactly one place. Previously
       // `kind` was recomputed at every return site inside runSingleCall and
@@ -2252,14 +2318,11 @@ async function executeReview(
       };
       const [cliOutcomes, investigateOutcomes, apiOutcomes] = await Promise.all([
         runCliLane(),
-        mapLimit(investigateCalls, 1, runOne),
+        mapLimit(investigateLaneCalls, 1, runOne),
         mapLimit(apiCalls, concurrency, runOne),
       ]);
       // Core API outcomes first so any fallback summary walk still prefers them.
       outcomes = [...cliOutcomes, ...apiOutcomes, ...investigateOutcomes];
-    } finally {
-      clearInterval(abortPoll);
-    }
 
     if (prClosedMidRun) {
       console.log(`[worker] PR #${number} closed during review — discarding partial results, not posting`);
@@ -2295,10 +2358,9 @@ async function executeReview(
       );
     }
 
-    // The core general + deep-dive lenses are the product contract. In normal
-    // mode each needs one completed call; in repeated mode each needs enough
-    // independent samples to meet the recurrence threshold. Breadth/deep-extra
-    // lenses remain best-effort and cannot discard the completed core review.
+    // Every purchased discovery stage is required. In normal mode each needs
+    // one completed call; in repeated mode each needs at least one successful
+    // sample before aggregation. Explicit diagnostic/deep extras remain optional.
     const requiredCalls = toRun.filter((call) => call.kind === 'pass' && !call.bestEffort);
     const requiredLensIds = [...new Set(requiredCalls.map((call) => call.modelPassIndex ?? -1))];
     // A required lens aborts the review only when it has ZERO successful
@@ -2331,11 +2393,11 @@ async function executeReview(
     }
     const degradedRequired = outcomes
       .filter((o) => o.kind === 'pass' && !o.bestEffort && o.ok && o.degraded)
-      .map((o) => `${o.label ?? 'required pass'} (fallback)`);
+      .map((o) => `${o.label ?? 'required pass'} (degraded)`);
     if (degradedRequired.length > 0) {
       skippedLenses = [...new Set([...skippedLenses, ...degradedRequired])];
       console.warn(
-        `[worker] required agentic pass(es) used a degraded fallback (${degradedRequired.join(', ')}) — posting with disclosure`,
+        `[worker] required pass(es) degraded (${degradedRequired.join(', ')}) — posting with disclosure`,
       );
     }
     // `deep:` labels come from DEEP_EXTRA_ANGLES — the lenses the 2x charge buys.
@@ -2448,7 +2510,9 @@ async function executeReview(
             reasoningEffort: llm.reasoningEffort,
             temperature: aggregation.temperature,
             json: true,
+            signal: reviewAbortController.signal,
             onUsage: onUsageFor(verificationTier, llm, 'aggregation'),
+            onAttempt: onAttemptFor(verificationTier, 'aggregation'),
           }),
       });
       aggregationManualCandidates = mergedRepeated.reviewOnly;
@@ -2614,11 +2678,13 @@ async function executeReview(
       reasoningEffort: llm.reasoningEffort,
       strict: plan.deepVerify,
       verifierTier: verificationTier,
+      signal: reviewAbortController.signal,
       // The batch is [...toPost, ...reviewOnly]. Manual candidates must not be
       // able to promote a normal finding's severity through `duplicateOf`.
       confirmedCount: merged.toPost.length,
       // P2-2: count verification tokens in the review's cost total.
       onUsage: onUsageFor(verificationTier, llm, 'verification'),
+      onAttempt: onAttemptFor(verificationTier, 'verification'),
     });
     if (verified.status === 'unavailable') {
       verificationIncomplete = true;
@@ -2746,9 +2812,9 @@ async function executeReview(
   if (config.leaseValid && !(await config.leaseValid())) {
     throw new Error('review lease lost before publication; discarding this worker result');
   }
-  // Abort poll stopped after discovery — re-check immediately before verify/post
-  // so a PR that merged during the multi-minute gate is not billed or commented.
-  if (!(await isPrStillOpen(octokit, ref))) {
+  // The webhook/poll signal stays active through verification. Re-check GitHub
+  // immediately before publication as the final non-atomic boundary backstop.
+  if (reviewAbortController.signal.aborted || !(await isPrStillOpen(octokit, ref))) {
     console.log(`[worker] PR #${number} closed before publication — discarding results, not posting`);
     return {
       findingCount: 0,
@@ -2907,11 +2973,12 @@ async function executeReview(
     lastReviewAt: new Date().toISOString(),
     codexThreadId,
   };
-  config.store.saveState(state);
+  await runPostPublicationStep('state persistence', () => config.store.saveState(state));
 
   // update the dashboard PR row with the latest open-finding count
   const openCount = finalFindings.filter((f) => f.status === 'open').length;
-  config.store.markReviewedNow(installationId, `${owner}/${repo}`, number, openCount);
+  await runPostPublicationStep('dashboard state update', () =>
+    config.store.markReviewedNow(installationId, `${owner}/${repo}`, number, openCount));
 
   if (config.enableCheckRuns) {
     // Manual-review candidates count toward the check run's honesty signals.
@@ -2950,15 +3017,16 @@ async function executeReview(
       ? ' · verification incomplete (NOT a full precision sign-off)'
       : '';
     const summary = `${stats.newCount} new, ${stats.fixedCount} fixed, ${stats.openCount} open${manualNote}${verifyNote}`;
-    await createCheckRun(octokit, ref, effectiveSha, {
-      conclusion,
-      title: incomplete ? 'Orvex Review (incomplete)' : 'Orvex Review',
-      summary: incomplete
-        ? skippedLenses.length > 0
-          ? `${summary} — ${skippedLenses.length} review pass(es) did not complete; NOT a full sign-off`
-          : `${summary} — precision verification did not complete; NOT a full sign-off`
-        : summary,
-    });
+    await runPostPublicationStep('check run', () =>
+      createCheckRun(octokit, ref, effectiveSha, {
+        conclusion,
+        title: incomplete ? 'Orvex Review (incomplete)' : 'Orvex Review',
+        summary: incomplete
+          ? skippedLenses.length > 0
+            ? `${summary} — ${skippedLenses.length} review pass(es) did not complete; NOT a full sign-off`
+            : `${summary} — precision verification did not complete; NOT a full sign-off`
+          : summary,
+      }));
   }
 
   // ——— Tier-2 (Verify plan): runtime verification in a sandbox ———
@@ -2998,9 +3066,14 @@ async function executeReview(
     inputTokens,
     outputTokens,
     costUsd,
+    published: true,
     newFindings: merged.toPost.map((f) => ({ severity: f.severity, file: f.file, line: f.line })),
     deepLensesRan,
   };
+  } finally {
+    clearInterval(abortPoll);
+    parentSignal?.removeEventListener('abort', cancelClosedReview);
+  }
 }
 
 /**

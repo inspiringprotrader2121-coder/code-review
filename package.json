@@ -18,5 +18,8 @@
   "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "@openai/codex": "0.147.0"
   }
 }

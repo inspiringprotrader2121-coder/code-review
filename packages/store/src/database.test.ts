@@ -31,7 +31,7 @@ test('stale-run cleanup leaves fresh running work alone during a rolling restart
   assert.equal(db.failStaleRunningRuns({ staleAfterMs: 60 * 60_000 }), 0);
 });
 
-test('sole-worker boot interrupts all running rows so resume can reopen them', () => {
+test('startup cleanup interrupts only rows whose heartbeat is stale', () => {
   const db = freshDb();
   const tenant = db.createTenant('sole-worker');
   const runId = db.startReviewRun({
@@ -43,7 +43,8 @@ test('sole-worker boot interrupts all running rows so resume can reopen them', (
     headSha: 'fresh',
     action: 'synchronize',
   });
-  assert.equal(db.failStaleRunningRuns({ staleAfterMs: 0 }), 1);
+  assert.equal(db.failStaleRunningRuns({ staleAfterMs: 60_000 }), 0, 'fresh peer work survives');
+  assert.equal(db.failStaleRunningRuns({ staleAfterMs: 60_000, nowMs: Date.now() + 61_000 }), 1);
   assert.equal(
     db.resumeReviewRun(runId, {
       tenantId: tenant.id,
@@ -54,6 +55,117 @@ test('sole-worker boot interrupts all running rows so resume can reopen them', (
       action: 'synchronize',
     }),
     'resumed',
+  );
+});
+
+test('review runs enforce tenant ownership and non-negative lifecycle fields', () => {
+  const db = freshDb();
+  assert.throws(
+    () => db.startReviewRun({
+      tenantId: 'missing-tenant',
+      installationId: 1,
+      owner: 'missing',
+      repo: 'api',
+      pr: 1,
+      headSha: 'sha',
+      action: 'manual',
+    }),
+    /tenant foreign key violation|FOREIGN KEY constraint failed/,
+  );
+
+  const tenant = db.createTenant('integrity');
+  assert.throws(
+    () => db.recordReviewRun({
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'integrity',
+      repo: 'api',
+      pr: 1,
+      headSha: 'sha',
+      action: 'manual',
+      status: 'completed',
+      durationMs: -1,
+    }),
+    /check constraint violation|CHECK constraint failed/,
+  );
+});
+
+test('provider attempts persist retry lineage and terminal review cleanup', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('attempts');
+  const runId = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'attempts',
+    repo: 'api',
+    pr: 2,
+    headSha: 'sha',
+    action: 'manual',
+  });
+  const startedAt = new Date().toISOString();
+  db.startReviewRunAttempt({
+    id: 'attempt-1',
+    runId,
+    tenantId: tenant.id,
+    provider: 'openai',
+    model: 'gpt-5.6-luna',
+    tier: 'openai',
+    passName: 'breadth',
+    transport: 'codex-cli',
+    retryIndex: 0,
+    keyIndex: 0,
+    startedAt,
+  });
+  db.startReviewRunAttempt({
+    id: 'attempt-2',
+    runId,
+    tenantId: tenant.id,
+    parentAttemptId: 'attempt-1',
+    provider: 'openai',
+    model: 'gpt-5.6-luna',
+    tier: 'openai',
+    passName: 'breadth',
+    transport: 'codex-cli',
+    retryIndex: 1,
+    keyIndex: 0,
+    startedAt,
+  });
+  assert.equal(db.completeReviewRunAttempt({
+    id: 'attempt-1',
+    outcome: 'rate_limited',
+    durationMs: 12,
+    completedAt: new Date().toISOString(),
+    error: 'rate limited',
+  }), true);
+  assert.equal(db.completeReviewRunAttempt({
+    id: 'attempt-1',
+    outcome: 'failed',
+    durationMs: 15,
+    completedAt: new Date().toISOString(),
+  }), false, 'attempt completion is compare-and-swap');
+  db.completeReviewRun(runId, { status: 'failed', durationMs: 20, error: 'provider exhausted' });
+
+  const attempts = db.listReviewRunAttempts(runId);
+  assert.equal(attempts[0]?.outcome, 'rate_limited');
+  assert.equal(attempts[1]?.parentAttemptId, 'attempt-1');
+  assert.equal(attempts[1]?.outcome, 'failed', 'terminal review closes dangling attempts');
+  assert.ok(attempts[1]?.completedAt);
+  assert.ok(db.listReviewRuns(tenant.id, 1)[0]?.completedAt);
+  assert.throws(
+    () => db.startReviewRunAttempt({
+      id: 'attempt-bad-lineage',
+      runId,
+      tenantId: tenant.id,
+      parentAttemptId: 'missing',
+      provider: 'openai',
+      model: 'gpt-5.6-luna',
+      tier: 'openai',
+      transport: 'codex-cli',
+      retryIndex: 2,
+      keyIndex: 0,
+      startedAt,
+    }),
+    /lineage mismatch/,
   );
 });
 
@@ -173,7 +285,7 @@ test('paid access downgrades on explicit dunning status and durable webhook clai
     headSha: 'abc',
     action: 'synchronize',
   });
-  assert.equal(db.failStaleRunningRuns({ staleAfterMs: 0 }), 1);
+  assert.equal(db.failStaleRunningRuns({ staleAfterMs: 60_000, nowMs: Date.now() + 61_000 }), 1);
   assert.equal(db.countAccountReviews('billing'), 1, 'an interrupted attempt remains quota-consuming');
   assert.equal(
     db.resumeReviewRun(runId, {

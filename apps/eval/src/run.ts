@@ -55,7 +55,7 @@ interface CaseResult {
   falsePos: string[];
 }
 
-/** LLM target for one production-mirror pass. */
+/** LLM target for one offline model-lineup pass. */
 interface PassTarget {
   apiKey: string;
   baseUrl?: string;
@@ -118,7 +118,7 @@ function openAiTarget(env: NodeJS.ProcessEnv = process.env): PassTarget | null {
         baseUrl: env.ORVEX_OPENAI_BASE_URL ?? 'https://api.openai.com/v1',
         model: env.ORVEX_OPENAI_MODEL ?? 'gpt-5.6-luna',
         api: env.ORVEX_OPENAI_API === 'chat' ? 'chat' : 'responses',
-        reasoningEffort: env.ORVEX_OPENAI_REASONING_EFFORT ?? 'xhigh',
+        reasoningEffort: 'max',
       }
     : null;
 }
@@ -127,50 +127,33 @@ function openAiTarget(env: NodeJS.ProcessEnv = process.env): PassTarget | null {
 export function evaluationVerifier(
   env: NodeJS.ProcessEnv = process.env,
 ): { target: PassTarget; tier: ReviewFinding['sourceTier'] } {
-  if (env.ORVEX_VERIFY_ON_STANDARD === '1') {
-    return { target: llmEnv(env), tier: 'standard' };
-  }
-  if (env.ORVEX_VERIFY_ON_OPENAI === '1') {
-    const openai = openAiTarget(env);
-    if (openai) return { target: openai, tier: 'openai' };
-  }
   const deepseekKey = env.ORVEX_DEEPSEEK_API_KEY;
   if (deepseekKey) {
-    if (env.ORVEX_VERIFY_ON_DEEPSEEK_PRO === '1') {
-      return {
-        target: {
-          apiKey: deepseekKey,
-          baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
-          model: env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
-          reasoningEffort: env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
-        },
-        tier: 'deepseek',
-      };
-    }
     return {
       target: {
         apiKey: deepseekKey,
         baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
         model: env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
-        reasoningEffort: env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
+        reasoningEffort: 'max',
       },
       tier: 'deepseek-flash',
     };
   }
-  return { target: llmEnv(env), tier: 'standard' };
+  throw new Error('ORVEX_DEEPSEEK_API_KEY is required for the Flash verification stage');
 }
 
-/** Mirror production's multi-model tier (modelForPass + buildReviewPassAngles),
- *  pass for pass. Multi-model defaults to the full four discovery passes;
- *  dual-model stays at general + deep-dive.
+/** Mirror production's model lineup and lens routing, pass for pass. The Luna
+ *  stage uses the direct API here, so this harness does not validate Codex CLI
+ *  exploration, checkout tooling, or its timeout/failure behavior. Multi-model
+ *  defaults to four discovery passes; dual-model stays at two.
  *
  *  This drifted twice and both times silently invalidated the benchmark: the
  *  eval ran three passes while the multi-model tier ran four (so bench170 was
  *  scored WITHOUT the removed-behavior lens that was built to catch it), and
  *  deep-dive was pointed at v4 Pro after production moved it to v4 Flash. If
  *  you change modelForPass or buildReviewPassAngles, change this in the same
- *  commit — otherwise every number this harness prints describes a pipeline that
- *  does not exist. */
+ *  commit — otherwise its model-lineup numbers describe a route that does not
+ *  exist. Agentic behavior requires separate integration evidence. */
 export function evaluationPassTargets(
   env: NodeJS.ProcessEnv = process.env,
   opts: {
@@ -193,14 +176,6 @@ export function evaluationPassTargets(
   const standard = llmEnv(env);
   const openai = openAiTarget(env);
   const deepseekKey = env.ORVEX_DEEPSEEK_API_KEY;
-  const deepseek: PassTarget | null = deepseekKey
-    ? {
-        apiKey: deepseekKey,
-        baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
-        model: env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
-        reasoningEffort: env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
-      }
-    : null;
   // v4 Flash shares the DeepSeek key/base URL — only the model id differs, which
   // is why production runs both as independent reasoners on different lenses.
   const deepseekFlash: PassTarget | null = deepseekKey
@@ -208,9 +183,13 @@ export function evaluationPassTargets(
         apiKey: deepseekKey,
         baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
         model: env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
-        reasoningEffort: env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
+        reasoningEffort: 'max',
       }
     : null;
+  if (!openai) throw new Error('ORVEX_OPENAI_API_KEY is required for the Luna review stage');
+  if (!deepseekFlash) {
+    throw new Error('ORVEX_DEEPSEEK_API_KEY is required for the DeepSeek v4 Flash review stages');
+  }
   // Full catalog matching modelForPass wiring; then filter with the same
   // conditional budget production uses so bench call counts stay honest.
   const catalog: Array<{
@@ -220,24 +199,18 @@ export function evaluationPassTargets(
     tier: ReviewFinding['sourceTier'];
     bestEffort?: boolean;
   }> = [
-    { tag: 'general', target: openai ?? standard, tier: openai ? 'openai' : 'standard' },
+    { tag: 'general', target: openai, tier: 'openai' },
     {
       tag: 'deep-dive',
-      target: deepseekFlash ?? standard,
+      target: deepseekFlash,
       focus: DEEP_DIVE_FOCUS,
-      tier: deepseekFlash ? 'deepseek-flash' : 'standard',
+      tier: 'deepseek-flash',
     },
     {
       tag: 'removed-behavior/callers',
-      target:
-        env.ORVEX_PASS3_ON_DEEPSEEK_PRO === '1'
-          ? (deepseek ?? deepseekFlash ?? standard)
-          : (deepseekFlash ?? deepseek ?? standard),
+      target: deepseekFlash,
       focus: REMOVED_BEHAVIOR_FOCUS,
-      tier:
-        env.ORVEX_PASS3_ON_DEEPSEEK_PRO === '1'
-          ? (deepseek ? 'deepseek' : deepseekFlash ? 'deepseek-flash' : 'standard')
-          : (deepseekFlash ? 'deepseek-flash' : deepseek ? 'deepseek' : 'standard'),
+      tier: 'deepseek-flash',
     },
     {
       tag: 'perf/completeness/api',
@@ -261,12 +234,11 @@ export function evaluationPassTargets(
 
 /**
  * Whether offline eval should run the sandboxed investigate pass.
- * Eval measures the multi-model (Verify*) track; investigate is on for that
- * track when a target resolves (mirrors production canRunInvestigate for
- * multi-model with Codex off). Kill-switch: ORVEX_INVESTIGATE=0.
+ * Eval measures the normal multi-model track, so diagnostic investigate is
+ * included only when explicitly enabled.
  */
 export function evaluationInvestigateEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  if (env.ORVEX_INVESTIGATE === '0') return false;
+  if (env.ORVEX_INVESTIGATE !== '1') return false;
   return evaluationInvestigateTarget(env) !== null;
 }
 
@@ -284,7 +256,7 @@ export function evaluationInvestigateTarget(env: NodeJS.ProcessEnv = process.env
         apiKey: deepseekKey,
         baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
         model: env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
-        reasoningEffort: env.ORVEX_DEEPSEEK_EFFORT ?? 'max',
+        reasoningEffort: 'max',
       }
     : null;
   const deepseekFlash: PassTarget | null = deepseekKey
@@ -292,7 +264,7 @@ export function evaluationInvestigateTarget(env: NodeJS.ProcessEnv = process.env
         apiKey: deepseekKey,
         baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
         model: env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
-        reasoningEffort: env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
+        reasoningEffort: 'max',
       }
     : null;
   const standard = (() => {
@@ -331,7 +303,7 @@ export function evaluationRiskHuntTarget(env: NodeJS.ProcessEnv = process.env): 
   target: PassTarget;
   tier: ReviewFinding['sourceTier'];
 } | null {
-  if (env.ORVEX_RISK_HUNT === '0') return null;
+  if (env.ORVEX_RISK_HUNT !== '1') return null;
   const deepseekKey = env.ORVEX_DEEPSEEK_API_KEY;
   if (!deepseekKey) return null;
   return {
@@ -339,7 +311,7 @@ export function evaluationRiskHuntTarget(env: NodeJS.ProcessEnv = process.env): 
       apiKey: deepseekKey,
       baseUrl: env.ORVEX_DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com',
       model: env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash',
-      reasoningEffort: env.ORVEX_DEEPSEEK_FLASH_EFFORT ?? 'max',
+      reasoningEffort: 'max',
     },
     tier: 'deepseek-flash',
   };

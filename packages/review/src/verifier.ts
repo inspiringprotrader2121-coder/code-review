@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { llmChat, extractJsonLoose } from './llm-client.js';
+import { llmChat, extractJsonLoose, type LlmAttemptEvent } from './llm-client.js';
 import { isTransientLlmError } from './llm.js';
 import { redactSecrets } from './redact.js';
 import {
@@ -49,6 +49,8 @@ export interface VerifierOptions {
   api?: 'chat' | 'responses' | 'anthropic';
   /** reasoning effort for /v1/responses models */
   reasoningEffort?: string;
+  /** Cancel verification when the reviewed PR closes or merges. */
+  signal?: AbortSignal;
   /**
    * How many leading `findings` are normal-surface candidates. The batch is
    * `[...toPost, ...reviewOnly]`, so a manual candidate cannot escalate a normal
@@ -78,7 +80,9 @@ export interface VerifierOptions {
     tokenSource?: 'provider' | 'estimate';
     provider?: string;
     model?: string;
+    attemptId?: string;
   }) => void;
+  onAttempt?: (event: LlmAttemptEvent) => void;
 }
 
 const SeveritySchema = z.enum(['P1', 'P2', 'P3', 'info']);
@@ -341,6 +345,7 @@ async function llmChatWithRetry(
       return await llmChat(system, user, opts);
     } catch (err) {
       lastErr = err;
+      if (opts.signal?.aborted) throw err;
       const msg = (err as Error).message;
       console.warn(`[verifier] call failed (attempt ${i + 1}/${attempts}):`, msg);
       // Only retry TRANSIENT failures (rate-limit / network / 5xx). Retrying a
@@ -710,8 +715,10 @@ async function verifyFindingsBatch(
       baseUrl: opts.baseUrl,
       api: opts.api,
       reasoningEffort: opts.reasoningEffort,
+      signal: opts.signal,
       json: true,
       onUsage: opts.onUsage,
+      onAttempt: opts.onAttempt,
     },
   );
   const parsed = VerdictSchema.parse(extractJsonLoose(text));
@@ -893,8 +900,10 @@ export async function verifyFixes(
         baseUrl: opts.baseUrl,
         api: opts.api,
         reasoningEffort: opts.reasoningEffort,
+        signal: opts.signal,
         json: true,
         onUsage: opts.onUsage,
+        onAttempt: opts.onAttempt,
       },
     );
     const parsed = VerdictSchema.parse(extractJsonLoose(text));

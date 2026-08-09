@@ -93,6 +93,12 @@ export interface ReviewQueue {
   releaseLockAndDrain(prKey: string): Promise<ReviewJobPayload | null>;
   /** Startup cleanup: clear stale in-flight locks + requeue pending. Returns count. */
   recoverOrphans(): Promise<number>;
+  /** Optional Redis-backed provider coordination used to keep model-specific
+   * concurrency and cooldowns correct across multiple worker processes. */
+  acquireProviderLease?(provider: string, limit: number, signal?: AbortSignal): Promise<string>;
+  releaseProviderLease?(provider: string, token: string): Promise<void>;
+  getProviderCooldownMs?(provider: string): Promise<number>;
+  setProviderCooldown?(provider: string, durationMs: number): Promise<void>;
   /** Snapshot of waiting / in-flight work for the operator monitor. */
   depth?(): Promise<QueueDepth>;
   /** Liveness probe for /health — true if the backing store is reachable. */
@@ -131,6 +137,13 @@ export function jobIdempotencyKey(job: ReviewJobPayload): string {
   if (job.action === 'ready_for_review' && kind === 'review') {
     return `${base}:ready_for_review`;
   }
+  // A close-aborted `opened`/`synchronize` run clears its own SEEN key. Give
+  // reopen a distinct key so it can coalesce while that abandoned run is still
+  // in flight, then run after the lock drains. Successful reviews still mark
+  // the bare SHA DONE, which suppresses a redundant reopen normally.
+  if (job.action === 'reopened' && kind === 'review') {
+    return `${base}:reopened`;
+  }
   if (kind === 'review') return base;
   // include instruction so two different free-form `@orvex <x>` replies on the
   // same thread aren't collapsed into one and silently deduped.
@@ -150,8 +163,8 @@ export function automaticReviewAlreadyDone(
   const bare = reviewShaIdempotencyKey(job);
   const idKey = jobIdempotencyKey(job);
   if (isDone(idKey)) return true;
-  // ready_for_review uses a distinct key — still suppress if opened (or a prior
-  // ready) already successfully reviewed this SHA.
+  // ready_for_review/reopened use distinct keys — still suppress if another
+  // automatic action already successfully reviewed this SHA.
   if (idKey !== bare && isDone(bare)) return true;
   return false;
 }

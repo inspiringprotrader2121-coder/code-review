@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import { AppDatabase } from './database.js';
 
 function db(): AppDatabase {
-  return new AppDatabase(':memory:');
+  const d = new AppDatabase(':memory:');
+  tenants.set(d, d.createTenant(`cooldown-${Math.random()}`).id);
+  return d;
 }
+const tenants = new WeakMap<AppDatabase, string>();
+const tenantId = (d: AppDatabase): string => tenants.get(d)!;
 
 test('secondsSinceLastCompletedReview is null when this commit has never completed a review', () => {
   const d = db();
@@ -14,7 +18,7 @@ test('secondsSinceLastCompletedReview is null when this commit has never complet
 test('detects a just-completed review of the exact same commit (the cooldown trigger)', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: 't1', installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
+    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
     action: 'command', status: 'completed', durationMs: 1000,
   });
   const s = d.secondsSinceLastCompletedReview(1, 'acme', 'api', 5, 'sha1');
@@ -24,7 +28,7 @@ test('detects a just-completed review of the exact same commit (the cooldown tri
 test('a DIFFERENT sha (a genuine new push) is unaffected — always null for that sha', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: 't1', installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
+    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
     action: 'command', status: 'completed', durationMs: 1000,
   });
   assert.equal(
@@ -37,11 +41,11 @@ test('a DIFFERENT sha (a genuine new push) is unaffected — always null for tha
 test('a failed or skipped run does NOT count as "recently reviewed" — cooldown only follows real completions', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: 't1', installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
+    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
     action: 'command', status: 'failed', durationMs: 1000,
   });
   d.recordReviewRun({
-    tenantId: 't1', installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
+    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
     action: 'command', status: 'skipped', durationMs: 0,
   });
   assert.equal(d.secondsSinceLastCompletedReview(1, 'acme', 'api', 5, 'sha1'), null);
@@ -50,7 +54,7 @@ test('a failed or skipped run does NOT count as "recently reviewed" — cooldown
 test('a fix run on the same commit does not count as a "review" for cooldown purposes', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: 't1', installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
+    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
     action: 'fix:ready', status: 'completed', durationMs: 1000,
   });
   assert.equal(d.secondsSinceLastCompletedReview(1, 'acme', 'api', 5, 'sha1'), null);
@@ -59,7 +63,7 @@ test('a fix run on the same commit does not count as a "review" for cooldown pur
 test('scoped per installation+repo+pr — does not leak across different PRs/repos', () => {
   const d = db();
   d.recordReviewRun({
-    tenantId: 't1', installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
+    tenantId: tenantId(d), installationId: 1, owner: 'acme', repo: 'api', pr: 5, headSha: 'sha1',
     action: 'command', status: 'completed', durationMs: 1000,
   });
   assert.equal(d.secondsSinceLastCompletedReview(1, 'acme', 'api', 6, 'sha1'), null, 'different PR');

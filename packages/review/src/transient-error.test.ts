@@ -9,17 +9,17 @@ import {
   isOversizedModelRequest,
 } from './llm-client.js';
 
-test('provider failover fires on rate-limit/quota errors specifically (narrower than transient)', () => {
-  // These trigger the MiniMax→fallback/Anthropic failover.
+test('same-provider key rotation uses rate-limit/quota errors specifically', () => {
+  // These permit rotation only across sibling keys for the configured model.
   assert.ok(isRateLimitOrQuotaError('LLM request failed (429): rate_limit_error'));
   assert.ok(isRateLimitOrQuotaError('Token Plan usage limit reached (2056)'));
   assert.ok(isRateLimitOrQuotaError('insufficient quota'));
   assert.ok(isRateLimitOrQuotaError('LLM request failed (402): This request requires more credits'));
 });
 
-test('a plain network blip is transient but does NOT itself trigger provider failover', () => {
+test('a plain network blip is transient but does not trigger key rotation', () => {
   // A transient network hiccup on the primary is worth retrying on the SAME
-  // provider — only a genuine rate-limit/quota signal means "switch providers".
+  // key; only a genuine rate-limit/quota signal justifies trying a sibling key.
   assert.ok(isTransientLlmError('fetch failed'));
   assert.ok(!isRateLimitOrQuotaError('fetch failed'));
   assert.ok(!isRateLimitOrQuotaError('LLM stream stalled (no data for 240000ms)'));
@@ -160,9 +160,7 @@ test('hard quota is never retried, however the provider dresses it', () => {
   );
 });
 
-test('an overloaded provider triggers failover, not just waiting', () => {
-  // 529/overloaded is exactly when rotating keys / failing over is right; it was
-  // retryable but NOT failover-eligible, so a configured fallback went untried.
+test('an overloaded provider permits sibling-key rotation as well as waiting', () => {
   assert.equal(isRateLimitOrQuotaError('LLM request failed (529): overloaded'), true);
   assert.equal(isRetryableRateLimit('LLM request failed (529): overloaded'), true);
 });

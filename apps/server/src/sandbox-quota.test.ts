@@ -19,7 +19,7 @@ test('assertWorkdirWithinQuota fails when workdir exceeds the budget', () => {
   }
 });
 
-test('isVerificationEnabled ignores ORVEX_VERIFY=0 in production unless FORCE_OFF', () => {
+test('isVerificationEnabled cannot be disabled by environment in production', () => {
   const prev = {
     verify: process.env.ORVEX_VERIFY,
     force: process.env.ORVEX_VERIFY_FORCE_OFF,
@@ -34,7 +34,7 @@ test('isVerificationEnabled ignores ORVEX_VERIFY=0 in production unless FORCE_OF
     assert.equal(isVerificationEnabled(), true);
 
     process.env.ORVEX_VERIFY_FORCE_OFF = '1';
-    assert.equal(isVerificationEnabled(), false);
+    assert.equal(isVerificationEnabled(), true);
 
     delete process.env.NODE_ENV;
     delete process.env.ORVEX_ENV;

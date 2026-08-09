@@ -6,10 +6,20 @@ function db(): AppDatabase {
   return new AppDatabase(':memory:');
 }
 
+const testTenants = new WeakMap<AppDatabase, string>();
+function testTenant(d: AppDatabase): string {
+  let id = testTenants.get(d);
+  if (!id) {
+    id = d.createTenant(`cost-${Math.random()}`).id;
+    testTenants.set(d, id);
+  }
+  return id;
+}
+
 test('completeReviewRun persists token usage + cost, and sumAccountCost aggregates it', () => {
   const d = db();
   const id = d.startReviewRun({
-    tenantId: 't1', installationId: 1, owner: 'acme', repo: 'api', pr: 1, headSha: 'sha1', action: 'manual',
+    tenantId: testTenant(d), installationId: 1, owner: 'acme', repo: 'api', pr: 1, headSha: 'sha1', action: 'manual',
   });
   d.completeReviewRun(id, {
     status: 'completed', durationMs: 1000, findingsNew: 2,
@@ -23,7 +33,7 @@ test('completeReviewRun persists token usage + cost, and sumAccountCost aggregat
 test('completeReviewRun cannot overwrite a terminal run', () => {
   const d = db();
   const id = d.startReviewRun({
-    tenantId: 't1',
+    tenantId: testTenant(d),
     installationId: 1,
     owner: 'cas-user',
     repo: 'api',
@@ -33,7 +43,7 @@ test('completeReviewRun cannot overwrite a terminal run', () => {
   });
   d.completeReviewRun(id, { status: 'completed', durationMs: 10, findingsNew: 2 });
   d.completeReviewRun(id, { status: 'failed', durationMs: 999, error: 'late worker' });
-  const row = d.listReviewRuns('t1', 1)[0]!;
+  const row = d.listReviewRuns(testTenant(d), 1)[0]!;
   assert.equal(row.status, 'completed');
   assert.equal(row.durationMs, 10);
   assert.equal(row.findingsNew, 2);
@@ -43,7 +53,7 @@ test('sumAccountCost is owner-scoped (case-insensitive) and windowed', () => {
   const d = db();
   for (const owner of ['acme', 'ACME', 'other']) {
     const id = d.startReviewRun({
-      tenantId: 't1', installationId: 1, owner, repo: 'api', pr: 1, headSha: 's', action: 'manual',
+      tenantId: testTenant(d), installationId: 1, owner, repo: 'api', pr: 1, headSha: 's', action: 'manual',
     });
     d.completeReviewRun(id, { status: 'completed', durationMs: 1, costUsd: 0.10 });
   }
@@ -56,10 +66,10 @@ test('sumAccountCost is owner-scoped (case-insensitive) and windowed', () => {
 test('getWorkspaceStats includes total spend for the window', () => {
   const d = db();
   const id = d.startReviewRun({
-    tenantId: 't1', installationId: 1, owner: 'acme', repo: 'api', pr: 1, headSha: 's', action: 'manual',
+    tenantId: testTenant(d), installationId: 1, owner: 'acme', repo: 'api', pr: 1, headSha: 's', action: 'manual',
   });
   d.completeReviewRun(id, { status: 'completed', durationMs: 1, costUsd: 0.5 });
-  const stats = d.getWorkspaceStats('t1');
+  const stats = d.getWorkspaceStats(testTenant(d));
   assert.ok(Math.abs(stats.costUsd - 0.5) < 1e-9);
 });
 

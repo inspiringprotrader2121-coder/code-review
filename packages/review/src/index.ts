@@ -23,6 +23,7 @@ export {
   detectCodexAuthMode,
   clearCodexAuthModeCache,
   resolveCodexHomeConcurrency,
+  resolveCodexRateLimitPolicy,
   DEFAULT_CODEX_CLI_MODEL,
   DEFAULT_CODEX_CLI_REASONING_EFFORT,
   type CodexAuthMode,
@@ -135,7 +136,20 @@ export {
   type ModelContributionRow,
 } from './contribution.js';
 export { checkImportBindings, enumerateExports, extractNamedImports } from './import-check.js';
-export { isRateLimitOrQuotaError, isOversizedModelRequest, llmChat, type LlmClientOptions } from './llm-client.js';
+export {
+  ReviewCancelledError,
+  isReviewCancelledError,
+  isRateLimitOrQuotaError,
+  isOversizedModelRequest,
+  llmChat,
+  configureLlmProviderCoordinator,
+  setProviderCooldown,
+  withProviderCallSlot,
+  type LlmClientOptions,
+  type LlmAttemptEvent,
+  type LlmAttemptOutcome,
+  type LlmProviderCoordinator,
+} from './llm-client.js';
 export {
   aggregateRepeatedFindings,
   fitReviewAggregationToBudget,

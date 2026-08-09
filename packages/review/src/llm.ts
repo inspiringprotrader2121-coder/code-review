@@ -1,6 +1,12 @@
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch, redactSecrets } from './redact.js';
-import { llmChat, extractJsonLoose, isRetryableRateLimit } from './llm-client.js';
+import {
+  llmChat,
+  extractJsonLoose,
+  isRetryableRateLimit,
+  isReviewCancelledError,
+  type LlmAttemptEvent,
+} from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 
@@ -23,7 +29,7 @@ export function isTransientLlmError(message: string): boolean {
   // than misreporting the missing pass as a clean, empty review.
   if (status === '402' && /credit|quota|payment required|insufficient/i.test(message)) return true;
   if (status && !['408', '425', '429'].includes(status)) return false;
-  return /\b(408|425|429|5\d\d)\b|rate.?limit|quota|token plan|request failed|fetch failed|stalled|timed?\s?out|econn|socket hang/i.test(
+  return /\b(408|425|429|5\d\d)\b|rate.?limit|quota|token plan|request failed|fetch failed|stalled|timed?\s?out|wall-clock cap|produced no output|econn|socket hang/i.test(
     message,
   );
 }
@@ -48,6 +54,8 @@ export interface LlmReviewOptions {
   reasoningEffort?: string;
   /** Sampling temperature for deliberately repeated review runs. */
   temperature?: number;
+  /** Cancel this review call when its PR closes or merges. */
+  signal?: AbortSignal;
   maxTokens?: number;
   /** cross-file context: repo tree + imported files */
   context?: ReviewPromptContext;
@@ -58,7 +66,9 @@ export interface LlmReviewOptions {
     tokenSource?: 'provider' | 'estimate';
     provider?: string;
     model?: string;
+    attemptId?: string;
   }) => void;
+  onAttempt?: (event: LlmAttemptEvent) => void;
 }
 
 export async function runLlmReview(
@@ -111,26 +121,28 @@ export async function runLlmReview(
       maxTokens: opts.maxTokens,
       json: true,
       thinking,
+      signal: opts.signal,
       onUsage: opts.onUsage,
+      onAttempt: opts.onAttempt,
     });
 
-  // Deep reasoning ON by default: both provider branches stream with an
-  // inactivity/keep-alive timer, so a long think can't drop the connection.
-  // ORVEX_REVIEW_THINKING=0 opts out; a failed reasoning call still retries
-  // once without reasoning below so a review is never lost to a thinking bug.
-  const reviewThinking = process.env.ORVEX_REVIEW_THINKING !== '0';
+  // Production review targets are configured at max effort. Preserve reasoning
+  // across retries so parse/transport recovery never silently becomes a cheaper,
+  // weaker review than the customer purchased.
+  const reviewThinking = true;
   const parseReview = (text: string) =>
     LlmReviewResponseSchema.parse(normalizeLlmResponse(extractJsonLoose(text)));
 
   // Both the model call AND the JSON extraction/validation are inside the retry:
   // an unparseable payload (e.g. the model wrapping its answer in a ```bash
-  // block) must retry without reasoning, then degrade gracefully — never crash
+  // block) must retry, then degrade gracefully — never crash
   // the whole review job the way an uncaught JSON.parse used to.
   let parsed: LlmReviewResponse;
   try {
     parsed = parseReview(await call(reviewThinking));
   } catch (err) {
     const firstMessage = (err as Error).message;
+    if (isReviewCancelledError(err) || opts.signal?.aborted) throw err;
     // A hard timeout already consumed the complete per-call budget. Starting a
     // second long request hid provider failures for another 5-8 minutes and
     // doubled spend. Surface it immediately so the required-pass gate can stop
@@ -138,26 +150,22 @@ export async function runLlmReview(
     if (/wall-clock cap|timed?\s*out|stalled/i.test(firstMessage)) throw err;
     // A rate limit ALREADY consumed its full wait-and-retry budget inside
     // llmChat. Re-entering with reasoning off just replays the whole
-    // key-rotation + failover chain against the same closed window, doubling
+    // same-provider key-rotation chain against the same closed window, doubling
     // both the attempt count and the time a worker slot is held. Fail now so the
     // job requeues and the circuit breaker can actually see it.
     if (isRetryableRateLimit(firstMessage)) throw err;
-    // Retry transport disconnects with reasoning still enabled. Only parsing,
-    // truncation, and empty-answer failures drop reasoning on the retry.
-    const retryThinking = /terminated|fetch failed|econn|socket hang|network/i.test(firstMessage)
-      ? reviewThinking
-      : false;
     // A provider that rejects `temperature` outright rejects it identically on
     // the retry, so the sample is lost to a parameter the call does not need.
     const rejectedTemperature = /temperature/i.test(firstMessage);
     console.warn(
-      `[llm] review call/parse failed, retrying with reasoning ${retryThinking ? 'on' : 'off'}` +
+      '[llm] review call/parse failed, retrying with reasoning on' +
         `${rejectedTemperature ? ' and temperature dropped' : ''}:`,
       firstMessage,
     );
     try {
-      parsed = parseReview(await call(retryThinking, rejectedTemperature ? undefined : opts.temperature));
+      parsed = parseReview(await call(reviewThinking, rejectedTemperature ? undefined : opts.temperature));
     } catch (err2) {
+      if (isReviewCancelledError(err2) || opts.signal?.aborted) throw err2;
       const msg = (err2 as Error).message;
       // A rate-limit / transport failure is NOT a clean review — propagate it so
       // the job FAILS (and can be retried when quota recovers) instead of silently

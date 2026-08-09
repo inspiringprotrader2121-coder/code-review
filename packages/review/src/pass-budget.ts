@@ -100,9 +100,8 @@ export type PassAngle = {
  *
  * Dual-model (Free/Starter/Pro) stays at general + deep-dive only.
  *
- * Env kill-switches (optional):
- *   ORVEX_BREADTH_ON=always|deep-or-large|never  (multi-model default: always)
- *   ORVEX_REMOVED_BEHAVIOR=always|deletes-or-renames|never  (multi-model default: always)
+ * Multi-model routing is intentionally not environment-conditional: changing a
+ * flag must not reduce a purchased four-reviewer run to two reviewers.
  */
 export function buildReviewPassAngles(opts: {
   modelTier?: string;
@@ -117,24 +116,31 @@ export function buildReviewPassAngles(opts: {
 }): PassAngle[] {
   const tier = opts.modelTier;
   const fourthTier = tier === 'multi-model' || tier === 'codex-hybrid';
-  // Paid multi-model track: full 4 discovery passes unless explicitly disabled.
-  const breadthMode = (
-    process.env.ORVEX_BREADTH_ON ?? (fourthTier ? 'always' : 'deep-or-large')
-  )
-    .trim()
-    .toLowerCase();
-  const removedMode = (
-    process.env.ORVEX_REMOVED_BEHAVIOR ?? (fourthTier ? 'always' : 'deletes-or-renames')
-  )
-    .trim()
-    .toLowerCase();
+  if (fourthTier) {
+    return [
+      { tag: 'general', modelIdx: 0 },
+      { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS, modelIdx: 1 },
+      {
+        tag: 'removed-behavior/callers',
+        focus: REMOVED_BEHAVIOR_FOCUS,
+        modelIdx: 2,
+      },
+      {
+        tag: 'perf/completeness/api',
+        focus: THIRD_ANGLE_FOCUS,
+        modelIdx: 3,
+      },
+    ];
+  }
+  if (tier === 'dual-model') {
+    return [
+      { tag: 'general', modelIdx: 0 },
+      { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS, modelIdx: 1 },
+    ];
+  }
+
+  const breadthMode = (process.env.ORVEX_BREADTH_ON ?? 'deep-or-large').trim().toLowerCase();
   const large = isLargePr(opts.files);
-  const wantRemoved =
-    fourthTier
-    && (
-      removedMode === 'always'
-      || (removedMode !== 'never' && hasDeleteOrRename(opts.files))
-    );
   const wantBreadth =
     breadthMode === 'always'
     || (breadthMode !== 'never' && (Boolean(opts.deep) || large));
@@ -143,13 +149,6 @@ export function buildReviewPassAngles(opts: {
     { tag: 'general', modelIdx: 0 },
     { tag: 'deep-dive', focus: DEEP_DIVE_FOCUS, modelIdx: 1 },
   ];
-  if (wantRemoved) {
-    angles.push({
-      tag: 'removed-behavior/callers',
-      focus: REMOVED_BEHAVIOR_FOCUS,
-      modelIdx: 2,
-    });
-  }
   if (wantBreadth) {
     angles.push({
       tag: 'perf/completeness/api',

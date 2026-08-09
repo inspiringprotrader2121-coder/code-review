@@ -13,6 +13,8 @@ import type {
   PullRequestState,
   Repo,
   ReviewRun,
+  ReviewRunAttempt,
+  ReviewRunAttemptOutcome,
   ReviewRunStatus,
   ReviewRunUsage,
   ScorecardRun,
@@ -134,27 +136,35 @@ CREATE INDEX IF NOT EXISTS idx_members_user ON workspace_members(user_id);
 
 CREATE TABLE IF NOT EXISTS review_runs (
   id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL REFERENCES tenants(id),
   installation_id INTEGER NOT NULL,
   owner TEXT NOT NULL,
   repo TEXT NOT NULL,
   pr INTEGER NOT NULL,
   head_sha TEXT NOT NULL,
   action TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'skipped', 'failed')),
   skip_reason TEXT,
   error TEXT,
-  duration_ms INTEGER NOT NULL DEFAULT 0,
-  findings_new INTEGER NOT NULL DEFAULT 0,
-  findings_fixed INTEGER NOT NULL DEFAULT 0,
-  findings_open INTEGER NOT NULL DEFAULT 0,
-  input_tokens INTEGER NOT NULL DEFAULT 0,
-  output_tokens INTEGER NOT NULL DEFAULT 0,
-  cost_usd REAL NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL
+  duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
+  findings_new INTEGER NOT NULL DEFAULT 0 CHECK (findings_new >= 0),
+  findings_fixed INTEGER NOT NULL DEFAULT 0 CHECK (findings_fixed >= 0),
+  findings_open INTEGER NOT NULL DEFAULT 0 CHECK (findings_open >= 0),
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+  cost_usd REAL NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),
+  deep INTEGER NOT NULL DEFAULT 0 CHECK (deep IN (0, 1)),
+  free_tier INTEGER NOT NULL DEFAULT 0 CHECK (free_tier IN (0, 1)),
+  new_findings_json TEXT,
+  worker_id TEXT,
+  heartbeat_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (id, tenant_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_tenant_time ON review_runs(tenant_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_id_tenant ON review_runs(id, tenant_id);
 -- Every billing check runs countAccountReviews (owner-scoped, lower(owner)) up
 -- to 3× per review; this expression index keeps it off a full table scan as the
 -- table grows. IF NOT EXISTS + always-run schema → created on existing DBs too.
@@ -168,19 +178,43 @@ CREATE TABLE IF NOT EXISTS review_run_usage (
   model TEXT NOT NULL,
   tier TEXT NOT NULL,
   pass_name TEXT,
-  input_tokens INTEGER NOT NULL DEFAULT 0,
-  output_tokens INTEGER NOT NULL DEFAULT 0,
-  input_rate_per_m REAL NOT NULL DEFAULT 0,
-  output_rate_per_m REAL NOT NULL DEFAULT 0,
-  cost_usd REAL NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+  output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+  input_rate_per_m REAL NOT NULL DEFAULT 0 CHECK (input_rate_per_m >= 0),
+  output_rate_per_m REAL NOT NULL DEFAULT 0 CHECK (output_rate_per_m >= 0),
+  cost_usd REAL NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),
   token_source TEXT NOT NULL DEFAULT 'unknown',
   attempt_id TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id, tenant_id) REFERENCES review_runs(id, tenant_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_usage_run ON review_run_usage(run_id);
 CREATE INDEX IF NOT EXISTS idx_run_usage_tenant_time ON review_run_usage(tenant_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_run_usage_model_time ON review_run_usage(model, created_at);
+
+CREATE TABLE IF NOT EXISTS review_run_attempts (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  parent_attempt_id TEXT REFERENCES review_run_attempts(id),
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  pass_name TEXT,
+  transport TEXT NOT NULL CHECK (transport IN ('responses', 'chat', 'anthropic', 'codex-cli')),
+  retry_index INTEGER NOT NULL DEFAULT 0 CHECK (retry_index >= 0),
+  key_index INTEGER NOT NULL DEFAULT 0 CHECK (key_index >= 0),
+  outcome TEXT NOT NULL CHECK (outcome IN ('running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'rate_limited')),
+  error TEXT,
+  duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  FOREIGN KEY (run_id, tenant_id) REFERENCES review_runs(id, tenant_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_attempts_run ON review_run_attempts(run_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_run_attempts_provider_time ON review_run_attempts(provider, started_at);
 
 CREATE TABLE IF NOT EXISTS stripe_revenue_events (
   event_id TEXT PRIMARY KEY,
@@ -393,6 +427,7 @@ CREATE TABLE IF NOT EXISTS workspace_settings (
 
 export class AppDatabase {
   private db: Database.Database;
+  private readonly workerId = process.env.ORVEX_WORKER_ID?.trim() || `${process.pid}:${randomUUID()}`;
 
   constructor(dbPath: string) {
     const resolvedDbPath = path.resolve(dbPath);
@@ -425,6 +460,7 @@ export class AppDatabase {
     this.migratePrepaidCreditLedger();
     this.migrateRepoAutomationToggles();
     this.migrateReviewRunCostColumns();
+    this.migrateReviewRunLifecycleColumns();
     this.migratePrReviewColumns();
     this.migrateRevenueIndexes();
     this.migrateWebhookEventColumns();
@@ -503,6 +539,59 @@ export class AppDatabase {
     if (!names.has('new_findings_json')) {
       this.db.exec(`ALTER TABLE review_runs ADD COLUMN new_findings_json TEXT`);
     }
+  }
+
+  /** Lifecycle fields and database-enforced integrity for databases created
+   * before review_runs gained native CHECK/FK clauses. SQLite cannot add those
+   * clauses with ALTER TABLE, so equivalent aborting triggers protect upgraded
+   * installations while fresh databases use the declarations in SCHEMA_V2. */
+  private migrateReviewRunLifecycleColumns(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(review_runs)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('worker_id')) this.db.exec(`ALTER TABLE review_runs ADD COLUMN worker_id TEXT`);
+    if (!names.has('heartbeat_at')) this.db.exec(`ALTER TABLE review_runs ADD COLUMN heartbeat_at TEXT`);
+    if (!names.has('completed_at')) this.db.exec(`ALTER TABLE review_runs ADD COLUMN completed_at TEXT`);
+    this.db.exec(`
+UPDATE review_runs
+SET completed_at = created_at
+WHERE status <> 'running' AND completed_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_id_tenant ON review_runs(id, tenant_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_review_runs_tenant_insert
+BEFORE INSERT ON review_runs
+WHEN NOT EXISTS (SELECT 1 FROM tenants WHERE id = NEW.tenant_id)
+BEGIN SELECT RAISE(ABORT, 'review_runs tenant foreign key violation'); END;
+CREATE TRIGGER IF NOT EXISTS trg_review_runs_tenant_update
+BEFORE UPDATE OF tenant_id ON review_runs
+WHEN NOT EXISTS (SELECT 1 FROM tenants WHERE id = NEW.tenant_id)
+BEGIN SELECT RAISE(ABORT, 'review_runs tenant foreign key violation'); END;
+CREATE TRIGGER IF NOT EXISTS trg_review_runs_check_insert
+BEFORE INSERT ON review_runs
+WHEN NEW.status NOT IN ('running','completed','skipped','failed')
+  OR NEW.duration_ms < 0 OR NEW.findings_new < 0 OR NEW.findings_fixed < 0
+  OR NEW.findings_open < 0 OR NEW.input_tokens < 0 OR NEW.output_tokens < 0
+  OR NEW.cost_usd < 0 OR NEW.deep NOT IN (0,1) OR NEW.free_tier NOT IN (0,1)
+BEGIN SELECT RAISE(ABORT, 'review_runs check constraint violation'); END;
+CREATE TRIGGER IF NOT EXISTS trg_review_runs_check_update
+BEFORE UPDATE ON review_runs
+WHEN NEW.status NOT IN ('running','completed','skipped','failed')
+  OR NEW.duration_ms < 0 OR NEW.findings_new < 0 OR NEW.findings_fixed < 0
+  OR NEW.findings_open < 0 OR NEW.input_tokens < 0 OR NEW.output_tokens < 0
+  OR NEW.cost_usd < 0 OR NEW.deep NOT IN (0,1) OR NEW.free_tier NOT IN (0,1)
+BEGIN SELECT RAISE(ABORT, 'review_runs check constraint violation'); END;
+
+CREATE TRIGGER IF NOT EXISTS trg_review_usage_parent_insert
+BEFORE INSERT ON review_run_usage
+WHEN NOT EXISTS (
+  SELECT 1 FROM review_runs WHERE id = NEW.run_id AND tenant_id = NEW.tenant_id
+)
+BEGIN SELECT RAISE(ABORT, 'review_run_usage foreign key violation'); END;
+CREATE TRIGGER IF NOT EXISTS trg_review_usage_check_insert
+BEFORE INSERT ON review_run_usage
+WHEN NEW.input_tokens < 0 OR NEW.output_tokens < 0 OR NEW.input_rate_per_m < 0
+  OR NEW.output_rate_per_m < 0 OR NEW.cost_usd < 0
+BEGIN SELECT RAISE(ABORT, 'review_run_usage check constraint violation'); END;
+`);
   }
 
   /** Add the subscription plan column to an existing tenants table.
@@ -1272,22 +1361,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
     this.db.prepare('SELECT 1').get();
   }
 
-  /** Clear rows left 'running' by a crash/restart so the dashboard doesn't show
-   * a stuck spinner and resumeReviewRun can reopen them. Sole-worker boot
-   * (single PM2 process) should pass staleAfterMs: 0 to mark ALL local running
-   * rows. A positive grace is only for multi-worker rolling restarts where
-   * another process may still be executing a fresh run. */
-  failStaleRunningRuns(opts: { staleAfterMs?: number } = {}): number {
-    const staleAfterMs = opts.staleAfterMs ?? 0;
-    const cutoff = new Date(Date.now() - Math.max(0, staleAfterMs)).toISOString();
-    const where = staleAfterMs > 0 ? `status = 'running' AND created_at < ?` : `status = 'running'`;
+  /** Clear only rows whose durable heartbeat is stale. A second worker process
+   * must never interrupt a peer's live review during a rolling start. */
+  failStaleRunningRuns(opts: { staleAfterMs?: number; nowMs?: number } = {}): number {
+    const staleAfterMs = Math.max(60_000, opts.staleAfterMs ?? 15 * 60_000);
+    const nowMs = opts.nowMs ?? Date.now();
+    const cutoff = new Date(nowMs - staleAfterMs).toISOString();
     const res = this.db
       .prepare(
-        `UPDATE review_runs SET status = 'skipped', skip_reason = 'interrupted by restart — retried'
-         WHERE ${where}`,
+        `UPDATE review_runs
+         SET status = 'skipped', skip_reason = 'interrupted by restart — retried',
+             completed_at = ?, worker_id = NULL
+         WHERE status = 'running' AND COALESCE(heartbeat_at, created_at) < ?`,
       )
-      .run(...(staleAfterMs > 0 ? [cutoff] : []));
+      .run(new Date(nowMs).toISOString(), cutoff);
     return res.changes;
+  }
+
+  heartbeatReviewRun(id: string): boolean {
+    if (!id) return false;
+    return this.db
+      .prepare(
+        `UPDATE review_runs SET heartbeat_at = ?
+         WHERE id = ? AND status = 'running' AND worker_id = ?`,
+      )
+      .run(new Date().toISOString(), id, this.workerId).changes > 0;
   }
 
   /**
@@ -1302,10 +1400,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         const res = this.db
           .prepare(
             `UPDATE review_runs
-             SET status = 'skipped', skip_reason = 'interrupted by restart — retried'
+             SET status = 'skipped', skip_reason = 'interrupted by restart — retried',
+                 completed_at = ?, worker_id = NULL
              WHERE id = ? AND status = 'running'`,
           )
-          .run(id);
+          .run(new Date().toISOString(), id);
         if (res.changes > 0) {
           // Wallet debit stays until resume completes or is abandoned; resume
           // reuses this run id so a second debit is not charged.
@@ -2731,8 +2830,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
       .prepare(
         `INSERT INTO review_runs
          (id, tenant_id, installation_id, owner, repo, pr, head_sha, action, status,
-          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, deep, free_tier, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, deep, free_tier,
+          worker_id, heartbeat_at, completed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -2752,6 +2852,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         input.findingsOpen ?? 0,
         input.deep ? 1 : 0,
         input.freeTier ? 1 : 0,
+        this.workerId,
+        now,
+        input.status === 'running' ? null : now,
         now,
       );
     return {
@@ -2770,8 +2873,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
       findingsNew: input.findingsNew ?? 0,
       findingsFixed: input.findingsFixed ?? 0,
       findingsOpen: input.findingsOpen ?? 0,
+      inputTokens: 0,
+      outputTokens: 0,
       costUsd: 0,
       deep: Boolean(input.deep),
+      freeTier: Boolean(input.freeTier),
+      workerId: this.workerId,
+      heartbeatAt: now,
+      completedAt: input.status === 'running' ? undefined : now,
       createdAt: now,
     };
   }
@@ -2800,8 +2909,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
       .prepare(
         `INSERT INTO review_runs
          (id, tenant_id, installation_id, owner, repo, pr, head_sha, action, status,
-          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, deep, free_tier, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, 0, 0, 0, 0, ?, ?, ?)`,
+          skip_reason, error, duration_ms, findings_new, findings_fixed, findings_open, deep, free_tier,
+          worker_id, heartbeat_at, completed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, NULL, 0, 0, 0, 0, ?, ?, ?, ?, NULL, ?)`,
       )
       .run(
         id,
@@ -2814,6 +2924,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         input.action,
         input.deep ? 1 : 0,
         input.freeTier ? 1 : 0,
+        this.workerId,
+        now,
         now,
       );
     return id;
@@ -2956,10 +3068,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
     const updated = this.db
       .prepare(
         `UPDATE review_runs
-         SET status = 'running', skip_reason = NULL, error = NULL, duration_ms = 0
+         SET status = 'running', skip_reason = NULL, error = NULL, duration_ms = 0,
+             worker_id = ?, heartbeat_at = ?, completed_at = NULL
          WHERE id = ? AND status = 'skipped' AND skip_reason LIKE 'interrupted by restart%'`,
       )
-      .run(id);
+      .run(this.workerId, new Date().toISOString(), id);
     return updated.changes > 0 ? 'resumed' : 'unavailable';
   }
 
@@ -2994,14 +3107,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
          FROM review_run_usage WHERE run_id = ?`,
       )
       .get(id) as { input_tokens: number; output_tokens: number; cost_usd: number };
-    this.db
+    const completedAt = new Date().toISOString();
+    const completed = this.db
       .prepare(
         `UPDATE review_runs
          SET status = ?, skip_reason = ?, error = ?, duration_ms = ?,
              findings_new = ?, findings_fixed = ?, findings_open = ?,
              input_tokens = ?, output_tokens = ?, cost_usd = ?,
              new_findings_json = ?,
-             deep = COALESCE(?, deep)
+             deep = COALESCE(?, deep), completed_at = ?, worker_id = NULL
          WHERE id = ? AND status = 'running'`,
       )
       .run(
@@ -3017,8 +3131,101 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
         patch.costUsd ?? usageTotals.cost_usd,
         patch.newFindings ? JSON.stringify(patch.newFindings) : null,
         patch.deep === undefined ? null : patch.deep ? 1 : 0,
+        completedAt,
         id,
       );
+    if (completed.changes > 0) {
+      const danglingOutcome: ReviewRunAttemptOutcome = patch.status === 'skipped' ? 'cancelled' : 'failed';
+      this.db
+        .prepare(
+          `UPDATE review_run_attempts
+           SET outcome = ?, error = COALESCE(error, ?), completed_at = ?,
+               duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER))
+           WHERE run_id = ? AND outcome = 'running'`,
+        )
+        .run(danglingOutcome, patch.error ?? patch.skipReason ?? 'review ended before attempt completion', completedAt, completedAt, id);
+    }
+  }
+
+  startReviewRunAttempt(input: Omit<ReviewRunAttempt, 'outcome' | 'durationMs' | 'completedAt'>): void {
+    const run = this.db
+      .prepare(`SELECT tenant_id FROM review_runs WHERE id = ?`)
+      .get(input.runId) as { tenant_id: string } | undefined;
+    if (!run || run.tenant_id !== input.tenantId) {
+      throw new Error(`review attempt parent mismatch for run ${input.runId}`);
+    }
+    if (input.parentAttemptId) {
+      const parent = this.db
+        .prepare(`SELECT run_id FROM review_run_attempts WHERE id = ?`)
+        .get(input.parentAttemptId) as { run_id: string } | undefined;
+      if (!parent || parent.run_id !== input.runId) {
+        throw new Error(`review attempt lineage mismatch for ${input.id}`);
+      }
+    }
+    this.db
+      .prepare(
+        `INSERT INTO review_run_attempts
+         (id, run_id, tenant_id, parent_attempt_id, provider, model, tier, pass_name,
+          transport, retry_index, key_index, outcome, error, duration_ms, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, 0, ?, NULL)`,
+      )
+      .run(
+        input.id,
+        input.runId,
+        input.tenantId,
+        input.parentAttemptId ?? null,
+        input.provider,
+        input.model,
+        input.tier,
+        input.passName ?? null,
+        input.transport,
+        input.retryIndex,
+        input.keyIndex,
+        input.startedAt,
+      );
+  }
+
+  completeReviewRunAttempt(input: {
+    id: string;
+    outcome: Exclude<ReviewRunAttemptOutcome, 'running'>;
+    durationMs: number;
+    completedAt: string;
+    error?: string;
+  }): boolean {
+    if (!Number.isFinite(input.durationMs) || input.durationMs < 0) {
+      throw new Error('invalid review attempt duration');
+    }
+    return this.db
+      .prepare(
+        `UPDATE review_run_attempts
+         SET outcome = ?, error = ?, duration_ms = ?, completed_at = ?
+         WHERE id = ? AND outcome = 'running'`,
+      )
+      .run(input.outcome, input.error ?? null, Math.floor(input.durationMs), input.completedAt, input.id).changes > 0;
+  }
+
+  listReviewRunAttempts(runId: string): ReviewRunAttempt[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM review_run_attempts WHERE run_id = ? ORDER BY started_at, id`)
+      .all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id),
+      runId: String(row.run_id),
+      tenantId: String(row.tenant_id),
+      parentAttemptId: row.parent_attempt_id ? String(row.parent_attempt_id) : undefined,
+      provider: String(row.provider),
+      model: String(row.model),
+      tier: String(row.tier),
+      passName: row.pass_name ? String(row.pass_name) : undefined,
+      transport: row.transport as ReviewRunAttempt['transport'],
+      retryIndex: Number(row.retry_index),
+      keyIndex: Number(row.key_index),
+      outcome: row.outcome as ReviewRunAttemptOutcome,
+      error: row.error ? String(row.error) : undefined,
+      durationMs: Number(row.duration_ms),
+      startedAt: String(row.started_at),
+      completedAt: row.completed_at ? String(row.completed_at) : undefined,
+    }));
   }
 
   /** Persist one provider usage event as soon as the provider reports it. */
@@ -3538,6 +3745,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
       output_tokens: number;
       cost_usd: number;
       deep: number;
+      free_tier: number;
+      new_findings_json: string | null;
+      worker_id: string | null;
+      heartbeat_at: string | null;
+      completed_at: string | null;
       created_at: string;
       usage_cost_usd: number | null;
     }>;
@@ -3559,8 +3771,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_ledger_run_refund
       findingsNew: row.findings_new,
       findingsFixed: row.findings_fixed,
       findingsOpen: row.findings_open,
+      inputTokens: row.input_tokens,
+      outputTokens: row.output_tokens,
       costUsd: row.cost_usd,
       deep: row.deep === 1,
+      freeTier: row.free_tier === 1,
+      newFindings: row.new_findings_json ? parseNewFindings(row.new_findings_json) : undefined,
+      workerId: row.worker_id ?? undefined,
+      heartbeatAt: row.heartbeat_at ?? undefined,
+      completedAt: row.completed_at ?? undefined,
       createdAt: row.created_at,
       usage: usageByRun.get(row.id) ?? [],
       actualCostUsd: row.usage_cost_usd ?? row.cost_usd,
@@ -4357,8 +4576,15 @@ interface ReviewRunRow {
   findings_new: number;
   findings_fixed: number;
   findings_open: number;
+  input_tokens: number;
+  output_tokens: number;
   cost_usd: number;
   deep: number;
+  free_tier: number;
+  new_findings_json: string | null;
+  worker_id: string | null;
+  heartbeat_at: string | null;
+  completed_at: string | null;
   created_at: string;
 }
 
@@ -4379,10 +4605,36 @@ function mapReviewRun(row: ReviewRunRow): ReviewRun {
     findingsNew: row.findings_new,
     findingsFixed: row.findings_fixed,
     findingsOpen: row.findings_open,
+    inputTokens: row.input_tokens ?? 0,
+    outputTokens: row.output_tokens ?? 0,
     costUsd: row.cost_usd ?? 0,
     deep: row.deep === 1,
+    freeTier: row.free_tier === 1,
+    newFindings: row.new_findings_json
+      ? parseNewFindings(row.new_findings_json)
+      : undefined,
+    workerId: row.worker_id ?? undefined,
+    heartbeatAt: row.heartbeat_at ?? undefined,
+    completedAt: row.completed_at ?? undefined,
     createdAt: row.created_at,
   };
+}
+
+function parseNewFindings(raw: string): Array<{ severity: string; file: string; line?: number }> | undefined {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed
+      .filter((item): item is { severity: string; file: string; line?: number } =>
+        Boolean(item)
+        && typeof item === 'object'
+        && typeof (item as { severity?: unknown }).severity === 'string'
+        && typeof (item as { file?: unknown }).file === 'string'
+        && ((item as { line?: unknown }).line === undefined || Number.isFinite((item as { line?: unknown }).line)),
+      );
+  } catch {
+    return undefined;
+  }
 }
 
 let sharedDb: AppDatabase | null = null;

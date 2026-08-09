@@ -6,9 +6,15 @@ import {
   fetchPullRequest,
   getInstallationIdForRepo,
 } from '@orvex-review/github';
-import { TenantService } from '@orvex-review/tenants';
-import { isTransientLlmError, killAllCodexChildren, setCodexChildListener } from '@orvex-review/review';
-import { processReviewJob, loadWorkerConfig } from './worker.js';
+import { TenantService, planFeatures } from '@orvex-review/tenants';
+import {
+  CountingSemaphore,
+  isTransientLlmError,
+  killAllCodexChildren,
+  setProviderCooldown,
+  setCodexChildListener,
+} from '@orvex-review/review';
+import { canRunCodexCli, processReviewJob, loadWorkerConfig } from './pipeline.js';
 import {
   noteActiveChildExit,
   noteActiveChildSpawn,
@@ -72,7 +78,42 @@ const BACKOFF_MS = boundedEnvInt('ORVEX_BACKOFF_MS', 300_000, 1_000, 86_400_000)
  * blow the provider's rate limit. This caps a single worker process; scale total
  * throughput horizontally by running more processes against the Redis queue.
  */
-const MAX_CONCURRENT = boundedEnvInt('ORVEX_MAX_CONCURRENT_REVIEWS', 4, 1, 100);
+export function resolveWorkerConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  const requestedRaw = Number(env.ORVEX_MAX_CONCURRENT_REVIEWS ?? 4);
+  return Number.isFinite(requestedRaw)
+    ? Math.min(100, Math.max(1, Math.floor(requestedRaw)))
+    : 4;
+}
+
+/** Keep queue dedup semantics aligned with the review outcome. A PR lifecycle
+ * cancellation is charged/persisted as a failed run when usage exists, but it
+ * must not create a successful DONE marker for that SHA. */
+export async function finalizeQueueJob(
+  queue: Pick<ReviewQueue, 'markCompleted' | 'markFailed'>,
+  job: ReviewJobPayload,
+  opts: { draftSkipped: boolean; prClosedMidRun: boolean },
+): Promise<void> {
+  if (opts.prClosedMidRun) {
+    await queue.markFailed(job, 'pr_closed_mid_run');
+    return;
+  }
+  await queue.markCompleted(job, { draftSkipped: opts.draftSkipped });
+}
+
+// One agentic Luna review per process/API-key home. Lower-tier reviews bypass
+// this gate and retain the configured worker concurrency. Production currently
+// runs one PM2 process; the Codex home semaphore independently enforces the same
+// one-process limit at the CLI boundary.
+const agenticReviewGate = new CountingSemaphore(1);
+
+export async function withAgenticReviewSlot<T>(
+  agentic: boolean,
+  run: () => Promise<T>,
+): Promise<T> {
+  return agentic ? agenticReviewGate.run(run) : run();
+}
+
+const MAX_CONCURRENT = resolveWorkerConcurrency();
 
 /** Cap used by the live resource monitor so the UI matches the worker. */
 export function maxConcurrentReviews(): number {
@@ -169,6 +210,7 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         persistJob: queue.persistJob ? (j: ReviewJobPayload) => queue.persistJob!(j) : undefined,
       };
       let draftSkipped = false;
+      let prClosedMidRun = false;
       if (kind === 'fix') {
         await processFixJob(job, config);
       } else if (kind === 'explain') {
@@ -180,11 +222,11 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
       } else if (kind === 'scan') {
         await processScanJob(job, config);
       } else {
-        const result = await processReviewJob(job, config);
-        if (leaseLost || !(await leaseValid())) {
-          throw new Error(`review lease lost for ${pk}; discarding this worker result`);
-        }
+        const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
+        const agentic = canRunCodexCli(plan);
+        const result = await withAgenticReviewSlot(agentic, () => processReviewJob(job, config));
         draftSkipped = result.skipReason === 'draft PR';
+        prClosedMidRun = result.skipReason === 'pr_closed_mid_run';
         // auto-apply mode: commit Orvex's ready fixes right after each review
         if (!result.skipReason && result.newCount > 0) {
           const settings = config.store.getPrSettings(job);
@@ -211,7 +253,10 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
           `[worker] post-job lease check failed for ${pk} — marking completed anyway`,
         );
       }
-      await queue.markCompleted(job, { draftSkipped });
+      // A close-aborted review is not DONE for this SHA. Clearing its SEEN
+      // claim lets a later `reopened` event run; any already-coalesced reopen
+      // drains after the lock is released in finally below.
+      await finalizeQueueJob(queue, job, { draftSkipped, prClosedMidRun });
       backoff = nextBackoffState(backoff, 'success', Date.now(), {
         threshold: BACKOFF_THRESHOLD,
         backoffMs: BACKOFF_MS,
@@ -226,19 +271,31 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
       // (real bugs) are NOT retried; the circuit breaker still pauses the pump.
       const attempts = (job.attempts ?? 0) + 1;
       // Clamped: a garbage env (NaN) must not silently disable retries, and an
-      // absurd value must not retry a poison job forever. 0..10, default 2.
+      // absurd value must not retry a poison job forever. At most one complete
+      // automatic-review replay; provider calls already have one bounded retry.
       const MAX_JOB_RETRIES = (() => {
-        const n = Number(process.env.ORVEX_MAX_JOB_RETRIES ?? 2);
-        return Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 0), 10) : 2;
+        const n = Number(process.env.ORVEX_MAX_JOB_RETRIES ?? 1);
+        return Number.isFinite(n) ? Math.min(Math.max(Math.floor(n), 0), 1) : 1;
       })();
       // A user-triggered @orvex review is never silently rerun in full after a
       // provider timeout: that multiplies spend and can keep a PR busy for tens
       // of minutes. Automatic webhook jobs retain bounded transient retries.
       if (job.action !== 'command' && isTransientLlmError(message) && attempts <= MAX_JOB_RETRIES) {
         console.warn(`[worker] transient failure on ${pk} — re-queuing (attempt ${attempts}/${MAX_JOB_RETRIES})`);
-        await queue.enqueue({ ...job, attempts }).catch((e) =>
-          console.error(`[worker] could not re-queue ${pk}:`, (e as Error).message),
-        );
+        try {
+          const requeued = await queue.enqueue({ ...job, attempts });
+          if (!requeued.accepted) {
+            throw new Error(`queue refused retry as ${requeued.reason ?? 'unknown'}`);
+          }
+        } catch (requeueError) {
+          const requeueMessage = (requeueError as Error).message;
+          console.error(`[worker] could not re-queue ${pk}:`, requeueMessage);
+          void sendOperationalAlert({
+            event: 'review-requeue-failed',
+            severity: 'critical',
+            message: `Failed to requeue ${pk} after transient provider failure: ${requeueMessage}`,
+          });
+        }
       }
       const wasPaused = isPaused(backoff, Date.now());
       backoff = nextBackoffState(
@@ -248,6 +305,17 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
         { threshold: BACKOFF_THRESHOLD, backoffMs: BACKOFF_MS },
       );
       if (!wasPaused && isPaused(backoff, Date.now())) {
+        try {
+          await setProviderCooldown('review-stack', BACKOFF_MS);
+        } catch (cooldownError) {
+          const cooldownMessage = (cooldownError as Error).message;
+          console.error('[worker] could not publish distributed provider cooldown:', cooldownMessage);
+          void sendOperationalAlert({
+            event: 'provider-cooldown-publish-failed',
+            severity: 'critical',
+            message: `Local provider circuit opened but distributed cooldown failed: ${cooldownMessage}`,
+          });
+        }
         console.warn(
           `[worker] ${backoff.consecutiveFailures} consecutive provider failures — pausing new reviews for ${Math.round(BACKOFF_MS / 1000)}s (provider looks rate-limited/out of quota)`,
         );
@@ -280,6 +348,17 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     while (active < MAX_CONCURRENT) {
       if (!running || isDeployDraining()) return;
       if (isPaused(backoff, Date.now())) return; // circuit breaker tripped — don't hammer a down/exhausted provider
+      if ((await queue.getProviderCooldownMs?.('review-stack') ?? 0) > 0) return;
+      if (backoff.pausedUntil > 0) {
+        const recoveredFailures = backoff.consecutiveFailures;
+        backoff = INITIAL_BACKOFF_STATE;
+        console.log(`[worker] provider circuit recovered after ${recoveredFailures} consecutive failure(s)`);
+        void sendOperationalAlert({
+          event: 'worker-provider-circuit-recovered',
+          severity: 'warning',
+          message: `Provider circuit cooldown elapsed after ${recoveredFailures} consecutive failures; queue processing resumed.`,
+        });
+      }
       // Reserve the slot BEFORE the async dequeue so two overlapping pump ticks
       // can't both pass the guard and exceed MAX_CONCURRENT; release it if the
       // dequeue turns up empty.
@@ -310,7 +389,15 @@ export function startWorkerLoop(queue: ReviewQueue): () => Promise<void> {
     pump().catch((err) => console.error('[worker] pump error', err));
   }, POLL_MS);
   const recoveryInterval = setInterval(() => {
-    queue.recoverOrphans().catch((err) => console.error('[worker] orphan recovery error', err));
+    queue.recoverOrphans().catch((err) => {
+      const message = (err as Error).message;
+      console.error('[worker] orphan recovery error', err);
+      void sendOperationalAlert({
+        event: 'periodic-queue-recovery-failed',
+        severity: 'critical',
+        message: `Periodic queue orphan recovery failed: ${message}`,
+      });
+    });
   }, RECOVERY_MS);
   recoveryInterval.unref?.();
 

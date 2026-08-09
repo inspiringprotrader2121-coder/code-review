@@ -8,11 +8,12 @@ import {
   evaluationVerifier,
 } from './run.js';
 
-test('evaluation pass targets mirror production API mode and DeepSeek effort settings', () => {
+test('evaluation pass targets mirror the fixed model lineup at max effort', () => {
   const targets = evaluationPassTargets({
     ORVEX_STANDARD_API_KEY: 'standard-test-key',
     ORVEX_STANDARD_MODEL: 'standard-test-model',
     ORVEX_STANDARD_API: 'responses',
+    ORVEX_OPENAI_API_KEY: 'openai-test-key',
     ORVEX_DEEPSEEK_API_KEY: 'deepseek-test-key',
     ORVEX_DEEPSEEK_EFFORT: 'high',
     ORVEX_DEEPSEEK_FLASH_EFFORT: 'low',
@@ -24,24 +25,25 @@ test('evaluation pass targets mirror production API mode and DeepSeek effort set
   assert.ok(flash);
   assert.ok(callers);
   assert.ok(standard);
-  assert.equal(flash.target.reasoningEffort, 'low');
+  assert.equal(flash.target.reasoningEffort, 'max');
   assert.equal(flash.tier, 'deepseek-flash');
   assert.equal(callers.tier, 'deepseek-flash');
   assert.equal(callers.target.model, 'deepseek-v4-flash');
   assert.equal(standard.target.api, 'responses');
 });
 
-test('evaluation pass 3 restores DeepSeek Pro when ORVEX_PASS3_ON_DEEPSEEK_PRO=1', () => {
+test('evaluation pass 3 ignores stale Pro overrides and stays on Flash', () => {
   const targets = evaluationPassTargets({
     ORVEX_STANDARD_API_KEY: 'standard-test-key',
     ORVEX_STANDARD_MODEL: 'standard-test-model',
+    ORVEX_OPENAI_API_KEY: 'openai-test-key',
     ORVEX_DEEPSEEK_API_KEY: 'deepseek-test-key',
     ORVEX_PASS3_ON_DEEPSEEK_PRO: '1',
   });
   const callers = targets.find((target) => target.tag === 'removed-behavior/callers');
   assert.ok(callers);
-  assert.equal(callers.tier, 'deepseek');
-  assert.equal(callers.target.model, 'deepseek-v4-pro');
+  assert.equal(callers.tier, 'deepseek-flash');
+  assert.equal(callers.target.model, 'deepseek-v4-flash');
 });
 
 test('evaluationVerifier defaults to DeepSeek Flash and passes the tier for peer-hedge partitioning', () => {
@@ -53,24 +55,24 @@ test('evaluationVerifier defaults to DeepSeek Flash and passes the tier for peer
   assert.equal(flash.tier, 'deepseek-flash');
   assert.equal(flash.target.model, 'deepseek-v4-flash');
 
-  const pro = evaluationVerifier({
+  const stillFlash = evaluationVerifier({
     ORVEX_STANDARD_API_KEY: 'standard-test-key',
     ORVEX_STANDARD_MODEL: 'standard-test-model',
     ORVEX_DEEPSEEK_API_KEY: 'deepseek-test-key',
     ORVEX_VERIFY_ON_DEEPSEEK_PRO: '1',
   });
-  assert.equal(pro.tier, 'deepseek');
-  assert.equal(pro.target.model, 'deepseek-v4-pro');
+  assert.equal(stillFlash.tier, 'deepseek-flash');
+  assert.equal(stillFlash.target.model, 'deepseek-v4-flash');
 });
 
 test('evaluationInvestigateEnabled mirrors production kill-switch + target resolution', () => {
   assert.equal(
     evaluationInvestigateEnabled({ ORVEX_DEEPSEEK_API_KEY: 'k' }),
-    true,
+    false,
   );
   assert.equal(
-    evaluationInvestigateEnabled({ ORVEX_DEEPSEEK_API_KEY: 'k', ORVEX_INVESTIGATE: '0' }),
-    false,
+    evaluationInvestigateEnabled({ ORVEX_DEEPSEEK_API_KEY: 'k', ORVEX_INVESTIGATE: '1' }),
+    true,
   );
   assert.equal(evaluationInvestigateEnabled({}), false);
 
@@ -93,7 +95,7 @@ test('evaluationInvestigateEnabled mirrors production kill-switch + target resol
   assert.equal(pro.target.model, 'deepseek-v4-pro');
 });
 
-test('evaluationRiskHuntTarget requires Flash and honors kill-switch', () => {
+test('evaluationRiskHuntTarget requires Flash and explicit opt-in', () => {
   assert.equal(evaluationRiskHuntTarget({}), null);
   assert.equal(
     evaluationRiskHuntTarget({ ORVEX_DEEPSEEK_API_KEY: 'k', ORVEX_RISK_HUNT: '0' }),
@@ -102,6 +104,7 @@ test('evaluationRiskHuntTarget requires Flash and honors kill-switch', () => {
   const target = evaluationRiskHuntTarget({
     ORVEX_DEEPSEEK_API_KEY: 'k',
     ORVEX_DEEPSEEK_FLASH_MODEL: 'deepseek-v4-flash',
+    ORVEX_RISK_HUNT: '1',
   });
   assert.ok(target);
   assert.equal(target.tier, 'deepseek-flash');

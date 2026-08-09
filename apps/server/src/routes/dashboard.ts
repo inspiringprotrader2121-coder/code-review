@@ -418,7 +418,7 @@ async function buyCredits(amountCents){
 const esc=(x)=>String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const sevCls=(s)=>({P1:'p1',P2:'p2',P3:'p3'}[s]||'muted');
 const runCls=(s)=>s==='completed'?'done':s==='failed'?'fail':s==='running'?'run':'queued';
-const runReason=(r)=>r.status==='failed'?'No verdict — retry':r.skipReason==='provider_not_configured'?'Provider unavailable':r.skipReason==='pr_closed_mid_run'?'PR closed':r.skipReason?String(r.skipReason).replaceAll('_',' '):'';
+const runReason=(r)=>r.skipReason==='pr_closed_mid_run'?'PR closed during review':r.skipReason==='provider_not_configured'?'Provider unavailable':r.skipReason?String(r.skipReason).replaceAll('_',' '):r.status==='failed'?'No verdict — retry':'';
 const runChip=(s,reason)=>'<span class="chip '+runCls(s)+'"'+(reason?' title="'+esc(reason)+'"':'')+'><span class="cd"></span>'+esc(s[0].toUpperCase()+s.slice(1))+(reason?' <small>'+esc(reason)+'</small>':'')+'</span>';
 const rel=(iso)=>{if(!iso)return'—';const d=(Date.now()-new Date(iso).getTime())/1000;if(d<60)return'just now';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago';};
 const dur=(ms)=>{if(!ms)return'—';const sec=Math.round(ms/1000);return sec<60?sec+'s':Math.floor(sec/60)+'m '+String(sec%60).padStart(2,'0')+'s';};

@@ -1,4 +1,47 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { randomUUID } from 'node:crypto';
+
+export type LlmAttemptOutcome =
+  | 'succeeded'
+  | 'failed'
+  | 'timed_out'
+  | 'cancelled'
+  | 'rate_limited';
+
+export type LlmAttemptEvent =
+  | {
+      phase: 'started';
+      attemptId: string;
+      parentAttemptId?: string;
+      retryIndex: number;
+      keyIndex: number;
+      provider: string;
+      model: string;
+      transport: 'responses' | 'chat' | 'anthropic' | 'codex-cli';
+      startedAt: string;
+    }
+  | {
+      phase: 'finished';
+      attemptId: string;
+      outcome: LlmAttemptOutcome;
+      durationMs: number;
+      completedAt: string;
+      error?: string;
+    };
+
+/** Structural interface implemented by the Redis queue in production. */
+export interface LlmProviderCoordinator {
+  acquireProviderLease(provider: string, limit: number, signal?: AbortSignal): Promise<string>;
+  releaseProviderLease(provider: string, token: string): Promise<void>;
+  getProviderCooldownMs(provider: string): Promise<number>;
+  setProviderCooldown(provider: string, durationMs: number): Promise<void>;
+}
+
+let providerCoordinator: LlmProviderCoordinator | undefined;
+
+export function configureLlmProviderCoordinator(coordinator?: LlmProviderCoordinator): void {
+  providerCoordinator = coordinator;
+}
 
 export interface LlmClientOptions {
   apiKey: string;
@@ -20,8 +63,8 @@ export interface LlmClientOptions {
   reasoningEffort?: string;
   /** Sampling temperature. Only set for explicitly repeated review samples. */
   temperature?: number;
-  /** internal: suppress provider-level failover (multi-key rotation tries sibling keys first) */
-  disableFailover?: boolean;
+  /** Cancel this exact provider call (for example when its PR closes). */
+  signal?: AbortSignal;
   /**
    * Called once per completed call with token usage, for cost tracking. Anthropic
    * reports exact usage; the OpenAI-compatible/streaming path estimates from
@@ -31,10 +74,39 @@ export interface LlmClientOptions {
     inputTokens: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
-    /** Actual provider/model after any fallback, for cost attribution. */
+    /** Provider/model that received this call, for cost attribution. */
     provider?: string;
     model?: string;
+    attemptId?: string;
   }) => void;
+  /** Durable lifecycle hook for every actual provider request. */
+  onAttempt?: (event: LlmAttemptEvent) => void;
+}
+
+/** Typed cancellation is deliberately non-transient: a closed PR must never
+ * enter provider retry/failover loops or trip the provider circuit breaker. */
+export class ReviewCancelledError extends Error {
+  override name = 'ReviewCancelledError';
+
+  constructor(message = 'review cancelled') {
+    super(message);
+  }
+}
+
+export function isReviewCancelledError(error: unknown): boolean {
+  return error instanceof ReviewCancelledError || (error as { name?: string })?.name === 'ReviewCancelledError';
+}
+
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new ReviewCancelledError();
+}
+
+function linkAbortSignal(signal: AbortSignal | undefined, controller: AbortController): () => void {
+  if (!signal) return () => {};
+  const abort = () => controller.abort(signal.reason);
+  signal.addEventListener('abort', abort, { once: true });
+  if (signal.aborted) abort();
+  return () => signal.removeEventListener('abort', abort);
 }
 
 /** Rough chars→tokens estimate (~4 chars/token) for providers that don't return
@@ -55,13 +127,13 @@ const LLM_TIMEOUT_MS = (() => {
 /** Total time allowed for one provider attempt, including active streaming. */
 function maxTotalMs(): number {
   const configured = Number(process.env.ORVEX_LLM_MAX_TOTAL_MS ?? 300_000);
-  return Number.isFinite(configured) ? Math.min(Math.max(configured, 30_000), 900_000) : 300_000;
+  const minimum = process.env.ORVEX_TEST_SHORT_TIMEOUTS === '1' ? 10 : 30_000;
+  return Number.isFinite(configured) ? Math.min(Math.max(configured, minimum), 300_000) : 300_000;
 }
 
 /** Reasoning models think before answering — slower, materially more accurate. */
 function thinkingEnabled(opts: LlmClientOptions): boolean {
-  if (opts.thinking !== undefined) return opts.thinking;
-  return process.env.ORVEX_LLM_THINKING !== '0';
+  return opts.thinking ?? true;
 }
 
 /**
@@ -75,16 +147,13 @@ function thinkingEnabled(opts: LlmClientOptions): boolean {
  * deliberately narrower than `isTransientLlmError` (packages/review/src/llm.ts),
  * which also matches generic network blips (timeouts, ECONNRESET, "fetch
  * failed"). That distinction is intentional: a transient network hiccup on the
- * PRIMARY provider is usually worth retrying on the SAME provider, not grounds
- * to switch providers entirely — but an actual quota/rate-limit signal means
- * the primary is genuinely unavailable, which IS grounds to fail over.
+ * PRIMARY provider is retried on the SAME provider. This narrower classifier is
+ * used only to rotate comma-separated sibling keys for the same configured
+ * model/provider; contracted review stages never substitute another model.
  * Exported so it's independently unit-tested rather than a silent duplicate.
  */
 export function isRateLimitOrQuotaError(message: string): boolean {
-  // 529/overloaded belongs here too: an overloaded provider is exactly the case
-  // where rotating keys / failing over to another provider is right. Without it
-  // `llmChat` would sit and retry the SAME dead endpoint while a configured
-  // fallback went untried.
+  // 529/overloaded belongs here too so sibling keys can be rotated promptly.
   return /\b429\b|\b529\b|overloaded|\b402\b[^\n]*(?:credit|quota|payment)|rate.?limit|usage limit|quota|token plan|insufficient|more credits?/i.test(
     message,
   );
@@ -124,28 +193,145 @@ function providerName(baseUrl: string | undefined, api: LlmClientOptions['api'])
  * fan-out alone multiplied by the number of worker jobs and caused provider
  * throttling/tail latency to grow as 4 reviews × 3 calls competed at once.
  */
-let activeLlmCalls = 0;
-const waitingLlmCalls: Array<() => void> = [];
+interface LlmSlotWaiter {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+}
+interface ProviderGate {
+  active: number;
+  waiters: LlmSlotWaiter[];
+}
+const providerGates = new Map<string, ProviderGate>();
+const localProviderCooldownUntil = new Map<string, number>();
 
-function globalLlmConcurrency(): number {
-  const raw = process.env.ORVEX_LLM_GLOBAL_CONCURRENCY;
-  const parsed = raw === undefined || raw.trim() === '' ? 6 : Number(raw);
-  return Number.isFinite(parsed) && parsed >= 1 ? Math.min(64, Math.floor(parsed)) : 6;
+function providerConcurrency(provider: string): number {
+  const normalized = provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  const defaults: Record<string, number> = { LUNA: 1, DEEPSEEK: 2, MINIMAX: 2 };
+  const fallback = defaults[normalized] ?? 4;
+  const raw = process.env[`ORVEX_PROVIDER_CONCURRENCY_${normalized}`];
+  const parsed = raw === undefined || raw.trim() === '' ? fallback : Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1 ? Math.min(32, Math.floor(parsed)) : fallback;
 }
 
-async function withGlobalLlmSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (activeLlmCalls >= globalLlmConcurrency()) {
-    await new Promise<void>((resolve) => waitingLlmCalls.push(resolve));
-  } else {
-    activeLlmCalls++;
+function providerBucket(opts: Pick<LlmClientOptions, 'model' | 'baseUrl' | 'api'>): string {
+  const identity = `${opts.model} ${opts.baseUrl ?? ''}`.toLowerCase();
+  if (identity.includes('luna') || identity.includes('api.openai.com')) return 'luna';
+  if (identity.includes('deepseek')) return 'deepseek';
+  if (identity.includes('minimax')) return 'minimax';
+  return providerName(opts.baseUrl, opts.api).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+}
+
+function gateFor(provider: string): ProviderGate {
+  let gate = providerGates.get(provider);
+  if (!gate) {
+    gate = { active: 0, waiters: [] };
+    providerGates.set(provider, gate);
   }
+  return gate;
+}
+
+function detachLlmWaiter(waiter: LlmSlotWaiter): void {
+  if (waiter.signal && waiter.onAbort) {
+    waiter.signal.removeEventListener('abort', waiter.onAbort);
+  }
+}
+
+async function acquireGlobalLlmSlot(provider: string, signal?: AbortSignal): Promise<void> {
+  throwIfCancelled(signal);
+  const gate = gateFor(provider);
+  if (gate.active >= providerConcurrency(provider)) {
+    await new Promise<void>((resolve, reject) => {
+      const waiter: LlmSlotWaiter = { resolve, reject, signal };
+      if (signal) {
+        waiter.onAbort = () => {
+          const index = gate.waiters.indexOf(waiter);
+          if (index >= 0) gate.waiters.splice(index, 1);
+          detachLlmWaiter(waiter);
+          reject(new ReviewCancelledError());
+        };
+        signal.addEventListener('abort', waiter.onAbort, { once: true });
+      }
+      gate.waiters.push(waiter);
+      if (signal?.aborted) waiter.onAbort?.();
+    });
+  } else {
+    gate.active++;
+  }
+}
+
+function releaseGlobalLlmSlot(provider: string): void {
+  const gate = gateFor(provider);
+  for (;;) {
+    const next = gate.waiters.shift();
+    if (!next) {
+      gate.active = Math.max(0, gate.active - 1);
+      return;
+    }
+    detachLlmWaiter(next);
+    if (next.signal?.aborted) {
+      next.reject(new ReviewCancelledError());
+      continue;
+    }
+    // Transfer this slot to the waiter; active count stays unchanged.
+    next.resolve();
+    return;
+  }
+}
+
+export async function withProviderCallSlot<T>(
+  provider: string,
+  fn: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  await acquireGlobalLlmSlot(provider, signal);
+  let leaseToken: string | undefined;
   try {
+    throwIfCancelled(signal);
+    const now = Date.now();
+    const localCooldown = Math.max(0, (localProviderCooldownUntil.get(provider) ?? 0) - now);
+    const localStackCooldown = Math.max(0, (localProviderCooldownUntil.get('review-stack') ?? 0) - now);
+    const [distributedCooldown, distributedStackCooldown] = providerCoordinator
+      ? await Promise.all([
+          providerCoordinator.getProviderCooldownMs(provider),
+          providerCoordinator.getProviderCooldownMs('review-stack'),
+        ])
+      : [0, 0];
+    const cooldownMs = Math.max(
+      localCooldown,
+      localStackCooldown,
+      distributedCooldown,
+      distributedStackCooldown,
+    );
+    if (cooldownMs > 0) {
+      throw new Error(`429 provider ${provider} cooldown active; retry-after: ${Math.ceil(cooldownMs / 1000)}`);
+    }
+    if (providerCoordinator) {
+      leaseToken = await providerCoordinator.acquireProviderLease(
+        provider,
+        providerConcurrency(provider),
+        signal,
+      );
+    }
     return await fn();
   } finally {
-    const next = waitingLlmCalls.shift();
-    if (next) next();
-    else activeLlmCalls--;
+    if (leaseToken && providerCoordinator) {
+      await providerCoordinator.releaseProviderLease(provider, leaseToken).catch((err) => {
+        console.error(`[llm] failed to release distributed ${provider} lease:`, (err as Error).message);
+      });
+    }
+    releaseGlobalLlmSlot(provider);
   }
+}
+
+export async function setProviderCooldown(provider: string, durationMs: number): Promise<void> {
+  const bounded = Math.min(300_000, Math.max(250, Math.floor(durationMs)));
+  localProviderCooldownUntil.set(
+    provider,
+    Math.max(localProviderCooldownUntil.get(provider) ?? 0, Date.now() + bounded),
+  );
+  if (providerCoordinator) await providerCoordinator.setProviderCooldown(provider, bounded);
 }
 
 export function resolveMaxOutputTokens(explicit?: number): number {
@@ -170,9 +356,8 @@ export function resolveMaxOutputTokens(explicit?: number): number {
 /**
  * Multi-key load balancing: `apiKey` may hold MULTIPLE comma-separated keys
  * (e.g. ORVEX_STANDARD_API_KEY=key1,key2,key3). Calls round-robin across the
- * keys, and a key that hits a rate-limit/quota error fails over to the next
- * key BEFORE falling back to a different provider. One key = exactly the old
- * behavior.
+ * keys, and a key that hits a rate-limit/quota error rotates to the next key for
+ * the same configured provider/model. There is no substitute-provider path.
  */
 let keyCursor = 0;
 function splitKeys(apiKey: string): string[] {
@@ -233,10 +418,24 @@ export function isRetryableRateLimit(message: string): boolean {
   );
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    throwIfCancelled(signal);
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new ReviewCancelledError());
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
 
 /**
- * Public entry point. Wraps the multi-key + provider-failover logic below in a
+ * Public entry point. Wraps same-provider key rotation below in a
  * WAIT-AND-RETRY loop: a recoverable rate limit HOLDS the call and retries
  * (honoring the provider's advertised retry-after) instead of failing the pass
  * and discarding the whole review — the "queue it, don't cancel it" behavior.
@@ -252,26 +451,37 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
     const n = Number(raw);
     return Number.isFinite(n) ? n : fallback;
   };
-  const maxAttempts = Math.min(10, Math.max(1, Math.floor(finite(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4))));
+  // One paid retry at most. A provider request can consume tokens before a
+  // transport/rate-limit error is returned; ten replay rounds multiplied cost
+  // without improving the probability of recovery inside the same quota window.
+  const maxAttempts = Math.min(2, Math.max(1, Math.floor(finite(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 2))));
   const maxWaitMs = Math.min(300_000, Math.max(1_000, finite(process.env.ORVEX_RATELIMIT_MAX_WAIT_MS, 60_000)));
   const baseMs = Math.min(60_000, Math.max(250, finite(process.env.ORVEX_RATELIMIT_BASE_MS, 2_000)));
   // TOTAL sleep budget across this call. Each attempt replays the whole key
-  // rotation + provider-failover chain, and `runLlmReview` wraps the result in a
+  // rotation chain, and `runLlmReview` wraps the result in a
   // second retry — so an unbounded per-attempt wait compounded into tens of
   // minutes of a worker slot held asleep. That starves the queue AND hides
   // failures from the circuit breaker (which only counts *failed jobs*), so the
   // breaker never trips while every slot naps. Bound the total, not just each nap.
   const totalWaitBudgetMs = Math.min(
-    900_000,
-    Math.max(5_000, finite(process.env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 120_000)),
+    60_000,
+    Math.max(5_000, finite(process.env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 60_000)),
   );
+  const provider = providerBucket(opts);
+  const lineage = { lastAttemptId: undefined as string | undefined };
   let sleptMs = 0;
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    throwIfCancelled(opts.signal);
     try {
-      return await withGlobalLlmSlot(() => llmChatWithFailover(system, user, opts));
+      return await withProviderCallSlot(
+        provider,
+        () => llmChatWithKeyRotation(system, user, opts, attempt, lineage),
+        opts.signal,
+      );
     } catch (err) {
       lastErr = err as Error;
+      if (isReviewCancelledError(lastErr) || opts.signal?.aborted) throw new ReviewCancelledError();
       if (attempt === maxAttempts - 1 || !isRetryableRateLimit(lastErr.message)) throw lastErr;
       // Honor the provider's advertised retry-after; otherwise exponential
       // backoff. Always add jitter so concurrent passes don't retry in lockstep,
@@ -298,17 +508,88 @@ export async function llmChat(system: string, user: string, opts: LlmClientOptio
         throw lastErr;
       }
       sleptMs += waitMs;
+      await setProviderCooldown(provider, waitMs);
       console.warn(
         `[llm] rate-limited — holding ${Math.round(waitMs / 1000)}s then retrying ` +
           `(attempt ${attempt + 1}/${maxAttempts}): ${lastErr.message.slice(0, 140)}`,
       );
-      await sleep(waitMs);
+      await sleep(waitMs, opts.signal);
     }
   }
   throw lastErr!;
 }
 
-async function llmChatWithFailover(system: string, user: string, opts: LlmClientOptions): Promise<string> {
+function attemptOutcome(error: unknown): LlmAttemptOutcome {
+  if (isReviewCancelledError(error)) return 'cancelled';
+  const message = (error as Error)?.message ?? String(error);
+  if (/wall-clock cap|timed?\s*out|stalled/i.test(message)) return 'timed_out';
+  if (isRateLimitOrQuotaError(message)) return 'rate_limited';
+  return 'failed';
+}
+
+async function trackedLlmAttempt(
+  system: string,
+  user: string,
+  opts: LlmClientOptions,
+  retryIndex: number,
+  keyIndex: number,
+  lineage: { lastAttemptId?: string },
+): Promise<string> {
+  const attemptId = randomUUID();
+  const started = Date.now();
+  const provider = providerName(opts.baseUrl, opts.api);
+  const transport = opts.api === 'responses'
+    ? 'responses'
+    : opts.api === 'anthropic' || (!opts.baseUrl && opts.api !== 'chat')
+      ? 'anthropic'
+      : 'chat';
+  opts.onAttempt?.({
+    phase: 'started',
+    attemptId,
+    parentAttemptId: lineage.lastAttemptId,
+    retryIndex,
+    keyIndex,
+    provider,
+    model: opts.model,
+    transport,
+    startedAt: new Date(started).toISOString(),
+  });
+  lineage.lastAttemptId = attemptId;
+  try {
+    const result = await llmChatSingle(system, user, {
+      ...opts,
+      onUsage: opts.onUsage
+        ? (usage) => opts.onUsage?.({ ...usage, attemptId })
+        : undefined,
+    });
+    opts.onAttempt?.({
+      phase: 'finished',
+      attemptId,
+      outcome: 'succeeded',
+      durationMs: Date.now() - started,
+      completedAt: new Date().toISOString(),
+    });
+    return result;
+  } catch (error) {
+    opts.onAttempt?.({
+      phase: 'finished',
+      attemptId,
+      outcome: attemptOutcome(error),
+      durationMs: Date.now() - started,
+      completedAt: new Date().toISOString(),
+      error: ((error as Error)?.message ?? String(error)).slice(0, 2_000),
+    });
+    throw error;
+  }
+}
+
+async function llmChatWithKeyRotation(
+  system: string,
+  user: string,
+  opts: LlmClientOptions,
+  retryIndex: number,
+  lineage: { lastAttemptId?: string },
+): Promise<string> {
   const keys = splitKeys(opts.apiKey);
   if (keys.length > 1) {
     const start = keyCursor++;
@@ -316,13 +597,14 @@ async function llmChatWithFailover(system: string, user: string, opts: LlmClient
     for (let i = 0; i < keys.length; i++) {
       const idx = (start + i) % keys.length;
       try {
-        // Suppress the provider-level fallback until the LAST key — sibling keys
-        // on the same provider are always the preferred failover.
-        return await llmChatSingle(system, user, {
-          ...opts,
-          apiKey: keys[idx],
-          disableFailover: i < keys.length - 1 ? true : opts.disableFailover,
-        });
+        return await trackedLlmAttempt(
+          system,
+          user,
+          { ...opts, apiKey: keys[idx] },
+          retryIndex,
+          idx,
+          lineage,
+        );
       } catch (err) {
         lastErr = err as Error;
         if (!isRateLimitOrQuotaError(lastErr.message)) throw err;
@@ -331,7 +613,7 @@ async function llmChatWithFailover(system: string, user: string, opts: LlmClient
     }
     throw lastErr;
   }
-  return llmChatSingle(system, user, opts);
+  return trackedLlmAttempt(system, user, opts, retryIndex, 0, lineage);
 }
 
 async function llmChatSingle(system: string, user: string, opts: LlmClientOptions): Promise<string> {
@@ -339,83 +621,16 @@ async function llmChatSingle(system: string, user: string, opts: LlmClientOption
     return anthropicChat(system, user, opts);
   }
   if (opts.api === 'responses') {
-    try {
-      return await openAiResponsesStreamChat(system, user, opts);
-    } catch (err) {
-      // P2-1: codex /v1/responses must fail over on rate-limit/quota just like
-      // the chat/completions path, so a single provider outage never halts reviews.
-      if (!opts.disableFailover && isRateLimitOrQuotaError((err as Error).message)) {
-        const fbUrl = process.env.ORVEX_FALLBACK_BASE_URL;
-        const fbKey = process.env.ORVEX_FALLBACK_API_KEY;
-        // Only use the URL fallback when a DISTINCT fallback key is configured —
-        // never transmit the primary provider's key as a Bearer to a different host.
-        if (fbUrl && fbKey) {
-          console.warn('[llm] responses primary unavailable (rate-limit/quota) — failing over to fallback endpoint');
-          return await openAiCompatStreamChat(system, user, {
-            ...opts,
-            api: undefined,
-            baseUrl: fbUrl,
-            apiKey: fbKey,
-            model: process.env.ORVEX_FALLBACK_MODEL ?? opts.model,
-          });
-        }
-        const anthropicKey = process.env.ANTHROPIC_API_KEY;
-        if (anthropicKey) {
-          console.warn('[llm] responses primary unavailable (rate-limit/quota) — failing over to Anthropic');
-          return await anthropicChat(system, user, {
-            ...opts,
-            apiKey: anthropicKey,
-            baseUrl: undefined,
-            api: 'anthropic',
-            model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
-          });
-        }
-      }
-      throw err;
-    }
+    return openAiResponsesStreamChat(system, user, opts);
   }
   if (opts.baseUrl) {
-    try {
-      return await openAiCompatStreamChat(system, user, opts);
-    } catch (err) {
-      // Automatic provider failover: if the primary provider (e.g. MiniMax) is
-      // rate-limited or out of quota, retry on a configured fallback so a
-      // quota-out never halts reviews. Tries a generic OpenAI-compatible fallback
-      // endpoint first (any provider, or a local model), then Anthropic. No-op
-      // when neither is configured — single-provider behavior is unchanged.
-      if (!opts.disableFailover && isRateLimitOrQuotaError((err as Error).message)) {
-        const fbUrl = process.env.ORVEX_FALLBACK_BASE_URL;
-        const fbKey = process.env.ORVEX_FALLBACK_API_KEY;
-        // Only use the URL fallback when a DISTINCT fallback key is configured —
-        // never transmit the primary provider's key as a Bearer to a different host.
-        if (fbUrl && fbKey) {
-          console.warn('[llm] primary unavailable (rate-limit/quota) — failing over to fallback endpoint');
-          return await openAiCompatStreamChat(system, user, {
-            ...opts,
-            baseUrl: fbUrl,
-            apiKey: fbKey,
-            model: process.env.ORVEX_FALLBACK_MODEL ?? opts.model,
-          });
-        }
-        const anthropicKey = process.env.ANTHROPIC_API_KEY;
-        if (anthropicKey) {
-          console.warn('[llm] primary unavailable (rate-limit/quota) — failing over to Anthropic');
-          return await anthropicChat(system, user, {
-            ...opts,
-            apiKey: anthropicKey,
-            baseUrl: undefined,
-            api: 'anthropic',
-            model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-20250514',
-          });
-        }
-      }
-      throw err;
-    }
+    return openAiCompatStreamChat(system, user, opts);
   }
   return anthropicChat(system, user, opts);
 }
 
 async function anthropicChat(system: string, user: string, opts: LlmClientOptions): Promise<string> {
+  throwIfCancelled(opts.signal);
   const hardLimitMs = maxTotalMs();
   const client = new Anthropic({ apiKey: opts.apiKey, baseURL: opts.baseUrl, timeout: hardLimitMs });
   // Match the MiniMax branch: stream (so multi-minute reasoning calls keep the
@@ -450,6 +665,13 @@ async function anthropicChat(system: string, user: string, opts: LlmClientOption
   });
   const startedAt = Date.now();
   let hitHardLimit = false;
+  let cancelled = false;
+  const cancelStream = () => {
+    cancelled = true;
+    stream.abort();
+  };
+  opts.signal?.addEventListener('abort', cancelStream, { once: true });
+  if (opts.signal?.aborted) cancelStream();
   const hardTimer = setTimeout(() => {
     hitHardLimit = true;
     stream.abort();
@@ -458,10 +680,12 @@ async function anthropicChat(system: string, user: string, opts: LlmClientOption
   try {
     response = await stream.finalMessage();
   } catch (err) {
+    if (cancelled || opts.signal?.aborted) throw new ReviewCancelledError();
     if (hitHardLimit) throw new Error(`LLM anthropic call exceeded ${hardLimitMs}ms wall-clock cap`);
     throw err;
   } finally {
     clearTimeout(hardTimer);
+    opts.signal?.removeEventListener('abort', cancelStream);
   }
   if (response.usage) {
     opts.onUsage?.({
@@ -501,6 +725,7 @@ async function anthropicChat(system: string, user: string, opts: LlmClientOption
  * inactivity timeout is deliberately generous (a silent think is not a stall).
  */
 async function openAiResponsesStreamChat(system: string, user: string, opts: LlmClientOptions): Promise<string> {
+  throwIfCancelled(opts.signal);
   const base = (opts.baseUrl ?? 'https://api.openai.com/v1').replace(/\/$/, '');
   const configuredTimeout = Number(process.env.ORVEX_RESPONSES_TIMEOUT_MS ?? 900_000);
   const timeoutMs =
@@ -512,12 +737,28 @@ async function openAiResponsesStreamChat(system: string, user: string, opts: Llm
   // could hang a review indefinitely. This bounds total call time regardless.
   const hardLimitMs = maxTotalMs();
   const controller = new AbortController();
+  const unlinkAbort = linkAbortSignal(opts.signal, controller);
   let timer: ReturnType<typeof setTimeout>;
+  let hardTimer: ReturnType<typeof setTimeout>;
+  let timeoutReason: 'inactivity' | 'hard' | undefined;
   const armTimer = () => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer = setTimeout(() => {
+      timeoutReason = 'inactivity';
+      controller.abort();
+    }, timeoutMs);
+  };
+  const clearTimers = () => {
+    clearTimeout(timer!);
+    clearTimeout(hardTimer!);
   };
   armTimer();
+  // Independent of stream activity: even continuous keepalives cannot extend
+  // one billed provider attempt beyond five minutes.
+  hardTimer = setTimeout(() => {
+    timeoutReason = 'hard';
+    controller.abort();
+  }, hardLimitMs);
 
   const maxOut = resolveMaxOutputTokens(opts.maxTokens);
   const effort = opts.reasoningEffort ?? process.env.ORVEX_OPENAI_REASONING_EFFORT ?? 'high';
@@ -542,14 +783,20 @@ async function openAiResponsesStreamChat(system: string, user: string, opts: Llm
       }),
     });
   } catch (err) {
-    clearTimeout(timer!);
-    if ((err as Error).name === 'AbortError') throw new Error(`LLM responses request stalled (no data for ${timeoutMs}ms)`);
+    clearTimers();
+    unlinkAbort();
+    if (opts.signal?.aborted) throw new ReviewCancelledError();
+    if ((err as Error).name === 'AbortError' || controller.signal.aborted) {
+      if (timeoutReason === 'hard') throw new Error(`LLM responses call exceeded ${hardLimitMs}ms wall-clock cap`);
+      throw new Error(`LLM responses request stalled (no data for ${timeoutMs}ms)`);
+    }
     throw err;
   }
 
   if (!response.ok || !response.body) {
-    clearTimeout(timer!);
     const errorBody = response.ok ? 'no response body' : await response.text().catch(() => '');
+    clearTimers();
+    unlinkAbort();
     throw new Error(`LLM responses request failed (${response.status}): ${errorBody.slice(0, 500)}`);
   }
 
@@ -611,10 +858,15 @@ async function openAiResponsesStreamChat(system: string, user: string, opts: Llm
       }
     }
   } catch (err) {
-    if ((err as Error).name === 'AbortError') throw new Error(`LLM responses stream stalled (no data for ${timeoutMs}ms)`);
+    if (opts.signal?.aborted) throw new ReviewCancelledError();
+    if ((err as Error).name === 'AbortError' || controller.signal.aborted) {
+      if (timeoutReason === 'hard') throw new Error(`LLM responses call exceeded ${hardLimitMs}ms wall-clock cap`);
+      throw new Error(`LLM responses stream stalled (no data for ${timeoutMs}ms)`);
+    }
     throw err;
   } finally {
-    clearTimeout(timer!);
+    clearTimers();
+    unlinkAbort();
   }
 
   console.log(
@@ -661,14 +913,29 @@ async function openAiCompatStreamChat(
   user: string,
   opts: LlmClientOptions,
 ): Promise<string> {
+  throwIfCancelled(opts.signal);
   const controller = new AbortController();
+  const unlinkAbort = linkAbortSignal(opts.signal, controller);
   const hardLimitMs = maxTotalMs();
   let timer: ReturnType<typeof setTimeout>;
+  let hardTimer: ReturnType<typeof setTimeout>;
+  let timeoutReason: 'inactivity' | 'hard' | undefined;
   const armTimer = () => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      timeoutReason = 'inactivity';
+      controller.abort();
+    }, LLM_TIMEOUT_MS);
+  };
+  const clearTimers = () => {
+    clearTimeout(timer!);
+    clearTimeout(hardTimer!);
   };
   armTimer();
+  hardTimer = setTimeout(() => {
+    timeoutReason = 'hard';
+    controller.abort();
+  }, hardLimitMs);
 
   // Reasoning shares this budget with the answer.
   const maxOut = resolveMaxOutputTokens(opts.maxTokens);
@@ -692,27 +959,19 @@ async function openAiCompatStreamChat(
         // OpenAI-style reasoning effort on the CHAT path — used by DeepSeek v4
         // ('low'..'max', verified live against api.deepseek.com) and OpenAI
         // models via OpenRouter. Only sent when the target sets it, so
-        // MiniMax/GLM requests are unchanged. On the no-thinking RETRY (after
-        // an empty answer) drop to a REDUCED effort: gpt-5.6-luna-pro at xhigh
-        // reasoned 499s into the output budget and produced 0 answer chars —
-        // resending the identical effort made the "retry without reasoning" a
-        // no-op. 'medium' (the provider default) keeps real depth while
-        // breaking the exhaustion pattern; override via ORVEX_RETRY_EFFORT.
+        // MiniMax requests are unchanged. Never lower this on retries: Luna and
+        // DeepSeek review stages are contractually run at max effort.
         ...(opts.reasoningEffort
-          ? {
-              reasoning_effort: thinkingEnabled(opts)
-                ? opts.reasoningEffort
-                : (process.env.ORVEX_RETRY_EFFORT ?? 'medium'),
-            }
+          ? { reasoning_effort: opts.reasoningEffort }
           : {}),
         // MiniMax-M3 reasoning is controlled via chat_template_kwargs.thinking_mode
         // ('enabled' | 'adaptive' | 'disabled'). Default 'enabled' FORCES deep
         // reasoning on every call — 'adaptive' let the model decide and it
         // under-thought simpler-looking PRs (shorter runs, fewer findings).
-        // Override via ORVEX_THINKING_MODE. (The top-level `thinking.type` param
-        // is a different, narrower control that rejects 'enabled' — don't use it.)
+        // The top-level `thinking.type` param is a different, narrower control
+        // that rejects 'enabled' — don't use it.
         chat_template_kwargs: {
-          thinking_mode: thinkingEnabled(opts) ? (process.env.ORVEX_THINKING_MODE ?? 'enabled') : 'disabled',
+          thinking_mode: thinkingEnabled(opts) ? 'enabled' : 'disabled',
         },
         // Return reasoning in a dedicated reasoning_content stream (not inline
         // <think> tags), so the answer parses cleanly and we can measure it.
@@ -724,16 +983,20 @@ async function openAiCompatStreamChat(
       }),
     });
   } catch (err) {
-    clearTimeout(timer!);
-    if ((err as Error).name === 'AbortError') {
+    clearTimers();
+    unlinkAbort();
+    if (opts.signal?.aborted) throw new ReviewCancelledError();
+    if ((err as Error).name === 'AbortError' || controller.signal.aborted) {
+      if (timeoutReason === 'hard') throw new Error(`LLM chat call exceeded ${hardLimitMs}ms wall-clock cap`);
       throw new Error(`LLM request stalled (no data for ${LLM_TIMEOUT_MS}ms)`);
     }
     throw err;
   }
 
   if (!response.ok || !response.body) {
-    clearTimeout(timer!);
     const errorBody = response.ok ? 'no response body' : await response.text().catch(() => '');
+    clearTimers();
+    unlinkAbort();
     throw new Error(`LLM request failed (${response.status}): ${errorBody.slice(0, 500)}`);
   }
 
@@ -789,12 +1052,15 @@ async function openAiCompatStreamChat(
       }
     }
   } catch (err) {
-    if ((err as Error).name === 'AbortError') {
+    if (opts.signal?.aborted) throw new ReviewCancelledError();
+    if ((err as Error).name === 'AbortError' || controller.signal.aborted) {
+      if (timeoutReason === 'hard') throw new Error(`LLM chat call exceeded ${hardLimitMs}ms wall-clock cap`);
       throw new Error(`LLM stream stalled (no data for ${LLM_TIMEOUT_MS}ms)`);
     }
     throw err;
   } finally {
-    clearTimeout(timer!);
+    clearTimers();
+    unlinkAbort();
   }
 
   // Reasoning arrives either as a separate reasoning_content stream OR inline as

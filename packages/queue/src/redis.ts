@@ -18,10 +18,61 @@ const INFLIGHT_PREFIX = 'orvex-review:inflight:';
 const PENDING_PREFIX = 'orvex-review:pending:';
 const PROCESSING_KEY = 'orvex-review:processing';
 const PROCESSING_META_PREFIX = 'orvex-review:processing-meta:';
+const PROVIDER_LEASE_PREFIX = 'orvex-review:provider-leases:';
+const PROVIDER_COOLDOWN_PREFIX = 'orvex-review:provider-cooldown:';
 // Recovery runs periodically while workers are active. A longer grace covers
 // the dequeue→claim handoff and a brief Redis/CPU stall without requeueing a
 // payload that its original worker is still about to claim.
 const PROCESSING_RECOVERY_GRACE_MS = 30_000;
+const PROVIDER_LEASE_TTL_MS = 960_000;
+
+const ACQUIRE_PROVIDER_LEASE_LUA = `
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then return false end
+redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + tonumber(ARGV[3]), ARGV[4])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[3]) + 60000)
+return ARGV[4]`;
+
+const SET_PROVIDER_COOLDOWN_LUA = `
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local requested = tonumber(ARGV[1])
+if requested > current then
+  redis.call('SET', KEYS[1], requested)
+  redis.call('PEXPIREAT', KEYS[1], requested)
+  return requested
+end
+return current`;
+
+const RECOVER_PROCESSING_LUA = `
+if redis.call('EXISTS', KEYS[3]) == 1 then return 'live' end
+local started = tonumber(redis.call('GET', KEYS[2]) or '')
+if not started then
+  redis.call('SET', KEYS[2], ARGV[2], 'EX', 3600, 'NX')
+  return 'grace'
+end
+if tonumber(ARGV[2]) - started < tonumber(ARGV[3]) then return 'grace' end
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+if removed == 0 then return 'claimed-by-peer' end
+redis.call('DEL', KEYS[2])
+if redis.call('EXISTS', KEYS[4]) == 1 or redis.call('EXISTS', KEYS[5]) == 1 then
+  return 'done'
+end
+local resumes = redis.call('INCR', KEYS[6])
+redis.call('EXPIRE', KEYS[6], 86400)
+if resumes > tonumber(ARGV[4]) then return 'dropped:' .. tostring(resumes) end
+redis.call('DEL', KEYS[7])
+redis.call('RPUSH', KEYS[8], ARGV[1])
+return 'requeued'`;
+
+const RECOVER_PENDING_LUA = `
+if redis.call('EXISTS', KEYS[2]) == 1 then return false end
+local raw = redis.call('LINDEX', KEYS[1], 0)
+if not raw then return false end
+if raw ~= ARGV[1] then return 'retry' end
+redis.call('LPOP', KEYS[1])
+redis.call('DEL', KEYS[3])
+redis.call('RPUSH', KEYS[4], raw)
+return raw`;
 
 // Atomic coalesce: a review replaces the LAST review already in the pending list
 // (scanning from the tail); anything else appends. cjson decode is wrapped in
@@ -145,15 +196,25 @@ if curToken == ARGV[1] then
 end
 return 0`;
 
-const CASDEL_LUA = `
+// Finalization is one token-owned operation. Successful DONE markers are written
+// only after ownership is proven, in the same Lua transaction as claim release.
+// A stale worker can therefore neither finalize nor poison deduplication.
+// KEYS: inflight, processing, metadata, seen, followed by zero or more DONE keys.
+// ARGV: token, raw job, delete-seen flag, DONE ttl seconds.
+const FINALIZE_CLAIM_LUA = `
 local cur = redis.call('GET', KEYS[1])
 if not cur then return 0 end
 local sep = string.find(cur, '\\n', 1, true)
 local curToken = sep and string.sub(cur, 1, sep - 1) or cur
-if curToken == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
+if curToken ~= ARGV[1] then return 0 end
+for i = 5, #KEYS do
+  redis.call('SET', KEYS[i], '1', 'EX', ARGV[4])
 end
-return 0`;
+redis.call('DEL', KEYS[1])
+redis.call('LREM', KEYS[2], 1, ARGV[2])
+redis.call('DEL', KEYS[3])
+if ARGV[3] == '1' then redis.call('DEL', KEYS[4]) end
+return 1`;
 
 /** Inflight lock values are `token\\nraw`. Ownership CAS uses the token only. */
 function claimToken(claim: string): string {
@@ -180,6 +241,72 @@ export class RedisReviewQueue implements ReviewQueue {
 
   constructor(url: string) {
     this.redis = new Redis(url);
+  }
+
+  private providerKey(prefix: string, provider: string): string {
+    const safe = provider.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+    return `${prefix}${safe || 'unknown'}`;
+  }
+
+  async acquireProviderLease(provider: string, limit: number, signal?: AbortSignal): Promise<string> {
+    const token = randomUUID();
+    const configuredWait = Number(process.env.ORVEX_PROVIDER_LEASE_WAIT_MS ?? 30_000);
+    const maxWaitMs = Number.isFinite(configuredWait)
+      ? Math.min(300_000, Math.max(1_000, Math.floor(configuredWait)))
+      : 30_000;
+    const deadline = Date.now() + maxWaitMs;
+    const key = this.providerKey(PROVIDER_LEASE_PREFIX, provider);
+    for (;;) {
+      if (signal?.aborted) throw new Error('review cancelled while waiting for provider lease');
+      const acquired = await this.redis.eval(
+        ACQUIRE_PROVIDER_LEASE_LUA,
+        1,
+        key,
+        Date.now(),
+        Math.max(1, Math.floor(limit)),
+        PROVIDER_LEASE_TTL_MS,
+        token,
+      );
+      if (acquired === token) return token;
+      if (Date.now() >= deadline) {
+        throw new Error(`429 provider ${provider} distributed concurrency saturated; retry-after: 1`);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const finish = () => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        };
+        const timer = setTimeout(finish, 100 + Math.floor(Math.random() * 150));
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          reject(new Error('review cancelled while waiting for provider lease'));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+        else timer.unref?.();
+      });
+    }
+  }
+
+  async releaseProviderLease(provider: string, token: string): Promise<void> {
+    await this.redis.zrem(this.providerKey(PROVIDER_LEASE_PREFIX, provider), token);
+  }
+
+  async getProviderCooldownMs(provider: string): Promise<number> {
+    const raw = await this.redis.get(this.providerKey(PROVIDER_COOLDOWN_PREFIX, provider));
+    const until = Number(raw);
+    return Number.isFinite(until) ? Math.max(0, until - Date.now()) : 0;
+  }
+
+  async setProviderCooldown(provider: string, durationMs: number): Promise<void> {
+    const until = Date.now() + Math.min(300_000, Math.max(250, Math.floor(durationMs)));
+    await this.redis.eval(
+      SET_PROVIDER_COOLDOWN_LUA,
+      1,
+      this.providerKey(PROVIDER_COOLDOWN_PREFIX, provider),
+      until,
+    );
   }
 
   async enqueue(job: ReviewJobPayload): Promise<EnqueueResult> {
@@ -287,33 +414,22 @@ export class RedisReviewQueue implements ReviewQueue {
   }
 
   async markCompleted(job: ReviewJobPayload, opts?: MarkCompletedOptions): Promise<void> {
+    let doneKeys: string[];
     if (opts?.draftSkipped) {
-      await this.redis.set(`${DONE_PREFIX}${draftSkipIdempotencyKey(job)}`, '1', 'EX', 604800);
-      const claim = this.lockTokens.get(job);
-      if (claim) {
-        await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claimToken(claim));
+      doneKeys = [`${DONE_PREFIX}${draftSkipIdempotencyKey(job)}`];
+    } else {
+      const idKey = jobIdempotencyKey(job);
+      doneKeys = [`${DONE_PREFIX}${idKey}`];
+      // ready_for_review/reopened success also marks bare SHA so another
+      // automatic event cannot review the same head twice.
+      const bare = reviewShaIdempotencyKey(job);
+      if (idKey !== bare && (job.kind ?? 'review') === 'review') {
+        doneKeys.push(`${DONE_PREFIX}${bare}`);
       }
-      await this.removeProcessing(job);
-      this.lockTokens.delete(job);
-      return;
     }
-    const idKey = jobIdempotencyKey(job);
-    await this.redis.set(`${DONE_PREFIX}${idKey}`, '1', 'EX', 604800);
-    // ready_for_review success also marks bare SHA so a queued opened cannot
-    // double-review the same head after ready already ran.
-    const bare = reviewShaIdempotencyKey(job);
-    if (idKey !== bare && (job.kind ?? 'review') === 'review') {
-      await this.redis.set(`${DONE_PREFIX}${bare}`, '1', 'EX', 604800);
+    if (!(await this.finalizeOwnedClaim(job, false, doneKeys))) {
+      throw new Error(`review lease lost before completion for ${prKey(job)}`);
     }
-    // Compare-and-delete: only release the lock if it is STILL ours. If this
-    // review outran its TTL and another run re-claimed the PR, an unconditional
-    // DEL would delete the new run's lock and let a third run start concurrently.
-    const claim = this.lockTokens.get(job);
-    if (claim) {
-      await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claimToken(claim));
-    }
-    await this.removeProcessing(job);
-    this.lockTokens.delete(job);
   }
 
   async renewLease(job: ReviewJobPayload): Promise<void> {
@@ -347,45 +463,36 @@ export class RedisReviewQueue implements ReviewQueue {
     const newRaw = JSON.stringify(job);
     if (newRaw === oldRaw) return;
 
-    const replaced = await this.redis.eval(
-      `
-local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
-if removed == 0 then return 0 end
-redis.call('RPUSH', KEYS[1], ARGV[2])
-return 1
-`,
-      1,
-      PROCESSING_KEY,
-      oldRaw,
-      newRaw,
-    );
-    if (Number(replaced) !== 1) return;
-
-    // Keep the inflight lock payload aligned with PROCESSING. Ownership CAS
-    // keys off the token prefix, but matching values avoid confusion in ops.
     const lockKey = `${INFLIGHT_PREFIX}${prKey(job)}`;
     const newClaim = `${token}\n${newRaw}`;
-    await this.redis.eval(
+    const replaced = await this.redis.eval(
       `
-local cur = redis.call('GET', KEYS[1])
+local cur = redis.call('GET', KEYS[2])
 if not cur then return 0 end
 local sep = string.find(cur, '\\n', 1, true)
 local curToken = sep and string.sub(cur, 1, sep - 1) or cur
 if curToken ~= ARGV[1] then return 0 end
-local ttl = redis.call('TTL', KEYS[1])
+local removed = redis.call('LREM', KEYS[1], 1, ARGV[2])
+if removed == 0 then return 0 end
+redis.call('RPUSH', KEYS[1], ARGV[3])
+local ttl = redis.call('TTL', KEYS[2])
 if ttl ~= false and ttl > 0 then
-  redis.call('SET', KEYS[1], ARGV[2], 'EX', ttl)
+  redis.call('SET', KEYS[2], ARGV[4], 'EX', ttl)
 else
-  redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
+  redis.call('SET', KEYS[2], ARGV[4], 'EX', tonumber(ARGV[5]))
 end
 return 1
 `,
-      1,
+      2,
+      PROCESSING_KEY,
       lockKey,
       token,
+      oldRaw,
+      newRaw,
       newClaim,
       LEASE_TTL_SECONDS,
     );
+    if (Number(replaced) !== 1) return;
 
     const oldMeta = processingMetaKey(oldRaw);
     const newMeta = processingMetaKey(newRaw);
@@ -400,24 +507,35 @@ return 1
   }
 
   async markFailed(job: ReviewJobPayload, _error: string): Promise<void> {
-    const idKey = jobIdempotencyKey(job);
-    await this.redis.del(`${SEEN_PREFIX}${idKey}`);
-    const claim = this.lockTokens.get(job);
-    if (claim) {
-      await this.redis.eval(CASDEL_LUA, 1, `${INFLIGHT_PREFIX}${prKey(job)}`, claimToken(claim));
-    }
-    await this.removeProcessing(job);
-    this.lockTokens.delete(job);
+    await this.finalizeOwnedClaim(job, true);
   }
 
-  private async removeProcessing(job: ReviewJobPayload): Promise<void> {
+  private async finalizeOwnedClaim(
+    job: ReviewJobPayload,
+    deleteSeen: boolean,
+    doneKeys: string[] = [],
+  ): Promise<boolean> {
     const claim = this.lockTokens.get(job);
-    if (!claim) return;
+    if (!claim) return false;
     const separator = claim.indexOf('\n');
-    if (separator < 0) return;
+    if (separator < 0) return false;
+    const token = claim.slice(0, separator);
     const raw = claim.slice(separator + 1);
-    await this.redis.lrem(PROCESSING_KEY, 1, raw);
-    await this.redis.del(processingMetaKey(raw));
+    const finalized = await this.redis.eval(
+      FINALIZE_CLAIM_LUA,
+      4 + doneKeys.length,
+      `${INFLIGHT_PREFIX}${prKey(job)}`,
+      PROCESSING_KEY,
+      processingMetaKey(raw),
+      `${SEEN_PREFIX}${jobIdempotencyKey(job)}`,
+      ...doneKeys,
+      token,
+      raw,
+      deleteSeen ? '1' : '0',
+      604800,
+    );
+    this.lockTokens.delete(job);
+    return Number(finalized) === 1;
   }
 
   async releaseLockAndDrain(prKeyStr: string): Promise<ReviewJobPayload | null> {
@@ -448,44 +566,43 @@ return 1
     let requeued = 0;
     const processing = await this.redis.lrange(PROCESSING_KEY, 0, -1);
     for (const raw of processing) {
-      let keep = false;
+      let job: ReviewJobPayload;
       try {
-        const job = JSON.parse(raw) as ReviewJobPayload;
-        if (await this.redis.exists(`${INFLIGHT_PREFIX}${prKey(job)}`)) {
-          keep = true;
-        }
-        const metaKey = processingMetaKey(raw);
-        const rawStartedAt = await this.redis.get(metaKey);
-        const startedAt = rawStartedAt === null ? Number.NaN : Number(rawStartedAt);
-        if (!keep && Number.isFinite(startedAt)) {
-          keep = Date.now() - startedAt < PROCESSING_RECOVERY_GRACE_MS;
-        } else if (!keep) {
-          // Older workers could die between DEQUEUE_LUA and the separate
-          // processing-meta SET. Treat a missing timestamp as newly observed
-          // once, so recovery cannot steal that handoff immediately.
-          await this.redis.set(metaKey, String(Date.now()), 'EX', 3600, 'NX');
-          keep = true;
-        }
-        if (!keep && !(await this.redis.exists(`${DONE_PREFIX}${jobIdempotencyKey(job)}`))) {
-          const idKey = jobIdempotencyKey(job);
-          const resumes = await this.redis.incr(`${RESUMED_PREFIX}${idKey}`);
-          await this.redis.expire(`${RESUMED_PREFIX}${idKey}`, 86400);
-          if (resumes > MAX_RESUME_AFTER_RESTART) {
-            console.error(
-              `[queue] DROPPING job ${idKey} — resumed ${resumes}x after restarts (cap ${MAX_RESUME_AFTER_RESTART}); it appears to crash the worker. Investigate manually.`,
-            );
-          } else {
-            await this.redis.del(`${SEEN_PREFIX}${idKey}`);
-            await this.redis.rpush(QUEUE_KEY, raw);
-            requeued++;
-          }
-        }
+        job = JSON.parse(raw) as ReviewJobPayload;
       } catch {
-        /* malformed processing entry — remove it so it cannot block recovery */
-      }
-      if (!keep) {
+        // Malformed processing entry has no valid ownership identity and cannot
+        // be recovered. Removal is atomic enough because no worker can parse it.
         await this.redis.lrem(PROCESSING_KEY, 1, raw);
         await this.redis.del(processingMetaKey(raw));
+        continue;
+      }
+      const idKey = jobIdempotencyKey(job);
+      const bare = reviewShaIdempotencyKey(job);
+      const automatic = (job.kind ?? 'review') === 'review'
+        && job.action !== 'command'
+        && job.action !== 'manual';
+      const recovered = String(await this.redis.eval(
+        RECOVER_PROCESSING_LUA,
+        8,
+        PROCESSING_KEY,
+        processingMetaKey(raw),
+        `${INFLIGHT_PREFIX}${prKey(job)}`,
+        `${DONE_PREFIX}${idKey}`,
+        `${DONE_PREFIX}${automatic ? bare : idKey}`,
+        `${RESUMED_PREFIX}${idKey}`,
+        `${SEEN_PREFIX}${idKey}`,
+        QUEUE_KEY,
+        raw,
+        Date.now(),
+        PROCESSING_RECOVERY_GRACE_MS,
+        MAX_RESUME_AFTER_RESTART,
+      ));
+      if (recovered === 'requeued') requeued++;
+      if (recovered.startsWith('dropped:')) {
+        console.error(
+          `[queue] DROPPING job ${idKey} — resumed ${recovered.slice('dropped:'.length)}x after restarts ` +
+            `(cap ${MAX_RESUME_AFTER_RESTART}); it appears to crash the worker. Investigate manually.`,
+        );
       }
     }
 
@@ -494,16 +611,27 @@ return 1
       const pendingPrKey = key.slice(PENDING_PREFIX.length);
       if (await this.redis.exists(`${INFLIGHT_PREFIX}${pendingPrKey}`)) continue;
       for (;;) {
-        const raw = await this.redis.lpop(key);
+        const raw = await this.redis.lindex(key, 0);
         if (!raw) break;
-        // clear the dedup marker so the requeued job is accepted, then queue it
+        let job: ReviewJobPayload;
         try {
-          const job = JSON.parse(raw) as ReviewJobPayload;
-          await this.redis.del(`${SEEN_PREFIX}${jobIdempotencyKey(job)}`);
+          job = JSON.parse(raw) as ReviewJobPayload;
         } catch {
-          /* keep going even if one entry is malformed */
+          // Remove malformed queue input; it cannot be executed safely.
+          await this.redis.lrem(key, 1, raw);
+          continue;
         }
-        await this.redis.rpush(QUEUE_KEY, raw);
+        const moved = await this.redis.eval(
+          RECOVER_PENDING_LUA,
+          4,
+          key,
+          `${INFLIGHT_PREFIX}${pendingPrKey}`,
+          `${SEEN_PREFIX}${jobIdempotencyKey(job)}`,
+          QUEUE_KEY,
+          raw,
+        );
+        if (!moved) break;
+        if (moved === 'retry') continue;
         requeued++;
       }
     }

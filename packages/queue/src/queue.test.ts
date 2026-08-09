@@ -98,6 +98,36 @@ test('opened is deduped when ready_for_review already successfully reviewed the 
   assert.equal(opened.reason, 'duplicate');
 });
 
+test('reopened coalesces behind a close-aborted same-SHA review and then runs', async () => {
+  const q = new MemoryReviewQueue();
+  await q.enqueue(job({ headSha: 'shaReopen', action: 'opened' }));
+  const opened = await q.dequeue();
+  assert.ok(opened);
+
+  const reopened = await q.enqueue(job({
+    headSha: 'shaReopen',
+    action: 'reopened',
+    enqueuedAt: '2026-01-01T00:01:00Z',
+  }));
+  assert.equal(reopened.accepted, true);
+  assert.equal(reopened.reason, 'coalesced');
+
+  await q.markFailed(opened!, 'pr_closed_mid_run');
+  await q.releaseLockAndDrain('1/acme/api#5');
+  assert.equal((await q.dequeue())?.action, 'reopened');
+});
+
+test('reopened stays deduped after a successful same-SHA review', async () => {
+  const q = new MemoryReviewQueue();
+  await q.enqueue(job({ headSha: 'shaDone', action: 'opened' }));
+  const opened = await q.dequeue();
+  await q.markCompleted(opened!);
+
+  const reopened = await q.enqueue(job({ headSha: 'shaDone', action: 'reopened' }));
+  assert.equal(reopened.accepted, false);
+  assert.equal(reopened.reason, 'duplicate');
+});
+
 test('a queue without leases is safe to heartbeat (optional-method contract)', async () => {
   // queue-runner heartbeats via `queue.renewLease?.(job)`. MemoryReviewQueue is
   // single-process and has no lease, so the method is absent — the optional call

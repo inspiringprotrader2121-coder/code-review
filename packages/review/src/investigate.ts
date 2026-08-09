@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch, redactSecrets } from './redact.js';
-import { extractJsonLoose, llmChat } from './llm-client.js';
+import { extractJsonLoose, llmChat, type LlmAttemptEvent } from './llm-client.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 import { normalizeLlmResponse, REVIEW_INCOMPLETE_SUMMARY, isTransientLlmError } from './llm.js';
 import { safePromptData } from './prompt-safety.js';
@@ -29,6 +29,8 @@ export interface InvestigateOptions {
   baseUrl?: string;
   api?: 'chat' | 'responses' | 'anthropic';
   reasoningEffort?: string;
+  /** Cancel the tool loop and any active provider call when the PR closes. */
+  signal?: AbortSignal;
   context?: ReviewPromptContext;
   onUsage?: (usage: {
     inputTokens: number;
@@ -36,7 +38,9 @@ export interface InvestigateOptions {
     tokenSource?: 'provider' | 'estimate';
     provider?: string;
     model?: string;
+    attemptId?: string;
   }) => void;
+  onAttempt?: (event: LlmAttemptEvent) => void;
   /** Max tool rounds before forcing a done response. Default 8. */
   maxSteps?: number;
   /** Cap on a single tool result returned to the model. */
@@ -457,8 +461,10 @@ export async function runInvestigateReview(
     baseUrl: opts.baseUrl,
     api: opts.api,
     reasoningEffort: opts.reasoningEffort,
+    signal: opts.signal,
     json: true as const,
     onUsage: opts.onUsage,
+    onAttempt: opts.onAttempt,
   };
 
   for (let step = 0; step < maxSteps; step++) {

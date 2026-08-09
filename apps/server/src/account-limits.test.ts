@@ -5,10 +5,15 @@ import { planFeatures } from '@orvex-review/tenants';
 import { accountLimitReason } from './pipeline.js';
 
 function db(): AppDatabase {
-  return new AppDatabase(':memory:');
+  const d = new AppDatabase(':memory:');
+  defaultTenants.set(d, d.createTenant(`limits-${Math.random()}`).id);
+  return d;
 }
 
-function complete(d: AppDatabase, owner: string, n: number, tenantId = 't1'): void {
+const defaultTenants = new WeakMap<AppDatabase, string>();
+const defaultTenant = (d: AppDatabase): string => defaultTenants.get(d)!;
+
+function complete(d: AppDatabase, owner: string, n: number, tenantId = defaultTenant(d)): void {
   for (let i = 0; i < n; i++) {
     d.recordReviewRun({
       tenantId, installationId: 1, owner, repo: 'r', pr: 1, headSha: `sha${i}`,
@@ -25,7 +30,7 @@ function completeSpreadOverDays(
   d: AppDatabase,
   owner: string,
   n: number,
-  tenantId = 't1',
+  tenantId = defaultTenant(d),
 ): void {
   const now = Date.now();
   const span = 28 * 24 * 3_600_000;
@@ -138,7 +143,7 @@ test('GLOBAL free-tier daily cap trips for a trial account once total free revie
   const cap = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
   for (let i = 0; i < cap; i++) {
     d.recordReviewRun({
-      tenantId: `farm${i}`, installationId: i, owner: `farm-acct-${i}`, repo: 'r', pr: 1,
+      tenantId: d.createTenant(`farm-${i}`).id, installationId: i, owner: `farm-acct-${i}`, repo: 'r', pr: 1,
       headSha: `s${i}`, action: 'opened', status: 'completed', durationMs: 100, freeTier: true,
     });
   }
@@ -151,7 +156,7 @@ test('the global free-tier cap does NOT block PAID accounts (only trial plans ar
   const cap = Number(process.env.ORVEX_FREE_TIER_DAILY_CAP ?? 300);
   for (let i = 0; i < cap; i++) {
     d.recordReviewRun({
-      tenantId: `farm${i}`, installationId: i, owner: `farm-acct-${i}`, repo: 'r', pr: 1,
+      tenantId: d.createTenant(`farm-${i}`).id, installationId: i, owner: `farm-acct-${i}`, repo: 'r', pr: 1,
       headSha: `s${i}`, action: 'opened', status: 'completed', durationMs: 100, freeTier: true,
     });
   }
@@ -162,8 +167,9 @@ test('the global free-tier cap does NOT block PAID accounts (only trial plans ar
 test('the rolling provider-cost safety ceiling blocks flat-plan spend', () => {
   const d = db();
   const cap = Number(process.env.ORVEX_MONTHLY_COGS_CAP_USD ?? 250);
+  const tenantId = defaultTenant(d);
   const runId = d.startReviewRun({
-    tenantId: 't1',
+    tenantId,
     installationId: 1,
     owner: 'pro-user',
     repo: 'r',
@@ -173,7 +179,7 @@ test('the rolling provider-cost safety ceiling blocks flat-plan spend', () => {
   });
   d.recordReviewRunUsage({
     runId,
-    tenantId: 't1',
+    tenantId,
     provider: 'test',
     model: 'test',
     tier: 'standard',
@@ -190,8 +196,9 @@ test('the rolling provider-cost safety ceiling blocks flat-plan spend', () => {
 test('COGS safety reservations include running and newly requested reviews', () => {
   const d = db();
   const cap = Number(process.env.ORVEX_MONTHLY_COGS_CAP_USD ?? 250);
+  const tenantId = defaultTenant(d);
   const completed = d.startReviewRun({
-    tenantId: 't1',
+    tenantId,
     installationId: 1,
     owner: 'concurrent-user',
     repo: 'r',
@@ -201,7 +208,7 @@ test('COGS safety reservations include running and newly requested reviews', () 
   });
   d.completeReviewRun(completed, { status: 'completed', durationMs: 1, costUsd: Math.max(0, cap - 10) });
   d.startReviewRun({
-    tenantId: 't1',
+    tenantId,
     installationId: 1,
     owner: 'concurrent-user',
     repo: 'r',
@@ -216,8 +223,9 @@ test('unlimited hourly plans still enforce the COGS gate in the atomic reservati
   const d = db();
   const plan = planFeatures('review-plus');
   const cap = Number(process.env.ORVEX_MONTHLY_COGS_CAP_USD ?? 250);
+  const tenantId = defaultTenant(d);
   const prior = d.startReviewRun({
-    tenantId: 't1',
+    tenantId,
     installationId: 1,
     owner: 'flat-plan-user',
     repo: 'r',
@@ -228,7 +236,7 @@ test('unlimited hourly plans still enforce the COGS gate in the atomic reservati
   d.completeReviewRun(prior, { status: 'completed', durationMs: 1, costUsd: cap });
   const reserved = d.tryReserveReviewRun(
     {
-      tenantId: 't1',
+      tenantId,
       installationId: 1,
       owner: 'flat-plan-user',
       repo: 'r',
@@ -245,8 +253,9 @@ test('resuming a run does not reserve a second full slot for its own recorded sp
   const d = db();
   const plan = planFeatures('review-plus');
   const cap = Number(process.env.ORVEX_MONTHLY_COGS_CAP_USD ?? 250);
+  const tenantId = defaultTenant(d);
   const runId = d.startReviewRun({
-    tenantId: 't1',
+    tenantId,
     installationId: 1,
     owner: 'resume-user',
     repo: 'r',
@@ -256,7 +265,7 @@ test('resuming a run does not reserve a second full slot for its own recorded sp
   });
   d.recordReviewRunUsage({
     runId,
-    tenantId: 't1',
+    tenantId,
     provider: 'test',
     model: 'test',
     tier: 'standard',
@@ -274,10 +283,11 @@ test('resuming a run does not reserve a second full slot for its own recorded sp
 test('per-account concurrency caps parallel burn of the hourly bucket', () => {
   const d = db();
   const plan = planFeatures('verify');
+  const tenantId = defaultTenant(d);
   assert.equal(plan.maxConcurrentReviews, 3);
   for (let i = 0; i < 3; i++) {
     d.startReviewRun({
-      tenantId: 't1',
+      tenantId,
       installationId: 1,
       owner: 'busy',
       repo: 'r',

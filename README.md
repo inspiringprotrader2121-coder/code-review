@@ -25,7 +25,8 @@ Self-hosted AI code review for GitHub. Install the GitHub App, open a PR, and Or
 
 - **Node.js 22.13+** and **pnpm 11** (via Corepack)
 - A **GitHub App** (permissions below)
-- At least one **LLM API key** (MiniMax default; OpenAI / DeepSeek / Anthropic optional)
+- **MiniMax and DeepSeek API keys** for normal review tracks
+- **OpenAI API-key-authenticated Codex CLI home** when enabling Verify-tier Luna
 - Optional: Redis (`QUEUE_BACKEND=redis`), Semgrep on `PATH`, Docker (runtime-verify)
 
 ---
@@ -43,8 +44,9 @@ cp .env.example .env
 #   GITHUB_APP_ID
 #   GITHUB_APP_PRIVATE_KEY_PATH=./orvex-review.pem   # download from the App settings
 #   GITHUB_WEBHOOK_SECRET
-#   PLATFORM_SECRET=$(openssl rand -hex 32)
-#   MINIMAX_API_KEY=...   # or configure another provider in .env.example
+#   REVIEW_API_SECRET=$(openssl rand -hex 32)
+#   MINIMAX_API_KEY=...
+#   ORVEX_DEEPSEEK_API_KEY=...
 #   STORE_PATH=./.data/orvex-review.db
 #   APP_URL=http://localhost:8787
 
@@ -170,9 +172,9 @@ scripts/         Deploy, backup, restore drill
 All variables are documented in **[.env.example](./.env.example)**. Minimum for a first review:
 
 - `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, `GITHUB_WEBHOOK_SECRET`
-- `PLATFORM_SECRET`
+- `REVIEW_API_SECRET`
 - `STORE_PATH` (SQLite path outside the repo in production)
-- One LLM provider key (e.g. `MINIMAX_API_KEY`)
+- MiniMax and DeepSeek provider keys; high-tier Luna additionally requires the pinned Codex CLI API-key home
 - `APP_URL` matching your public webhook host
 
 Never commit `.env`, `*.pem`, or database files — they are gitignored.

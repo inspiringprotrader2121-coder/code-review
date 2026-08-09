@@ -8,6 +8,7 @@ import {
   createInstallationOctokit,
   fetchPullRequest,
   isRepoAllowed,
+  isPrStillOpen,
   listInstallationRepos,
   loadGitHubConfigFromEnv,
   replyToIssueComment,
@@ -34,6 +35,7 @@ import { createAppDatabase, type GitHubInstallation } from '@orvex-review/store'
 import { enqueueManualReview } from '../queue-runner.js';
 import { authorizedAdminMutation } from './admin-auth.js';
 import { formatQuotaStatusComment, loadAccountQuotaStatus } from '../quota-status.js';
+import { cancelActiveReviewsForPr } from '../active-reviews.js';
 
 /** sha256(event + NUL + body) — closes delivery-id rotation replay. */
 export function githubWebhookBodyHash(event: string | undefined, rawBody: string): string {
@@ -885,11 +887,31 @@ export function webhookRoutes(queue: ReviewQueue) {
     }
 
     // record the PR's current lifecycle state
-    const prState = prPayload.pull_request.merged
+    let prState: 'open' | 'closed' | 'merged' = prPayload.pull_request.merged
       ? 'merged'
       : action === 'closed' || prPayload.pull_request.state === 'closed'
         ? 'closed'
         : 'open';
+    if (prState === 'closed' || prState === 'merged') {
+      // A signed close event is normally authoritative, but deliveries can
+      // arrive after a rapid reopen. Confirm current GitHub state before both
+      // recording closure and terminating paid calls.
+      try {
+        if (
+          await isPrStillOpen(
+            createInstallationOctokit(githubConfig, installationId),
+            { owner, repo, number: pr },
+          )
+        ) {
+          prState = 'open';
+          console.log(`[webhook] ignored delayed close event for reopened ${fullName}#${pr}`);
+        }
+      } catch (err) {
+        // Fail toward the signed lifecycle event when GitHub is temporarily
+        // unavailable; the worker's 5s poll remains the independent backstop.
+        console.warn(`[webhook] could not confirm closed state for ${fullName}#${pr}:`, (err as Error).message);
+      }
+    }
     db.upsertPullRequest({
       tenantId: installation.tenantId,
       installationId,
@@ -909,6 +931,10 @@ export function webhookRoutes(queue: ReviewQueue) {
     // Close any persisted Codex CLI session when the PR is done. The session
     // files are passive (no CPU), but deleting them keeps ~/.codex tidy.
     if (prState === 'closed' || prState === 'merged') {
+      const cancelled = cancelActiveReviewsForPr({ installationId, owner, repo, pr });
+      if (cancelled > 0) {
+        console.warn(`[webhook] ${fullName}#${pr} closed — cancelled ${cancelled} active paid review(s)`);
+      }
       const prior = db.getState({ installationId, owner, repo, pr });
       if (prior?.codexThreadId) {
         console.log(`[webhook] closing Codex session ${prior.codexThreadId} for ${owner}/${repo}#${pr}`);

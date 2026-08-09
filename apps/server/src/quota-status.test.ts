@@ -10,8 +10,13 @@ import {
 } from './quota-status.js';
 
 function db(): AppDatabase {
-  return new AppDatabase(':memory:');
+  const d = new AppDatabase(':memory:');
+  defaultTenants.set(d, d.createTenant(`quota-${Math.random()}`).id);
+  return d;
 }
+
+const defaultTenants = new WeakMap<AppDatabase, string>();
+const defaultTenant = (d: AppDatabase): string => defaultTenants.get(d)!;
 
 function complete(
   d: AppDatabase,
@@ -21,7 +26,7 @@ function complete(
 ): void {
   for (let i = 0; i < n; i++) {
     d.recordReviewRun({
-      tenantId: opts.tenantId ?? 't1',
+      tenantId: opts.tenantId ?? defaultTenant(d),
       installationId: 1,
       owner,
       repo: 'r',
@@ -49,7 +54,7 @@ test('loadAccountQuotaStatus reports hourly remaining and next slot when exhaust
   const plan = planFeatures('review');
   const oldest = new Date(Date.now() - 20 * 60_000).toISOString();
   complete(d, 'acme', plan.reviewsPerHour!, { createdAt: oldest });
-  const status = loadAccountQuotaStatus(d, 'acme', 't1', plan);
+  const status = loadAccountQuotaStatus(d, 'acme', defaultTenant(d), plan);
   assert.equal(status.hourly.used, plan.reviewsPerHour);
   assert.equal(status.hourly.remaining, 0);
   assert.ok(status.hourly.nextSlotAt);
@@ -64,7 +69,8 @@ test('loadAccountQuotaStatus reports hourly remaining and next slot when exhaust
 });
 
 test('formatQuotaStatusComment includes plan, hourly, and dashboard tip', () => {
-  const status = loadAccountQuotaStatus(db(), 'acme', 't1', planFeatures('review-plus'));
+  const d = db();
+  const status = loadAccountQuotaStatus(d, 'acme', defaultTenant(d), planFeatures('review-plus'));
   const body = formatQuotaStatusComment(status, '@orvex');
   assert.match(body, /\*\*Plan:\*\* Pro/);
   assert.match(body, /Hourly:/);
@@ -80,7 +86,7 @@ test('formatLimitBlockedComment for rate_limited is explicit about used/limit an
   const plan = planFeatures('review');
   const oldest = new Date(Date.now() - 15 * 60_000).toISOString();
   complete(d, 'acme', 5, { createdAt: oldest });
-  const status = loadAccountQuotaStatus(d, 'acme', 't1', plan);
+  const status = loadAccountQuotaStatus(d, 'acme', defaultTenant(d), plan);
   const body = formatLimitBlockedComment(status, 'rate_limited', '@orvex');
   assert.match(body, /hourly limit reached/i);
   assert.match(body, /5 \/ 5/);
@@ -93,7 +99,7 @@ test('formatLimitBlockedComment for trial_exhausted points at upgrade', () => {
   const d = db();
   const plan = planFeatures('free');
   complete(d, 'newbie', 10);
-  const status = loadAccountQuotaStatus(d, 'newbie', 't1', plan);
+  const status = loadAccountQuotaStatus(d, 'newbie', defaultTenant(d), plan);
   const body = formatLimitBlockedComment(status, 'trial_exhausted', '@orvex');
   assert.match(body, /free trial used up/i);
   assert.match(body, /10/);

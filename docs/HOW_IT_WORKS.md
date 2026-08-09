@@ -22,8 +22,8 @@ GitHub event ──▶ /webhooks/github ──▶ queue ──▶ worker ──�
    in-memory for dev. Jobs are deduped and per-PR locked so the same SHA isn't
    reviewed twice and commands never collide.
 3. **Worker** (`apps/server/src/queue-runner.ts`) — a bounded pump pulls jobs and
-   runs at most `ORVEX_MAX_CONCURRENT_REVIEWS` at once. Scale out by running more
-   worker processes against the shared Redis queue.
+   runs at most `ORVEX_MAX_CONCURRENT_REVIEWS` at once. Agentic Luna mode defaults
+   to one whole review at a time to keep a single API key inside its TPM budget.
 4. **Review pipeline** (`apps/server/src/pipeline.ts`) — builds context, runs the
    review, verifies findings, posts the comment, records the run.
 
@@ -45,15 +45,16 @@ For each changed file the pipeline builds **deep context** and reviews against i
   repo most relevant to the change, so a 5-line diff can surface breakage in a file
   it doesn't directly import.
 
-Depth is enforced in the harness (not left to the model), scaled **by plan**, and
-all the calls **run in parallel with bounded concurrency** (`ORVEX_REVIEW_CONCURRENCY`)
-so a deep review finishes in a few minutes, not tens of minutes:
+Depth is enforced in the harness (not left to the model) and scaled **by plan**.
+Required stages are scheduled with bounded concurrency, then provider-specific
+local and Redis leases pace each provider independently. Luna is serialized;
+DeepSeek and MiniMax can use their separately configured capacities:
 
 - **Passes** — the review runs N times over the change + neighborhood + top-K
   index files; findings accumulate and dedupe by fingerprint.
 - **Whole-repo sweep** (Verify plans only) — the rest of the repo is examined
   against the change in size-bounded batches (many files per batch) for exhaustive
-  coverage, run concurrently with the passes.
+  coverage, scheduled within the same bounded review workload.
 - **Adversarial verification** — a second skeptical model pass tries to *refute*
   each finding against the source; it fails open (never drops a real finding on an
   error, after retries). Fix verification fails closed (never commits an unverified
@@ -131,7 +132,7 @@ tracks differ in pass count, model mix, included volume, rate limits, and billin
 
 | Capability | Free trial | Starter (`review`) | Pro (`review-plus`) | Verify Lite | Verify |
 |---|---|---|---|---|---|
-| Review passes | 2 | 2 | 2 | 2 (cond. up to 4) | 2 (cond. up to 4) |
+| Review passes | 2 | 2 | 2 | 4 | 4 |
 | Index retrieval (top-K files) | 28 | 28 | 28 | 28 | 28 |
 | Review track | dual-model (MiniMax + Flash) | dual-model (MiniMax + Flash) | dual-model (MiniMax + Flash) | multi-model | multi-model |
 | Strict verification | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) | ✓ (Flash) |
@@ -151,20 +152,14 @@ constraint. Command/manual re-review of an unchanged
 commit also has a 2-minute cooldown for the same reason — a fresh push is never
 affected.
 
-Dual-model and multi-model tracks use different review mixes; Verify Lite and
-Verify default to **two discovery passes** (general + deep-dive). Breadth and
-removed-behavior lenses are conditional (large/`@orvex deep`, or
-Verify / Enterprise / multi-model always run four discovery passes (Luna/Codex
+Dual-model and multi-model tracks use different review mixes. Verify Lite,
+Verify, and Enterprise always run four discovery passes (Luna/Codex
 + Flash deep-dive + Flash removed-behavior + MiniMax breadth) then Flash verify
 — see `packages/review/src/pass-budget.ts`. Free/Starter/Pro stay on two
-discovery passes (MiniMax + DeepSeek v4 Flash) plus Flash verify — no sandboxed
-investigate. On high-risk diffs (auth/billing/cleanup/contracts), both tracks
-also get a best-effort Flash **risk-hunt** lens — additive recall only; findings
-still go through the same verifier (`ORVEX_RISK_HUNT=0` disables).
-Verify* plans also get a sandboxed **investigate**
-pass when Codex CLI is not already agentic: DeepSeek v4 Flash with read-only
-tools (`list_dir` / `read_file` / `grep`) over a temp checkout — skipped when
-`ORVEX_INVESTIGATE=0`. Paid plans can request the two-unit `@orvex deep`
+discovery passes (MiniMax + DeepSeek v4 Flash) plus Flash verify. Diagnostic
+risk-hunt and sandboxed investigate passes are opt-in (`ORVEX_RISK_HUNT=1`,
+`ORVEX_INVESTIGATE=1`) and are not part of a normal plan run. Paid plans can
+request the two-unit `@orvex deep`
 review. Code execution and nightly scans sit behind ops flags
 (`ORVEX_CODE_EXECUTION`, `ORVEX_NIGHTLY_SCANS`).
 
@@ -242,15 +237,16 @@ callback refuses to rebind an installation already owned by another workspace
 
 | Var | Purpose |
 |---|---|
-| `MINIMAX_API_KEY` / `ANTHROPIC_API_KEY` | LLM provider (MiniMax preferred if set) |
-| `MINIMAX_MODEL` / `ANTHROPIC_MODEL` | model id |
+| `MINIMAX_API_KEY` / `MINIMAX_MODEL` | required MiniMax reviewer credentials and model id |
+| `ORVEX_DEEPSEEK_API_KEY` / `ORVEX_DEEPSEEK_FLASH_MODEL` | required DeepSeek key + Flash model id (default `deepseek-v4-flash`) |
 | `QUEUE_BACKEND` | `redis` (prod) or `memory` |
 | `REDIS_URL` | Redis connection (with auth) |
 | `ORVEX_MAX_CONCURRENT_REVIEWS` | reviews per worker process (default 4) |
-| `ORVEX_CODEX_APIKEY_CONCURRENCY` | parallel Codex CLI processes per API-key `CODEX_HOME` (default = `ORVEX_MAX_CONCURRENT_REVIEWS`; OAuth homes always 1) |
-| `ORVEX_CODEX_HOME` / `ORVEX_CODEX_HOMES` | dedicated Codex auth dir, or comma-separated OAuth account pool |
-| `ORVEX_REVIEW_CONCURRENCY` | parallel model calls within one review (default 3 — paces Verify to ~10 min) |
-| `ORVEX_LLM_GLOBAL_CONCURRENCY` | process-wide provider-call ceiling across all reviews (default 6) |
+| `ORVEX_CODEX_HOME` | dedicated API-key-authenticated Codex home; OAuth is refused |
+| `ORVEX_REVIEW_CONCURRENCY` | maximum concurrently scheduled stages within one review (default 3) |
+| `ORVEX_PROVIDER_CONCURRENCY_LUNA` / `_DEEPSEEK` / `_MINIMAX` | provider-specific local and Redis-coordinated ceilings (defaults 1/2/2) |
+| `ORVEX_PROVIDER_LEASE_WAIT_MS` | maximum wait for a distributed provider slot (default 30 seconds) |
+| `ORVEX_BACKOFF_THRESHOLD` / `ORVEX_BACKOFF_MS` | failed-job circuit threshold and Redis-shared review-stack cooldown |
 | `ORVEX_MONTHLY_COGS_CAP_USD` | rolling provider-cost safety ceiling for non-custom plans (default $250) |
 | `ORVEX_AGENT_ARCHIVE_MAX_BYTES` | compressed agent checkout cap (default 150 MB) |
 | `ORVEX_SWEEP_FILE_CHARS` | per-file read depth in the whole-repo sweep (default 10000) |
@@ -259,14 +255,16 @@ callback refuses to rebind an installation already owned by another workspace
 | `ORVEX_REVIEW_AGGREGATION_MIN_OCCURRENCES` | distinct samples required for a normal finding (default 2) |
 | `ORVEX_REVIEW_AGGREGATION_TEMPERATURE` | sampling temperature for repeated API calls (default 0.2) |
 | `ORVEX_REVIEW_AGGREGATION_MAX_CANDIDATES` | bounded candidates sent to the merge step (default 120) |
-| `ORVEX_OPENAI_MODEL` / `ORVEX_CODEX_CLI_MODEL` | explicit direct-API and agentic-review model ids |
-| `ORVEX_OPENAI_REASONING_EFFORT` / `ORVEX_CODEX_CLI_REASONING_EFFORT` | explicit reasoning effort for those targets |
-| `ORVEX_INVESTIGATE` | `0` disables the sandboxed investigate pass (on by default for multi-model / Verify* when Codex isn't agentic) |
+| `ORVEX_OPENAI_MODEL` / `ORVEX_CODEX_CLI_MODEL` | configured Luna ids; the agentic runtime is pinned and fails closed with no substitute model/provider |
+| `ORVEX_OPENAI_REASONING_EFFORT` / `ORVEX_CODEX_CLI_REASONING_EFFORT` | documented as `max`; production review routing enforces max |
+| `ORVEX_INVESTIGATE` | `1` enables the optional sandboxed investigate pass |
 | `ORVEX_INVESTIGATE_TIER` | investigate model: `deepseek-flash` (default), `deepseek`, `openai`, or `standard` |
 | `ORVEX_INVESTIGATE_MAX_STEPS` | max tool-loop rounds (default 8) |
-| `ORVEX_RISK_HUNT` | `0` disables the additive Flash risk-hunt pass on high-risk diffs (on by default when Flash is configured) |
-| `ORVEX_DEEPSEEK_API_KEY` / `ORVEX_DEEPSEEK_FLASH_MODEL` | DeepSeek key + Flash model id (default `deepseek-v4-flash`) |
-| `ORVEX_REVIEW_THINKING` | `0` disables reasoning (on by default) |
+| `ORVEX_RISK_HUNT` | `1` enables the optional additive Flash risk-hunt pass on high-risk diffs |
+| `ORVEX_LLM_MAX_TOTAL_MS` | independent hard cap for each non-Codex provider attempt (maximum/default 300 seconds) |
+| `ORVEX_RATELIMIT_MAX_RETRIES` / `ORVEX_RATELIMIT_TOTAL_WAIT_MS` | at most two attempts and 60 seconds total rate-limit sleep |
+| `ORVEX_RUNNING_STALE_MS` | startup stale-heartbeat threshold (default 15 minutes; minimum 60 seconds) |
+| `ORVEX_REVIEW_THINKING` | review stages retain reasoning on across retries |
 | `ORVEX_CODE_EXECUTION` | `1` enables Verify-tier runtime verification (off by default) |
 | `ORVEX_MAX_SANDBOXES` | global concurrent sandbox cap (default 2) |
 | `ORVEX_NIGHTLY_SCANS` | `1` enables nightly whole-repo scans (off by default) |

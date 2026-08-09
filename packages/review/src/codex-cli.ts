@@ -1,10 +1,20 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { buildUserPrompt, loadOrvexRules, type ReviewPromptContext } from './prompt.js';
 import { redactPatch, redactSecrets } from './redact.js';
-import { extractJsonLoose, isOversizedModelRequest, isRetryableRateLimit, parseRetryAfterMs } from './llm-client.js';
+import {
+  extractJsonLoose,
+  isOversizedModelRequest,
+  isRetryableRateLimit,
+  parseRetryAfterMs,
+  ReviewCancelledError,
+  setProviderCooldown,
+  withProviderCallSlot,
+  type LlmAttemptEvent,
+} from './llm-client.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
 import { normalizeLlmResponse } from './llm.js';
 
@@ -15,6 +25,8 @@ export interface CodexCliReviewOptions {
   model?: string;
   /** Reasoning effort for models that support it. */
   reasoningEffort?: string;
+  /** Cancel only this Codex process when its PR closes or merges. */
+  signal?: AbortSignal;
   /** cross-file context: repo tree + imported files */
   context?: ReviewPromptContext;
   /** a read-only repo checkout codex may explore for a whole-repo sweep.
@@ -37,14 +49,17 @@ export interface CodexCliReviewOptions {
     tokenSource?: 'provider' | 'estimate';
     model?: string;
     provider?: string;
+    attemptId?: string;
   }) => void;
+  /** Durable lifecycle callback for each actual Codex child attempt. */
+  onAttempt?: (event: LlmAttemptEvent) => void;
 }
 
 /** How much context we paste into the Codex CLI turn. */
 export type CodexPromptMode = 'full' | 'lean' | 'slim';
 
-/** One canonical, documented fallback prevents worker and CLI routing drift. */
-export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.5';
+/** The production agentic reviewer. Never fall back to a different paid model. */
+export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.6-luna';
 export const DEFAULT_CODEX_CLI_REASONING_EFFORT = 'max';
 
 /**
@@ -116,17 +131,6 @@ export async function closeCodexSession(threadRef: string): Promise<void> {
   });
 }
 
-function defaultModel(): string {
-  return process.env.ORVEX_CODEX_CLI_MODEL?.trim() || DEFAULT_CODEX_CLI_MODEL;
-}
-
-function fallbackModel(): { model: string; reasoningEffort?: string } {
-  return {
-    model: DEFAULT_CODEX_CLI_MODEL,
-    reasoningEffort: process.env.ORVEX_CODEX_CLI_REASONING_EFFORT?.trim() || DEFAULT_CODEX_CLI_REASONING_EFFORT,
-  };
-}
-
 /** Parse a numeric env var, falling back when unset/non-numeric. A bare
  *  `Number(x)` yields NaN for a typo'd value, and NaN silently defeats every
  *  comparison it touches (`i >= NaN` is always false → infinite retry loop). */
@@ -136,6 +140,74 @@ function finiteEnv(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === '') return fallback;
   const n = Number(raw);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function waitForCodexRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new ReviewCancelledError('codex-cli review cancelled'));
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new ReviewCancelledError('codex-cli review cancelled'));
+    };
+    timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+/**
+ * Detect a Codex CLI diagnostic that announces a model substitution. The CLI
+ * has historically accepted an unsupported requested model and silently moved
+ * to a costlier one; Orvex must fail closed instead of paying for that run.
+ */
+export function codexAnnouncedModelFallback(output: string): boolean {
+  const compact = output.replace(/\s+/g, ' ');
+  return (
+    /(?:model\s+)?[\w.-]+\s+(?:is\s+)?not supported.{0,160}\bfalling back to\b/i.test(compact)
+    || /\bfalling back to\s+(?:model\s+)?(?:gpt-|codex-|o[1-9](?:\b|-))/i.test(compact)
+  );
+}
+
+export function resolveCodexTimeouts(env: NodeJS.ProcessEnv = process.env): {
+  hardMs: number;
+  inactivityMs: number;
+} {
+  const hardMs = Math.min(
+    900_000,
+    Math.max(60_000, finiteEnv(env.ORVEX_CODEX_TIMEOUT_MS, 480_000)),
+  );
+  const inactivityMs = Math.min(
+    hardMs,
+    Math.max(30_000, finiteEnv(env.ORVEX_CODEX_INACTIVITY_TIMEOUT_MS, 180_000)),
+  );
+  return { hardMs, inactivityMs };
+}
+
+export function resolveCodexRateLimitPolicy(env: NodeJS.ProcessEnv = process.env): {
+  maxAttempts: number;
+  maxWaitMs: number;
+  totalWaitBudgetMs: number;
+} {
+  // At most one retry, and at most one minute waiting in total. A rate-limited
+  // agentic run may already have consumed tokens before the CLI exits; allowing
+  // four full restarts created both tail-latency spikes and surprise spend.
+  const maxAttempts = Math.min(
+    2,
+    Math.max(1, Math.floor(finiteEnv(env.ORVEX_RATELIMIT_MAX_RETRIES, 2))),
+  );
+  const maxWaitMs = Math.min(
+    60_000,
+    Math.max(1_000, finiteEnv(env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS, 60_000)),
+  );
+  const totalWaitBudgetMs = Math.min(
+    60_000,
+    Math.max(5_000, finiteEnv(env.ORVEX_CODEX_RATELIMIT_TOTAL_WAIT_MS, 60_000)),
+  );
+  return { maxAttempts, maxWaitMs, totalWaitBudgetMs };
 }
 
 /** Live codex children, so a worker shutdown can kill them. `detached: true`
@@ -174,16 +246,24 @@ export function killAllCodexChildren(): number {
   return killed;
 }
 
+export function resolveCodexBinary(
+  cwd = process.cwd(),
+  _configuredPath = process.env.ORVEX_CODEX_CLI_PATH,
+  exists: (candidate: string) => boolean = fs.existsSync,
+): string {
+  // The root package pins a known Luna-compatible CLI. Fail closed if that exact
+  // dependency is absent: a global/configured binary may be a different version
+  // and has previously substituted a much more expensive model.
+  const local = path.join(cwd, 'node_modules', '.bin', 'codex');
+  if (exists(local)) return local;
+  throw new Error(`pinned Codex CLI is missing at ${local}; refusing unpinned fallback binary`);
+}
+
 function codexBinary(): string {
-  return process.env.ORVEX_CODEX_CLI_PATH ?? 'codex';
+  return resolveCodexBinary();
 }
 
 function shellEnv(codexHome?: string, homeIdx?: number): NodeJS.ProcessEnv {
-  // Ensure the codex binary is discoverable if it was installed into a user npm
-  // prefix (e.g. ~/.npm-global/bin) and the worker isn't started via a login shell.
-  const extra = process.env.ORVEX_CODEX_CLI_PATH
-    ? path.dirname(process.env.ORVEX_CODEX_CLI_PATH)
-    : `${os.homedir()}/.npm-global/bin`;
   // MINIMAL, ALLOWLISTED env — NOT `{ ...process.env }`. codex runs untrusted PR
   // code as an agent with shell access; inheriting the full server env would hand
   // it every secret (Stripe key, GitHub App private key, all LLM keys, DB path).
@@ -193,7 +273,7 @@ function shellEnv(codexHome?: string, homeIdx?: number): NodeJS.ProcessEnv {
     'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TMPDIR', 'SHELL',
     'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
   ];
-  const env: NodeJS.ProcessEnv = { PATH: `${extra}${path.delimiter}${process.env.PATH ?? ''}` };
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '' };
   for (const k of ALLOWED_ENV) if (process.env[k] !== undefined) env[k] = process.env[k];
   // ISOLATE the reviewer's OAuth: use a DEDICATED CODEX_HOME so interactive codex
   // sessions / other agents on the same box can't rotate & revoke the server's
@@ -227,7 +307,12 @@ export type CodexAuthMode = 'apikey' | 'oauth' | 'unknown';
  */
 export class CountingSemaphore {
   private active = 0;
-  private readonly waiters: Array<() => void> = [];
+  private readonly waiters: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+    signal?: AbortSignal;
+    onAbort?: () => void;
+  }> = [];
 
   constructor(private limit: number) {
     this.limit = Math.max(1, Math.floor(limit));
@@ -241,32 +326,52 @@ export class CountingSemaphore {
     return this.active;
   }
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
-    await this.acquire();
+  async run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    await this.acquire(signal);
     try {
+      if (signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
       return await fn();
     } finally {
       this.release();
     }
   }
 
-  private acquire(): Promise<void> {
+  private acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new ReviewCancelledError('codex-cli review cancelled'));
     if (this.active < this.limit) {
       this.active++;
       return Promise.resolve();
     }
-    return new Promise<void>((resolve) => {
-      this.waiters.push(() => {
-        this.active++;
-        resolve();
-      });
+    return new Promise<void>((resolve, reject) => {
+      const waiter = { resolve, reject, signal, onAbort: undefined as (() => void) | undefined };
+      if (signal) {
+        waiter.onAbort = () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          signal.removeEventListener('abort', waiter.onAbort!);
+          reject(new ReviewCancelledError('codex-cli review cancelled'));
+        };
+        signal.addEventListener('abort', waiter.onAbort, { once: true });
+      }
+      this.waiters.push(waiter);
+      if (signal?.aborted) waiter.onAbort?.();
     });
   }
 
   private release(): void {
     this.active = Math.max(0, this.active - 1);
-    const next = this.waiters.shift();
-    if (next) next();
+    for (;;) {
+      const next = this.waiters.shift();
+      if (!next) return;
+      if (next.signal && next.onAbort) next.signal.removeEventListener('abort', next.onAbort);
+      if (next.signal?.aborted) {
+        next.reject(new ReviewCancelledError('codex-cli review cancelled'));
+        continue;
+      }
+      this.active++;
+      next.resolve();
+      return;
+    }
   }
 }
 
@@ -276,12 +381,10 @@ export class CountingSemaphore {
  */
 export function resolveCodexHomeConcurrency(mode: CodexAuthMode): number {
   if (mode !== 'apikey') return 1;
-  const explicit = process.env.ORVEX_CODEX_APIKEY_CONCURRENCY;
-  if (explicit !== undefined && explicit.trim() !== '') {
-    return Math.max(1, Math.min(32, Math.floor(finiteEnv(explicit, 1))));
-  }
-  // Match review worker slots so Codex is not the serial bottleneck.
-  return Math.max(1, Math.min(32, Math.floor(finiteEnv(process.env.ORVEX_MAX_CONCURRENT_REVIEWS, 4))));
+  // A single agentic Luna process can consume most of an account's TPM itself.
+  // Parallel reviews previously stampeded the same key, then all entered long
+  // reconnect loops. Keep this code-level cap immune to stale immutable env.
+  return 1;
 }
 
 /**
@@ -293,9 +396,8 @@ export function resolveCodexHomeConcurrency(mode: CodexAuthMode): number {
  * Concurrency rules:
  * - **OAuth / ChatGPT homes stay SERIAL (1)** — concurrent refreshes of one
  *   auth.json race and revoke each other. Scale OAuth by adding more homes.
- * - **API-key homes allow N parallel Codex CLI processes** on the same home
- *   (`ORVEX_CODEX_APIKEY_CONCURRENCY`, defaulting to
- *   `ORVEX_MAX_CONCURRENT_REVIEWS`). No refresh-token race.
+ * - **API-key homes stay SERIAL (1)** so parallel agentic runs cannot stampede
+ *   one key's TPM. This is deliberately not configurable from the live env.
  * - A PR's session sticks to the home that created it (rollouts live in that
  *   home); the stored thread ref encodes the home as "hN:<threadId>".
  * - A home whose auth fails is benched for 15 minutes and the call fails
@@ -387,13 +489,18 @@ function ensureHomeSlot(idx: number): CountingSemaphore {
 function pickHome(preferred?: number): number {
   const now = Date.now();
   // Session affinity wins over balance: resuming a thread REQUIRES its own home.
-  if (preferred !== undefined && preferred < CODEX_HOME_POOL.length && homeDeadUntil[preferred] <= now) {
+  if (
+    preferred !== undefined
+    && preferred < CODEX_HOME_POOL.length
+    && homeDeadUntil[preferred] <= now
+    && detectCodexAuthMode(CODEX_HOME_POOL[preferred]) === 'apikey'
+  ) {
     return preferred;
   }
   let best = 0;
   let bestScore = Infinity;
   for (let i = 0; i < CODEX_HOME_POOL.length; i++) {
-    const dead = homeDeadUntil[i] > now;
+    const dead = homeDeadUntil[i] > now || detectCodexAuthMode(CODEX_HOME_POOL[i]) !== 'apikey';
     const score = (dead ? 1000 : 0) + homeBusy[i];
     if (score < bestScore) {
       bestScore = score;
@@ -407,11 +514,11 @@ function pickHome(preferred?: number): number {
  * Acquire a Codex home slot then run `fn`.
  * API-key homes: up to N concurrent. OAuth/unknown: serial (N=1).
  */
-function withHomeLock<T>(idx: number, fn: () => Promise<T>): Promise<T> {
+function withHomeLock<T>(idx: number, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
   const gate = ensureHomeSlot(idx);
   homeBusy[idx]++;
   return gate
-    .run(fn)
+    .run(fn, signal)
     .finally(() => {
       homeBusy[idx]--;
     });
@@ -612,17 +719,90 @@ async function runCodexExec(
       tokenSource?: 'provider' | 'estimate';
       model?: string;
       provider?: string;
+      attemptId?: string;
     }) => void;
+    onAttempt?: (event: LlmAttemptEvent) => void;
+    attemptState?: { lastAttemptId?: string; nextRetryIndex: number };
+    /** Internal process-lifecycle test seam; production never supplies these. */
+    binaryPath?: string;
+    testTimeouts?: { hardMs: number; inactivityMs: number };
+    testEnv?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
   },
 ): Promise<{ text: string; threadId: string }> {
+  if (opts.signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
   const homeIdx = opts.homeIdx ?? 0;
+  const execute = () => {
+    const attemptId = randomUUID();
+    const started = Date.now();
+    const retryIndex = opts.attemptState?.nextRetryIndex ?? 0;
+    const parentAttemptId = opts.attemptState?.lastAttemptId;
+    if (opts.attemptState) {
+      opts.attemptState.lastAttemptId = attemptId;
+      opts.attemptState.nextRetryIndex += 1;
+    }
+    opts.onAttempt?.({
+      phase: 'started',
+      attemptId,
+      parentAttemptId,
+      retryIndex,
+      keyIndex: homeIdx,
+      provider: 'codex-cli',
+      model: opts.model,
+      transport: 'codex-cli',
+      startedAt: new Date(started).toISOString(),
+    });
+    return withProviderCallSlot(
+      'luna',
+      () => runCodexExecInner(prompt, {
+        ...opts,
+        onUsage: opts.onUsage
+          ? (usage) => opts.onUsage?.({ ...usage, attemptId })
+          : undefined,
+      }),
+      opts.signal,
+    ).then(
+      (result) => {
+        opts.onAttempt?.({
+          phase: 'finished',
+          attemptId,
+          outcome: 'succeeded',
+          durationMs: Date.now() - started,
+          completedAt: new Date().toISOString(),
+        });
+        return result;
+      },
+      (error) => {
+        const message = (error as Error)?.message ?? String(error);
+        const outcome = error instanceof ReviewCancelledError
+          ? 'cancelled'
+          : /wall-clock cap|timed?\s*out|produced no output/i.test(message)
+            ? 'timed_out'
+            : isRetryableRateLimit(message)
+              ? 'rate_limited'
+              : 'failed';
+        opts.onAttempt?.({
+          phase: 'finished',
+          attemptId,
+          outcome,
+          durationMs: Date.now() - started,
+          completedAt: new Date().toISOString(),
+          error: message.slice(0, 2_000),
+        });
+        throw error;
+      },
+    );
+  };
   // Serialize concurrent resumes of the SAME thread OUTSIDE the home lock so
   // waiters do not consume CountingSemaphore slots while queued on the chain.
   // The home lock is acquired only for the actual exec.
   if (opts.threadId) {
     const key = `${homeIdx}:${opts.threadId}:${opts.model}`;
     const prior = codexResumeChains.get(key) ?? Promise.resolve();
-    const run = prior.then(() => withHomeLock(homeIdx, () => runCodexExecInner(prompt, opts)));
+    const run = prior.then(() => {
+      if (opts.signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
+      return withHomeLock(homeIdx, execute, opts.signal);
+    });
     // Store a settled-proof handle as the chain link so one rejection doesn't
     // poison the next resume.
     const link = run.catch(() => {});
@@ -635,7 +815,7 @@ async function runCodexExec(
       if (codexResumeChains.get(key) === link) codexResumeChains.delete(key);
     }
   }
-  return withHomeLock(homeIdx, () => runCodexExecInner(prompt, opts));
+  return withHomeLock(homeIdx, execute, opts.signal);
 }
 
 async function runCodexExecInner(
@@ -653,9 +833,15 @@ async function runCodexExecInner(
       tokenSource?: 'provider' | 'estimate';
       model?: string;
       provider?: string;
+      attemptId?: string;
     }) => void;
+    binaryPath?: string;
+    testTimeouts?: { hardMs: number; inactivityMs: number };
+    testEnv?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
   },
 ): Promise<{ text: string; threadId: string }> {
+  if (opts.signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-codex-'));
   const lastMsgFile = path.join(tmpDir, 'last-message.txt');
 
@@ -691,8 +877,8 @@ async function runCodexExecInner(
   args.push('-');
 
   return new Promise((resolve, reject) => {
-    const child = spawn(codexBinary(), args, {
-      env: shellEnv(opts.home, opts.homeIdx),
+    const child = spawn(opts.binaryPath ?? codexBinary(), args, {
+      env: opts.testEnv ?? shellEnv(opts.home, opts.homeIdx),
       cwd: tmpDir,
       stdio: ['pipe', 'pipe', 'pipe'],
       // Own process group, so the timeout below can kill codex AND any
@@ -710,15 +896,27 @@ async function runCodexExecInner(
     // itself rather than trusting `close` to arrive.
     // Cap hung/agentic stalls. Successful Luna calls usually finish in 1–3 min;
     // the old 30m default let dead Cloudflare streams burn a full review slot.
-    const hardMs = Math.max(60_000, finiteEnv(process.env.ORVEX_CODEX_TIMEOUT_MS, 480_000));
+    const { hardMs, inactivityMs } = opts.testTimeouts ?? resolveCodexTimeouts();
     let settled = false;
+    let cleaned = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+    const onCancel = () => {
+      killProcessGroup();
+      finish(() => {
+        cleanup();
+        reject(new ReviewCancelledError('codex-cli review cancelled'));
+      });
+    };
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
-      clearTimeout(killTimer);
+      if (killTimer) clearTimeout(killTimer);
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      opts.signal?.removeEventListener('abort', onCancel);
       fn();
     };
-    const killTimer = setTimeout(() => {
+    const killProcessGroup = () => {
       try {
         process.kill(-child.pid!, 'SIGKILL'); // whole group
       } catch {
@@ -728,11 +926,32 @@ async function runCodexExecInner(
           /* already gone */
         }
       }
+    };
+    const rejectForTimeout = (message: string) => {
+      killProcessGroup();
       finish(() => {
         cleanup();
-        reject(new Error(`codex-cli exceeded ${hardMs}ms wall-clock cap`));
+        reject(new Error(message));
       });
+    };
+    const rejectForModelFallback = () => {
+      killProcessGroup();
+      finish(() => {
+        cleanup();
+        reject(new Error(`codex-cli refused model substitution; required model is ${opts.model}`));
+      });
+    };
+    const armInactivityTimer = () => {
+      if (settled) return;
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        rejectForTimeout(`codex-cli produced no output for ${inactivityMs}ms`);
+      }, inactivityMs);
+    };
+    killTimer = setTimeout(() => {
+      rejectForTimeout(`codex-cli exceeded ${hardMs}ms wall-clock cap`);
     }, hardMs);
+    armInactivityTimer();
 
     if (child.pid !== undefined) {
       liveCodexChildren.add(child.pid);
@@ -742,6 +961,11 @@ async function runCodexExecInner(
         console.warn('[codex-cli] child spawn listener failed:', (err as Error).message);
       }
     }
+    opts.signal?.addEventListener('abort', onCancel, { once: true });
+    if (opts.signal?.aborted) {
+      onCancel();
+      return;
+    }
 
     let stdout = '';
     let stderr = '';
@@ -750,10 +974,18 @@ async function runCodexExecInner(
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
+      armInactivityTimer();
       stdout = appendCapped(stdout, chunk, MAX_CODEX_STDOUT_CHARS);
+      if (codexAnnouncedModelFallback(stdout)) {
+        rejectForModelFallback();
+      }
     });
     child.stderr.on('data', (chunk) => {
+      armInactivityTimer();
       stderr = appendCapped(stderr, chunk, MAX_CODEX_STDERR_CHARS);
+      if (codexAnnouncedModelFallback(stderr)) {
+        rejectForModelFallback();
+      }
     });
 
     child.stdin.on('error', (err) => {
@@ -773,6 +1005,7 @@ async function runCodexExecInner(
     });
 
     child.on('close', (code) => {
+      if (settled) return;
       try {
         const threadId = extractThreadId(stdout);
         const text = readLastMessage(lastMsgFile);
@@ -867,6 +1100,8 @@ async function runCodexExecInner(
     });
 
     function cleanup() {
+      if (cleaned) return;
+      cleaned = true;
       if (child.pid !== undefined) {
         liveCodexChildren.delete(child.pid);
         try {
@@ -881,6 +1116,34 @@ async function runCodexExecInner(
         /* best effort */
       }
     }
+  });
+}
+
+/** Execute the real child-process lifecycle with a fixture binary. This narrow
+ * test seam is intentionally separate from runCodexCliReview, so production
+ * model/auth/binary pinning cannot be overridden by callers. */
+export function runCodexExecForTest(
+  prompt: string,
+  opts: {
+    binaryPath: string;
+    model?: string;
+    reasoningEffort?: string;
+    signal?: AbortSignal;
+    hardMs?: number;
+    inactivityMs?: number;
+    env?: NodeJS.ProcessEnv;
+  },
+): Promise<{ text: string; threadId: string }> {
+  return runCodexExecInner(prompt, {
+    model: opts.model ?? DEFAULT_CODEX_CLI_MODEL,
+    reasoningEffort: opts.reasoningEffort ?? DEFAULT_CODEX_CLI_REASONING_EFFORT,
+    signal: opts.signal,
+    binaryPath: opts.binaryPath,
+    testTimeouts: {
+      hardMs: opts.hardMs ?? 2_000,
+      inactivityMs: opts.inactivityMs ?? 1_000,
+    },
+    testEnv: opts.env ?? process.env,
   });
 }
 
@@ -963,10 +1226,6 @@ function extractErrorMessage(stdout: string, stderr: string): string | undefined
   return combined;
 }
 
-function isUnsupportedModelError(message: string): boolean {
-  return /not supported|unsupported model|model not found/i.test(message);
-}
-
 function isStaleThreadError(message: string): boolean {
   return /no rollout found for thread|thread\/resume failed|thread not found|unknown thread/i.test(message);
 }
@@ -993,11 +1252,15 @@ export async function runCodexCliReview(
 
   let promptMode: CodexPromptMode = opts.promptMode ?? (cwd ? 'lean' : 'full');
   let prompt = buildCodexPrompt(files, opts.context, { hasRepoCheckout: Boolean(cwd), mode: promptMode });
-  const model = opts.model ?? defaultModel();
+  // The agentic product stage is Luna. Do not accept a caller/env substitute:
+  // unsupported Luna must fail closed instead of launching a costlier model.
+  const model = DEFAULT_CODEX_CLI_MODEL;
+  const effort = DEFAULT_CODEX_CLI_REASONING_EFFORT;
+  const attemptState = { lastAttemptId: undefined as string | undefined, nextRetryIndex: 0 };
 
-  const effort = opts.reasoningEffort ?? (process.env.ORVEX_CODEX_CLI_REASONING_EFFORT?.trim() || DEFAULT_CODEX_CLI_REASONING_EFFORT);
-
-  // One full attempt on a given home: exec + stale-thread retry + model fallback.
+  // One full attempt on a given home: exec + stale-thread retry. Model identity
+  // is fail-closed: a rejected Luna request must never launch a different,
+  // unexpectedly expensive model.
   // Home locking lives inside runCodexExec (after resume-chain wait) so retries
   // and rate-limit sleeps never hold a CountingSemaphore slot.
   const attemptOnHome = async (
@@ -1005,6 +1268,12 @@ export async function runCodexCliReview(
     threadId: string | undefined,
   ): Promise<{ text: string; threadId: string }> => {
     const home = CODEX_HOME_POOL[homeIdx];
+    const authMode = detectCodexAuthMode(home);
+    if (authMode !== 'apikey') {
+      throw new Error(
+        `codex-cli Luna requires API-key authentication; home ${homeIdx + 1} reports ${authMode}`,
+      );
+    }
     try {
       return await runCodexExec(prompt, {
         model,
@@ -1014,6 +1283,9 @@ export async function runCodexCliReview(
         home,
         homeIdx,
         onUsage: opts.onUsage,
+        onAttempt: opts.onAttempt,
+        attemptState,
+        signal: opts.signal,
       });
     } catch (err) {
       const msg = (err as Error).message;
@@ -1021,21 +1293,16 @@ export async function runCodexCliReview(
       // rather than failing the whole review.
       if (isStaleThreadError(msg) && threadId) {
         console.warn(`[codex-cli] thread ${threadId} not resumable, starting a new session`);
-        return runCodexExec(prompt, { model, reasoningEffort: effort, cwd, home, homeIdx, onUsage: opts.onUsage });
-      }
-      if (isUnsupportedModelError(msg) && model !== fallbackModel().model) {
-        // Auto-fallback if the desired model isn't available on this Codex account —
-        // keep the SAME (high) effort, don't silently drop to medium.
-        const fb = fallbackModel();
-        console.warn(`[codex-cli] ${model} not supported, falling back to ${fb.model} ${fb.reasoningEffort}`);
         return runCodexExec(prompt, {
-          model: fb.model,
-          reasoningEffort: fb.reasoningEffort ?? effort,
-          threadId,
+          model,
+          reasoningEffort: effort,
           cwd,
           home,
           homeIdx,
           onUsage: opts.onUsage,
+          onAttempt: opts.onAttempt,
+          attemptState,
+          signal: opts.signal,
         });
       }
       throw err;
@@ -1052,21 +1319,10 @@ export async function runCodexCliReview(
     hIdx: number,
     tId: string | undefined,
   ): Promise<{ text: string; threadId: string }> => {
-    const maxRetries = Math.min(10, Math.max(1, Math.floor(finiteEnv(process.env.ORVEX_RATELIMIT_MAX_RETRIES, 4))));
-    const maxWaitMs = Math.min(
-      300_000,
-      Math.max(1_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS, 90_000)),
-    );
-    // Total sleep budget for this review's codex pass. llmChat got one; this loop
-    // did not, yet each attempt here re-runs a FULL agentic pass (~30 min cap), so
-    // unbounded retrying is what actually holds a worker slot long enough to
-    // outlive the queue's 2h lease and let a second worker duplicate the review.
-    const totalWaitBudgetMs = Math.min(
-      900_000,
-      Math.max(5_000, finiteEnv(process.env.ORVEX_CODEX_RATELIMIT_TOTAL_WAIT_MS, 180_000)),
-    );
+    const { maxAttempts, maxWaitMs, totalWaitBudgetMs } = resolveCodexRateLimitPolicy();
     let sleptMs = 0;
     for (let i = 0; ; i++) {
+      if (opts.signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
       try {
         return await attemptOnHome(hIdx, tId);
       } catch (err) {
@@ -1080,7 +1336,7 @@ export async function runCodexCliReview(
           );
           throw err;
         }
-        if (i >= maxRetries - 1 || !isRetryableRateLimit(msg)) throw err;
+        if (i >= maxAttempts - 1 || !isRetryableRateLimit(msg)) throw err;
         // Honor the provider's advertised delay; otherwise back off toward the
         // ~1-minute TPM window. Jitter keeps concurrent passes from colliding.
         const advertised = parseRetryAfterMs(msg);
@@ -1103,11 +1359,12 @@ export async function runCodexCliReview(
           throw err;
         }
         sleptMs += waitMs;
+        await setProviderCooldown('luna', waitMs);
         console.warn(
           `[codex-cli] rate-limited — holding ${Math.round(waitMs / 1000)}s then retrying ` +
-            `(attempt ${i + 1}/${maxRetries}): ${msg.slice(0, 120)}`,
+            `(attempt ${i + 1}/${maxAttempts}): ${msg.slice(0, 120)}`,
         );
-        await new Promise((r) => setTimeout(r, waitMs));
+        await waitForCodexRetry(waitMs, opts.signal);
       }
     }
   };
@@ -1120,6 +1377,7 @@ export async function runCodexCliReview(
 
   let result: { text: string; threadId: string } | undefined;
   for (let attempts = 0; ; attempts++) {
+    if (opts.signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
     try {
       result = await attemptWithRateLimitRetry(homeIdx, threadId);
       break;

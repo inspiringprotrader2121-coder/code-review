@@ -6,6 +6,21 @@ function db(): AppDatabase {
   return new AppDatabase(':memory:');
 }
 
+const testTenants = new WeakMap<AppDatabase, Map<string, string>>();
+function tenantFor(d: AppDatabase, label = 'default'): string {
+  let tenants = testTenants.get(d);
+  if (!tenants) {
+    tenants = new Map();
+    testTenants.set(d, tenants);
+  }
+  let id = tenants.get(label);
+  if (!id) {
+    id = d.createTenant(`trial-${label}-${Math.random()}`).id;
+    tenants.set(label, id);
+  }
+  return id;
+}
+
 function addReview(
   d: AppDatabase,
   opts: {
@@ -16,7 +31,7 @@ function addReview(
   },
 ): void {
   d.recordReviewRun({
-    tenantId: opts.tenantId ?? 't1',
+    tenantId: tenantFor(d, opts.tenantId),
     installationId: 1,
     owner: opts.owner,
     repo: 'r',
@@ -57,8 +72,9 @@ test('pruneEphemeralData never deletes failed rows (lifetime trial anti-farm)', 
 
 test('pruning skipped runs also removes their usage ledger rows', () => {
   const d = db();
+  const tenantId = tenantFor(d);
   const run = d.recordReviewRun({
-    tenantId: 't1',
+    tenantId,
     installationId: 1,
     owner: 'alice',
     repo: 'r',
@@ -70,7 +86,7 @@ test('pruning skipped runs also removes their usage ledger rows', () => {
   });
   d.recordReviewRunUsage({
     runId: run.id,
-    tenantId: 't1',
+    tenantId,
     provider: 'test',
     model: 'test',
     tier: 'standard',
@@ -106,15 +122,15 @@ test('trial is anchored to the GitHub account, not the workspace — a second wo
 test('countGlobalFreeTierReviewsSince counts only free-tier reviews across all accounts', () => {
   const d = db();
   // free-tier reviews from several accounts (a farm)
-  d.recordReviewRun({ tenantId: 't1', installationId: 1, owner: 'farm1', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: true });
-  d.recordReviewRun({ tenantId: 't2', installationId: 2, owner: 'farm2', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'running', durationMs: 100, freeTier: true });
-  d.recordReviewRun({ tenantId: 't3', installationId: 3, owner: 'farm3', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: true });
+  d.recordReviewRun({ tenantId: tenantFor(d, 't1'), installationId: 1, owner: 'farm1', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: true });
+  d.recordReviewRun({ tenantId: tenantFor(d, 't2'), installationId: 2, owner: 'farm2', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'running', durationMs: 100, freeTier: true });
+  d.recordReviewRun({ tenantId: tenantFor(d, 't3'), installationId: 3, owner: 'farm3', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: true });
   // a PAID review must NOT count toward the free-tier cap
-  d.recordReviewRun({ tenantId: 'p1', installationId: 9, owner: 'paying', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: false });
+  d.recordReviewRun({ tenantId: tenantFor(d, 'p1'), installationId: 9, owner: 'paying', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'completed', durationMs: 100, freeTier: false });
   // a free-tier FIX / skipped run must NOT count
-  d.recordReviewRun({ tenantId: 't4', installationId: 4, owner: 'farm4', repo: 'r', pr: 1, headSha: 's', action: 'fix:ready', status: 'completed', durationMs: 100, freeTier: true });
-  d.recordReviewRun({ tenantId: 't5', installationId: 5, owner: 'farm5', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'skipped', durationMs: 0, freeTier: true });
-  d.recordReviewRun({ tenantId: 't6', installationId: 6, owner: 'farm6', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'failed', durationMs: 100, freeTier: true });
+  d.recordReviewRun({ tenantId: tenantFor(d, 't4'), installationId: 4, owner: 'farm4', repo: 'r', pr: 1, headSha: 's', action: 'fix:ready', status: 'completed', durationMs: 100, freeTier: true });
+  d.recordReviewRun({ tenantId: tenantFor(d, 't5'), installationId: 5, owner: 'farm5', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'skipped', durationMs: 0, freeTier: true });
+  d.recordReviewRun({ tenantId: tenantFor(d, 't6'), installationId: 6, owner: 'farm6', repo: 'r', pr: 1, headSha: 's', action: 'opened', status: 'failed', durationMs: 100, freeTier: true });
   assert.equal(d.countGlobalFreeTierReviewsSince(24 * 3600_000), 4, 'counts running+completed+failed free-tier reviews');
 });
 

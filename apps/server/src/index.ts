@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { serve } from '@hono/node-server';
 import { createReviewQueue } from '@orvex-review/queue';
+import { configureLlmProviderCoordinator, type LlmProviderCoordinator } from '@orvex-review/review';
 import { createAppDatabase } from '@orvex-review/store';
 import { authDisabled, legacyAuthMode } from '@orvex-review/tenants';
 import { createApp } from './app.js';
@@ -50,15 +51,14 @@ const tempCleanupTimer = setInterval(() => {
   }
 }, 24 * 3_600_000);
 tempCleanupTimer.unref();
-// Sole-worker boot (single PM2 process): mark ALL local 'running' rows interrupted
-// so resumeReviewRun can reopen them and the dashboard doesn't show a stuck
-// spinner. Multi-worker rolling restarts may set ORVEX_RUNNING_STALE_MS to a
-// positive grace so a peer's fresh work is not interrupted mid-flight.
-const configuredStaleRunMs = Number(process.env.ORVEX_RUNNING_STALE_MS ?? 0);
+// Only interrupt rows whose durable heartbeat is stale. The positive default is
+// mandatory even on today's one-process PM2 setup so adding a second process or
+// doing a rolling restart cannot invalidate a peer's live database row.
+const configuredStaleRunMs = Number(process.env.ORVEX_RUNNING_STALE_MS ?? 15 * 60_000);
 const staleRunMs =
-  Number.isFinite(configuredStaleRunMs) && configuredStaleRunMs >= 0
+  Number.isFinite(configuredStaleRunMs) && configuredStaleRunMs >= 60_000
     ? Math.min(Math.floor(configuredStaleRunMs), 24 * 3_600_000)
-    : 0;
+    : 15 * 60_000;
 const staleRuns = bootDb.failStaleRunningRuns({ staleAfterMs: staleRunMs });
 if (staleRuns > 0) console.log(`[server] cleared ${staleRuns} stale 'running' review row(s)`);
 
@@ -87,6 +87,14 @@ const meterRetryTimer = setInterval(() => {
 meterRetryTimer.unref();
 
 const queue = createReviewQueue();
+if (
+  queue.acquireProviderLease
+  && queue.releaseProviderLease
+  && queue.getProviderCooldownMs
+  && queue.setProviderCooldown
+) {
+  configureLlmProviderCoordinator(queue as LlmProviderCoordinator);
+}
 const app = createApp(queue);
 
 // Startup recovery BEFORE the worker starts: clear stale in-flight locks and

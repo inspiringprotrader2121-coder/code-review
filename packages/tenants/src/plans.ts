@@ -82,7 +82,7 @@ export interface PlanFeatures {
    * Which LLM(s) run the review:
    * - 'dual-model' — MiniMax (general) + DeepSeek v4 Flash (deep-dive); Flash verify.
    *   Free / Starter / Pro. Two discovery passes.
-   * - 'multi-model' — Luna/Codex + Flash + Flash/Pro lens + MiniMax; Flash verify.
+   * - 'multi-model' — Luna/Codex + Flash + Flash + MiniMax; Flash verify.
    *   Verify Lite / Verify / Enterprise. Four discovery passes.
    * - 'codex-hybrid' — Codex/Luna general, MiniMax thereafter (legacy hybrid).
    * - 'standard' — MiniMax on every pass. 'premium' — GLM on every pass.
@@ -94,11 +94,10 @@ export interface PlanFeatures {
 }
 
 /**
- * Cost model. Every tier now does ONE focused review call (diff + neighborhood +
- * top-K retrieved context) plus a cheap adversarial verification pass — like
- * CodeRabbit/Greptile, NOT a 28-call whole-repo sweep. Real cost is roughly
- * $0.05–$0.20/review (a few cents), a few minutes each — versus the old ~$3 /
- * 25-minute whole-repo sweep that cost more AND reviewed worse (diluted focus).
+ * Cost model. Entry plans run two focused discovery stages; higher tiers run
+ * four. A separate Flash verifier checks the merged candidates. Optional deep,
+ * aggregation, investigate, and risk-hunt work is excluded unless explicitly
+ * enabled. Hard per-review/provider caps prevent runaway calls.
  *
  * The per-hour/month numbers below are generous SAFETY ceilings (runaway
  * protection), not usage targets — a real team never approaches them. Adjust
@@ -114,8 +113,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   //     MiniMax (general) + DeepSeek v4 Flash (deep-dive) + Flash verify.
   //     No investigate — cost-bounded trial/entry track.
   //   multi-model (Verify Lite / Verify / Enterprise) → four discovery passes
-  //     (Luna + Flash + Flash/Pro lens + MiniMax) + Flash verify (+ Codex /
-  //     investigate when enabled) — the full precision track.
+  //     (Luna/Codex + Flash + Flash + MiniMax) + Flash verify. Diagnostic bonus
+  //     passes are opt-in and are not part of the normal plan contract.
   //
   // ONE deliberate exception: nightlyScans. Unlike every other feature here,
   // scheduled whole-repo scans are NOT counted against trialReviewLimit or any
@@ -223,10 +222,9 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     // multi-model full track (~5 model calls) on EVERY PR:
     //   pass 1 — Luna / Codex CLI (general)
     //   pass 2 — DeepSeek v4 Flash (deep-dive)
-    //   pass 3 — DeepSeek v4 Flash (removed-behavior/callers; Pro via env)
+    //   pass 3 — DeepSeek v4 Flash (removed-behavior/callers)
     //   pass 4 — MiniMax (perf / completeness / API-contract)
     //   then ONE strict verification on DeepSeek v4 Flash (when candidates exist)
-    // (+ sandboxed investigate when Codex isn't already agentic)
     // $99/mo — 120 reviews included, then prepaid overage at $0.75/review up to
     // a 1000/mo hard safety ceiling at 10/hour.
     reviewPasses: 4,

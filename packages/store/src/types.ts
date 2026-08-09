@@ -145,9 +145,43 @@ export interface ReviewRun {
   findingsNew: number;
   findingsFixed: number;
   findingsOpen: number;
+  inputTokens: number;
+  outputTokens: number;
   costUsd: number;
   deep: boolean;
+  freeTier: boolean;
+  newFindings?: Array<{ severity: string; file: string; line?: number }>;
+  workerId?: string;
+  heartbeatAt?: string;
+  completedAt?: string;
   createdAt: string;
+}
+
+export type ReviewRunAttemptOutcome =
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'timed_out'
+  | 'cancelled'
+  | 'rate_limited';
+
+export interface ReviewRunAttempt {
+  id: string;
+  runId: string;
+  tenantId: string;
+  parentAttemptId?: string;
+  provider: string;
+  model: string;
+  tier: string;
+  passName?: string;
+  transport: 'responses' | 'chat' | 'anthropic' | 'codex-cli';
+  retryIndex: number;
+  keyIndex: number;
+  outcome: ReviewRunAttemptOutcome;
+  error?: string;
+  durationMs: number;
+  startedAt: string;
+  completedAt?: string;
 }
 
 export type UsageTokenSource = 'provider' | 'estimate' | 'unknown';

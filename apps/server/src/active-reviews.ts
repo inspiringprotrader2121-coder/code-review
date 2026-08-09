@@ -19,6 +19,9 @@ export interface ActiveReviewEntry {
   startedAtMs: number;
   checkoutDirs: Set<string>;
   childPids: Set<number>;
+  /** Per-review cancellation. Never use the global Codex shutdown kill for a
+   *  PR lifecycle event because that would terminate other tenants' reviews. */
+  abortController: AbortController;
 }
 
 export interface ActiveReviewSample {
@@ -94,6 +97,7 @@ export function runWithActiveReview<T>(job: ReviewJobPayload, fn: () => Promise<
     startedAtMs: Date.now(),
     checkoutDirs: new Set(),
     childPids: new Set(),
+    abortController: new AbortController(),
   };
   entries.set(id, entry);
   return als.run(id, async () => {
@@ -103,6 +107,40 @@ export function runWithActiveReview<T>(job: ReviewJobPayload, fn: () => Promise<
       entries.delete(id);
     }
   });
+}
+
+/** Signal bound to the review currently executing in this async stack. */
+export function activeReviewSignal(): AbortSignal | undefined {
+  const id = als.getStore();
+  return id ? entries.get(id)?.abortController.signal : undefined;
+}
+
+/**
+ * Cancel only the matching in-flight review(s). The close/merge webhook uses
+ * this for immediate same-process cancellation; the pipeline's GitHub poll is
+ * retained as a process-independent fallback.
+ */
+export function cancelActiveReviewsForPr(
+  key: Pick<ReviewJobPayload, 'installationId' | 'owner' | 'repo' | 'pr'>,
+  reason = 'pr_closed_mid_run',
+): number {
+  let cancelled = 0;
+  for (const entry of entries.values()) {
+    const job = entry.job;
+    if (
+      (job.kind ?? 'review') !== 'review'
+      || job.installationId !== key.installationId
+      || job.pr !== key.pr
+      || job.owner.toLowerCase() !== key.owner.toLowerCase()
+      || job.repo.toLowerCase() !== key.repo.toLowerCase()
+      || entry.abortController.signal.aborted
+    ) {
+      continue;
+    }
+    entry.abortController.abort(reason);
+    cancelled++;
+  }
+  return cancelled;
 }
 
 export function noteActiveCheckoutDir(dir: string | null | undefined): void {

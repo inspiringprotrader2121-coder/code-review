@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
+  activeReviewSignal,
+  cancelActiveReviewsForPr,
   directorySizeBytes,
   getActiveReviewCount,
   noteActiveCheckoutDir,
@@ -95,4 +97,44 @@ test('concurrent reviews appear as separate client rows', async () => {
 
   const [, prs] = await Promise.all([first, second]);
   assert.deepEqual(prs, [1, 2]);
+});
+
+test('PR cancellation aborts only the matching active review and is idempotent', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const signals = new Map<number, AbortSignal>();
+  let bothReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    bothReady = resolve;
+  });
+
+  const run = (pr: number) =>
+    runWithActiveReview(job({ pr }), async () => {
+      const signal = activeReviewSignal();
+      assert.ok(signal);
+      signals.set(pr, signal);
+      if (signals.size === 2) bothReady();
+      await gate;
+    });
+
+  const first = run(11);
+  const second = run(12);
+  await ready;
+
+  assert.equal(
+    cancelActiveReviewsForPr({ installationId: 1, owner: 'ACME', repo: 'API', pr: 11 }),
+    1,
+  );
+  assert.equal(signals.get(11)?.aborted, true);
+  assert.equal(signals.get(12)?.aborted, false);
+  assert.equal(
+    cancelActiveReviewsForPr({ installationId: 1, owner: 'acme', repo: 'api', pr: 11 }),
+    0,
+    'duplicate close delivery must not count or throw',
+  );
+
+  release();
+  await Promise.all([first, second]);
 });

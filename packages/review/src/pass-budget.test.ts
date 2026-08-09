@@ -70,7 +70,7 @@ test('buildReviewPassAngles dual-model stays at general + deep-dive on small PRs
   assert.deepEqual(tags, ['general', 'deep-dive']);
 });
 
-test('buildReviewPassAngles can still opt multi-model back to conditional lenses', () => {
+test('buildReviewPassAngles cannot reduce a multi-model purchase through env drift', () => {
   process.env.ORVEX_BREADTH_ON = 'deep-or-large';
   process.env.ORVEX_REMOVED_BEHAVIOR = 'deletes-or-renames';
   try {
@@ -80,10 +80,29 @@ test('buildReviewPassAngles can still opt multi-model back to conditional lenses
       status: 'modified',
     }));
     const tags = buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag);
-    assert.deepEqual(tags, ['general', 'deep-dive']);
+    assert.deepEqual(tags, [
+      'general',
+      'deep-dive',
+      'removed-behavior/callers',
+      'perf/completeness/api',
+    ]);
   } finally {
     delete process.env.ORVEX_BREADTH_ON;
     delete process.env.ORVEX_REMOVED_BEHAVIOR;
+  }
+});
+
+test('buildReviewPassAngles keeps dual-model at two even for deep or large diffs', () => {
+  process.env.ORVEX_BREADTH_ON = 'always';
+  try {
+    const tags = buildReviewPassAngles({
+      modelTier: 'dual-model',
+      deep: true,
+      files: Array.from({ length: 100 }, (_, i) => ({ filename: `src/f${i}.ts`, patch: '+x' })),
+    }).map((a) => a.tag);
+    assert.deepEqual(tags, ['general', 'deep-dive']);
+  } finally {
+    delete process.env.ORVEX_BREADTH_ON;
   }
 });
 
