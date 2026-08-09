@@ -120,6 +120,5 @@ function waitForSlot(durationMs: number, signal?: AbortSignal): Promise<void> {
     }
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) onAbort();
-    else timer.unref?.();
   });
 }

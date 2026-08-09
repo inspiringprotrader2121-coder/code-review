@@ -167,6 +167,5 @@ function waitForAdmission(durationMs: number, signal?: AbortSignal): Promise<voi
     }
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) onAbort();
-    else timer.unref?.();
   });
 }
