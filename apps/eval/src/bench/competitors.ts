@@ -696,5 +696,7 @@ async function main() {
 
 const entrypoint = process.argv[1];
 if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
-  main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+  // Preserve process.exitCode — process.exit(0) previously overrode combine()'s
+  // exitCode=1 after overlapping PR ranges, so CI treated a refused combine as success.
+  main().then(() => process.exit(process.exitCode ?? 0)).catch((e) => { console.error(e); process.exit(1); });
 }
