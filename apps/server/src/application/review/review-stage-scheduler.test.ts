@@ -39,11 +39,10 @@ test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
     sharded[2]?.files?.map((file) => file.filename),
     ['src/file-1.ts', 'src/file-3.ts'],
   );
-  assert.deepEqual(
-    sharded[1]?.ctx.changedContents?.map((file) => file.path),
-    ['src/file-0.ts', 'src/file-2.ts', 'src/file-4.ts'],
-  );
+  assert.equal(sharded[1]?.ctx.changedContents, undefined);
+  assert.equal(sharded[2]?.ctx.changedContents, undefined);
   assert.match(sharded[2]?.ctx.extraFocus ?? '', /REQUIRED SHARD 2\/2/);
+  assert.match(sharded[2]?.ctx.extraFocus ?? '', /reserve enough output.*final JSON/);
   assert.deepEqual(
     sharded[3]?.files?.map((file) => file.filename),
     ['src/file-1.ts', 'src/file-3.ts'],

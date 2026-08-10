@@ -52,14 +52,21 @@ export interface ScheduledReviewCalls {
   aggregation: ReturnType<typeof fitReviewAggregationToBudget>;
 }
 
-function withFileShard(call: ReviewCall, shard: ChangedFile[], note: string): ReviewCall {
+function withFileShard(
+  call: ReviewCall,
+  shard: ChangedFile[],
+  note: string,
+  includeChangedSource = true,
+): ReviewCall {
   const paths = new Set(shard.map((file) => file.filename));
   return {
     ...call,
     files: shard,
     ctx: {
       ...call.ctx,
-      changedContents: call.ctx.changedContents?.filter((file) => paths.has(file.path)),
+      changedContents: includeChangedSource
+        ? call.ctx.changedContents?.filter((file) => paths.has(file.path))
+        : undefined,
       extraFocus: [call.ctx.extraFocus, note].filter(Boolean).join('\n'),
     },
   };
@@ -86,7 +93,8 @@ export function boundHighTierDiscoveryWorkloads(
       return withFileShard(
         call,
         shard,
-        `REQUIRED SHARD ${shardIndex + 1}/${repeated.length}: review every supplied diff. Other required reviewers cover the remaining changed files.`,
+        `REQUIRED SHARD ${shardIndex + 1}/${repeated.length}: review every supplied diff. Other required reviewers cover the remaining changed files. Use maximum reasoning effort, but reserve enough output for the required final JSON; a reasoning-only response is unusable. Stop exploring once the supplied shard is covered and report at most 5 concrete findings.`,
+        false,
       );
     }
 
