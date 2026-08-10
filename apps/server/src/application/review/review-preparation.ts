@@ -9,6 +9,7 @@ import {
   hasIgnoreLabel,
   shouldSkipPr,
 } from '@orvex-review/github';
+import type { DiffCoverage } from '@orvex-review/github';
 import type { ReviewJobPayload } from '@orvex-review/queue';
 import { isHighRiskDiff, reconcileFixedOnHead } from '@orvex-review/review';
 import { planFeatures } from '@orvex-review/tenants';
@@ -57,6 +58,24 @@ export interface ReviewPreparationDependencies {
     fetchFileContent: typeof fetchFileContent;
     buildRepoContext: typeof buildRepoContext;
   };
+}
+
+/**
+ * Model prompts must never be built from a partial GitHub diff. Required
+ * coverage chunks prevent prompt-size sampling, while this guard handles
+ * source boundaries such as GitHub's own file cap or an omitted patch.
+ */
+export function assertCompleteReviewInput(coverage: DiffCoverage): void {
+  if (coverage.complete) return;
+  const gaps = [
+    coverage.githubCapHit ? "GitHub's file limit" : undefined,
+    coverage.skippedByCap > 0 ? `${coverage.skippedByCap} local file-cap omission(s)` : undefined,
+    coverage.truncatedFiles > 0 ? `${coverage.truncatedFiles} truncated patch(es)` : undefined,
+    coverage.omittedPatch > 0 ? `${coverage.omittedPatch} missing patch(es)` : undefined,
+  ].filter((value): value is string => Boolean(value));
+  throw new Error(
+    `review input coverage incomplete; no model calls were made (${gaps.join(', ') || 'unknown source gap'})`,
+  );
 }
 
 /**
@@ -192,6 +211,7 @@ export class ReviewPreparation {
         `[worker] PARTIAL coverage ${owner}/${repo}#${number}: ${coverage.reviewed}/${coverage.candidates} files reviewed, ${coverage.skippedByCap} over cap, ${coverage.truncatedFiles} truncated, ${coverage.omittedPatch} patch-omitted`,
       );
     }
+    assertCompleteReviewInput(coverage);
     console.log(
       `[worker] PR #${number} @ ${effectiveSha.slice(0, 7)} action=${action} files=${files.length}` +
         (sinceSha

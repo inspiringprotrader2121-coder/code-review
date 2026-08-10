@@ -266,6 +266,7 @@ async function postReviewFailureNotice(
   error: string,
 ): Promise<void> {
   const transient = isTransientLlmError(error);
+  const incompleteInput = /review input coverage incomplete; no model calls were made/i.test(error);
   const marker = `<!-- orvex-review-failure:${job.installationId}:${job.owner}/${job.repo}#${job.pr}@${job.headSha} -->`;
   const body = [
     marker,
@@ -273,9 +274,13 @@ async function postReviewFailureNotice(
     '',
     transient
       ? 'A review provider was temporarily unavailable or rate-limited. Orvex will retry automatically when possible.'
-      : 'No clean-review verdict was produced because the review pipeline failed before it could complete.',
+      : incompleteInput
+        ? 'GitHub did not provide a complete diff, so Orvex stopped before calling or charging any review model. Split the pull request or reduce the changed-file/diff size, then request a new review.'
+        : 'No clean-review verdict was produced because the review pipeline failed before it could complete.',
     '',
-    'Please push a new commit or comment `@orvex review` to try again. If this keeps happening, contact support@useorvex.com.',
+    incompleteInput
+      ? 'This protection prevents a partial review from being mistaken for a complete sign-off.'
+      : 'Please push a new commit or comment `@orvex review` to try again. If this keeps happening, contact support@useorvex.com.',
   ].join('\n');
   try {
     const octokit = createInstallationOctokit(config.github, job.installationId);
