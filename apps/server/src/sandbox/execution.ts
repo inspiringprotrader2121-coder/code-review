@@ -335,7 +335,9 @@ export async function runInSandboxWithSpawnForTest(
   return new Promise((resolve) => {
     let child: ReturnType<SandboxSpawn>;
     try {
-      child = spawnImpl('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawnImpl('docker', args, {
+        stdio: [opts.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      });
     } catch (error) {
       activeWorkdirs.delete(safeWorkdir);
       slot.release();
@@ -469,6 +471,27 @@ export async function runInSandboxWithSpawnForTest(
       armInactivityTimer();
       stderr = cap(stderr, chunk);
     });
+    if (opts.stdin !== undefined && !child.stdin) {
+      failAndCleanup(
+        {
+          exitCode: null,
+          stdout,
+          stderr: `${stderr}\n[sandbox] Docker stdin pipe unavailable`.trim(),
+          timedOut: false,
+          durationMs: Date.now() - startedAt,
+        },
+        true,
+      );
+      return;
+    }
+    if (opts.stdin !== undefined) {
+      // Docker must receive the Codex prompt through attached stdin. Codex 0.147
+      // exits successfully without running when `exec -` reads a mounted file.
+      child.stdin!.on('error', () => {
+        /* A concurrent container exit is handled by the child lifecycle. */
+      });
+      child.stdin!.end(opts.stdin);
+    }
     quotaTimer = setInterval(() => {
       if (settled) return;
       try {

@@ -55,8 +55,14 @@ export function buildSandboxDockerArgs(
 ): string[] {
   const { workdir, diskBytes } = assertSafeSandboxRunOptions(opts, runtime);
   const agenticCodex = opts.profile === 'agentic-codex';
+  if (opts.stdin !== undefined && !agenticCodex) {
+    throw new Error('sandbox stdin is restricted to agentic Codex');
+  }
   if (agenticCodex && !isBrokerCapabilityToken(opts.brokerToken)) {
     throw new Error('agentic Codex sandbox requires a valid per-container broker capability');
+  }
+  if (agenticCodex && (typeof opts.stdin !== 'string' || opts.stdin.length === 0)) {
+    throw new Error('agentic Codex sandbox requires a private stdin prompt');
   }
   const workdirReadOnly = agenticCodex || opts.readOnlyWorkdir;
   const mount = `type=bind,src=${workdir},dst=/work,bind-propagation=rprivate${workdirReadOnly ? ',readonly' : ''}`;
@@ -124,6 +130,7 @@ export function buildSandboxDockerArgs(
   ];
   if (agenticCodex) {
     args.push(
+      '--interactive',
       '--tmpfs',
       `${CODEX_CONTAINER_HOME}:size=16m,noexec,nosuid,nodev,mode=0700`,
       '--label',

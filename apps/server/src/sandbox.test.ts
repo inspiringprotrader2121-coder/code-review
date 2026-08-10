@@ -40,6 +40,7 @@ function containerName(runArgs: string[]): string {
 function fakeChild(): ReturnType<typeof spawn> {
   const child = new EventEmitter() as unknown as ReturnType<typeof spawn>;
   Object.assign(child, {
+    stdin: new PassThrough(),
     stdout: new PassThrough(),
     stderr: new PassThrough(),
     kill: () => true,
@@ -930,6 +931,7 @@ test('agentic Codex container mounts only its private checkout and receives no h
     }
     const args = fake.calls[0]!.args;
     assert.deepEqual(args.slice(0, 4), ['run', '--rm', '--pull', 'never']);
+    assert.ok(args.includes('--interactive'));
     assert.deepEqual(args.slice(args.indexOf('--network'), args.indexOf('--network') + 2), [
       '--network',
       'orvex-agentic-internal',
@@ -968,7 +970,12 @@ test('agentic Codex container mounts only its private checkout and receives no h
         command.indexOf('\'model_provider="orvex_broker"\''),
       'broker overrides must be applied after Codex resets user configuration',
     );
-    assert.match(command, /< '\/work\/\.orvex-agentic\/prompt-/);
+    assert.doesNotMatch(command, /prompt-|redacted review prompt/);
+    assert.equal(
+      (fake.run.stdin as PassThrough).read()?.toString(),
+      'redacted review prompt',
+      'the prompt is delivered only through attached container stdin',
+    );
 
     fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 });
     fs.writeFileSync(output, '{"findings":[],"summary":"ok"}', { mode: 0o600 });
@@ -1040,6 +1047,36 @@ test('agentic Codex runner rejects output traversal and cleans up a silent conta
     );
     assert.equal(result.timedOut, true);
     assert.equal(result.inactivityTimedOut, true);
+    assert.deepEqual(
+      fake.calls.slice(1).map((call) => call.args[0]),
+      ['inspect', 'kill', 'rm', 'inspect'],
+    );
+  } finally {
+    fs.rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test('agentic Codex fails closed when Docker does not expose the requested stdin pipe', async () => {
+  const fake = fakeDocker();
+  const workdir = createSandboxWorkdir();
+  const output = path.join(workdir, '.orvex-agentic', 'last-message-feed123.txt');
+  Object.assign(fake.run, { stdin: null });
+  try {
+    const result = await runCodexInSandboxWithSpawnForTest(
+      {
+        workdir,
+        image: PINNED_IMAGE,
+        args: ['exec', '--ignore-user-config', '-'],
+        prompt: 'private prompt',
+        lastMessageFile: output,
+        timeoutMs: 500,
+        inactivityTimeoutMs: 100,
+        brokerToken: BROKER_TOKEN,
+      },
+      fake.spawn,
+    );
+    assert.equal(result.exitCode, null);
+    assert.match(result.stderr, /stdin pipe unavailable/);
     assert.deepEqual(
       fake.calls.slice(1).map((call) => call.args[0]),
       ['inspect', 'kill', 'rm', 'inspect'],

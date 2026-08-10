@@ -1,6 +1,4 @@
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
 import type { CodexContainerResult, CodexContainerRuntime } from '@orvex-review/review';
 import {
   CODEX_CONTAINER_BINARY,
@@ -28,7 +26,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `"'"'`)}'`;
 }
 
-function codexContainerCommand(args: readonly string[], promptInContainer: string): string {
+function codexContainerCommand(args: readonly string[]): string {
   if (args[0] !== 'exec' || args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) {
     throw new Error('internal Codex runner refused malformed CLI arguments');
   }
@@ -54,7 +52,7 @@ function codexContainerCommand(args: readonly string[], promptInContainer: strin
   if (configResetIndex < 0) throw new Error('internal Codex runner requires config isolation');
   const insertAt = configResetIndex + 1;
   const commandArgs = [...args.slice(0, insertAt), ...brokerProviderArgs, ...args.slice(insertAt)];
-  return `mkdir -p ${shellQuote(CODEX_CONTAINER_HOME)} && chmod 700 ${shellQuote(CODEX_CONTAINER_HOME)} && exec node ${shellQuote(CODEX_CONTAINER_BINARY)} ${commandArgs.map(shellQuote).join(' ')} < ${shellQuote(promptInContainer)}`;
+  return `mkdir -p ${shellQuote(CODEX_CONTAINER_HOME)} && chmod 700 ${shellQuote(CODEX_CONTAINER_HOME)} && exec node ${shellQuote(CODEX_CONTAINER_BINARY)} ${commandArgs.map(shellQuote).join(' ')}`;
 }
 
 async function runCodexInSandboxInternal(
@@ -62,28 +60,24 @@ async function runCodexInSandboxInternal(
   run: (options: SandboxRunOptions) => Promise<SandboxResult>,
 ): Promise<CodexContainerResult> {
   const { workdir, output } = assertCodexOutputPath(opts.workdir, opts.lastMessageFile);
-  const agentDir = assertPrivateAgentDirectory(workdir);
-  const promptName = `prompt-${randomUUID()}.txt`;
-  const hostPrompt = path.join(agentDir, promptName);
-  const containerPrompt = `/work/.orvex-agentic/${promptName}`;
+  assertPrivateAgentDirectory(workdir);
   try {
-    fs.writeFileSync(hostPrompt, opts.prompt, { mode: 0o600, flag: 'wx' });
     fs.writeFileSync(output, '', { mode: 0o600, flag: 'wx' });
     const result = await run({
       workdir,
       image: opts.image,
-      command: codexContainerCommand(opts.args, containerPrompt),
+      command: codexContainerCommand(opts.args),
       timeoutMs: opts.timeoutMs,
       inactivityTimeoutMs: opts.inactivityTimeoutMs,
       readOnlyWorkdir: true,
       profile: 'agentic-codex',
       brokerToken: opts.brokerToken,
       outputFile: output,
+      stdin: opts.prompt,
       signal: opts.signal,
     });
     return { ...result, lastMessage: readSandboxOutput(workdir, output) };
   } finally {
-    removePrivateSandboxFile(workdir, hostPrompt);
     removePrivateSandboxFile(workdir, output);
   }
 }

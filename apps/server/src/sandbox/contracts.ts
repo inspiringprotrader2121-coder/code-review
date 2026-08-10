@@ -15,6 +15,8 @@ export interface SandboxRunOptions {
   brokerToken?: string;
   /** Pre-created, validated host file exposed as the sole writable Codex output. */
   outputFile?: string;
+  /** Private input delivered over the container's attached stdin, never argv. */
+  stdin?: string;
 }
 
 export interface SandboxResult {
