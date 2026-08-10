@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { gzipSync } from 'node:zlib';
 import { pipeline as streamPipeline } from 'node:stream/promises';
 import { createCappedArchiveStream, createCappedGunzip } from './archive-stream.js';
@@ -32,9 +32,44 @@ test('createCappedGunzip aborts when uncompressed output exceeds the budget', as
 
   const gunzip = createCappedGunzip(50_000);
   await assert.rejects(
-    () => streamPipeline(Readable.from([compressed]), gunzip),
+    () =>
+      streamPipeline(
+        Readable.from([compressed]),
+        gunzip,
+        new Writable({ write: (_chunk, _encoding, callback) => callback() }),
+      ),
     /uncompressed|cap/i,
   );
+});
+
+test('createCappedGunzip preserves backpressure for output larger than stream buffers', async () => {
+  const payload = Buffer.alloc(2 * 1024 * 1024);
+  for (let index = 0; index < payload.length; index++) payload[index] = index % 251;
+  const compressed = gzipSync(payload);
+  const chunks: Buffer[] = [];
+  const sink = new Writable({
+    highWaterMark: 1,
+    write(chunk: Buffer, _encoding, callback) {
+      chunks.push(Buffer.from(chunk));
+      setImmediate(callback);
+    },
+  });
+
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      streamPipeline(Readable.from([compressed]), createCappedGunzip(payload.length + 1), sink),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('gunzip backpressure pipeline stalled')),
+          5_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+  assert.deepEqual(Buffer.concat(chunks), payload);
 });
 
 function tarEntry(name: string, content: Buffer): Buffer {

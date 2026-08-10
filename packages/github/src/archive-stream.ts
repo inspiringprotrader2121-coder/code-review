@@ -1,4 +1,4 @@
-import { Readable, Transform, type Duplex } from 'node:stream';
+import { Duplex, Readable, Transform } from 'node:stream';
 import { createGunzip } from 'node:zlib';
 
 /**
@@ -113,59 +113,27 @@ export function createCappedGunzip(maxUncompressedBytes: number): Duplex {
   const max = Math.floor(maxUncompressedBytes);
   const gunzip = createGunzip({ maxOutputLength: max });
   let produced = 0;
-  let gunzipEnded = false;
-
-  const out = new Transform({
-    transform(chunk: Buffer | Uint8Array, encoding, callback) {
-      if (!gunzip.write(chunk, encoding)) {
-        gunzip.once('drain', () => callback());
-      } else {
-        callback();
-      }
-    },
-    flush(callback) {
-      gunzip.end();
-      if (gunzipEnded) {
-        callback();
+  const limiter = new Transform({
+    transform(chunk: Buffer | Uint8Array, _encoding, callback) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      produced += bytes.length;
+      if (produced > max) {
+        callback(new Error(`repository archive expands past the ${max}-byte uncompressed cap`));
         return;
       }
-      const onEnd = () => {
-        cleanup();
-        callback();
-      };
-      const onError = (err: Error) => {
-        cleanup();
-        callback(err);
-      };
-      const cleanup = () => {
-        gunzip.off('end', onEnd);
-        gunzip.off('error', onError);
-      };
-      gunzip.once('end', onEnd);
-      gunzip.once('error', onError);
+      callback(null, bytes);
     },
-  }) as Duplex;
-
-  gunzip.on('data', (chunk: Buffer) => {
-    produced += chunk.length;
-    if (produced > max) {
-      const err = new Error(`repository archive expands past the ${max}-byte uncompressed cap`);
-      gunzip.destroy(err);
-      out.destroy(err);
-      return;
-    }
-    if (!out.push(chunk)) {
-      gunzip.pause();
-      out.once('drain', () => gunzip.resume());
-    }
   });
-  gunzip.on('error', (err) => {
-    if (!out.destroyed) out.destroy(err);
+  // Node's duplex adapter owns readable backpressure; the paired error handlers
+  // tear down both halves of the inflate pipeline.
+  // Waiting for `drain` after a failed readable push deadlocks large archives:
+  // `drain` belongs to the writable side and never resumes the paused inflater.
+  gunzip.on('error', (error) => {
+    if (!limiter.destroyed) limiter.destroy(error);
   });
-  gunzip.on('end', () => {
-    gunzipEnded = true;
-    out.push(null);
+  limiter.on('error', (error) => {
+    if (!gunzip.destroyed) gunzip.destroy(error);
   });
-
-  return out;
+  gunzip.pipe(limiter);
+  return Duplex.from({ writable: gunzip, readable: limiter });
 }
