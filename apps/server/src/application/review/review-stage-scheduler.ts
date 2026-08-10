@@ -57,6 +57,7 @@ function withFileShard(
   shard: ChangedFile[],
   note: string,
   context: 'focused-source' | 'diff-only',
+  replaceExistingFocus = false,
 ): ReviewCall {
   const paths = new Set(shard.map((file) => file.filename));
   const changedContents =
@@ -68,9 +69,25 @@ function withFileShard(
     files: shard,
     ctx: {
       changedContents,
-      extraFocus: [call.ctx.extraFocus, note].filter(Boolean).join('\n'),
+      extraFocus: replaceExistingFocus
+        ? note
+        : [call.ctx.extraFocus, note].filter(Boolean).join('\n'),
     },
   };
+}
+
+function compactHighTierShardFocus(
+  call: ReviewCall,
+  shardIndex: number,
+  shardCount: number,
+): string {
+  const lens =
+    call.passTag === 'deep-dive'
+      ? 'Audit only concrete regressions in data integrity, authorization, concurrency, and failure/cleanup branch parity.'
+      : call.passTag === 'removed-behavior/callers'
+        ? 'Audit deleted or changed behaviour, visible caller/test contracts, and retry or legacy-state regressions.'
+        : 'Audit concrete performance, completeness, and API-contract regressions visible in this diff.';
+  return `REQUIRED DIFF-ONLY SHARD ${shardIndex + 1}/${shardCount}: review every supplied diff and nothing outside it. ${lens} Luna covers repository-wide callers and the other reviewers cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass and emit the required JSON before exhausting the response budget. Do not narrate private reasoning. Report at most 3 concrete findings.`;
 }
 
 export function boundHighTierDiscoveryWorkloads(
@@ -94,8 +111,9 @@ export function boundHighTierDiscoveryWorkloads(
       return withFileShard(
         call,
         shard,
-        `REQUIRED DIFF-ONLY SHARD ${shardIndex + 1}/${repeated.length}: review every supplied diff and nothing outside it. Other required reviewers cover the remaining changed files and Luna verifies repository-wide callers. Use maximum reasoning quality, but keep analysis bounded and reserve the final response for the required JSON; a reasoning-only response is unusable. Return JSON as soon as this shard is covered and report at most 3 concrete findings.`,
+        compactHighTierShardFocus(call, shardIndex, repeated.length),
         'diff-only',
+        true,
       );
     }
 
@@ -109,8 +127,9 @@ export function boundHighTierDiscoveryWorkloads(
     return withFileShard(
       call,
       shard,
-      `REQUIRED DIFF-ONLY BREADTH SHARD: review every supplied diff and nothing outside it. Luna and the DeepSeek discovery shards cover the full changed-file set. Keep analysis bounded, return the required JSON promptly, and report at most 5 concrete findings.`,
+      'REQUIRED DIFF-ONLY BREADTH SHARD: review every supplied diff and nothing outside it. Audit only concrete performance, completeness, and API-contract regressions visible in this shard. Luna and the DeepSeek discovery shards cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass and emit the required JSON before exhausting the response budget. Do not narrate private reasoning. Report at most 5 concrete findings.',
       'diff-only',
+      true,
     );
   });
 }

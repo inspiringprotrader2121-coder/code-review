@@ -424,7 +424,11 @@ export async function openAiCompatStreamChat(
         : {}),
       ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
       ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
-      chat_template_kwargs: { thinking_mode: thinkingEnabled(opts) ? 'enabled' : 'disabled' },
+      ...(supportsCompatibleUsageStream(opts.baseUrl)
+        ? { thinking: { type: thinkingEnabled(opts) ? 'enabled' : 'disabled' } }
+        : {
+            chat_template_kwargs: { thinking_mode: thinkingEnabled(opts) ? 'enabled' : 'disabled' },
+          }),
       reasoning_split: true,
       messages: [
         { role: 'system', content: system },

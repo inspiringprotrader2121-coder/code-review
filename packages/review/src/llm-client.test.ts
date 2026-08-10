@@ -291,6 +291,25 @@ test('an explicit max reasoning effort is never downgraded on a retry-style call
   assert.equal('max_completion_tokens' in captured[0].body, false);
 });
 
+test('official DeepSeek requests use its native thinking switch at max effort', async () => {
+  const captured = await withStubbedFetch(
+    () => chatStream('{"findings":[]}'),
+    async () => {
+      await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.com/v1',
+        api: 'chat',
+        reasoningEffort: 'max',
+      });
+    },
+  );
+
+  assert.deepEqual(captured[0]?.body.thinking, { type: 'enabled' });
+  assert.equal('chat_template_kwargs' in captured[0].body, false);
+  assert.equal(captured[0].body.reasoning_effort, 'max');
+});
+
 test('a reasoning-only compatible response reports output exhaustion accurately', async () => {
   const encoder = new TextEncoder();
   await assert.rejects(
