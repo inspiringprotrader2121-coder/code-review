@@ -77,7 +77,8 @@ const dur = (ms) => {
     ? sec + 's'
     : Math.floor(sec / 60) + 'm ' + String(sec % 60).padStart(2, '0') + 's';
 };
-const estimatedUsd = (n) => (n == null ? '—' : '~$' + finiteNumber(n).toFixed(2));
+const estimatedUsd = (n, estimated = false) =>
+  n == null ? '—' : (estimated ? '~' : '') + '$' + finiteNumber(n).toFixed(2);
 const repoShort = (fn) => String(fn || '').split('/');
 
 // —— theme toggle (persisted) ——
@@ -779,8 +780,12 @@ async function loadReviews() {
               runChip(r.status, runReason(r)) +
               '</td>' +
               (SHOW_LLM_COST
-                ? '<td class="r mono" title="Estimated provider cost; the invoice can differ when a provider omits usage.">' +
-                  estimatedUsd(r.costUsd) +
+                ? '<td class="r mono" title="' +
+                  (r.costEstimated
+                    ? 'Estimated because a provider omitted usage.'
+                    : 'Reported provider usage, including cache reads when supplied.') +
+                  '">' +
+                  estimatedUsd(r.costUsd, r.costEstimated) +
                   '</td>'
                 : '') +
               '<td class="r mono">' +

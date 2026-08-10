@@ -9,22 +9,48 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TARGET_USER="orvex"
 ENV_FILE="/home/orvex/code-review/.env"
 MODE="dry-run"
+UPDATE_PINNED_IMAGE=0
 IMAGE_TAG="orvex-agentic-egress:local"
 INTERNAL_NETWORK="orvex-agentic-internal"
 EGRESS_NETWORK="orvex-agentic-egress"
 BROKER_NAME="orvex-openai-egress"
+PIN_UPDATE_TMP=""
+PIN_RELOCK_ENV=0
+
+cleanup_private_state() {
+  local status=$?
+  if [[ -n ${SECRET_FILE:-} ]]; then
+    rm -f -- "$SECRET_FILE" "$SECRET_FILE.tmp" 2>/dev/null || true
+  fi
+  if [[ -n ${PIN_UPDATE_TMP:-} ]]; then
+    rm -f -- "$PIN_UPDATE_TMP" 2>/dev/null || true
+  fi
+  if ((PIN_RELOCK_ENV)); then
+    chattr +i -- "$ENV_FILE" 2>/dev/null || true
+  fi
+  return "$status"
+}
+
+trap cleanup_private_state EXIT
+trap 'cleanup_private_state; exit 1' HUP INT TERM
 
 usage() {
   cat <<'EOF'
 Usage:
   provision-agentic-sandbox.sh [--dry-run] [--user USER] [--env-file FILE]
   provision-agentic-sandbox.sh --apply [--user USER] [--env-file FILE] [--image-tag TAG]
+  provision-agentic-sandbox.sh --apply --update-pinned-image [--user USER] [--env-file FILE] [--image-tag TAG]
 
 The default is a non-mutating dry run. --apply builds the digest-pinned local
 broker image, creates the two rootless Docker networks, and starts the named
 broker. It reads the existing immutable service environment without printing
 it. The configured ORVEX_CODEX_EGRESS_BROKER_IMAGE must exactly equal the
 locally built immutable image ID before anything is started.
+
+--update-pinned-image is root-only and may be used only with --apply during a
+drained, guarded release. It atomically changes exactly the broker image-digest
+line in the immutable environment, restores its immutable flag, and restores
+the previous pin and broker if the new broker fails its health check.
 EOF
 }
 
@@ -38,11 +64,17 @@ while (($#)); do
     --user) shift; (($#)) || fail '--user requires an account'; TARGET_USER=$1 ;;
     --env-file) shift; (($#)) || fail '--env-file requires a path'; ENV_FILE=$1 ;;
     --image-tag) shift; (($#)) || fail '--image-tag requires a tag'; IMAGE_TAG=$1 ;;
+    --update-pinned-image) UPDATE_PINNED_IMAGE=1 ;;
     --help|-h) usage; exit 0 ;;
     *) usage >&2; fail "unknown argument: $1" ;;
   esac
   shift
 done
+
+if ((UPDATE_PINNED_IMAGE)); then
+  [[ $MODE == apply ]] || fail '--update-pinned-image requires --apply'
+  [[ ${EUID:-$(id -u)} -eq 0 ]] || fail '--update-pinned-image must run as root'
+fi
 
 [[ $TARGET_USER =~ ^[a-z_][a-z0-9_-]*$ ]] || fail 'invalid Unix account'
 getent passwd "$TARGET_USER" >/dev/null || fail "Unix account does not exist: $TARGET_USER"
@@ -79,6 +111,35 @@ read_nonsecret_configured_image() {
     : "${ORVEX_CODEX_EGRESS_BROKER_IMAGE:?missing broker image digest}"
     printf "%s" "$ORVEX_CODEX_EGRESS_BROKER_IMAGE"
   ' bash "$ENV_FILE"
+}
+
+rewrite_broker_image_pin() {
+  local image=$1 attributes line_count owner mode
+  [[ $image =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'refusing to write an invalid broker image ID'
+  attributes=$(lsattr -d -- "$ENV_FILE" | awk '{print $1}')
+  [[ $attributes == *i* ]] || fail 'service environment must be immutable before updating its broker image pin'
+  line_count=$(grep -Ec '^ORVEX_CODEX_EGRESS_BROKER_IMAGE=sha256:[a-f0-9]{64}$' "$ENV_FILE" || true)
+  [[ $line_count == 1 ]] || fail 'service environment must contain exactly one valid broker image pin'
+  owner=$(stat -c '%u:%g' "$ENV_FILE")
+  mode=$(stat -c '%a' "$ENV_FILE")
+  PIN_UPDATE_TMP=$(mktemp "${ENV_FILE}.orvex-broker-pin.XXXXXX")
+  if ! awk -v image="$image" '
+    /^ORVEX_CODEX_EGRESS_BROKER_IMAGE=/ {
+      print "ORVEX_CODEX_EGRESS_BROKER_IMAGE=" image
+      next
+    }
+    { print }
+  ' "$ENV_FILE" > "$PIN_UPDATE_TMP"; then
+    fail 'could not prepare the broker image-pin update'
+  fi
+  chown "$owner" "$PIN_UPDATE_TMP"
+  chmod "$mode" "$PIN_UPDATE_TMP"
+  chattr -i -- "$ENV_FILE" || fail 'could not temporarily unlock the immutable service environment'
+  PIN_RELOCK_ENV=1
+  mv -f -- "$PIN_UPDATE_TMP" "$ENV_FILE" || fail 'could not atomically update the broker image pin'
+  PIN_UPDATE_TMP=""
+  chattr +i -- "$ENV_FILE" || fail 'broker image pin was updated but could not be re-locked as immutable'
+  PIN_RELOCK_ENV=0
 }
 
 check_network() {
@@ -144,10 +205,34 @@ wait_for_healthy() {
   return 1
 }
 
+start_broker() {
+  local image=$1
+  as_service_user docker rm -f "$BROKER_NAME" >/dev/null 2>&1 || true
+  as_service_user docker run --detach --name "$BROKER_NAME" --pull never \
+    --label orvex.managed=true --label orvex.agentic-egress=true \
+    --network "$INTERNAL_NETWORK" --read-only --tmpfs /tmp:size=16m,noexec,nosuid,nodev \
+    --cap-drop ALL --security-opt no-new-privileges --ipc none --pids-limit 64 \
+    --memory 256m --memory-swap 256m --cpus 0.50 --ulimit nofile=128:128 \
+    --mount "type=bind,src=$SECRET_FILE,dst=/run/secrets/openai_api_key,readonly,bind-propagation=rprivate" \
+    --mount "type=bind,src=$SIGNING_KEY_FILE,dst=/run/secrets/broker_signing_key,readonly,bind-propagation=rprivate" \
+    --env OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
+    --env EGRESS_SIGNING_KEY_FILE=/run/secrets/broker_signing_key \
+    --env EGRESS_LISTEN_PORT=8080 --env EGRESS_ALLOWED_HOST="$BROKER_NAME" \
+    --env EGRESS_MAX_CONTENT_BYTES=1048576 --env EGRESS_MAX_OUTPUT_TOKENS=65536 \
+    --env EGRESS_MAX_CONCURRENT=8 --env EGRESS_MAX_REQUESTS_PER_WINDOW=24 \
+    --env EGRESS_RATE_WINDOW_MS=60000 --env EGRESS_BODY_READ_TIMEOUT_MS=30000 \
+    --env EGRESS_UPSTREAM_TIMEOUT_MS=300000 \
+    --env EGRESS_MAX_RESPONSE_BYTES=8388608 \
+    "$image" >/dev/null || return 1
+  as_service_user docker network connect "$EGRESS_NETWORK" "$BROKER_NAME" || return 1
+  wait_for_healthy
+}
+
 assert_rootless_docker
 check_network "$INTERNAL_NETWORK" true
 check_network "$EGRESS_NETWORK" false
 CONFIGURED_IMAGE=$(read_nonsecret_configured_image) || fail 'immutable service environment is missing required broker configuration'
+[[ $CONFIGURED_IMAGE =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'immutable service environment contains an invalid broker image ID'
 
 if [[ $MODE == dry-run ]]; then
   log "DRY RUN: would build $IMAGE_TAG from infra/agentic-egress with --pull=false, --provenance=false and --network none"
@@ -162,36 +247,27 @@ IMAGE_ID=$(as_service_user docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
 [[ $IMAGE_ID =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'broker build did not return an immutable image ID'
 as_service_user mkdir -p "$STATE_DIR"
 as_service_user chmod 0700 "$STATE_DIR"
-[[ $CONFIGURED_IMAGE == "$IMAGE_ID" ]] || fail "ORVEX_CODEX_EGRESS_BROKER_IMAGE does not equal the built broker image ID ($IMAGE_ID); update immutable configuration through the approved operator process before retrying"
+PIN_UPDATED=0
+if [[ $CONFIGURED_IMAGE != "$IMAGE_ID" ]]; then
+  ((UPDATE_PINNED_IMAGE)) || fail "ORVEX_CODEX_EGRESS_BROKER_IMAGE does not equal the built broker image ID ($IMAGE_ID); update immutable configuration through the approved operator process before retrying"
+  as_service_user docker image inspect "$CONFIGURED_IMAGE" >/dev/null 2>&1 || fail 'previous configured broker image is unavailable for rollback'
+  rewrite_broker_image_pin "$IMAGE_ID"
+  PIN_UPDATED=1
+fi
 
 ensure_network "$INTERNAL_NETWORK" internal
 ensure_network "$EGRESS_NETWORK" egress
 prepare_secret_mount
 prepare_signing_key
-cleanup_secret() { rm -f "$SECRET_FILE" "$SECRET_FILE.tmp"; }
-trap cleanup_secret EXIT
 
-as_service_user docker rm -f "$BROKER_NAME" >/dev/null 2>&1 || true
-as_service_user docker run --detach --name "$BROKER_NAME" --pull never \
-  --label orvex.managed=true --label orvex.agentic-egress=true \
-  --network "$INTERNAL_NETWORK" --read-only --tmpfs /tmp:size=16m,noexec,nosuid,nodev \
-  --cap-drop ALL --security-opt no-new-privileges --ipc none --pids-limit 64 \
-  --memory 256m --memory-swap 256m --cpus 0.50 --ulimit nofile=128:128 \
-  --mount "type=bind,src=$SECRET_FILE,dst=/run/secrets/openai_api_key,readonly,bind-propagation=rprivate" \
-  --mount "type=bind,src=$SIGNING_KEY_FILE,dst=/run/secrets/broker_signing_key,readonly,bind-propagation=rprivate" \
-  --env OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
-  --env EGRESS_SIGNING_KEY_FILE=/run/secrets/broker_signing_key \
-  --env EGRESS_LISTEN_PORT=8080 --env EGRESS_ALLOWED_HOST="$BROKER_NAME" \
-  --env EGRESS_MAX_CONTENT_BYTES=1048576 --env EGRESS_MAX_OUTPUT_TOKENS=65536 \
-  --env EGRESS_MAX_CONCURRENT=8 --env EGRESS_MAX_REQUESTS_PER_WINDOW=24 \
-  --env EGRESS_RATE_WINDOW_MS=60000 --env EGRESS_BODY_READ_TIMEOUT_MS=30000 \
-  --env EGRESS_UPSTREAM_TIMEOUT_MS=300000 \
-  --env EGRESS_MAX_RESPONSE_BYTES=8388608 \
-  "$IMAGE_ID" >/dev/null
-as_service_user docker network connect "$EGRESS_NETWORK" "$BROKER_NAME"
-wait_for_healthy || fail 'broker failed its private health check; inspect rootless Docker logs without printing environment data'
+if ! start_broker "$IMAGE_ID"; then
+  if ((PIN_UPDATED)); then
+    log 'new broker failed its private health check; restoring the previous pinned broker'
+    rewrite_broker_image_pin "$CONFIGURED_IMAGE"
+    start_broker "$CONFIGURED_IMAGE" || fail 'new broker failed and the previous broker could not be restored'
+  fi
+  fail 'broker failed its private health check; inspect rootless Docker logs without printing environment data'
+fi
 printf '%s\n' "$IMAGE_ID" | as_service_user tee "$RECORD_FILE" >/dev/null
 as_service_user chmod 0600 "$RECORD_FILE"
-cleanup_secret
-trap - EXIT
 log "broker is healthy; immutable image ID recorded at $RECORD_FILE"

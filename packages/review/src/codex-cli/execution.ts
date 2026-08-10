@@ -12,7 +12,7 @@ import {
   codexAnnouncedModelFallback,
   extractErrorMessage,
   extractThreadId,
-  extractUsage,
+  extractUsages,
   readLastMessage,
 } from './protocol.js';
 import {
@@ -30,6 +30,7 @@ const usageTotals = new Map<
   {
     input: number;
     cachedInput: number;
+    cacheWrite: number;
     output: number;
     reasoning: number;
   }
@@ -64,6 +65,7 @@ export type CodexExecutionOptions = {
   onUsage?: (usage: {
     inputTokens: number;
     cachedInputTokens?: number;
+    cacheWriteTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     model?: string;
@@ -132,7 +134,7 @@ async function executeContainerCodex(
   if (codexAnnouncedModelFallback(`${result.stdout}\n${result.stderr}`)) {
     throw new Error(`codex-cli refused model substitution; required model is ${options.model}`);
   }
-  reportUsage(options, extractUsage(result.stdout));
+  reportUsages(options, extractUsages(result.stdout));
   const text = result.lastMessage.trim();
   if (result.exitCode !== 0 || !text) {
     throw new Error(
@@ -289,7 +291,7 @@ async function executeChildCodex(
       try {
         const threadId = extractThreadId(stdout);
         const text = readLastMessage(lastMessageFile);
-        reportUsage(options, extractUsage(stdout), threadId, tempDir);
+        reportUsages(options, extractUsages(stdout), threadId, tempDir);
         cleanup();
         if (!text)
           return finish(() =>
@@ -323,17 +325,39 @@ function reportUsageFloor(options: CodexExecutionOptions): void {
   });
 }
 
-function reportUsage(
+function reportUsages(
   options: CodexExecutionOptions,
-  usage?: { input?: number; cachedInput?: number; output?: number; reasoning?: number },
+  usages: readonly {
+    input?: number;
+    cachedInput?: number;
+    cacheWrite?: number;
+    output?: number;
+    reasoning?: number;
+  }[],
   threadId?: string,
   tempDir?: string,
 ): void {
-  if (!usage) return reportUsageFloor(options);
+  if (usages.length === 0) return reportUsageFloor(options);
+  for (const usage of usages) reportUsage(options, usage, threadId, tempDir);
+}
+
+function reportUsage(
+  options: CodexExecutionOptions,
+  usage: {
+    input?: number;
+    cachedInput?: number;
+    cacheWrite?: number;
+    output?: number;
+    reasoning?: number;
+  },
+  threadId?: string,
+  tempDir?: string,
+): void {
   if (!tempDir) {
     options.onUsage?.({
       inputTokens: usage.input ?? 0,
       cachedInputTokens: usage.cachedInput ?? 0,
+      cacheWriteTokens: usage.cacheWrite ?? 0,
       outputTokens: usage.output ?? 0,
       tokenSource: 'provider',
       model: options.model,
@@ -345,6 +369,7 @@ function reportUsage(
   const total = {
     input: usage.input ?? 0,
     cachedInput: usage.cachedInput ?? 0,
+    cacheWrite: usage.cacheWrite ?? 0,
     output: usage.output ?? 0,
     reasoning: usage.reasoning ?? 0,
   };
@@ -356,6 +381,10 @@ function reportUsage(
       total.cachedInput >= previous.cachedInput
         ? total.cachedInput - previous.cachedInput
         : total.cachedInput;
+    delta.cacheWrite =
+      total.cacheWrite >= previous.cacheWrite
+        ? total.cacheWrite - previous.cacheWrite
+        : total.cacheWrite;
     delta.output -= previous.output;
     delta.reasoning =
       total.reasoning >= previous.reasoning
@@ -373,6 +402,7 @@ function reportUsage(
   options.onUsage?.({
     inputTokens: delta.input,
     cachedInputTokens: delta.cachedInput,
+    cacheWriteTokens: delta.cacheWrite,
     outputTokens: delta.output,
     tokenSource: 'provider',
     model: options.model,

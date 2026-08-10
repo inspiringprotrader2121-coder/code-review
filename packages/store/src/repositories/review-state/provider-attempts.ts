@@ -123,6 +123,8 @@ export class SqliteReviewAttemptRepository {
       ...input,
       cachedInputTokens: input.cachedInputTokens ?? 0,
       cachedInputRatePerM: input.cachedInputRatePerM ?? 0,
+      cacheWriteTokens: input.cacheWriteTokens ?? 0,
+      cacheWriteRatePerM: input.cacheWriteRatePerM ?? 0,
     };
     const run = this.db
       .prepare(`SELECT tenant_id, status, worker_id FROM review_runs WHERE id = ?`)
@@ -142,23 +144,25 @@ export class SqliteReviewAttemptRepository {
     for (const [name, value] of Object.entries({
       inputTokens: usage.inputTokens,
       cachedInputTokens: usage.cachedInputTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
       outputTokens: usage.outputTokens,
       inputRatePerM: usage.inputRatePerM,
       cachedInputRatePerM: usage.cachedInputRatePerM,
+      cacheWriteRatePerM: usage.cacheWriteRatePerM,
       outputRatePerM: usage.outputRatePerM,
       costUsd: usage.costUsd,
     })) {
       if (!Number.isFinite(value) || value < 0) throw new Error(`invalid review usage ${name}`);
     }
-    if (usage.cachedInputTokens > usage.inputTokens)
-      throw new Error('invalid review usage cachedInputTokens');
+    if (usage.cachedInputTokens + usage.cacheWriteTokens > usage.inputTokens)
+      throw new Error('invalid review usage cache token counts');
     const id = randomUUID();
     const createdAt = usage.createdAt ?? new Date().toISOString();
     const recorded = this.db
       .prepare(
         `INSERT INTO review_run_usage
-       (id, run_id, tenant_id, provider, model, tier, pass_name, input_tokens, cached_input_tokens, output_tokens, input_rate_per_m, cached_input_rate_per_m, output_rate_per_m, cost_usd, token_source, attempt_id, created_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       (id, run_id, tenant_id, provider, model, tier, pass_name, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, input_rate_per_m, cached_input_rate_per_m, cache_write_rate_per_m, output_rate_per_m, cost_usd, token_source, attempt_id, created_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM review_runs WHERE id = ? AND tenant_id = ? AND status = 'running' AND worker_id = ?)`,
       )
       .run(
@@ -171,9 +175,11 @@ export class SqliteReviewAttemptRepository {
         usage.passName ?? null,
         usage.inputTokens,
         usage.cachedInputTokens,
+        usage.cacheWriteTokens,
         usage.outputTokens,
         usage.inputRatePerM,
         usage.cachedInputRatePerM,
+        usage.cacheWriteRatePerM,
         usage.outputRatePerM,
         usage.costUsd,
         usage.tokenSource,
@@ -200,9 +206,11 @@ export class SqliteReviewAttemptRepository {
       passName: row.pass_name ? String(row.pass_name) : undefined,
       inputTokens: Number(row.input_tokens),
       cachedInputTokens: Number(row.cached_input_tokens),
+      cacheWriteTokens: Number(row.cache_write_tokens ?? 0),
       outputTokens: Number(row.output_tokens),
       inputRatePerM: Number(row.input_rate_per_m),
       cachedInputRatePerM: Number(row.cached_input_rate_per_m),
+      cacheWriteRatePerM: Number(row.cache_write_rate_per_m ?? 0),
       outputRatePerM: Number(row.output_rate_per_m),
       costUsd: Number(row.cost_usd),
       tokenSource: row.token_source as ReviewRunUsage['tokenSource'],

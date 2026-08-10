@@ -37,7 +37,14 @@ export class WorkspaceReadRepository implements WorkspaceReadStore {
 
   listReviewRuns(tenantId: string, limit = 50): ReviewRun[] {
     const rows = this.db
-      .prepare(`SELECT * FROM review_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`)
+      .prepare(
+        `SELECT review_runs.*, EXISTS (
+           SELECT 1 FROM review_run_usage
+           WHERE review_run_usage.run_id = review_runs.id
+             AND review_run_usage.token_source != 'provider'
+         ) AS cost_estimated
+         FROM review_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`,
+      )
       .all(tenantId, limit) as ReviewRunRow[];
     return rows.map(mapReviewRun);
   }
@@ -186,6 +193,7 @@ interface ReviewRunRow {
   input_tokens: number;
   output_tokens: number;
   cost_usd: number;
+  cost_estimated?: number;
   deep: number;
   free_tier: number;
   new_findings_json: string | null;
@@ -277,6 +285,7 @@ function mapReviewRun(row: ReviewRunRow): ReviewRun {
     inputTokens: row.input_tokens ?? 0,
     outputTokens: row.output_tokens ?? 0,
     costUsd: row.cost_usd ?? 0,
+    costEstimated: row.cost_estimated === 1,
     deep: row.deep === 1,
     freeTier: row.free_tier === 1,
     newFindings: row.new_findings_json ? parseNewFindings(row.new_findings_json) : undefined,

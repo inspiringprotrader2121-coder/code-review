@@ -137,9 +137,11 @@ test('persists per-model usage and builds operator profitability analytics', () 
     passName: 'verification',
     inputTokens: 1_000_000,
     cachedInputTokens: 500_000,
+    cacheWriteTokens: 100_000,
     outputTokens: 100_000,
     inputRatePerM: 0.14,
     cachedInputRatePerM: 0.0028,
+    cacheWriteRatePerM: 0.14,
     outputRatePerM: 0.28,
     costUsd: 0.0994,
     tokenSource: 'provider',
@@ -190,6 +192,8 @@ test('persists per-model usage and builds operator profitability analytics', () 
   assert.equal(analytics.recentRuns[0]?.usage.length, 1);
   assert.equal(analytics.recentRuns[0]?.usage[0]?.cachedInputTokens, 500_000);
   assert.equal(analytics.recentRuns[0]?.usage[0]?.cachedInputRatePerM, 0.0028);
+  assert.equal(analytics.recentRuns[0]?.usage[0]?.cacheWriteTokens, 100_000);
+  assert.equal(analytics.recentRuns[0]?.usage[0]?.cacheWriteRatePerM, 0.14);
 });
 
 test('usage ledger rejects unknown runs and cross-tenant attribution', () => {

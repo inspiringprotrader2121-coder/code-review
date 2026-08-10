@@ -955,7 +955,7 @@ test('agentic Codex container mounts only its private checkout and receives no h
     );
     assert.ok(args.includes('CODEX_HOME=/codex-home'));
     const command = args.at(-1) ?? '';
-    assert.match(command, /^mkdir -p '\/codex-home' && chmod 700 '\/codex-home' && exec node /);
+    assert.match(command, /^mkdir -p '\/codex-home' && chmod 700 '\/codex-home' && node /);
     assert.match(command, /node '\/opt\/orvex\/node_modules\/@openai\/codex\/bin\/codex\.js'/);
     assert.match(command, /'model_provider="orvex_broker"'/);
     assert.match(
@@ -965,6 +965,9 @@ test('agentic Codex container mounts only its private checkout and receives no h
     assert.match(command, /'model_providers\.orvex_broker\.supports_websockets=false'/);
     assert.match(command, /'model_providers\.orvex_broker\.request_max_retries=1'/);
     assert.match(command, /'model_providers\.orvex_broker\.stream_max_retries=1'/);
+    assert.match(command, /\/v1\/orvex\/usage/);
+    assert.match(command, /codex_status=\$\?/);
+    assert.match(command, /exit "\$codex_status"/);
     assert.ok(
       command.indexOf("'--ignore-user-config'") <
         command.indexOf('\'model_provider="orvex_broker"\''),

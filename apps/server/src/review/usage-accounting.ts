@@ -4,6 +4,7 @@ import type { LlmTarget, PassTier, WorkerConfig } from './worker-types.js';
 export interface UsageCostRates {
   input: number;
   cachedInput: number;
+  cacheWrite: number;
   output: number;
 }
 
@@ -24,16 +25,21 @@ const PASS_TIERS: readonly PassTier[] = [
 ];
 
 export const DEFAULT_USAGE_COST_POLICY: UsageCostPolicy = {
-  premium: { input: 1.4, cachedInput: 1.4, output: 4.4 },
-  standard: { input: 0.3, cachedInput: 0.06, output: 1.2 },
-  openai: { input: 0.2, cachedInput: 0.02, output: 1.2 },
-  deepseek: { input: 0.435, cachedInput: 0.003625, output: 0.87 },
-  'deepseek-flash': { input: 0.14, cachedInput: 0.0028, output: 0.28 },
+  premium: { input: 1.4, cachedInput: 1.4, cacheWrite: 1.4, output: 4.4 },
+  standard: { input: 0.3, cachedInput: 0.06, cacheWrite: 0.3, output: 1.2 },
+  openai: { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 },
+  deepseek: { input: 0.435, cachedInput: 0.003625, cacheWrite: 0.435, output: 0.87 },
+  'deepseek-flash': { input: 0.14, cachedInput: 0.0028, cacheWrite: 0.14, output: 0.28 },
   modelRates: {
-    'gpt-5.6-luna': { input: 0.2, cachedInput: 0.02, output: 1.2 },
-    'deepseek-v4-pro': { input: 0.435, cachedInput: 0.003625, output: 0.87 },
-    'deepseek-v4-flash': { input: 0.14, cachedInput: 0.0028, output: 0.28 },
-    'minimax-m3': { input: 0.3, cachedInput: 0.06, output: 1.2 },
+    'gpt-5.6-luna': { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 },
+    'deepseek-v4-pro': {
+      input: 0.435,
+      cachedInput: 0.003625,
+      cacheWrite: 0.435,
+      output: 0.87,
+    },
+    'deepseek-v4-flash': { input: 0.14, cachedInput: 0.0028, cacheWrite: 0.14, output: 0.28 },
+    'minimax-m3': { input: 0.3, cachedInput: 0.06, cacheWrite: 0.3, output: 1.2 },
   },
 };
 
@@ -43,6 +49,7 @@ export function createUsageCostPolicy(values: UsageCostPolicyInput): UsageCostPo
   const rate = (value: Partial<UsageCostRates> | undefined, fallback: UsageCostRates) => ({
     input: positive(value?.input, fallback.input),
     cachedInput: positive(value?.cachedInput, fallback.cachedInput),
+    cacheWrite: positive(value?.cacheWrite, fallback.cacheWrite),
     output: positive(value?.output, fallback.output),
   });
   const tiers = Object.fromEntries(
@@ -57,8 +64,29 @@ export function createUsageCostPolicy(values: UsageCostPolicyInput): UsageCostPo
   return { ...tiers, modelRates: Object.freeze(modelRates) };
 }
 
-function usageRatesFor(tier: PassTier, model: string, policy: UsageCostPolicy): UsageCostRates {
-  return policy.modelRates[model.trim().toLowerCase()] ?? policy[tier];
+function usageRatesFor(
+  tier: PassTier,
+  model: string,
+  policy: UsageCostPolicy,
+  inputTokens = 0,
+): UsageCostRates {
+  const normalized = model.trim().toLowerCase();
+  const rates = policy.modelRates[normalized] ?? policy[tier];
+  // Provider pricing changes at a single-request context threshold. Usage is
+  // recorded once per provider response, so this never applies a surcharge to
+  // an aggregate of several smaller requests.
+  const multiplier =
+    (normalized === 'gpt-5.6-luna' && inputTokens > 272_000) ||
+    (normalized === 'minimax-m3' && inputTokens > 512_000)
+      ? { input: 2, cachedInput: 2, cacheWrite: 2, output: normalized === 'gpt-5.6-luna' ? 1.5 : 2 }
+      : undefined;
+  if (!multiplier) return rates;
+  return {
+    input: rates.input * multiplier.input,
+    cachedInput: rates.cachedInput * multiplier.cachedInput,
+    cacheWrite: rates.cacheWrite * multiplier.cacheWrite,
+    output: rates.output * multiplier.output,
+  };
 }
 
 export function computeCostUsd(
@@ -68,6 +96,7 @@ export function computeCostUsd(
   policy: UsageCostPolicy = DEFAULT_USAGE_COST_POLICY,
   cachedInputTokens = 0,
   model?: string,
+  cacheWriteTokens = 0,
 ): number {
   const safeInput = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
   const safeOutput = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
@@ -75,10 +104,15 @@ export function computeCostUsd(
     safeInput,
     Number.isFinite(cachedInputTokens) && cachedInputTokens > 0 ? cachedInputTokens : 0,
   );
-  const rates = model ? usageRatesFor(tier, model, policy) : policy[tier];
+  const safeCacheWrite = Math.min(
+    safeInput - safeCachedInput,
+    Number.isFinite(cacheWriteTokens) && cacheWriteTokens > 0 ? cacheWriteTokens : 0,
+  );
+  const rates = model ? usageRatesFor(tier, model, policy, safeInput) : policy[tier];
   return (
-    ((safeInput - safeCachedInput) / 1e6) * rates.input +
+    ((safeInput - safeCachedInput - safeCacheWrite) / 1e6) * rates.input +
     (safeCachedInput / 1e6) * rates.cachedInput +
+    (safeCacheWrite / 1e6) * rates.cacheWrite +
     (safeOutput / 1e6) * rates.output
   );
 }
@@ -112,19 +146,22 @@ export function usageProvider(target: LlmTarget, passName: string): string {
 export interface UsageEvent {
   inputTokens: number;
   cachedInputTokens?: number;
+  cacheWriteTokens?: number;
   outputTokens: number;
   tokenSource?: 'provider' | 'estimate';
   model?: string;
   provider?: string;
 }
 
-export interface AccountedUsage extends Omit<UsageEvent, 'cachedInputTokens'> {
+export interface AccountedUsage extends Omit<UsageEvent, 'cachedInputTokens' | 'cacheWriteTokens'> {
   cachedInputTokens: number;
+  cacheWriteTokens: number;
   provider: string;
   model: string;
   tier: PassTier;
   inputRatePerM: number;
   cachedInputRatePerM: number;
+  cacheWriteRatePerM: number;
   outputRatePerM: number;
   costUsd: number;
 }
@@ -149,19 +186,35 @@ export function accountUsage(
       ? usage.cachedInputTokens!
       : 0,
   );
-  const rates = usageRatesFor(tier, model, policy);
+  const cacheWriteTokens = Math.min(
+    inputTokens - cachedInputTokens,
+    Number.isFinite(usage.cacheWriteTokens) && usage.cacheWriteTokens! > 0
+      ? usage.cacheWriteTokens!
+      : 0,
+  );
+  const rates = usageRatesFor(tier, model, policy, inputTokens);
   return {
     ...usage,
     inputTokens,
     cachedInputTokens,
+    cacheWriteTokens,
     outputTokens,
     provider,
     model,
     tier,
     inputRatePerM: rates.input,
     cachedInputRatePerM: rates.cachedInput,
+    cacheWriteRatePerM: rates.cacheWrite,
     outputRatePerM: rates.output,
-    costUsd: computeCostUsd(inputTokens, outputTokens, tier, policy, cachedInputTokens, model),
+    costUsd: computeCostUsd(
+      inputTokens,
+      outputTokens,
+      tier,
+      policy,
+      cachedInputTokens,
+      model,
+      cacheWriteTokens,
+    ),
   };
 }
 
@@ -186,9 +239,11 @@ export function createUsageRecorder(
       passName,
       inputTokens: accounted.inputTokens,
       cachedInputTokens: accounted.cachedInputTokens,
+      cacheWriteTokens: accounted.cacheWriteTokens,
       outputTokens: accounted.outputTokens,
       inputRatePerM: accounted.inputRatePerM,
       cachedInputRatePerM: accounted.cachedInputRatePerM,
+      cacheWriteRatePerM: accounted.cacheWriteRatePerM,
       outputRatePerM: accounted.outputRatePerM,
       costUsd: accounted.costUsd,
       tokenSource: accounted.tokenSource ?? 'unknown',

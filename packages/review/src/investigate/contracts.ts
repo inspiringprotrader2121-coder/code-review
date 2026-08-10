@@ -16,6 +16,8 @@ export interface InvestigateOptions {
   context?: ReviewPromptContext;
   onUsage?: (usage: {
     inputTokens: number;
+    cachedInputTokens?: number;
+    cacheWriteTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     provider?: string;

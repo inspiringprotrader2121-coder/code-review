@@ -129,6 +129,7 @@ function slowRequest(port, { token = capability(), requestBody = body() } = {}) 
 function fakeUpstream({
   chunks = ['data: one\n\n', 'data: [DONE]\n\n'],
   delayMs = 0,
+  contentType = 'text/event-stream',
   onOptions,
   onBody,
 } = {}) {
@@ -140,7 +141,7 @@ function fakeUpstream({
       onBody?.(requestBody);
       const response = new EventEmitter();
       response.statusCode = 200;
-      response.headers = { 'content-type': 'text/event-stream', 'x-request-id': 'req_test' };
+      response.headers = { 'content-type': contentType, 'x-request-id': 'req_test' };
       response.pause = () => {};
       response.resume = () => {};
       callback(response);
@@ -193,6 +194,90 @@ test('adds the configured output ceiling when Codex omits the optional field', a
   assert.equal(result.status, 200);
   assert.equal(capturedBody.max_output_tokens, 8_192);
   assert.equal(capturedBody.reasoning.effort, 'max');
+});
+
+test('returns bounded completed-response usage only to the originating capability', async (t) => {
+  const completed = JSON.stringify({
+    type: 'response.completed',
+    response: {
+      usage: {
+        input_tokens: 300_000,
+        input_tokens_details: { cached_tokens: 100_000, cache_write_tokens: 50_000 },
+        output_tokens: 30,
+      },
+    },
+  });
+  const server = createBrokerServer(config({ maxRequestsPerWindow: 8 }), {
+    upstreamRequest: fakeUpstream({ chunks: [`data: ${completed}\n\n`, 'data: [DONE]\n\n'] }),
+  });
+  t.after(() => server.close());
+  const port = await listen(server);
+  const owner = capability();
+  assert.equal((await request(port, { token: owner })).status, 200);
+
+  const ownerUsage = await request(port, {
+    method: 'GET',
+    path: '/v1/orvex/usage',
+    body: '',
+    token: owner,
+  });
+  assert.equal(ownerUsage.status, 200);
+  assert.deepEqual(JSON.parse(ownerUsage.body), {
+    type: 'orvex.usage',
+    records: [
+      {
+        input_tokens: 300_000,
+        cached_input_tokens: 100_000,
+        cache_write_tokens: 50_000,
+        output_tokens: 30,
+      },
+    ],
+  });
+  const otherUsage = await request(port, {
+    method: 'GET',
+    path: '/v1/orvex/usage',
+    body: '',
+  });
+  assert.deepEqual(JSON.parse(otherUsage.body).records, []);
+  const consumed = await request(port, {
+    method: 'GET',
+    path: '/v1/orvex/usage',
+    body: '',
+    token: owner,
+  });
+  assert.deepEqual(JSON.parse(consumed.body).records, []);
+});
+
+test('records usage from a completed non-streaming response', async (t) => {
+  const completed = JSON.stringify({
+    status: 'completed',
+    usage: {
+      input_tokens: 1_000,
+      input_tokens_details: { cached_tokens: 200, cache_write_tokens: 100 },
+      output_tokens: 50,
+    },
+  });
+  const server = createBrokerServer(config({ maxRequestsPerWindow: 8 }), {
+    upstreamRequest: fakeUpstream({ chunks: [completed], contentType: 'application/json' }),
+  });
+  t.after(() => server.close());
+  const port = await listen(server);
+  const owner = capability();
+  assert.equal((await request(port, { token: owner, body: body({ stream: false }) })).status, 200);
+  const usage = await request(port, {
+    method: 'GET',
+    path: '/v1/orvex/usage',
+    body: '',
+    token: owner,
+  });
+  assert.deepEqual(JSON.parse(usage.body).records, [
+    {
+      input_tokens: 1_000,
+      cached_input_tokens: 200,
+      cache_write_tokens: 100,
+      output_tokens: 50,
+    },
+  ]);
 });
 
 test('fails closed before listening when a required broker configuration item is missing', () => {

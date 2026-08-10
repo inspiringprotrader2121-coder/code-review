@@ -82,10 +82,17 @@ separate, reviewed local configuration change and normal safe deployment:
 export DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
 /home/orvex/code-review/scripts/build-internal-sandbox-image.sh
 
-# Read-only broker preflight. After the two image IDs have been applied through
-# production configuration management, --apply builds and starts the broker.
+# Read-only broker preflight. In the usual case, after the two image IDs have
+# been applied through production configuration management, --apply builds and
+# starts the broker without changing runtime configuration.
 sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --dry-run
 sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --apply
+
+# A broker source update builds a new local image. During a guarded deployment
+# while the review worker is drained, this root-only option atomically changes
+# only ORVEX_CODEX_EGRESS_BROKER_IMAGE, restores the immutable file flag, and
+# restores the previous pin and broker if the new broker is unhealthy.
+sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --apply --update-pinned-image
 ```
 
 ```dotenv
@@ -110,7 +117,10 @@ ORVEX_CODEX_EGRESS_BROKER_IMAGE=sha256:<64-hex-local-image-id>
 
 The production `.env` is immutable by design. Use the existing approved
 configuration-management and guarded deployment workflow; do not edit the live
-server as a one-off and do not run raw `rsync`.
+server as a one-off and do not run raw `rsync`. The only controlled exception is
+the root-only `--apply --update-pinned-image` operation above, which replaces
+exactly one validated broker-image digest during a drained broker release and
+immediately restores the immutable flag.
 
 Both local image builders disable BuildKit provenance wrappers. These images
 never leave the server, and omitting the generated attestation manifest keeps

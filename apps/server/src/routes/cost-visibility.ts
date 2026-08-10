@@ -21,7 +21,9 @@ export function workspaceStatsForTenant(
 export function reviewRunsForTenant(
   runs: ReviewRun[],
   canViewLlmCost: boolean,
-): ReviewRun[] | Array<Omit<ReviewRun, 'costUsd'>> {
+): ReviewRun[] | Array<Omit<ReviewRun, 'costUsd' | 'costEstimated'>> {
   if (canViewLlmCost) return runs;
-  return runs.map(({ costUsd: _costUsd, ...withoutCost }) => withoutCost);
+  return runs.map(
+    ({ costUsd: _costUsd, costEstimated: _costEstimated, ...withoutCost }) => withoutCost,
+  );
 }

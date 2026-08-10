@@ -148,6 +148,8 @@ export interface ReviewRun {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  /** True when this run includes provider usage that was estimated, not reported. */
+  costEstimated?: boolean;
   deep: boolean;
   freeTier: boolean;
   newFindings?: Array<{ severity: string; file: string; line?: number }>;
@@ -196,9 +198,11 @@ export interface ReviewRunUsage {
   passName?: string;
   inputTokens: number;
   cachedInputTokens: number;
+  cacheWriteTokens?: number;
   outputTokens: number;
   inputRatePerM: number;
   cachedInputRatePerM: number;
+  cacheWriteRatePerM?: number;
   outputRatePerM: number;
   costUsd: number;
   tokenSource: UsageTokenSource;

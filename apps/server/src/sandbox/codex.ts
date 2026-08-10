@@ -26,6 +26,44 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `"'"'`)}'`;
 }
 
+// The broker owns the provider credential and returns only bounded numeric
+// usage for this short-lived capability. The wrapper never prints the token or
+// lets telemetry failure turn a completed review into a failed one.
+const usageReporter = `
+const http = require('node:http');
+const base = process.env.OPENAI_BASE_URL;
+const token = process.env.OPENAI_API_KEY;
+if (typeof base !== 'string' || typeof token !== 'string') process.exit(0);
+let settled = false;
+const finish = () => { if (!settled) { settled = true; process.exit(0); } };
+try {
+  const url = new URL('/v1/orvex/usage', base);
+  const request = http.request(url, { method: 'GET', headers: { authorization: 'Bearer ' + token, accept: 'application/json' } }, (response) => {
+    let body = '';
+    response.setEncoding('utf8');
+    response.on('data', (chunk) => { if (body.length <= 32768) body += chunk; });
+    response.once('end', () => {
+      if (response.statusCode === 200 && body.length <= 32768) {
+        try {
+          const value = JSON.parse(body);
+          if (value?.type === 'orvex.usage' && Array.isArray(value.records)) {
+            process.stdout.write(
+              JSON.stringify({ type: 'orvex.usage', records: value.records }) + '\\n',
+              finish,
+            );
+            return;
+          }
+        } catch {}
+      }
+      finish();
+    });
+  });
+  request.once('error', finish);
+  request.setTimeout(1500, () => { request.destroy(); finish(); });
+  request.end();
+} catch { finish(); }
+`;
+
 function codexContainerCommand(args: readonly string[]): string {
   if (args[0] !== 'exec' || args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) {
     throw new Error('internal Codex runner refused malformed CLI arguments');
@@ -52,7 +90,7 @@ function codexContainerCommand(args: readonly string[]): string {
   if (configResetIndex < 0) throw new Error('internal Codex runner requires config isolation');
   const insertAt = configResetIndex + 1;
   const commandArgs = [...args.slice(0, insertAt), ...brokerProviderArgs, ...args.slice(insertAt)];
-  return `mkdir -p ${shellQuote(CODEX_CONTAINER_HOME)} && chmod 700 ${shellQuote(CODEX_CONTAINER_HOME)} && exec node ${shellQuote(CODEX_CONTAINER_BINARY)} ${commandArgs.map(shellQuote).join(' ')}`;
+  return `mkdir -p ${shellQuote(CODEX_CONTAINER_HOME)} && chmod 700 ${shellQuote(CODEX_CONTAINER_HOME)} && node ${shellQuote(CODEX_CONTAINER_BINARY)} ${commandArgs.map(shellQuote).join(' ')}; codex_status=$?; node -e ${shellQuote(usageReporter)}; exit "$codex_status"`;
 }
 
 async function runCodexInSandboxInternal(

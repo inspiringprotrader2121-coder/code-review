@@ -75,7 +75,7 @@ test('only allowlisted tenants receive LLM cost data or dashboard controls', asy
   const customerDashboard = await dashboards.request('/dashboard/customer-workspace');
   const customerHtml = await customerDashboard.text();
   assert.match(customerHtml, /data-show-llm-cost="false"/);
-  assert.doesNotMatch(customerHtml, /<th class="r">Est\. LLM cost<\/th>/);
+  assert.doesNotMatch(customerHtml, /<th class="r">LLM cost<\/th>/);
   assert.match(customerHtml, /href="\/assets\/dashboard\.css"/);
   assert.match(customerHtml, /src="\/assets\/dashboard\.js" defer/);
   assert.doesNotMatch(customerHtml, /<style|onclick=|style=/);
@@ -92,7 +92,7 @@ test('only allowlisted tenants receive LLM cost data or dashboard controls', asy
   const internalDashboard = await dashboards.request('/dashboard/internal-testing');
   const internalHtml = await internalDashboard.text();
   assert.match(internalHtml, /data-show-llm-cost="true"/);
-  assert.match(internalHtml, /<th class="r">Est\. LLM cost<\/th>/);
+  assert.match(internalHtml, /<th class="r">LLM cost<\/th>/);
 });
 
 async function json(

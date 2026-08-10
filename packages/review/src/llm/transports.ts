@@ -260,6 +260,7 @@ export async function anthropicChat(
     opts.onUsage?.({
       inputTokens: response.usage.input_tokens,
       cachedInputTokens: response.usage.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: response.usage.cache_creation_input_tokens ?? 0,
       outputTokens: response.usage.output_tokens,
       tokenSource: 'provider',
       provider: providerName(opts.baseUrl, opts.api),
@@ -312,6 +313,7 @@ export async function openAiResponsesStreamChat(
   let reasoningTokens = 0;
   let inTok = 0;
   let cachedInTok = 0;
+  let cacheWriteTok = 0;
   let outTok = 0;
   let failed: string | undefined;
   let incomplete: string | undefined;
@@ -340,7 +342,11 @@ export async function openAiResponsesStreamChat(
             error?: { message?: string };
             usage?: {
               input_tokens?: number;
-              input_tokens_details?: { cached_tokens?: number };
+              input_tokens_details?: {
+                cached_tokens?: number;
+                cache_write_tokens?: number;
+                cache_creation_tokens?: number;
+              };
               output_tokens?: number;
               output_tokens_details?: { reasoning_tokens?: number };
             };
@@ -354,6 +360,10 @@ export async function openAiResponsesStreamChat(
           if (usage) {
             inTok = usage.input_tokens ?? 0;
             cachedInTok = usage.input_tokens_details?.cached_tokens ?? 0;
+            cacheWriteTok =
+              usage.input_tokens_details?.cache_write_tokens ??
+              usage.input_tokens_details?.cache_creation_tokens ??
+              0;
             outTok = usage.output_tokens ?? 0;
             reasoningTokens = usage.output_tokens_details?.reasoning_tokens ?? 0;
           }
@@ -372,6 +382,7 @@ export async function openAiResponsesStreamChat(
   opts.onUsage?.({
     inputTokens: inTok || estimateTokens(system.length + user.length),
     cachedInputTokens: inTok ? Math.min(inTok, cachedInTok) : 0,
+    cacheWriteTokens: inTok ? Math.min(Math.max(0, inTok - cachedInTok), cacheWriteTok) : 0,
     outputTokens: outTok || estimateTokens(content.length),
     tokenSource: inTok && outTok ? 'provider' : 'estimate',
     provider: providerName(opts.baseUrl, opts.api),

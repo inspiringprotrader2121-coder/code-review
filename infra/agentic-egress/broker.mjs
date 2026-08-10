@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 
 const OPENAI_HOST = 'api.openai.com';
 const OPENAI_RESPONSES_PATH = '/v1/responses';
@@ -11,6 +12,10 @@ const MAX_CLIENTS = 1_024;
 const CAPABILITY_PREFIX = 'orvex1';
 const MAX_CAPABILITY_REQUESTS = 64;
 const MAX_CAPABILITY_TTL_SECONDS = 1_800;
+const MAX_USAGE_RECORDS = 64;
+const MAX_USAGE_TOKEN_COUNT = 1_000_000_000;
+const MAX_SSE_EVENT_CHARS = 32_768;
+const MAX_JSON_USAGE_BODY_CHARS = 1_048_576;
 
 function failConfig(message) {
   throw new Error(`agentic egress configuration invalid: ${message}`);
@@ -153,6 +158,136 @@ function createCapabilityUsage(clock = Date) {
   };
 }
 
+function boundedTokenCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= MAX_USAGE_TOKEN_COUNT ? value : 0;
+}
+
+function responseUsage(response) {
+  if (!response || typeof response !== 'object') return null;
+  const usage = response.usage;
+  if (!usage || typeof usage !== 'object') return null;
+  const details = usage.input_tokens_details;
+  const input = boundedTokenCount(usage.input_tokens);
+  const cachedInput = boundedTokenCount(details?.cached_tokens);
+  const cacheWrite = boundedTokenCount(
+    details?.cache_write_tokens ?? details?.cache_creation_tokens,
+  );
+  const output = boundedTokenCount(usage.output_tokens);
+  if (cachedInput + cacheWrite > input) return null;
+  return {
+    input_tokens: input,
+    cached_input_tokens: cachedInput,
+    cache_write_tokens: cacheWrite,
+    output_tokens: output,
+  };
+}
+
+function createCapabilityTelemetry(clock = Date) {
+  const clients = new Map();
+  const prune = (now) => {
+    for (const [jti, entry] of clients) if (entry.expiresAt <= now) clients.delete(jti);
+  };
+  return {
+    record(capability, usage) {
+      const now = clock.now();
+      prune(now);
+      let entry = clients.get(capability.jti);
+      if (!entry) {
+        if (clients.size >= MAX_CLIENTS) return;
+        entry = { expiresAt: capability.exp * 1_000, records: [] };
+        clients.set(capability.jti, entry);
+      }
+      if (entry.records.length < MAX_USAGE_RECORDS) entry.records.push(usage);
+    },
+    take(capability) {
+      const now = clock.now();
+      prune(now);
+      const entry = clients.get(capability.jti);
+      if (!entry) return [];
+      clients.delete(capability.jti);
+      return entry.records;
+    },
+  };
+}
+
+function createSseUsageCapture(onUsage) {
+  const decoder = new StringDecoder('utf8');
+  let pending = '';
+  let jsonBody = '';
+  let jsonTooLarge = false;
+  let streaming = true;
+  let recorded = false;
+  const record = (usage) => {
+    if (recorded || !usage) return;
+    recorded = true;
+    onUsage(usage);
+  };
+  const consumeLine = (line) => {
+    if (recorded || line.length > MAX_SSE_EVENT_CHARS || !line.startsWith('data:')) return;
+    const data = line.slice('data:'.length).trim();
+    if (!data || data === '[DONE]') return;
+    try {
+      const event = JSON.parse(data);
+      if (event?.type !== 'response.completed') return;
+      record(responseUsage(event.response));
+    } catch {
+      /* retain transparent proxying when an SSE event is not JSON */
+    }
+  };
+  const drain = () => {
+    let newline = pending.indexOf('\n');
+    while (newline >= 0) {
+      consumeLine(pending.slice(0, newline).replace(/\r$/, ''));
+      pending = pending.slice(newline + 1);
+      newline = pending.indexOf('\n');
+    }
+    if (pending.length > MAX_SSE_EVENT_CHARS) pending = '';
+  };
+  return {
+    setContentType(contentType) {
+      streaming = typeof contentType === 'string' && contentType.includes('text/event-stream');
+    },
+    write(chunk) {
+      const text = decoder.write(chunk);
+      if (streaming) {
+        pending += text;
+        drain();
+      } else {
+        if (jsonTooLarge) return;
+        if (jsonBody.length + text.length <= MAX_JSON_USAGE_BODY_CHARS) jsonBody += text;
+        else {
+          jsonBody = '';
+          jsonTooLarge = true;
+        }
+      }
+    },
+    end() {
+      const text = decoder.end();
+      if (streaming) {
+        pending += text;
+        drain();
+        consumeLine(pending.replace(/\r$/, ''));
+      } else if (jsonBody && !jsonTooLarge) {
+        if (jsonBody.length + text.length > MAX_JSON_USAGE_BODY_CHARS) {
+          jsonBody = '';
+          jsonTooLarge = true;
+        } else {
+          jsonBody += text;
+          try {
+            const response = JSON.parse(jsonBody);
+            if (response?.status === 'completed') record(responseUsage(response));
+          } catch {
+            /* retain transparent proxying when a direct response is not JSON */
+          }
+        }
+      }
+      pending = '';
+      jsonBody = '';
+      jsonTooLarge = false;
+    },
+  };
+}
+
 function hostMatches(request, allowedHost) {
   const host = request.headers.host;
   return host === allowedHost || host === `${allowedHost}:8080`;
@@ -269,7 +404,7 @@ function createRateLimiter(config, clock = Date) {
   };
 }
 
-function proxyResponses({ request, response, body, config, upstreamRequest, complete }) {
+function proxyResponses({ request, response, body, config, upstreamRequest, complete, onUsage }) {
   const accept =
     typeof request.headers.accept === 'string' &&
     request.headers.accept.includes('text/event-stream')
@@ -279,6 +414,7 @@ function proxyResponses({ request, response, body, config, upstreamRequest, comp
   let timeout;
   let responseBytes = 0;
   let done = false;
+  const usageCapture = createSseUsageCapture(onUsage);
   const finish = (result) => {
     if (done) return;
     done = true;
@@ -323,6 +459,7 @@ function proxyResponses({ request, response, body, config, upstreamRequest, comp
               : 'application/json; charset=utf-8',
           'cache-control': 'no-store',
         };
+        usageCapture.setContentType(headers['content-type']);
         const requestId = upstreamResponse.headers['x-request-id'];
         if (typeof requestId === 'string' && requestId.length <= 200)
           headers['x-request-id'] = requestId;
@@ -335,10 +472,12 @@ function proxyResponses({ request, response, body, config, upstreamRequest, comp
             finish({ status: 502, responseBytes, outcome: 'response_too_large' });
             return;
           }
+          usageCapture.write(chunk);
           if (!response.write(chunk)) upstreamResponse.pause();
         });
         response.on('drain', () => upstreamResponse.resume());
         upstreamResponse.once('end', () => {
+          usageCapture.end();
           if (!response.writableEnded) response.end();
           finish({ status: statusCode, responseBytes, outcome: 'upstream_complete' });
         });
@@ -371,6 +510,7 @@ function createBrokerServer(config, dependencies = {}) {
   const clock = dependencies.clock ?? Date;
   const limiter = createRateLimiter(config, clock);
   const capabilityUsage = createCapabilityUsage(clock);
+  const telemetry = createCapabilityTelemetry(clock);
   let active = 0;
 
   const server = http.createServer(async (request, response) => {
@@ -402,11 +542,7 @@ function createBrokerServer(config, dependencies = {}) {
       response.end();
       return;
     }
-    if (
-      !hostMatches(request, config.allowedHost) ||
-      request.method !== 'POST' ||
-      request.url !== OPENAI_RESPONSES_PATH
-    ) {
+    if (!hostMatches(request, config.allowedHost)) {
       rejectRequest(request, response, 404, { error: 'not_found' });
       return;
     }
@@ -416,6 +552,14 @@ function createBrokerServer(config, dependencies = {}) {
       return;
     }
     client = capability.jti;
+    if (request.method === 'GET' && request.url === '/v1/orvex/usage') {
+      writeJson(response, 200, { type: 'orvex.usage', records: telemetry.take(capability) });
+      return;
+    }
+    if (request.method !== 'POST' || request.url !== OPENAI_RESPONSES_PATH) {
+      rejectRequest(request, response, 404, { error: 'not_found' });
+      return;
+    }
     const declaredLength = Number(request.headers['content-length']);
     if (
       !Number.isFinite(declaredLength) ||
@@ -463,7 +607,15 @@ function createBrokerServer(config, dependencies = {}) {
       complete({ status, outcome: prepared.error });
       return;
     }
-    proxyResponses({ request, response, body: prepared.body, config, upstreamRequest, complete });
+    proxyResponses({
+      request,
+      response,
+      body: prepared.body,
+      config,
+      upstreamRequest,
+      complete,
+      onUsage: (usage) => telemetry.record(capability, usage),
+    });
   });
   server.maxConnections = Math.max(16, config.maxConcurrent * 4);
   server.requestTimeout = config.bodyReadTimeoutMs;

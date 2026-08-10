@@ -203,6 +203,72 @@ test('DeepSeek streaming usage reports cache reads at provider precision', async
   });
 });
 
+test('Responses usage reports provider cache writes separately from cache reads', async () => {
+  let usage:
+    | {
+        inputTokens: number;
+        cachedInputTokens?: number;
+        cacheWriteTokens?: number;
+        outputTokens: number;
+        tokenSource?: string;
+      }
+    | undefined;
+  const encoder = new TextEncoder();
+  await withStubbedFetch(
+    () =>
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: 'response.output_text.delta',
+                delta: '{"findings":[]}',
+              })}\n\n`,
+            ),
+          );
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: 'response.completed',
+                response: {
+                  usage: {
+                    input_tokens: 100,
+                    input_tokens_details: { cached_tokens: 40, cache_write_tokens: 10 },
+                    output_tokens: 20,
+                  },
+                },
+              })}\n\n`,
+            ),
+          );
+          controller.close();
+        },
+      }),
+    async () => {
+      await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'gpt-5.6-luna',
+        baseUrl: 'https://api.openai.example/v1',
+        api: 'responses',
+        thinking: false,
+        onUsage: (event) => {
+          usage = event;
+        },
+      });
+    },
+  );
+  assert.deepEqual(usage, {
+    inputTokens: 100,
+    cachedInputTokens: 40,
+    cacheWriteTokens: 10,
+    outputTokens: 20,
+    tokenSource: 'provider',
+    provider: 'api.openai.example',
+    model: 'gpt-5.6-luna',
+    attemptId: usage?.attemptId,
+  });
+  assert.match(usage?.attemptId ?? '', /^[0-9a-f-]{36}$/i);
+});
+
 test('an explicit max reasoning effort is never downgraded on a retry-style call', async () => {
   const captured = await withStubbedFetch(
     () => chatStream('{"findings":[]}'),

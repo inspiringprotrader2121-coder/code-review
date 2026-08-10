@@ -236,7 +236,7 @@ test('usage accounting clamps malformed provider token counts instead of poisoni
   assert.equal(accounted.costUsd, 0);
 });
 
-test('usage accounting keeps Luna pricing pinned and prices DeepSeek cache reads separately', () => {
+test('usage accounting keeps Luna pricing pinned and prices provider cache reads and writes separately', () => {
   const staleGenericOpenAi = createUsageCostPolicy({
     openai: { input: 1, cachedInput: 0.1, output: 6 },
   });
@@ -249,6 +249,7 @@ test('usage accounting keeps Luna pricing pinned and prices DeepSeek cache reads
   );
   assert.equal(luna.inputRatePerM, 0.2);
   assert.equal(luna.cachedInputRatePerM, 0.02);
+  assert.equal(luna.cacheWriteRatePerM, 0.25);
   assert.equal(luna.outputRatePerM, 1.2);
   assert.equal(luna.costUsd, 0.016);
 
@@ -259,6 +260,29 @@ test('usage accounting keeps Luna pricing pinned and prices DeepSeek cache reads
     { inputTokens: 1_000_000, cachedInputTokens: 900_000, outputTokens: 1_000_000 },
   );
   assert.equal(flash.costUsd, 0.29652);
+
+  const longLuna = accountUsage('openai', modelRoutingConfig().openaiModel, 'agentic discovery', {
+    inputTokens: 300_000,
+    cachedInputTokens: 100_000,
+    cacheWriteTokens: 50_000,
+    outputTokens: 1_000_000,
+    tokenSource: 'provider',
+  });
+  assert.equal(longLuna.inputRatePerM, 0.4);
+  assert.equal(longLuna.cachedInputRatePerM, 0.04);
+  assert.equal(longLuna.cacheWriteRatePerM, 0.5);
+  assert.ok(Math.abs(longLuna.outputRatePerM - 1.8) < 1e-12);
+  assert.ok(Math.abs(longLuna.costUsd - 1.889) < 1e-12);
+
+  const longMiniMax = accountUsage('standard', modelRoutingConfig().standardModel, 'discovery', {
+    inputTokens: 600_000,
+    outputTokens: 100_000,
+    tokenSource: 'provider',
+  });
+  assert.equal(longMiniMax.inputRatePerM, 0.6);
+  assert.equal(longMiniMax.cachedInputRatePerM, 0.12);
+  assert.equal(longMiniMax.outputRatePerM, 2.4);
+  assert.equal(longMiniMax.costUsd, 0.6);
 });
 
 test('post-publication finalizers are non-fatal after GitHub accepted a review', async () => {

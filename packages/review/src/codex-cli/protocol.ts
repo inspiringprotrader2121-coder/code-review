@@ -49,39 +49,71 @@ export function extractThreadId(stdout: string): string {
 export type CodexUsage = {
   input?: number;
   cachedInput?: number;
+  cacheWrite?: number;
   output?: number;
   reasoning?: number;
 };
-export function extractUsage(stdout: string): CodexUsage | undefined {
+type ProtocolUsage = {
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  cache_write_tokens?: number;
+  output_tokens?: number;
+  reasoning_output_tokens?: number;
+  input_tokens_details?: {
+    cached_tokens?: number;
+    cache_write_tokens?: number;
+    cache_creation_tokens?: number;
+  };
+  prompt_tokens_details?: { cached_tokens?: number };
+};
+
+function toUsage(usage: ProtocolUsage): CodexUsage {
+  return {
+    input: usage.input_tokens,
+    cachedInput:
+      usage.cached_input_tokens ??
+      usage.input_tokens_details?.cached_tokens ??
+      usage.prompt_tokens_details?.cached_tokens,
+    cacheWrite:
+      usage.cache_write_tokens ??
+      usage.input_tokens_details?.cache_write_tokens ??
+      usage.input_tokens_details?.cache_creation_tokens,
+    output: usage.output_tokens,
+    reasoning: usage.reasoning_output_tokens,
+  };
+}
+
+/**
+ * Prefer the broker's per-response usage over a Codex terminal aggregate. A
+ * single agentic turn can issue multiple Responses requests with different
+ * context pricing, so aggregation before cost accounting would be inaccurate.
+ */
+export function extractUsages(stdout: string): CodexUsage[] {
+  const terminal: CodexUsage[] = [];
+  const broker: CodexUsage[] = [];
   for (const line of stdout.split('\n')) {
     try {
       const event = JSON.parse(line) as {
         type?: string;
-        usage?: {
-          input_tokens?: number;
-          cached_input_tokens?: number;
-          output_tokens?: number;
-          reasoning_output_tokens?: number;
-          input_tokens_details?: { cached_tokens?: number };
-          prompt_tokens_details?: { cached_tokens?: number };
-        };
+        usage?: ProtocolUsage;
+        records?: ProtocolUsage[];
       };
       if (event.type === 'turn.completed' && event.usage) {
-        return {
-          input: event.usage.input_tokens,
-          cachedInput:
-            event.usage.cached_input_tokens ??
-            event.usage.input_tokens_details?.cached_tokens ??
-            event.usage.prompt_tokens_details?.cached_tokens,
-          output: event.usage.output_tokens,
-          reasoning: event.usage.reasoning_output_tokens,
-        };
+        terminal.push(toUsage(event.usage));
+      } else if (event.type === 'orvex.usage' && Array.isArray(event.records)) {
+        for (const usage of event.records) {
+          if (usage && typeof usage === 'object') broker.push(toUsage(usage));
+        }
       }
     } catch {
       /* non-protocol output */
     }
   }
-  return undefined;
+  return broker.length > 0 ? broker : terminal;
+}
+
+export function extractUsage(stdout: string): CodexUsage | undefined {
+  return extractUsages(stdout)[0];
 }
 
 export function readLastMessage(file: string): string {

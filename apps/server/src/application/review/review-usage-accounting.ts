@@ -16,9 +16,11 @@ export interface ReviewAttemptStore {
     passName: string;
     inputTokens: number;
     cachedInputTokens: number;
+    cacheWriteTokens?: number;
     outputTokens: number;
     inputRatePerM: number;
     cachedInputRatePerM: number;
+    cacheWriteRatePerM?: number;
     outputRatePerM: number;
     costUsd: number;
     tokenSource: 'provider' | 'estimate';
@@ -64,6 +66,7 @@ export interface ReviewUsageAccounting {
   ): (usage: {
     inputTokens: number;
     cachedInputTokens?: number;
+    cacheWriteTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     model?: string;
@@ -89,6 +92,7 @@ export function createReviewUsageAccounting(
     (reported: {
       inputTokens: number;
       cachedInputTokens?: number;
+      cacheWriteTokens?: number;
       outputTokens: number;
       tokenSource?: 'provider' | 'estimate';
       model?: string;
@@ -110,9 +114,11 @@ export function createReviewUsageAccounting(
         passName,
         inputTokens: accounted.inputTokens,
         cachedInputTokens: accounted.cachedInputTokens,
+        cacheWriteTokens: accounted.cacheWriteTokens,
         outputTokens: accounted.outputTokens,
         inputRatePerM: accounted.inputRatePerM,
         cachedInputRatePerM: accounted.cachedInputRatePerM,
+        cacheWriteRatePerM: accounted.cacheWriteRatePerM,
         outputRatePerM: accounted.outputRatePerM,
         costUsd: accounted.costUsd,
         tokenSource:

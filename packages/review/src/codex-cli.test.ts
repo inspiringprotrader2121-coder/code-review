@@ -557,6 +557,71 @@ test('container protocol gives the internal runner only a private checkout, reda
   );
 });
 
+test('container protocol prices broker usage per Responses request instead of a terminal CLI estimate', async (t) => {
+  const checkout = mkdtempSync(path.join(tmpdir(), 'orvex-rverify-codex-usage-'));
+  chmodSync(checkout, 0o700);
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  const usage: Array<Record<string, unknown>> = [];
+  const runtime: CodexContainerRuntime = {
+    assertReady: async () => {},
+    run: async () => ({
+      exitCode: 0,
+      stdout: [
+        JSON.stringify({
+          type: 'turn.completed',
+          usage: { input_tokens: 999_999, output_tokens: 999_999 },
+        }),
+        JSON.stringify({
+          type: 'orvex.usage',
+          records: [
+            {
+              input_tokens: 100,
+              cached_input_tokens: 40,
+              cache_write_tokens: 10,
+              output_tokens: 20,
+            },
+            {
+              input_tokens: 300_000,
+              cached_input_tokens: 100_000,
+              cache_write_tokens: 50_000,
+              output_tokens: 30,
+            },
+          ],
+        }),
+      ].join('\n'),
+      stderr: '',
+      lastMessage: '{"findings":[],"summary":"ok"}',
+      timedOut: false,
+      durationMs: 1,
+    }),
+  };
+  await runCodexContainerExecForTest('review', {
+    cwd: checkout,
+    runtime,
+    onUsage: (event) => usage.push(event),
+  });
+  assert.deepEqual(usage, [
+    {
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      cacheWriteTokens: 10,
+      outputTokens: 20,
+      tokenSource: 'provider',
+      model: DEFAULT_CODEX_CLI_MODEL,
+      provider: 'codex-cli',
+    },
+    {
+      inputTokens: 300_000,
+      cachedInputTokens: 100_000,
+      cacheWriteTokens: 50_000,
+      outputTokens: 30,
+      tokenSource: 'provider',
+      model: DEFAULT_CODEX_CLI_MODEL,
+      provider: 'codex-cli',
+    },
+  ]);
+});
+
 test('container protocol refuses announced model substitution without a fallback call', async () => {
   const checkout = mkdtempSync(path.join(tmpdir(), 'orvex-rverify-codex-fallback-'));
   chmodSync(checkout, 0o700);
@@ -710,6 +775,7 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:12, cache
     {
       inputTokens: 12,
       cachedInputTokens: 4,
+      cacheWriteTokens: 0,
       outputTokens: 3,
       tokenSource: 'provider',
       model: DEFAULT_CODEX_CLI_MODEL,
