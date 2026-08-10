@@ -946,6 +946,10 @@ test('agentic Codex container mounts only its private checkout and receives no h
     assert.ok(args.includes(`OPENAI_API_KEY=${BROKER_TOKEN}`));
     assert.ok(args.includes('CODEX_HOME=/tmp/codex-home'));
     const command = args.at(-1) ?? '';
+    assert.match(
+      command,
+      /^mkdir -p '\/tmp\/codex-home' && chmod 700 '\/tmp\/codex-home' && exec node /,
+    );
     assert.match(command, /node '\/opt\/orvex\/node_modules\/@openai\/codex\/bin\/codex\.js'/);
     assert.match(command, /< '\/work\/\.orvex-agentic\/prompt-/);
 

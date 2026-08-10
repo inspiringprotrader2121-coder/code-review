@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { CodexContainerResult, CodexContainerRuntime } from '@orvex-review/review';
 import {
   CODEX_CONTAINER_BINARY,
+  CODEX_CONTAINER_HOME,
   DEFAULT_SANDBOX_RUNTIME_OPTIONS,
   type CodexSandboxRunOptions,
   type SandboxResult,
@@ -30,7 +31,7 @@ function codexContainerCommand(args: readonly string[], promptInContainer: strin
   if (args[0] !== 'exec' || args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) {
     throw new Error('internal Codex runner refused malformed CLI arguments');
   }
-  return `exec node ${shellQuote(CODEX_CONTAINER_BINARY)} ${args.map(shellQuote).join(' ')} < ${shellQuote(promptInContainer)}`;
+  return `mkdir -p ${shellQuote(CODEX_CONTAINER_HOME)} && chmod 700 ${shellQuote(CODEX_CONTAINER_HOME)} && exec node ${shellQuote(CODEX_CONTAINER_BINARY)} ${args.map(shellQuote).join(' ')} < ${shellQuote(promptInContainer)}`;
 }
 
 async function runCodexInSandboxInternal(

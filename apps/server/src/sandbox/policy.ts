@@ -1,6 +1,7 @@
 import {
   CODEX_EGRESS_BASE_URL,
   CODEX_EGRESS_NETWORK,
+  CODEX_CONTAINER_HOME,
   DEFAULT_SANDBOX_RUNTIME_OPTIONS,
   MAX_SANDBOX_COMMAND_BYTES,
   MAX_SANDBOX_OUTPUT_FILE_BYTES,
@@ -130,7 +131,7 @@ export function buildSandboxDockerArgs(
       '--env',
       `OPENAI_API_KEY=${opts.brokerToken}`,
       '--env',
-      'CODEX_HOME=/tmp/codex-home',
+      `CODEX_HOME=${CODEX_CONTAINER_HOME}`,
       '--env',
       'NO_PROXY=*',
     );
