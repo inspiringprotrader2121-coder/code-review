@@ -11,8 +11,8 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.openAiReasoningEffort, 'high');
   assert.equal(config.llmTimeoutMs, 240_000);
   assert.equal(config.llmMaxTotalMs, 300_000);
-  assert.equal(config.codexTimeoutMs, 300_000);
-  assert.equal(config.codexInactivityTimeoutMs, 180_000);
+  assert.equal(config.codexTimeoutMs, 480_000);
+  assert.equal(config.codexInactivityTimeoutMs, 300_000);
   assert.equal(config.maxFindings, 25);
   assert.equal(config.reviewWorkerConcurrency, 8);
   assert.equal(config.codexApiKeyConcurrency, 8);

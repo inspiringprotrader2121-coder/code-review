@@ -293,8 +293,8 @@ export function loadReviewRuntimeConfig(
       list(env.ORVEX_CODEX_CLI_REPOS).map((value) => value.toLowerCase()),
     ),
     codexTimeoutMs: Math.min(
-      300_000,
-      Math.max(60_000, finite(env.ORVEX_CODEX_TIMEOUT_MS, 300_000)),
+      480_000,
+      Math.max(60_000, finite(env.ORVEX_CODEX_TIMEOUT_MS, 480_000)),
     ),
     codexInactivityTimeoutMs: 0,
     codexRateLimitMaxWaitMs: finite(env.ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS, 60_000),
@@ -445,7 +445,7 @@ export function loadReviewRuntimeConfig(
   };
   const inactivity = Math.min(
     config.codexTimeoutMs,
-    Math.max(30_000, finite(env.ORVEX_CODEX_INACTIVITY_TIMEOUT_MS, 180_000)),
+    Math.max(30_000, finite(env.ORVEX_CODEX_INACTIVITY_TIMEOUT_MS, 300_000)),
   );
   return Object.freeze({ ...config, codexInactivityTimeoutMs: inactivity });
 }

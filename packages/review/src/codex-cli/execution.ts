@@ -115,6 +115,8 @@ async function executeContainerCodex(
     throw new ReviewCancelledError('codex-cli review cancelled');
   if (result.timedOut) {
     reportUsageFloor(options);
+    if (result.inactivityTimedOut)
+      throw new Error(`codex-cli produced no container output for ${timeouts.inactivityMs}ms`);
     throw new Error(`codex-cli container exceeded ${timeouts.hardMs}ms wall-clock cap`);
   }
   if (codexAnnouncedModelFallback(`${result.stdout}\n${result.stderr}`)) {

@@ -378,7 +378,7 @@ test('production home lock keeps OAuth and unknown homes serial', async () => {
 });
 
 test('resolveCodexTimeouts bounds wall and silence timers', () => {
-  assert.deepEqual(resolveCodexTimeouts({}), { hardMs: 300_000, inactivityMs: 180_000 });
+  assert.deepEqual(resolveCodexTimeouts({}), { hardMs: 480_000, inactivityMs: 300_000 });
   assert.deepEqual(
     resolveCodexTimeouts({
       ORVEX_CODEX_TIMEOUT_MS: '120000',
@@ -391,7 +391,7 @@ test('resolveCodexTimeouts bounds wall and silence timers', () => {
       ORVEX_CODEX_TIMEOUT_MS: '9999999',
       ORVEX_CODEX_INACTIVITY_TIMEOUT_MS: '1',
     }),
-    { hardMs: 300_000, inactivityMs: 30_000 },
+    { hardMs: 480_000, inactivityMs: 30_000 },
   );
 });
 
@@ -598,6 +598,42 @@ test('container protocol also refuses an announced model substitution on stderr'
   await assert.rejects(
     runCodexContainerExecForTest('review', { cwd: checkout, runtime }),
     /refused model substitution/,
+  );
+});
+
+test('container protocol reports inactivity and wall-clock timeouts distinctly', async (t) => {
+  const checkout = mkdtempSync(path.join(tmpdir(), 'orvex-rverify-codex-timeout-'));
+  chmodSync(checkout, 0o700);
+  t.after(() => rmSync(checkout, { recursive: true, force: true }));
+  const result = (inactivityTimedOut: boolean): CodexContainerRuntime => ({
+    assertReady: async () => {},
+    run: async () => ({
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      lastMessage: '',
+      timedOut: true,
+      inactivityTimedOut,
+      durationMs: 1,
+    }),
+  });
+  await assert.rejects(
+    runCodexContainerExecForTest('review', {
+      cwd: checkout,
+      runtime: result(true),
+      hardMs: 2_000,
+      inactivityMs: 1_000,
+    }),
+    /no container output for 1000ms/,
+  );
+  await assert.rejects(
+    runCodexContainerExecForTest('review', {
+      cwd: checkout,
+      runtime: result(false),
+      hardMs: 2_000,
+      inactivityMs: 1_000,
+    }),
+    /exceeded 2000ms wall-clock cap/,
   );
 });
 

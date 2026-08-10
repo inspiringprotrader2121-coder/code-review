@@ -234,8 +234,8 @@ Agentic Luna execution is restricted to named trusted repositories, API-key auth
 | `ORVEX_CODEX_PROXIES` | csv-URLs; approved proxies | `(unset)` | yes / connection | - | Optional bounded set of approved Codex proxies. |
 | `ORVEX_CODEX_PROXY` | URL; approved proxy URL | `(unset)` | yes / connection | - | Single approved Codex proxy compatibility setting. |
 | `ORVEX_CODEX_CLI_PATH` | path; pinned project-local CLI path | `(unset)` | no / path | - | Pinned local Codex CLI executable. Unpinned global binaries are refused. |
-| `ORVEX_CODEX_TIMEOUT_MS` | integer; 60000..300000 ms; default 300000 | `300000` | no / none | - | Wall-clock cap for one agentic pass. |
-| `ORVEX_CODEX_INACTIVITY_TIMEOUT_MS` | integer; 30000..ORVEX_CODEX_TIMEOUT_MS; default 180000 | `180000` | no / none | - | Stdout/stderr silence cap for one agentic pass. |
+| `ORVEX_CODEX_TIMEOUT_MS` | integer; 60000..480000 ms; default 480000 | `480000` | no / none | - | Wall-clock cap for one agentic pass. |
+| `ORVEX_CODEX_INACTIVITY_TIMEOUT_MS` | integer; 30000..ORVEX_CODEX_TIMEOUT_MS; default 300000 | `300000` | no / none | - | Stdout/stderr silence cap for one agentic pass. |
 | `ORVEX_CODEX_RATELIMIT_MAX_WAIT_MS` | integer; milliseconds; default 60000 | `60000` | no / none | - | Codex rate-limit retry maximum wait. |
 | `ORVEX_CODEX_RATELIMIT_TOTAL_WAIT_MS` | integer; milliseconds; default 60000 | `60000` | no / none | - | Codex rate-limit total sleep budget. |
 | `ORVEX_CODEX_USAGE_FLOOR_INPUT` | integer; positive tokens; default 50000 | `50000` | no / none | - | Conservative input-token floor for Codex usage accounting. |
