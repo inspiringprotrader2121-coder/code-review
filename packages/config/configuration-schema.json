@@ -2230,7 +2230,7 @@
     },
     {
       "name": "Retries and focused prompt limits",
-      "description": "These values bound retry delays and supporting context. The diff remains first and is fairly sampled only on oversized PRs.",
+      "description": "These values bound retry delays and supporting context. The diff remains first and is fairly sampled only on oversized PRs. DeepSeek and MiniMax review completions use a fixed 16000-token budget while their required reasoning modes remain enabled.",
       "variables": [
         {
           "name": "ORVEX_RATELIMIT_MAX_RETRIES",
@@ -2365,26 +2365,6 @@
           "redaction": "none",
           "enabled": false,
           "description": "Changed chunk length budget.",
-          "deprecatedAliases": []
-        },
-        {
-          "name": "ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS",
-          "example": "24000",
-          "type": "integer",
-          "range": "positive tokens",
-          "secret": false,
-          "redaction": "none",
-          "description": "DeepSeek completion token cap while maintaining maximum reasoning effort.",
-          "deprecatedAliases": []
-        },
-        {
-          "name": "ORVEX_MINIMAX_MAX_OUTPUT_TOKENS",
-          "example": "24000",
-          "type": "integer",
-          "range": "positive tokens",
-          "secret": false,
-          "redaction": "none",
-          "description": "MiniMax completion token cap.",
           "deprecatedAliases": []
         }
       ]

@@ -6,7 +6,6 @@ import { formatLimitBlockedComment, loadAccountQuotaStatus } from './quota-statu
 import {
   canRunAgentic,
   hasPinnedCodexLuna,
-  createReviewRoutingPolicy,
   DEFAULT_REVIEW_ROUTING_POLICY,
   type ReviewRoutingPolicy,
 } from './review/model-routing.js';
@@ -113,7 +112,7 @@ export type { PassAngle } from '@orvex-review/review';
 /** Compatibility helper for direct unit tests. Production gets this policy
  * from the immutable bootstrap snapshot on WorkerConfig. */
 export function loadReviewRoutingPolicy(): ReviewRoutingPolicy {
-  return createReviewRoutingPolicy(DEFAULT_REVIEW_ROUTING_POLICY);
+  return DEFAULT_REVIEW_ROUTING_POLICY;
 }
 
 function runtimeFor(config: WorkerConfig): NonNullable<WorkerConfig['reviewRuntime']> {

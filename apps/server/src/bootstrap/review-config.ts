@@ -42,8 +42,6 @@ export function createWorkerConfig(config: ServerConfig, store: AppDatabase): Wo
     investigateEnabled: runtime.routing.investigateEnabled,
     riskHuntEnabled: runtime.routing.riskHuntEnabled,
     investigateTier: runtime.routing.investigateTier,
-    deepseekMaxOutputTokens: runtime.providerLimits.deepseekMaxOutputTokens,
-    minimaxMaxOutputTokens: runtime.providerLimits.minimaxMaxOutputTokens,
   });
 
   const minimaxKey = providers.minimaxApiKey;

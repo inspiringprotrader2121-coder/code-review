@@ -91,10 +91,6 @@ export interface ReviewRuntimeConfig {
     riskHuntEnabled: boolean;
     investigateTier: 'deepseek-flash' | 'deepseek' | 'openai' | 'standard';
   }>;
-  readonly providerLimits: Readonly<{
-    deepseekMaxOutputTokens: number;
-    minimaxMaxOutputTokens: number;
-  }>;
   readonly reviewInput: Readonly<{
     maxFileBytes: number;
     maxFiles: number;
@@ -376,16 +372,6 @@ export function loadReviewRuntimeConfig(
             | 'openai'
             | 'standard')
         : 'deepseek-flash',
-    }),
-    providerLimits: Object.freeze({
-      deepseekMaxOutputTokens: Math.min(
-        64_000,
-        Math.max(16_000, positive(env.ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS, 24_000)),
-      ),
-      minimaxMaxOutputTokens: Math.min(
-        64_000,
-        Math.max(16_000, positive(env.ORVEX_MINIMAX_MAX_OUTPUT_TOKENS, 24_000)),
-      ),
     }),
     reviewInput: Object.freeze({
       maxFileBytes: positiveBounded(env.MAX_FILE_BYTES, 300_000, 10_000_000),

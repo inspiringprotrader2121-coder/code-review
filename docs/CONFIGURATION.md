@@ -261,7 +261,7 @@ Agentic Luna execution is restricted to named trusted repositories, API-key auth
 
 ## Retries and focused prompt limits
 
-These values bound retry delays and supporting context. The diff remains first and is fairly sampled only on oversized PRs.
+These values bound retry delays and supporting context. The diff remains first and is fairly sampled only on oversized PRs. DeepSeek and MiniMax review completions use a fixed 16000-token budget while their required reasoning modes remain enabled.
 
 | Variable | Type and range | Safe default | Secret / redaction | Compatibility aliases | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -278,8 +278,6 @@ These values bound retry delays and supporting context. The diff remains first a
 | `ORVEX_CHANGED_CONTEXT_LINES` | integer; positive lines; default 32 | `32` | no / none | - | Changed-line surrounding context. |
 | `ORVEX_MAX_CHANGED_CHUNKS_PER_FILE` | integer; positive chunks; default 4 | `4` | no / none | - | Changed chunks retained per file. |
 | `ORVEX_MAX_CHANGED_CHUNK_CHARS` | integer; positive chars; default 12000 | `12000` | no / none | - | Changed chunk length budget. |
-| `ORVEX_DEEPSEEK_MAX_OUTPUT_TOKENS` | integer; positive tokens | `24000` | no / none | - | DeepSeek completion token cap while maintaining maximum reasoning effort. |
-| `ORVEX_MINIMAX_MAX_OUTPUT_TOKENS` | integer; positive tokens | `24000` | no / none | - | MiniMax completion token cap. |
 
 ## Inherited child-process environment
 

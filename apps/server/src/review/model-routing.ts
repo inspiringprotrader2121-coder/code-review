@@ -15,23 +15,32 @@ export interface ReviewRoutingPolicy {
   minimaxMaxOutputTokens: number;
 }
 
-export const DEFAULT_REVIEW_ROUTING_POLICY: ReviewRoutingPolicy = {
+export const REVIEW_MODEL_OUTPUT_TOKENS = 16_000;
+
+export const DEFAULT_REVIEW_ROUTING_POLICY: ReviewRoutingPolicy = Object.freeze({
   codexCliEnabled: false,
   codexRepoAllowed: () => false,
   investigateEnabled: false,
   riskHuntEnabled: false,
   investigateTier: 'deepseek-flash',
-  deepseekMaxOutputTokens: 24_000,
-  minimaxMaxOutputTokens: 24_000,
-};
+  deepseekMaxOutputTokens: REVIEW_MODEL_OUTPUT_TOKENS,
+  minimaxMaxOutputTokens: REVIEW_MODEL_OUTPUT_TOKENS,
+});
 
-export function createReviewRoutingPolicy(
-  values: Partial<ReviewRoutingPolicy>,
-): ReviewRoutingPolicy {
-  const outputLimit = (value: number | undefined): number =>
-    Number.isFinite(value) ? Math.min(64_000, Math.max(16_000, Math.floor(Number(value)))) : 24_000;
+type ReviewRoutingPolicyOptions = Partial<
+  Pick<
+    ReviewRoutingPolicy,
+    | 'codexCliEnabled'
+    | 'codexRepoAllowed'
+    | 'investigateEnabled'
+    | 'riskHuntEnabled'
+    | 'investigateTier'
+  >
+>;
+
+export function createReviewRoutingPolicy(values: ReviewRoutingPolicyOptions): ReviewRoutingPolicy {
   const investigateTier = values.investigateTier;
-  return {
+  return Object.freeze({
     codexCliEnabled: values.codexCliEnabled === true,
     codexRepoAllowed: values.codexRepoAllowed ?? (() => false),
     investigateEnabled: values.investigateEnabled === true,
@@ -41,9 +50,9 @@ export function createReviewRoutingPolicy(
     )
       ? investigateTier!
       : 'deepseek-flash',
-    deepseekMaxOutputTokens: outputLimit(values.deepseekMaxOutputTokens),
-    minimaxMaxOutputTokens: outputLimit(values.minimaxMaxOutputTokens),
-  };
+    deepseekMaxOutputTokens: REVIEW_MODEL_OUTPUT_TOKENS,
+    minimaxMaxOutputTokens: REVIEW_MODEL_OUTPUT_TOKENS,
+  });
 }
 
 function premiumTarget(config: WorkerConfig, policy = DEFAULT_REVIEW_ROUTING_POLICY): LlmTarget {
