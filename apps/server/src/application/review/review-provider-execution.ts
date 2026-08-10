@@ -67,6 +67,17 @@ export interface ReviewProviderExecutionInput {
   apiConcurrency: number;
 }
 
+export function groupApiCallsByProvider(calls: ReviewCall[]): ReviewCall[][] {
+  const lanes = new Map<string, ReviewCall[]>();
+  for (const call of calls) {
+    const bucket = call.target.admissionBucket ?? call.target.baseUrl ?? call.target.model;
+    const lane = lanes.get(bucket) ?? [];
+    lane.push(call);
+    lanes.set(bucket, lane);
+  }
+  return [...lanes.values()];
+}
+
 /** Executes independent providers in parallel while retaining Codex's ordered session lane. */
 export async function executeReviewProviderCalls(
   input: ReviewProviderExecutionInput,
@@ -158,10 +169,23 @@ export async function executeReviewProviderCalls(
     for (const call of cli) outcomes.push(await runOne(call));
     return outcomes;
   };
+  const runApiLanes = async () => {
+    const lanes = groupApiCallsByProvider(api);
+    const laneOutcomes = await input.mapConcurrent(
+      lanes,
+      Math.min(input.apiConcurrency, lanes.length),
+      async (lane) => {
+        const outcomes: ReviewCallOutcome[] = [];
+        for (const call of lane) outcomes.push(await runOne(call));
+        return outcomes;
+      },
+    );
+    return laneOutcomes.flat();
+  };
   const [cliOutcomes, investigateOutcomes, apiOutcomes] = await Promise.all([
     runCliLane(),
     input.mapConcurrent(investigate, 1, runOne),
-    input.mapConcurrent(api, input.apiConcurrency, runOne),
+    runApiLanes(),
   ]);
   return [...cliOutcomes, ...apiOutcomes, ...investigateOutcomes];
 }

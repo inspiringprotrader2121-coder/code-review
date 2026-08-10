@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ChangedFile } from '@orvex-review/github';
+import { groupApiCallsByProvider } from './review-provider-execution.js';
 import { boundHighTierDiscoveryWorkloads, type ReviewCall } from './review-stage-scheduler.js';
 
 const files = Array.from({ length: 5 }, (_, index) => ({
@@ -61,4 +62,15 @@ test('lower-tier single DeepSeek and MiniMax reviewers still receive the full PR
   const scheduled = boundHighTierDiscoveryWorkloads(calls, files);
   assert.equal(scheduled[0], only);
   assert.equal(scheduled[1], minimax);
+});
+
+test('same-provider review calls share an ordered lane while independent providers stay parallel', () => {
+  const first = call('deepseek-v4-flash', 1);
+  first.target.admissionBucket = 'deepseek';
+  const second = call('deepseek-v4-flash', 2);
+  second.target.admissionBucket = 'deepseek';
+  const minimax = call('MiniMax-M3', 3);
+  minimax.target.admissionBucket = 'minimax';
+
+  assert.deepEqual(groupApiCallsByProvider([first, minimax, second]), [[first, second], [minimax]]);
 });
