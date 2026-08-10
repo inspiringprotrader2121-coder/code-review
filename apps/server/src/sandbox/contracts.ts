@@ -144,5 +144,5 @@ export const CODEX_EGRESS_NETWORK = 'orvex-agentic-internal';
 export const CODEX_EGRESS_BROKER = 'orvex-openai-egress';
 export const CODEX_EGRESS_BASE_URL = `http://${CODEX_EGRESS_BROKER}:8080/v1`;
 export const CODEX_CONTAINER_BINARY = '/opt/orvex/node_modules/@openai/codex/bin/codex.js';
-export const CODEX_CONTAINER_HOME = '/tmp/codex-home';
+export const CODEX_CONTAINER_HOME = '/codex-home';
 export const DEFAULT_WORKDIR_MAX_BYTES = 1024 * 1024 * 1024;

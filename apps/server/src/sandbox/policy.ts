@@ -124,6 +124,8 @@ export function buildSandboxDockerArgs(
   ];
   if (agenticCodex) {
     args.push(
+      '--tmpfs',
+      `${CODEX_CONTAINER_HOME}:size=16m,noexec,nosuid,nodev,mode=0700`,
       '--label',
       ORVEX_CODEX_LABEL,
       '--env',
