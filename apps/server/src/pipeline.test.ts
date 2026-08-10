@@ -163,8 +163,8 @@ test('high-tier preflight requires allowlisted pinned Codex CLI and never accept
 
 test('fixed provider output ceilings bound long maximum-reasoning generations', () => {
   const defaults = createReviewRoutingPolicy({});
-  assert.equal(maxOutputTokensForModel('deepseek-v4-flash', defaults), 32_000);
-  assert.equal(maxOutputTokensForModel('MiniMax-M3', defaults), 18_000);
+  assert.equal(maxOutputTokensForModel('deepseek-v4-flash', defaults), 36_000);
+  assert.equal(maxOutputTokensForModel('MiniMax-M3', defaults), 20_000);
   assert.ok(Object.isFrozen(defaults));
   assert.equal(maxOutputTokensForModel('gpt-5.6-luna', defaults), undefined);
 });

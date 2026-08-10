@@ -17,9 +17,9 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.reviewWorkerConcurrency, 8);
   assert.equal(config.codexApiKeyConcurrency, 8);
   assert.equal(config.providerConcurrency('luna'), 8);
-  assert.equal(config.promptChangedChars, 32_000);
-  assert.equal(config.promptRelatedChars, 12_000);
-  assert.equal(config.promptOtherChars, 4_000);
+  assert.equal(config.promptChangedChars, 16_000);
+  assert.equal(config.promptRelatedChars, 6_000);
+  assert.equal(config.promptOtherChars, 2_000);
   assert.deepEqual(config.codexAllowedRepos, []);
   assert.ok(Object.isFrozen(config));
   assert.ok(Object.isFrozen(config.childProcessEnvironment));
@@ -79,9 +79,9 @@ test('supporting context cannot override the diff-first production ceiling', () 
     ORVEX_MAX_RELATED_CHARS: '999999',
     ORVEX_MAX_OTHER_CHARS: '999999',
   });
-  assert.equal(config.promptChangedChars, 32_000);
-  assert.equal(config.promptRelatedChars, 12_000);
-  assert.equal(config.promptOtherChars, 4_000);
+  assert.equal(config.promptChangedChars, 16_000);
+  assert.equal(config.promptRelatedChars, 6_000);
+  assert.equal(config.promptOtherChars, 2_000);
 });
 
 test('review runtime preserves legacy empty-string and invalid-value fallbacks', () => {

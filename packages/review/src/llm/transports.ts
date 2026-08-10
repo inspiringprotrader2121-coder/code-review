@@ -455,9 +455,9 @@ export async function openAiCompatStreamChat(
     model: opts.model,
   });
   const text = stripThinking(content);
-  if (!text) throw new Error('LLM returned no text content');
   if (finishReason === 'length')
     throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
+  if (!text) throw new Error('LLM returned no text content');
   return text;
 }
 

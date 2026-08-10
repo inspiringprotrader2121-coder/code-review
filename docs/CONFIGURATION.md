@@ -270,9 +270,9 @@ These values bound retry delays and supporting context. The diff remains first a
 | `ORVEX_RATELIMIT_BASE_MS` | integer; milliseconds; default 2000 | `2000` | no / none | - | Base retry-backoff duration. |
 | `ORVEX_RATELIMIT_TOTAL_WAIT_MS` | integer; milliseconds; default 60000 | `60000` | no / none | - | Total retry sleep budget per provider call. |
 | `ORVEX_MAX_DIFF_CHARS` | integer; positive chars; default 96000 | `96000` | no / none | - | Primary diff context budget. |
-| `ORVEX_MAX_CHANGED_CHARS` | integer; positive chars; default and maximum 32000 | `32000` | no / none | - | Changed-file supporting context budget. |
-| `ORVEX_MAX_RELATED_CHARS` | integer; positive chars; default and maximum 12000 | `12000` | no / none | - | Related-file context budget. |
-| `ORVEX_MAX_OTHER_CHARS` | integer; positive chars; default and maximum 4000 | `4000` | no / none | - | Other supporting context budget. |
+| `ORVEX_MAX_CHANGED_CHARS` | integer; positive chars; default and maximum 16000 | `16000` | no / none | - | Changed-file supporting context budget. |
+| `ORVEX_MAX_RELATED_CHARS` | integer; positive chars; default and maximum 6000 | `6000` | no / none | - | Related-file context budget. |
+| `ORVEX_MAX_OTHER_CHARS` | integer; positive chars; default and maximum 2000 | `2000` | no / none | - | Other supporting context budget. |
 | `ORVEX_MAX_TREE_PATHS` | integer; positive paths; default 400 | `400` | no / none | - | Repository-tree path budget. |
 | `ORVEX_FULL_CHANGED_FILE_CHARS` | integer; positive chars; default 12000 | `12000` | no / none | - | Full changed-file context budget. |
 | `ORVEX_CHANGED_CONTEXT_LINES` | integer; positive lines; default 32 | `32` | no / none | - | Changed-line surrounding context. |

@@ -220,6 +220,10 @@ Constructor-only reads are a known false-positive class.
 
 - List findings **most severe first**. When you can propose an exact fix, include
   `originalCode` (verbatim from the new side of the diff, minimal) and `fixedCode`.
+- Emit the JSON as soon as the evidence is sufficient. Keep each finding message
+  to at most three concise sentences. Omit `originalCode`/`fixedCode` unless both
+  are exact, minimal replacements of at most 20 lines each; never copy a whole
+  function or file just to fill those fields.
 - Write a `summary`: what the change does, an overall verdict (does the patch look
   correct, or does it have issues?), and what is done well.
 - Respond with **JSON only**, matching the schema.

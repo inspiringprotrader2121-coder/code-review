@@ -159,8 +159,45 @@ test('an explicit max reasoning effort is never downgraded on a retry-style call
   assert.equal('max_completion_tokens' in captured[0].body, false);
 });
 
+test('a reasoning-only compatible response reports output exhaustion accurately', async () => {
+  const encoder = new TextEncoder();
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'thinking' } }] })}\n\n`,
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\n`,
+                ),
+              );
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              controller.close();
+            },
+          }),
+        async () => {
+          await llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://example.test/v1',
+            api: 'chat',
+            reasoningEffort: 'max',
+            maxTokens: 36_000,
+          });
+        },
+      ),
+    /truncated \(finish_reason=length\)/,
+  );
+});
+
 test('MiniMax keeps thinking enabled without consuming its answer budget', () => {
-  assert.equal(resolveAnthropicThinkingBudget('MiniMax-M3', 18_000, 20_000), 6_000);
+  assert.equal(resolveAnthropicThinkingBudget('MiniMax-M3', 20_000, 20_000), 6_000);
   assert.equal(resolveAnthropicThinkingBudget('other-model', 32_000, 20_000), 20_000);
 });
 
