@@ -170,8 +170,8 @@ Limits bound time, spend, and context. Production verification remains on; max r
 
 | Variable | Type and range | Safe default | Secret / redaction | Compatibility aliases | Description |
 | --- | --- | --- | --- | --- | --- |
-| `MAX_FILE_BYTES` | integer; positive bytes | `300000` | no / none | - | Legacy per-file review limit. |
-| `MAX_FILES` | integer; positive files | `150` | no / none | - | Legacy maximum changed-file count. |
+| `MAX_FILE_BYTES` | integer; positive bytes | `1000000` | no / none | - | Legacy per-file review limit. |
+| `MAX_FILES` | integer; positive files | `3000` | no / none | - | Legacy maximum changed-file count. |
 | `MAX_LLM_TOKENS` | integer; positive tokens | `50000` | no / none | - | Legacy LLM token ceiling. |
 | `ORVEX_LLM_TIMEOUT_MS` | integer; 1000..900000 ms; default 240000 | `240000` | no / none | - | Per-call timeout protecting the per-PR lock from hung calls. |
 | `ORVEX_RESPONSES_TIMEOUT_MS` | integer; 1000..900000 ms; default 900000 | `900000` | no / none | - | Responses API hard timeout. |
