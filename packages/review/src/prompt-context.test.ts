@@ -103,6 +103,26 @@ test('focused reviewers can use a smaller diff budget without widening the globa
   assert.match(prompt, /CHANGE_419_/);
 });
 
+test('required complete diff shards reject overflow instead of sampling', () => {
+  const patch =
+    '@@ -1,1 +1,1 @@\n-old\n+new\n' +
+    Array.from({ length: 160 }, (_, index) => `+COMPLETE_${index}_${'x'.repeat(100)}`).join('\n');
+  assert.throws(
+    () =>
+      buildUserPrompt([{ filename: 'src/complete.ts', status: 'modified', patch }], {
+        diffBudgetChars: 4_000,
+        diffCoverage: 'require-complete',
+      }),
+    /required complete diff shard exceeds 4000-character budget/,
+  );
+  const complete = buildUserPrompt(
+    [{ filename: 'src/complete.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+COMPLETE' }],
+    { diffBudgetChars: 4_000, diffCoverage: 'require-complete' },
+  );
+  assert.match(complete, /\+COMPLETE/);
+  assert.doesNotMatch(complete, /diff chars omitted; sampled start and end/);
+});
+
 test('cross-file context budgets disclose every skipped path', () => {
   const prompt = buildUserPrompt(
     [{ filename: 'src/app.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],

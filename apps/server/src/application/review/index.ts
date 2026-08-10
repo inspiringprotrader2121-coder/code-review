@@ -10,6 +10,7 @@ export {
 export {
   ReviewExecutor,
   executeReviewCore,
+  failedRequiredCoverageKeys,
   failedRequiredLensIds,
   takeReviewCallsByPriority,
 } from './review-executor.js';

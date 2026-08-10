@@ -15,7 +15,7 @@ export { fileRulesFor, loadOrvexRules, REQUIRED_RULE_ANCHORS } from './prompt/ru
  */
 export function buildUserPrompt(files: ReviewPromptFile[], context?: ReviewPromptContext): string {
   const parts = taskPreamble();
-  parts.push('', ...buildDiffSections(files, context?.diffBudgetChars));
+  parts.push('', ...buildDiffSections(files, context?.diffBudgetChars, context?.diffCoverage));
   appendChangedSourceContext(
     parts,
     files,

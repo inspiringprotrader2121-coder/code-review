@@ -23,6 +23,7 @@ export interface ReviewCallOutcome {
   label?: string;
   sample: number;
   modelPassIndex?: number;
+  requiredCoverageKey?: string;
 }
 
 export interface ReviewProviderExecutionInput {
@@ -82,7 +83,7 @@ export async function executeReviewProviderCalls(
       if (call.mode === 'agentic') {
         try {
           const { response } = await input.providers.runCodexReview(
-            input.filesForLlm,
+            call.files ?? input.filesForLlm,
             call.target,
             {
               context: call.ctx,
@@ -200,5 +201,6 @@ function outcome(
     label: call.label,
     sample: call.sample,
     modelPassIndex: call.modelPassIndex,
+    requiredCoverageKey: call.requiredCoverageKey,
   };
 }

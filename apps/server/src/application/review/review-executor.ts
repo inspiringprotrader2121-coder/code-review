@@ -41,6 +41,7 @@ import type { PreparedExecutionReview, ProcessResult } from './types.js';
 
 export interface RequiredLensOutcome {
   modelPassIndex?: number;
+  requiredCoverageKey?: string;
   ok: boolean;
   bestEffort?: boolean;
 }
@@ -54,6 +55,21 @@ export function failedRequiredLensIds(
     (lensId) =>
       outcomes.filter(
         (outcome) => outcome.modelPassIndex === lensId && outcome.ok && !outcome.bestEffort,
+      ).length < requiredSuccesses,
+  );
+}
+
+/** A required chunk is complete only when that exact stage/chunk key succeeded. */
+export function failedRequiredCoverageKeys(
+  coverageKeys: readonly string[],
+  outcomes: readonly RequiredLensOutcome[],
+  requiredSuccesses: number,
+): string[] {
+  return coverageKeys.filter(
+    (coverageKey) =>
+      outcomes.filter(
+        (outcome) =>
+          outcome.requiredCoverageKey === coverageKey && outcome.ok && !outcome.bestEffort,
       ).length < requiredSuccesses,
   );
 }
@@ -448,12 +464,17 @@ export async function executeReviewCore(
           );
         }
 
-        // Every purchased discovery stage is required. In normal mode each needs
-        // one completed call; in repeated mode each needs at least one successful
-        // sample before aggregation. Explicit diagnostic/deep extras remain optional.
+        // Every purchased discovery stage and every complete-diff chunk is
+        // required. A successful sibling chunk cannot satisfy a failed chunk.
+        // In repeated mode each exact coverage key needs one successful sample
+        // before aggregation. Explicit diagnostic/deep extras remain optional.
         const requiredCalls = toRun.filter((call) => call.kind === 'pass' && !call.bestEffort);
-        const requiredLensIds = [
-          ...new Set(requiredCalls.map((call) => call.modelPassIndex ?? -1)),
+        const requiredCoverageKeys = [
+          ...new Set(
+            requiredCalls.map(
+              (call) => call.requiredCoverageKey ?? `lens:${call.modelPassIndex ?? -1}`,
+            ),
+          ),
         ];
         // A required lens aborts the review only when it has ZERO successful
         // samples — the pre-aggregation semantics. Requiring minOccurrences
@@ -465,18 +486,20 @@ export async function executeReviewCore(
         // findings can still recur via other samples' lenses, and losing solo
         // findings to manual review beats losing the entire review.
         const requiredSuccesses = 1;
-        const failedRequiredLenses = failedRequiredLensIds(
-          requiredLensIds,
+        const failedRequiredCoverage = failedRequiredCoverageKeys(
+          requiredCoverageKeys,
           outcomes,
           requiredSuccesses,
         );
-        if (failedRequiredLenses.length > 0) {
+        if (failedRequiredCoverage.length > 0) {
           // PRESERVE TRANSIENCE. queue-runner decides whether to requeue by pattern-
           // matching this message with isTransientLlmError; naming it keeps a
           // rate-limited required lens retryable rather than silently partial.
           const failedRequiredPasses = outcomes.filter(
             (outcome) =>
-              failedRequiredLenses.includes(outcome.modelPassIndex ?? -1) &&
+              failedRequiredCoverage.includes(
+                outcome.requiredCoverageKey ?? `lens:${outcome.modelPassIndex ?? -1}`,
+              ) &&
               !outcome.bestEffort &&
               !outcome.ok,
           );
@@ -488,7 +511,7 @@ export async function executeReviewCore(
               ? ' — required provider call timed out or was temporarily unavailable'
               : '; no partial review was posted';
           throw new Error(
-            `review aborted: ${failedRequiredLenses.length}/${requiredLensIds.length} required review lens(es) ` +
+            `review aborted: ${failedRequiredCoverage.length}/${requiredCoverageKeys.length} required review coverage unit(s) ` +
               `completed fewer than ${requiredSuccesses} sample(s)${cause}`,
           );
         }
@@ -530,19 +553,26 @@ export async function executeReviewCore(
           // Aggregation degradation (see requiredSuccesses above): a required lens
           // with some but < minOccurrences successes can't reach the recurrence
           // gate on its own samples — disclose it rather than abort.
-          const underSampled = requiredLensIds.filter((id) => {
+          const underSampled = requiredCoverageKeys.filter((coverageKey) => {
             const okCount = outcomes.filter(
-              (o) => (o.modelPassIndex ?? -1) === id && o.kind === 'pass' && !o.bestEffort && o.ok,
+              (o) =>
+                (o.requiredCoverageKey ?? `lens:${o.modelPassIndex ?? -1}`) === coverageKey &&
+                o.kind === 'pass' &&
+                !o.bestEffort &&
+                o.ok,
             ).length;
             return okCount >= 1 && okCount < aggregation.minOccurrences;
           });
           if (underSampled.length > 0) {
-            const labels = underSampled.map((id) => {
+            const labels = underSampled.map((coverageKey) => {
               const ok = outcomes.filter(
                 (o) =>
-                  (o.modelPassIndex ?? -1) === id && o.kind === 'pass' && !o.bestEffort && o.ok,
+                  (o.requiredCoverageKey ?? `lens:${o.modelPassIndex ?? -1}`) === coverageKey &&
+                  o.kind === 'pass' &&
+                  !o.bestEffort &&
+                  o.ok,
               ).length;
-              return `lens ${id + 1} (${ok}/${aggregation.effectiveRuns} samples)`;
+              return `${coverageKey} (${ok}/${aggregation.effectiveRuns} samples)`;
             });
             skippedLenses = [...skippedLenses, ...labels];
             console.warn(

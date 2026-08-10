@@ -97,16 +97,24 @@ export function buildCodexPrompt(
       : mode === 'lean'
         ? configuredBudget('ORVEX_CODEX_MAX_DIFF_CHARS', 60_000)
         : Number.POSITIVE_INFINITY;
-  const filesForPrompt = capCodexDiffFiles(
-    files
-      .filter((file) => file.patch && file.status !== 'removed')
-      .map((file) => ({
-        filename: file.filename,
-        status: file.status,
-        patch: redactPatch(file.patch),
-      })),
-    Number.isFinite(maxDiffChars) ? maxDiffChars : 10_000_000,
-  );
+  const redactedDiffs = files
+    .filter((file) => file.patch && file.status !== 'removed')
+    .map((file) => ({
+      filename: file.filename,
+      status: file.status,
+      patch: redactPatch(file.patch!) ?? '',
+    }));
+  const diffBudget = Number.isFinite(maxDiffChars) ? maxDiffChars : 10_000_000;
+  const completeDiff = context?.diffCoverage === 'require-complete';
+  const completeDiffChars = redactedDiffs.reduce((sum, file) => sum + file.patch.length, 0);
+  if (completeDiff && completeDiffChars > diffBudget) {
+    throw new Error(
+      `required complete Codex diff shard exceeds ${diffBudget}-character budget (${completeDiffChars} chars)`,
+    );
+  }
+  const filesForPrompt = completeDiff
+    ? redactedDiffs
+    : capCodexDiffFiles(redactedDiffs, diffBudget);
   const redactAll = (items?: Array<{ path: string; content: string }>) =>
     items?.map((item) => ({ ...item, content: redactSecrets(item.content) }));
   const maxTree =
@@ -116,6 +124,9 @@ export function buildCodexPrompt(
         ? configuredBudget('ORVEX_CODEX_MAX_TREE_PATHS', 400)
         : undefined;
   const promptContext: ReviewPromptContext | undefined = context && {
+    promptProfile: context.promptProfile,
+    diffBudgetChars: context.diffBudgetChars,
+    diffCoverage: context.diffCoverage,
     treePaths:
       maxTree === 0
         ? undefined
@@ -130,13 +141,17 @@ export function buildCodexPrompt(
     extraFocus: context.extraFocus,
   };
   const user = buildUserPrompt(filesForPrompt, promptContext);
-  if (mode === 'slim')
-    return trimCodexPrompt(
-      `${SLIM_EXPLORE}\n${user}`,
-      configuredBudget('ORVEX_CODEX_SLIM_PROMPT_CHARS', 50_000),
-    );
+  if (mode === 'slim') {
+    const promptBudget = configuredBudget('ORVEX_CODEX_SLIM_PROMPT_CHARS', 50_000);
+    if (completeDiff && `${SLIM_EXPLORE}\n${user}`.length > promptBudget)
+      throw new Error(`required complete Codex prompt exceeds ${promptBudget}-character budget`);
+    return trimCodexPrompt(`${SLIM_EXPLORE}\n${user}`, promptBudget);
+  }
   const system = loadOrvexRules();
   if (!hasCheckout && mode === 'full') return `${system}\n\n${user}`;
   const body = hasCheckout ? `${system}\n\n${LEAN_EXPLORE}\n${user}` : `${system}\n\n${user}`;
-  return trimCodexPrompt(body, configuredBudget('ORVEX_CODEX_MAX_PROMPT_CHARS', 100_000));
+  const promptBudget = configuredBudget('ORVEX_CODEX_MAX_PROMPT_CHARS', 100_000);
+  if (completeDiff && body.length > promptBudget)
+    throw new Error(`required complete Codex prompt exceeds ${promptBudget}-character budget`);
+  return trimCodexPrompt(body, promptBudget);
 }

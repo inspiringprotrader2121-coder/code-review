@@ -1338,7 +1338,7 @@
       "variables": [
         {
           "name": "MAX_FILE_BYTES",
-          "example": "300000",
+          "example": "1000000",
           "type": "integer",
           "range": "positive bytes",
           "secret": false,
@@ -1348,7 +1348,7 @@
         },
         {
           "name": "MAX_FILES",
-          "example": "150",
+          "example": "3000",
           "type": "integer",
           "range": "positive files",
           "secret": false,

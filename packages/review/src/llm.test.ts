@@ -122,3 +122,31 @@ test('an invalid discovery response is not replayed as another paid call', async
   assert.equal(result.summary, REVIEW_INCOMPLETE_SUMMARY);
   assert.deepEqual(result.findings, []);
 });
+
+test('required complete-diff context reaches the provider prompt unchanged', async () => {
+  let user = '';
+  const result = await runLlmReview(
+    [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+COMPLETE_MARKER' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      context: { diffBudgetChars: 100, diffCoverage: 'require-complete' },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+      },
+      runner: {
+        transport: 'compatible-chat',
+        async run(request) {
+          user = request.user;
+          return JSON.stringify({ findings: [], summary: 'complete' });
+        },
+      },
+    },
+  );
+
+  assert.equal(result.summary, 'complete');
+  assert.match(user, /COMPLETE_MARKER/);
+  assert.doesNotMatch(user, /diff chars omitted; sampled start and end/);
+});

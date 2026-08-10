@@ -39,6 +39,8 @@ export interface ReviewCall {
   temperature?: number;
   bestEffort?: boolean;
   files?: ChangedFile[];
+  /** Stable required diff chunk identity. A sibling chunk cannot satisfy it. */
+  requiredCoverageKey?: string;
 }
 
 export interface ReviewStageSchedule {
@@ -51,8 +53,8 @@ export interface ScheduledReviewCalls {
   aggregation: ReturnType<typeof fitReviewAggregationToBudget>;
 }
 
-const FOCUSED_REVIEW_DIFF_BUDGET_CHARS = 24_000;
-const FOCUSED_REVIEW_HUNK_CHUNK_CHARS = 12_000;
+const FOCUSED_REVIEW_DIFF_BUDGET_CHARS = 14_000;
+const FOCUSED_REVIEW_HUNK_CHUNK_CHARS = 6_000;
 
 function withFileShard(
   call: ReviewCall,
@@ -61,6 +63,7 @@ function withFileShard(
   context: 'focused-source' | 'diff-only',
   replaceExistingFocus = false,
   diffBudgetChars?: number,
+  requiredCoverageKey?: string,
 ): ReviewCall {
   const paths = new Set(shard.map((file) => file.filename));
   const changedContents =
@@ -72,12 +75,13 @@ function withFileShard(
     files: shard,
     ctx: {
       ...(context === 'diff-only' ? { promptProfile: 'focused' as const } : {}),
-      ...(diffBudgetChars ? { diffBudgetChars } : {}),
+      ...(diffBudgetChars ? { diffBudgetChars, diffCoverage: 'require-complete' as const } : {}),
       changedContents,
       extraFocus: replaceExistingFocus
         ? note
         : [call.ctx.extraFocus, note].filter(Boolean).join('\n'),
     },
+    ...(requiredCoverageKey ? { requiredCoverageKey } : {}),
   };
 }
 
@@ -135,7 +139,27 @@ function splitOversizedHunk(hunk: string, maxChars: number): string[] {
   return chunks.length > 0 ? chunks : [hunk];
 }
 
-/** Break large files at unified-diff hunk boundaries before balanced assignment. */
+function splitRawPatchFragment(file: ChangedFile, maxChars: number): ChangedFile[] {
+  const patch = file.patch;
+  if (!patch || patch.length <= maxChars) return [file];
+  const fragments: ChangedFile[] = [];
+  let offset = 0;
+  while (offset < patch.length) {
+    const marker =
+      offset === 0 ? '' : `... [continued exact raw diff fragment at character ${offset}] ...\n`;
+    const available = Math.max(1, maxChars - marker.length);
+    let end = Math.min(patch.length, offset + available);
+    if (end < patch.length) {
+      const newline = patch.lastIndexOf('\n', end);
+      if (newline > offset) end = newline + 1;
+    }
+    fragments.push({ ...file, patch: `${marker}${patch.slice(offset, end)}` });
+    offset = end;
+  }
+  return fragments;
+}
+
+/** Break large files at hunk boundaries, retaining every byte of every patch. */
 function splitFileForFocusedReview(file: ChangedFile): ChangedFile[] {
   const patch = file.patch;
   if (!patch || patch.length <= FOCUSED_REVIEW_HUNK_CHUNK_CHARS) return [file];
@@ -143,7 +167,7 @@ function splitFileForFocusedReview(file: ChangedFile): ChangedFile[] {
   const hunkStarts = lines
     .map((line, index) => (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line) ? index : -1))
     .filter((index) => index >= 0);
-  if (hunkStarts.length === 0) return [file];
+  if (hunkStarts.length === 0) return splitRawPatchFragment(file, FOCUSED_REVIEW_HUNK_CHUNK_CHARS);
   const prefix = lines.slice(0, hunkStarts[0]).join('\n');
   const chunks: string[] = [];
   for (let index = 0; index < hunkStarts.length; index++) {
@@ -152,99 +176,88 @@ function splitFileForFocusedReview(file: ChangedFile): ChangedFile[] {
     const hunk = lines.slice(start, end).join('\n');
     chunks.push(...splitOversizedHunk(hunk, FOCUSED_REVIEW_HUNK_CHUNK_CHARS));
   }
-  if (chunks.length < 2) return [file];
-  return chunks.map((chunk, index) => ({
-    ...file,
-    patch: index === 0 && prefix ? `${prefix}\n${chunk}` : chunk,
-  }));
-}
-
-/** Balance repeated provider calls by diff size, keeping source order within each shard. */
-function balancedFileShards(files: ChangedFile[], shardCount: number): ChangedFile[][] {
-  const shards = Array.from({ length: shardCount }, () => ({
-    files: [] as ChangedFile[],
-    weight: 0,
-  }));
-  const ranked = files
-    .map((file, index) => ({ file, index, weight: patchWeight(file) }))
-    .sort((left, right) => right.weight - left.weight || left.index - right.index);
-  for (const item of ranked) {
-    const target = shards.reduce(
-      (best, candidate, index) =>
-        candidate.weight < shards[best]!.weight ||
-        (candidate.weight === shards[best]!.weight && index < best)
-          ? index
-          : best,
-      0,
-    );
-    const shard = shards[target]!;
-    shard.files.push(item.file);
-    shard.weight += item.weight;
-  }
-  return shards.map((shard) =>
-    shard.files.sort((left, right) => files.indexOf(left) - files.indexOf(right)),
+  if (chunks.length < 2) return splitRawPatchFragment(file, FOCUSED_REVIEW_HUNK_CHUNK_CHARS);
+  return chunks.flatMap((chunk, index) =>
+    splitRawPatchFragment(
+      { ...file, patch: index === 0 && prefix ? `${prefix}\n${chunk}` : chunk },
+      FOCUSED_REVIEW_HUNK_CHUNK_CHARS,
+    ),
   );
 }
 
-function compactHighTierShardFocus(
+/** Pack complete diff fragments in source order under the provider prompt budget. */
+function completeDiffShards(files: ChangedFile[]): ChangedFile[][] {
+  const units = files.flatMap(splitFileForFocusedReview);
+  const shards: ChangedFile[][] = [];
+  let shard: ChangedFile[] = [];
+  let used = 0;
+  for (const unit of units) {
+    const weight = patchWeight(unit);
+    if (weight > FOCUSED_REVIEW_DIFF_BUDGET_CHARS) {
+      throw new Error(
+        `required complete diff unit for ${unit.filename} exceeds ${FOCUSED_REVIEW_DIFF_BUDGET_CHARS}-character budget`,
+      );
+    }
+    if (shard.length > 0 && used + weight > FOCUSED_REVIEW_DIFF_BUDGET_CHARS) {
+      shards.push(shard);
+      shard = [];
+      used = 0;
+    }
+    shard.push(unit);
+    used += weight;
+  }
+  if (shard.length > 0) shards.push(shard);
+  return shards;
+}
+
+function coverageKey(call: ReviewCall, shardIndex: number, shardCount: number): string {
+  const lens = call.stage ?? call.passTag ?? call.target.model.toLowerCase();
+  return `required:${lens}:${call.modelPassIndex ?? 'unindexed'}:chunk:${shardIndex + 1}/${shardCount}`;
+}
+
+function compactCompleteDiffFocus(
   call: ReviewCall,
   shardIndex: number,
   shardCount: number,
 ): string {
   const lens =
     call.passTag === 'deep-dive'
-      ? 'Audit only concrete regressions in data integrity, authorization, concurrency, and failure/cleanup branch parity.'
+      ? 'Audit concrete regressions in data integrity, authorization, concurrency, and failure/cleanup branch parity.'
       : call.passTag === 'removed-behavior/callers'
-        ? 'Audit deleted or changed behaviour, visible caller/test contracts, and retry or legacy-state regressions.'
-        : 'Audit concrete performance, completeness, and API-contract regressions visible in this diff.';
-  return `REQUIRED DIFF-ONLY SHARD ${shardIndex + 1}/${shardCount}: review every supplied diff and nothing outside it. ${lens} Luna covers repository-wide callers and the other reviewers cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass with no more than 12,000 reasoning tokens and reserve the remaining budget for the final JSON. The final JSON must stay under 3,000 tokens: at most 3 concrete findings, each message at most 3 sentences, a 2-sentence summary, and no originalCode or fixedCode fields. Do not narrate private reasoning.`;
+        ? 'Audit deleted or changed behaviour and visible caller/test contracts.'
+        : 'Audit concrete performance, completeness, and API-contract regressions.';
+  return `REQUIRED COMPLETE DIFF CHUNK ${shardIndex + 1}/${shardCount}: review every supplied diff hunk in this chunk. This is one explicit coverage unit of a larger PR; do not infer a clean result for chunks you were not given. ${lens} Use the configured maximum reasoning effort, complete one evidence-led pass, and return compact JSON before the worker time limit. Report at most 3 concrete findings, each with a file:line and failure scenario. Do not narrate private reasoning.`;
 }
 
+/**
+ * Expand required API stages across every bounded diff chunk. This preserves the
+ * fixed model-role lineup while allowing very large PRs to use additional calls
+ * rather than silently sampling a prompt.
+ */
 export function boundHighTierDiscoveryWorkloads(
   calls: ReviewCall[],
   files: ChangedFile[],
 ): ReviewCall[] {
-  const repeated = calls.filter(
-    (call) =>
-      call.kind === 'pass' &&
-      call.mode === 'api' &&
-      !call.bestEffort &&
-      call.target.model.toLowerCase().includes('deepseek-v4-flash'),
+  const requiredApi = new Set(
+    calls.filter((call) => call.kind === 'pass' && call.mode === 'api' && !call.bestEffort),
   );
-  const shardedFiles = files.flatMap(splitFileForFocusedReview);
-  if (repeated.length < 2 || shardedFiles.length < 2) return calls;
-
-  const assignment = new Map(repeated.map((call, index) => [call, index]));
-  const shards = balancedFileShards(shardedFiles, repeated.length);
-  return calls.map((call) => {
-    const shardIndex = assignment.get(call);
-    if (shardIndex !== undefined) {
-      const shard = shards[shardIndex]!;
-      return withFileShard(
+  if (requiredApi.size === 0 || files.length === 0) return calls;
+  const shards = completeDiffShards(files);
+  return calls.flatMap((call) => {
+    if (!requiredApi.has(call)) return [call];
+    return shards.map((shard, shardIndex) => {
+      const key = coverageKey(call, shardIndex, shards.length);
+      const sharded = withFileShard(
         call,
         shard,
-        compactHighTierShardFocus(call, shardIndex, repeated.length),
+        compactCompleteDiffFocus(call, shardIndex, shards.length),
         'diff-only',
         true,
         FOCUSED_REVIEW_DIFF_BUDGET_CHARS,
+        key,
       );
-    }
-
-    const isRequiredMiniMax =
-      call.kind === 'pass' &&
-      call.mode === 'api' &&
-      !call.bestEffort &&
-      call.target.model.toLowerCase().startsWith('minimax-');
-    if (!isRequiredMiniMax) return call;
-    const shard = shards[repeated.length - 1]!;
-    return withFileShard(
-      call,
-      shard,
-      'REQUIRED DIFF-ONLY BREADTH SHARD: review every supplied diff and nothing outside it. Audit only concrete performance, completeness, and API-contract regressions visible in this shard. Luna and the DeepSeek discovery shards cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass and reserve the response budget for a compact final JSON. The final JSON must stay under 3,000 tokens: at most 3 concrete findings, each message at most 3 sentences, a 2-sentence summary, and no originalCode or fixedCode fields. Do not narrate private reasoning.',
-      'diff-only',
-      true,
-      FOCUSED_REVIEW_DIFF_BUDGET_CHARS,
-    );
+      return { ...sharded, label: `${call.label} chunk ${shardIndex + 1}/${shards.length}` };
+    });
   });
 }
 
@@ -265,6 +278,8 @@ export function selectScheduledReviewCalls(input: {
   const passes = input.calls.filter(
     (call) => call.kind === 'pass' && call.mode !== 'investigate' && call.passTag !== 'risk-hunt',
   );
+  const requiredPasses = passes.filter((call) => !call.bestEffort);
+  const optionalPasses = passes.filter((call) => call.bestEffort);
   const sweeps = input.calls.filter((call) => call.kind === 'sweep');
   const aggregation = fitReviewAggregationToBudget(
     input.requestedAggregation,
@@ -303,14 +318,14 @@ export function selectScheduledReviewCalls(input: {
       }),
     ).flat();
     calls = takeReviewCallsByPriority(
-      repeated,
-      [...sweeps, ...investigate, ...risk],
+      repeated.filter((call) => !call.bestEffort),
+      [...repeated.filter((call) => call.bestEffort), ...sweeps, ...investigate, ...risk],
       input.maxCalls,
     );
   } else {
     calls = takeReviewCallsByPriority(
-      passes.slice(0, input.discoveryPasses),
-      [...passes.slice(input.discoveryPasses), ...sweeps, ...investigate, ...risk],
+      requiredPasses,
+      [...optionalPasses, ...sweeps, ...investigate, ...risk],
       input.maxCalls,
     );
   }

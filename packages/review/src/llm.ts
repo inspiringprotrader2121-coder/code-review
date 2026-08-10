@@ -109,11 +109,17 @@ export async function runLlmReview(
   const context = opts.context
     ? {
         promptProfile: opts.context.promptProfile,
+        diffBudgetChars: opts.context.diffBudgetChars,
+        diffCoverage: opts.context.diffCoverage,
         treePaths: opts.context.treePaths,
         related: redactAll(opts.context.related),
         dependents: redactAll(opts.context.dependents),
         changedContents: redactAll(opts.context.changedContents),
+        omittedChangedContents: opts.context.omittedChangedContents,
         others: redactAll(opts.context.others),
+        omittedRelated: opts.context.omittedRelated,
+        omittedDependents: opts.context.omittedDependents,
+        omittedOthers: opts.context.omittedOthers,
         // Must pass through — without this, deep-dive / breadth / investigate
         // lens text never reaches buildUserPrompt.
         extraFocus: opts.context.extraFocus,

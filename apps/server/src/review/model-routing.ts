@@ -93,7 +93,12 @@ export function contextForReviewPass(
     const midpoint = Math.floor(changed.length / 2);
     changed.push(...changed.splice(0, midpoint));
   }
-  const common: ReviewPromptContext = { treePaths: context.treePaths, changedContents: changed };
+  const common: ReviewPromptContext = {
+    diffBudgetChars: context.diffBudgetChars,
+    diffCoverage: context.diffCoverage,
+    treePaths: context.treePaths,
+    changedContents: changed,
+  };
   if (modelPassIndex === 1) return { ...common, related: context.related };
   if (modelPassIndex === 2) return { ...common, dependents: context.dependents };
   if (modelPassIndex >= 3) return { ...common, related: context.related, others: context.others };

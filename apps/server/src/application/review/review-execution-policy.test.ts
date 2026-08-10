@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
-import { resolvePrStatePollMs } from './review-execution-policy.js';
+import { test } from 'node:test';
+import { takeReviewCallsByPriority } from './review-execution-policy.js';
 
-test('GitHub PR-state polling stays quota-safe while ownership heartbeats remain frequent', () => {
-  assert.equal(resolvePrStatePollMs(5_000), 30_000);
-  assert.equal(resolvePrStatePollMs(60_000), 60_000);
-  assert.equal(resolvePrStatePollMs(Number.NaN), 30_000);
+test('call budget never removes required complete-coverage calls', () => {
+  const required = ['flash-deep-chunk-1', 'flash-deep-chunk-2', 'minimax-chunk-1'];
+  const optional = ['risk-hunt', 'sweep'];
+
+  assert.deepEqual(takeReviewCallsByPriority(required, optional, 1), required);
+  assert.deepEqual(takeReviewCallsByPriority(required, optional, 4), [...required, 'risk-hunt']);
 });

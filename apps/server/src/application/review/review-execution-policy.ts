@@ -23,5 +23,9 @@ export function takeReviewCallsByPriority<T>(
   optional: readonly T[],
   maxCalls: number,
 ): T[] {
-  return [...core, ...optional].slice(0, Math.max(0, Math.floor(maxCalls)));
+  // Required coverage is never silently dropped. The execution budget limits
+  // optional sweeps, probes, and repeated samples only; a future hard ceiling
+  // must reject before provider spend rather than publishing a sampled review.
+  const optionalSlots = Math.max(0, Math.floor(maxCalls) - core.length);
+  return [...core, ...optional.slice(0, optionalSlots)];
 }

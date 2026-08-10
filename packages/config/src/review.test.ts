@@ -21,6 +21,8 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.promptChangedChars, 16_000);
   assert.equal(config.promptRelatedChars, 6_000);
   assert.equal(config.promptOtherChars, 2_000);
+  assert.equal(config.reviewInput.maxFileBytes, 1_000_000);
+  assert.equal(config.reviewInput.maxFiles, 3_000);
   assert.deepEqual(config.codexAllowedRepos, []);
   assert.ok(Object.isFrozen(config));
   assert.ok(Object.isFrozen(config.childProcessEnvironment));
@@ -111,6 +113,12 @@ test('review runtime preserves legacy empty-string and invalid-value fallbacks',
   assert.equal(config.aggregationRuns, 1);
   assert.equal(config.verifyConcurrency, 1);
   assert.equal(config.llmMaxTotalMs, 30_000);
+});
+
+test("large-PR intake reaches GitHub's file boundary without exceeding it", () => {
+  const config = loadReviewRuntimeConfig({ MAX_FILE_BYTES: '5000000', MAX_FILES: '99999' });
+  assert.equal(config.reviewInput.maxFileBytes, 5_000_000);
+  assert.equal(config.reviewInput.maxFiles, 3_000);
 });
 
 test('GitHub and rules runtime loaders preserve secure defaults', () => {

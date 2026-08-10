@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ChangedFile } from '@orvex-review/github';
+import { buildUserPrompt } from '@orvex-review/review';
 import {
   executeReviewProviderCalls,
   groupApiCallsByProvider,
@@ -31,108 +32,76 @@ function call(model: string, index: number): ReviewCall {
   };
 }
 
-test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
+test('required API stages each cover every complete bounded diff shard', () => {
   const luna = call('gpt-5.6-luna', 1);
+  luna.mode = 'agentic';
   const first = call('deepseek-v4-flash', 2);
   const second = call('deepseek-v4-flash', 3);
   const minimax = call('MiniMax-M3', 4);
-  const sharded = boundHighTierDiscoveryWorkloads([luna, first, second, minimax], files);
+  first.modelPassIndex = 1;
+  first.passTag = 'deep-dive';
+  second.modelPassIndex = 2;
+  second.passTag = 'removed-behavior/callers';
+  minimax.modelPassIndex = 3;
+  minimax.passTag = 'perf/completeness/api';
+  const large = Array.from({ length: 12 }, (_, index) => ({
+    filename: `src/large-${index}.ts`,
+    status: 'modified',
+    patch: `@@ -${index * 10 + 1},1 +${index * 10 + 1},1 @@\n-OLD_MARKER_${index}\n+NEW_MARKER_${index}\n${'+x'.repeat(1_400)}`,
+  })) as ChangedFile[];
+  const scheduled = boundHighTierDiscoveryWorkloads([luna, first, second, minimax], large);
 
-  assert.equal(sharded[0], luna);
-  assert.deepEqual(
-    sharded[1]?.files?.map((file) => file.filename),
-    ['src/file-0.ts', 'src/file-2.ts', 'src/file-4.ts'],
-  );
-  assert.deepEqual(
-    sharded[2]?.files?.map((file) => file.filename),
-    ['src/file-1.ts', 'src/file-3.ts'],
-  );
-  assert.equal(sharded[1]?.ctx.changedContents, undefined);
-  assert.equal(sharded[1]?.ctx.promptProfile, 'focused');
-  assert.equal(sharded[1]?.ctx.diffBudgetChars, 24_000);
-  assert.equal(sharded[2]?.ctx.changedContents, undefined);
-  assert.equal(sharded[2]?.ctx.diffBudgetChars, 24_000);
-  assert.equal(sharded[1]?.ctx.related, undefined);
-  assert.equal(sharded[1]?.ctx.dependents, undefined);
-  assert.equal(sharded[1]?.ctx.others, undefined);
-  assert.equal(sharded[1]?.ctx.treePaths, undefined);
-  assert.match(sharded[2]?.ctx.extraFocus ?? '', /REQUIRED DIFF-ONLY SHARD 2\/2/);
-  assert.match(sharded[2]?.ctx.extraFocus ?? '', /12,000 reasoning tokens/);
-  assert.match(sharded[2]?.ctx.extraFocus ?? '', /under 3,000 tokens/);
-  assert.doesNotMatch(sharded[1]?.ctx.extraFocus ?? '', /DATA INTEGRITY & MIGRATIONS/);
-  assert.deepEqual(
-    sharded[3]?.files?.map((file) => file.filename),
-    ['src/file-1.ts', 'src/file-3.ts'],
-  );
-  assert.equal(sharded[3]?.ctx.changedContents, undefined);
-  assert.equal(sharded[3]?.ctx.promptProfile, 'focused');
-  assert.equal(sharded[3]?.ctx.diffBudgetChars, 24_000);
-  assert.equal(sharded[3]?.ctx.related, undefined);
-  assert.equal(sharded[3]?.ctx.dependents, undefined);
-  assert.equal(sharded[3]?.ctx.others, undefined);
-  assert.equal(sharded[3]?.ctx.treePaths, undefined);
-  assert.match(sharded[3]?.ctx.extraFocus ?? '', /REQUIRED DIFF-ONLY BREADTH SHARD/);
+  assert.equal(scheduled.filter((entry) => entry.mode === 'agentic').length, 1);
+  const apiStages = [
+    ['deep-dive', 1],
+    ['removed-behavior/callers', 2],
+    ['perf/completeness/api', 3],
+  ] as const;
+  const chunksPerStage = scheduled.filter((entry) => entry.passTag === 'deep-dive').length;
+  assert.ok(chunksPerStage > 1, 'large diff must fan out into several bounded chunks');
+  for (const [tag, modelPassIndex] of apiStages) {
+    const stageCalls = scheduled.filter(
+      (entry) => entry.passTag === tag && entry.modelPassIndex === modelPassIndex,
+    );
+    assert.equal(stageCalls.length, chunksPerStage, `${tag} must cover every chunk`);
+    const combined = stageCalls
+      .flatMap((entry) => entry.files ?? [])
+      .map((file) => file.patch)
+      .join('\n');
+    for (const index of [0, 4, 8, 11]) assert.match(combined, new RegExp(`NEW_MARKER_${index}`));
+    for (const entry of stageCalls) {
+      assert.equal(entry.ctx.promptProfile, 'focused');
+      assert.equal(entry.ctx.diffBudgetChars, 14_000);
+      assert.equal(entry.ctx.diffCoverage, 'require-complete');
+      assert.equal(entry.ctx.changedContents, undefined);
+      assert.equal(entry.ctx.related, undefined);
+      assert.equal(entry.ctx.dependents, undefined);
+      assert.equal(entry.ctx.others, undefined);
+      assert.equal(entry.ctx.treePaths, undefined);
+      assert.ok(entry.requiredCoverageKey);
+      const prompt = buildUserPrompt(entry.files ?? [], entry.ctx);
+      assert.doesNotMatch(prompt, /diff chars omitted; sampled start and end/);
+      assert.doesNotMatch(prompt, /Focused source context|Cross-file coverage notice/);
+    }
+  }
 });
 
-test('repeated Flash shards balance uneven diffs instead of assigning by source position', () => {
-  const uneven = [
-    { filename: 'src/small-test.ts', status: 'modified', patch: '+x' },
-    { filename: 'src/pagination.test.ts', status: 'modified', patch: '+'.repeat(6_000) },
-    { filename: 'src/auth.ts', status: 'modified', patch: '+'.repeat(7_800) },
-  ] as ChangedFile[];
-  const calls = [
-    call('gpt-5.6-luna', 1),
-    call('deepseek-v4-flash', 2),
-    call('deepseek-v4-flash', 3),
-  ];
-  const sharded = boundHighTierDiscoveryWorkloads(calls, uneven);
-
-  assert.deepEqual(
-    sharded[1]?.files?.map((file) => file.filename),
-    ['src/auth.ts'],
-  );
-  assert.deepEqual(
-    sharded[2]?.files?.map((file) => file.filename),
-    ['src/small-test.ts', 'src/pagination.test.ts'],
-  );
-});
-
-test('a single large file is split into valid hunk shards for both Flash reviewers', () => {
-  const lineCount = 1_000;
-  const patch = [
-    `@@ -1,${lineCount} +1,${lineCount} @@`,
-    ...Array.from({ length: lineCount }, (_, index) => `-OLD_${index}\n+NEW_${index}`),
-  ].join('\n');
-  const calls = [
-    call('gpt-5.6-luna', 1),
-    call('deepseek-v4-flash', 2),
-    call('deepseek-v4-flash', 3),
-  ];
-  const scheduled = boundHighTierDiscoveryWorkloads(calls, [
-    { filename: 'src/large.ts', status: 'modified', patch } as ChangedFile,
-  ]);
-  const flashPatches = scheduled
-    .slice(1)
-    .flatMap((call) => call.files ?? [])
-    .map((file) => file.patch ?? '');
-
-  assert.ok(scheduled[1]?.files?.length, 'first Flash reviewer must receive a hunk shard');
-  assert.ok(scheduled[2]?.files?.length, 'second Flash reviewer must receive a hunk shard');
-  assert.ok(flashPatches.every((piece) => piece.length <= 12_000));
-  assert.ok(flashPatches.every((piece) => /^@@ -\d+,\d+ \+\d+,\d+ @@/m.test(piece)));
-  const combined = flashPatches.join('\n');
-  for (const index of [0, 250, 500, 999]) assert.match(combined, new RegExp(`NEW_${index}`));
-  assert.equal(scheduled[1]?.ctx.diffBudgetChars, 24_000);
-  assert.equal(scheduled[2]?.ctx.diffBudgetChars, 24_000);
-});
-
-test('lower-tier single DeepSeek and MiniMax reviewers still receive the full PR', () => {
+test('lower-tier required DeepSeek and MiniMax calls also fan out without sampling', () => {
   const only = call('deepseek-v4-flash', 1);
   const minimax = call('MiniMax-M3', 2);
-  const calls = [only, minimax];
-  const scheduled = boundHighTierDiscoveryWorkloads(calls, files);
-  assert.equal(scheduled[0], only);
-  assert.equal(scheduled[1], minimax);
+  only.modelPassIndex = 0;
+  minimax.modelPassIndex = 1;
+  const large = Array.from({ length: 10 }, (_, index) => ({
+    filename: `src/lower-${index}.ts`,
+    status: 'modified',
+    patch: `@@ -1 +1 @@\n-OLD_${index}\n+NEW_${index}\n${'+x'.repeat(1_700)}`,
+  })) as ChangedFile[];
+  const scheduled = boundHighTierDiscoveryWorkloads([only, minimax], large);
+  const flashCalls = scheduled.filter((entry) => entry.target.model === only.target.model);
+  const minimaxCalls = scheduled.filter((entry) => entry.target.model === minimax.target.model);
+  assert.ok(flashCalls.length > 1);
+  assert.equal(minimaxCalls.length, flashCalls.length);
+  assert.ok(scheduled.every((entry) => entry.requiredCoverageKey));
 });
 
 test('same-provider review calls are independently scheduled behind provider admission', () => {

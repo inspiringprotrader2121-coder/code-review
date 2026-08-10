@@ -381,8 +381,11 @@ export function loadReviewRuntimeConfig(
         : 'deepseek-flash',
     }),
     reviewInput: Object.freeze({
-      maxFileBytes: positiveBounded(env.MAX_FILE_BYTES, 300_000, 10_000_000),
-      maxFiles: positiveBounded(env.MAX_FILES, 150, 1_000),
+      maxFileBytes: positiveBounded(env.MAX_FILE_BYTES, 1_000_000, 10_000_000),
+      // GitHub's API exposes at most 3,000 changed files. Keep the local default
+      // at that boundary so ordinary large PRs are fully queued into bounded
+      // review chunks instead of being silently limited to the old 150 files.
+      maxFiles: positiveBounded(env.MAX_FILES, 3_000, 3_000),
       checkRunsEnabled: env.CHECK_RUNS_ENABLED === '1',
     }),
     accountLimits: Object.freeze({

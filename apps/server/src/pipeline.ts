@@ -67,6 +67,7 @@ export type { AccountLimitPolicy } from './review/account-limits.js';
  * investigate-only callers may still continue without the extra tool pass.
  */
 export {
+  failedRequiredCoverageKeys,
   failedRequiredLensIds,
   takeReviewCallsByPriority,
 } from './application/review/review-executor.js';

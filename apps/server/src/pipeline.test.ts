@@ -9,6 +9,7 @@ import {
   accountUsage,
   buildReviewPassAngles,
   effectiveReviewConfig,
+  failedRequiredCoverageKeys,
   failedRequiredLensIds,
   contextForReviewPass,
   maxOutputTokensForModel,
@@ -698,6 +699,19 @@ test('a successful deep extra cannot satisfy a failed required lens', () => {
   );
 
   assert.deepEqual(failed, [0]);
+});
+
+test('a successful required chunk cannot satisfy a failed sibling chunk', () => {
+  const failed = failedRequiredCoverageKeys(
+    ['required:deep-dive:1:chunk:1/2', 'required:deep-dive:1:chunk:2/2'],
+    [
+      { requiredCoverageKey: 'required:deep-dive:1:chunk:1/2', ok: true },
+      { requiredCoverageKey: 'required:deep-dive:1:chunk:2/2', ok: false },
+    ],
+    1,
+  );
+
+  assert.deepEqual(failed, ['required:deep-dive:1:chunk:2/2']);
 });
 
 test('buildReviewPassAngles: multi-model always runs the full four-pass track', (t) => {

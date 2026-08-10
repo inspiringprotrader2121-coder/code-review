@@ -84,6 +84,24 @@ test('capCodexDiffFiles truncates then stubs remaining files', () => {
   assert.match(capped[2]!.patch ?? '', /omitted|checkout/);
 });
 
+test('complete Codex diff shards fail before prompt truncation', (t) => {
+  t.after(() => {
+    delete process.env.ORVEX_CODEX_MAX_DIFF_CHARS;
+    delete process.env.ORVEX_CODEX_MAX_PROMPT_CHARS;
+  });
+  process.env.ORVEX_CODEX_MAX_DIFF_CHARS = '100';
+  process.env.ORVEX_CODEX_MAX_PROMPT_CHARS = '200000';
+  assert.throws(
+    () =>
+      buildCodexPrompt(
+        [{ filename: 'src/large.ts', status: 'modified', patch: '+'.repeat(101) }],
+        { diffBudgetChars: 100, diffCoverage: 'require-complete' },
+        { hasRepoCheckout: true, mode: 'lean' },
+      ),
+    /required complete Codex diff shard exceeds 100-character budget/,
+  );
+});
+
 test('lean Codex prompt omits changedContents when checkout exists', (t) => {
   t.after(() => {
     delete process.env.ORVEX_CODEX_MAX_DIFF_CHARS;

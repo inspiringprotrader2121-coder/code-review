@@ -14,6 +14,12 @@ export interface ReviewPromptContext {
   promptProfile?: 'focused';
   /** Per-call diff budget for focused reviewers. It can only reduce the global prompt cap. */
   diffBudgetChars?: number;
+  /**
+   * Required reviewer shards must either receive their entire assigned diff or
+   * fail before any provider call. Sampling is only permitted for explicitly
+   * best-effort prompt surfaces.
+   */
+  diffCoverage?: 'require-complete';
   /** Repo file paths at the reviewed SHA. */
   treePaths?: string[];
   /** Files the changed code imports, for cross-file reasoning. */

@@ -62,12 +62,26 @@ function sampleDiff(patch: string, budget: number): string {
 export function buildDiffSections(
   files: readonly ReviewPromptFile[],
   requestedBudget?: number,
+  diffCoverage?: 'require-complete',
 ): string[] {
   const patches = files.map((file) => promptData(file.patch ?? '(no patch — binary or too large)'));
   const budget =
     Number.isFinite(requestedBudget) && (requestedBudget ?? 0) > 0
       ? Math.min(MAX_DIFF_CHARS, Math.floor(requestedBudget!))
       : MAX_DIFF_CHARS;
+  const total = patches.reduce((sum, patch) => sum + patch.length, 0);
+  if (diffCoverage === 'require-complete' && total > budget) {
+    const paths = files.map((file) => promptLabel(file.filename)).join(', ');
+    throw new Error(
+      `required complete diff shard exceeds ${budget}-character budget (${total} chars): ${paths}`,
+    );
+  }
+  if (diffCoverage === 'require-complete') {
+    return files.map(
+      (file, index) =>
+        `### ${promptLabel(file.filename)} (${promptLabel(file.status)})\n\`\`\`diff\n${patches[index]!}\n\`\`\``,
+    );
+  }
   const budgets = fairPromptBudgets(
     patches.map((patch) => patch.length),
     budget,
