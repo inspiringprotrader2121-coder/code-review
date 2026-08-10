@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -968,6 +968,8 @@ test('agentic Codex container mounts only its private checkout and receives no h
     assert.match(command, /\/v1\/orvex\/usage/);
     assert.match(command, /codex_status=\$\?/);
     assert.match(command, /exit "\$codex_status"/);
+    const shellSyntax = spawnSync('sh', ['-n', '-c', command], { encoding: 'utf8' });
+    assert.equal(shellSyntax.status, 0, shellSyntax.stderr);
     assert.ok(
       command.indexOf("'--ignore-user-config'") <
         command.indexOf('\'model_provider="orvex_broker"\''),

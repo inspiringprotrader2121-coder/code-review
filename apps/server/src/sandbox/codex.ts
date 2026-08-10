@@ -23,7 +23,7 @@ import { createBrokerCapabilityToken } from './broker-capability.js';
 
 function shellQuote(value: string): string {
   if (value.includes('\0')) throw new Error('container argument contains a NUL byte');
-  return `'${value.replace(/'/g, `"'"'`)}'`;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 // The broker owns the provider credential and returns only bounded numeric
