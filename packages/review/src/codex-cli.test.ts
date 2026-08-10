@@ -540,8 +540,9 @@ test('container protocol gives the internal runner only a private checkout, reda
     '--model',
     DEFAULT_CODEX_CLI_MODEL,
     '--json',
-    '--sandbox',
+    '--dangerously-bypass-approvals-and-sandbox',
   ]);
+  assert.equal(request?.args.includes('--sandbox'), false);
   assert.ok(request?.args.includes('model_reasoning_effort="max"'));
   assert.ok(request?.args.includes('/work'));
   assert.match(

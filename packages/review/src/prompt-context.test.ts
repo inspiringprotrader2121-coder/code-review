@@ -41,7 +41,9 @@ test('production-sized repository context stays bounded while every diff remains
   }));
   const changedContents = files.map((file, index) => ({
     path: file.filename,
-    content: `SOURCE_${index}\n${'x'.repeat(4_000)}`,
+    content: Array.from({ length: 80 }, (_, line) =>
+      line === 9 ? `SOURCE_${index}` : `line ${line + 1}: ${'x'.repeat(48)}`,
+    ).join('\n'),
   }));
   const contextFile = (prefix: string, index: number) => ({
     path: `src/${prefix}-${index}.ts`,

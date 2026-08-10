@@ -2230,7 +2230,7 @@
     },
     {
       "name": "Retries and focused prompt limits",
-      "description": "These values bound retry delays and supporting context. The diff remains first and is fairly sampled only on oversized PRs. DeepSeek and MiniMax review completions use a fixed 16000-token budget while their required reasoning modes remain enabled.",
+      "description": "These values bound retry delays and supporting context. The diff remains first and is fairly sampled only on oversized PRs. Provider-specific completion and thinking budgets are fixed in code so maximum reasoning cannot consume the answer or wall-clock budget.",
       "variables": [
         {
           "name": "ORVEX_RATELIMIT_MAX_RETRIES",
@@ -2285,9 +2285,9 @@
         },
         {
           "name": "ORVEX_MAX_CHANGED_CHARS",
-          "example": "64000",
+          "example": "32000",
           "type": "integer",
-          "range": "positive chars; default 64000",
+          "range": "positive chars; default and maximum 32000",
           "secret": false,
           "redaction": "none",
           "description": "Changed-file supporting context budget.",
@@ -2295,9 +2295,9 @@
         },
         {
           "name": "ORVEX_MAX_RELATED_CHARS",
-          "example": "24000",
+          "example": "12000",
           "type": "integer",
-          "range": "positive chars; default 24000",
+          "range": "positive chars; default and maximum 12000",
           "secret": false,
           "redaction": "none",
           "description": "Related-file context budget.",
@@ -2305,9 +2305,9 @@
         },
         {
           "name": "ORVEX_MAX_OTHER_CHARS",
-          "example": "8000",
+          "example": "4000",
           "type": "integer",
-          "range": "positive chars; default 8000",
+          "range": "positive chars; default and maximum 4000",
           "secret": false,
           "redaction": "none",
           "description": "Other supporting context budget.",

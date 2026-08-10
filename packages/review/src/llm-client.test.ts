@@ -11,7 +11,7 @@ import {
   type LlmAttemptEvent,
   type LlmProviderCoordinator,
 } from './llm-client.js';
-import { awaitAnthropicFinalMessage } from './llm/transports.js';
+import { awaitAnthropicFinalMessage, resolveAnthropicThinkingBudget } from './llm/transports.js';
 import type { Clock } from './providers/types.js';
 
 interface CapturedRequest {
@@ -155,7 +155,13 @@ test('an explicit max reasoning effort is never downgraded on a retry-style call
 
   assert.equal(captured.length, 1);
   assert.equal(captured[0].body.reasoning_effort, 'max');
-  assert.equal(captured[0].body.max_completion_tokens, 32_000);
+  assert.equal(captured[0].body.max_tokens, 32_000);
+  assert.equal('max_completion_tokens' in captured[0].body, false);
+});
+
+test('MiniMax keeps thinking enabled without consuming its answer budget', () => {
+  assert.equal(resolveAnthropicThinkingBudget('MiniMax-M3', 18_000, 20_000), 6_000);
+  assert.equal(resolveAnthropicThinkingBudget('other-model', 32_000, 20_000), 20_000);
 });
 
 test('environment drift cannot disable default reasoning or MiniMax thinking', async (t) => {

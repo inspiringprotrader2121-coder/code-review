@@ -152,7 +152,8 @@ export function chunkChangedFileContext(
   maxChunkChars = MAX_CHANGED_CHUNK_CHARS,
 ): SourceChunk[] {
   const lines = content.split('\n');
-  if (content.length <= FULL_CHANGED_FILE_CHARS) return [{ start: 1, end: lines.length, content }];
+  if (content.length <= Math.min(FULL_CHANGED_FILE_CHARS, maxChunkChars))
+    return [{ start: 1, end: lines.length, content }];
   const ranges = changedHunks(patch)
     .map((hunk) => ({
       start: Math.max(1, hunk.start - CHANGED_CONTEXT_LINES),

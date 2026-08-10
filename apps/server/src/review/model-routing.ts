@@ -15,7 +15,8 @@ export interface ReviewRoutingPolicy {
   minimaxMaxOutputTokens: number;
 }
 
-export const REVIEW_MODEL_OUTPUT_TOKENS = 16_000;
+export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = 32_000;
+export const MINIMAX_REVIEW_OUTPUT_TOKENS = 18_000;
 
 export const DEFAULT_REVIEW_ROUTING_POLICY: ReviewRoutingPolicy = Object.freeze({
   codexCliEnabled: false,
@@ -23,8 +24,8 @@ export const DEFAULT_REVIEW_ROUTING_POLICY: ReviewRoutingPolicy = Object.freeze(
   investigateEnabled: false,
   riskHuntEnabled: false,
   investigateTier: 'deepseek-flash',
-  deepseekMaxOutputTokens: REVIEW_MODEL_OUTPUT_TOKENS,
-  minimaxMaxOutputTokens: REVIEW_MODEL_OUTPUT_TOKENS,
+  deepseekMaxOutputTokens: DEEPSEEK_REVIEW_OUTPUT_TOKENS,
+  minimaxMaxOutputTokens: MINIMAX_REVIEW_OUTPUT_TOKENS,
 });
 
 type ReviewRoutingPolicyOptions = Partial<
@@ -50,8 +51,8 @@ export function createReviewRoutingPolicy(values: ReviewRoutingPolicyOptions): R
     )
       ? investigateTier!
       : 'deepseek-flash',
-    deepseekMaxOutputTokens: REVIEW_MODEL_OUTPUT_TOKENS,
-    minimaxMaxOutputTokens: REVIEW_MODEL_OUTPUT_TOKENS,
+    deepseekMaxOutputTokens: DEEPSEEK_REVIEW_OUTPUT_TOKENS,
+    minimaxMaxOutputTokens: MINIMAX_REVIEW_OUTPUT_TOKENS,
   });
 }
 

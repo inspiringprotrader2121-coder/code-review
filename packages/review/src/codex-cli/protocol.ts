@@ -7,8 +7,9 @@ export function buildCodexExecArgs(options: CodexExecArgsOptions): string[] {
     '--model',
     options.model,
     '--json',
-    '--sandbox',
-    'read-only',
+    ...(options.outerSandboxed
+      ? ['--dangerously-bypass-approvals-and-sandbox']
+      : ['--sandbox', 'read-only']),
     '--ignore-user-config',
     '--ignore-rules',
     '-c',

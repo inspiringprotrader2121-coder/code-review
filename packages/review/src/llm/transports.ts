@@ -240,14 +240,11 @@ export async function anthropicChat(
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: user }];
   const prefill = opts.json && !think;
   if (prefill) messages.push({ role: 'assistant', content: '{' });
-  const defaultThinkingBudget = opts.model.startsWith('MiniMax-') ? 20_000 : 32_000;
-  const configuredThinkingBudget =
-    loadReviewRuntimeConfig().anthropicThinkingBudgetTokens ?? defaultThinkingBudget;
-  const thinkingBudget = Math.min(
-    Number.isFinite(configuredThinkingBudget) && configuredThinkingBudget > 0
-      ? configuredThinkingBudget
-      : defaultThinkingBudget,
-    maxTokens - 8_000,
+  const configuredThinkingBudget = loadReviewRuntimeConfig().anthropicThinkingBudgetTokens;
+  const thinkingBudget = resolveAnthropicThinkingBudget(
+    opts.model,
+    maxTokens,
+    configuredThinkingBudget,
   );
   const stream = client.messages.stream({
     model: opts.model,
@@ -284,6 +281,21 @@ export async function anthropicChat(
     `[llm] model=${opts.model} api=anthropic thinking=${think ? 'on' : 'off'} reasoning=${reasoningChars}c answer=${text.length}c ${Math.round((Date.now() - startedAt) / 1000)}s`,
   );
   return text;
+}
+
+export function resolveAnthropicThinkingBudget(
+  model: string,
+  maxTokens: number,
+  configured: number | undefined,
+): number {
+  const miniMax = model.startsWith('MiniMax-');
+  const defaultBudget = miniMax ? 6_000 : 32_000;
+  const requested =
+    configured !== undefined && Number.isFinite(configured) && configured > 0
+      ? configured
+      : defaultBudget;
+  const providerBudget = miniMax ? 6_000 : requested;
+  return Math.max(1_024, Math.min(requested, providerBudget, maxTokens - 8_000));
 }
 
 export async function openAiResponsesStreamChat(
@@ -386,7 +398,7 @@ export async function openAiCompatStreamChat(
     {
       model: opts.model,
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-      max_completion_tokens: resolveMaxOutputTokens(opts.maxTokens),
+      max_tokens: resolveMaxOutputTokens(opts.maxTokens),
       stream: true,
       ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
       ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),

@@ -103,6 +103,7 @@ async function executeContainerCodex(
       threadId: options.threadId,
       cwd: '/work',
       lastMessageFile: `/work/.orvex-agentic/${outputName}`,
+      outerSandboxed: true,
     }),
     prompt,
     workdir: checkout,

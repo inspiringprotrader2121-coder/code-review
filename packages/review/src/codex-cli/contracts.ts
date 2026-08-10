@@ -49,6 +49,7 @@ export interface CodexExecArgsOptions {
   threadId?: string;
   cwd: string;
   lastMessageFile: string;
+  outerSandboxed?: boolean;
 }
 
 export type CodexChildListener = {

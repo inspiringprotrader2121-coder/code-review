@@ -17,6 +17,9 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.reviewWorkerConcurrency, 8);
   assert.equal(config.codexApiKeyConcurrency, 8);
   assert.equal(config.providerConcurrency('luna'), 8);
+  assert.equal(config.promptChangedChars, 32_000);
+  assert.equal(config.promptRelatedChars, 12_000);
+  assert.equal(config.promptOtherChars, 4_000);
   assert.deepEqual(config.codexAllowedRepos, []);
   assert.ok(Object.isFrozen(config));
   assert.ok(Object.isFrozen(config.childProcessEnvironment));
@@ -68,6 +71,17 @@ test('production capacity profile reserves eight reviews and 24 DeepSeek stages'
   assert.equal(config.providerConcurrency('minimax'), 8);
   assert.equal(config.verifyConcurrency, 1);
   assert.equal(config.execution.concurrency, 3);
+});
+
+test('supporting context cannot override the diff-first production ceiling', () => {
+  const config = loadReviewRuntimeConfig({
+    ORVEX_MAX_CHANGED_CHARS: '999999',
+    ORVEX_MAX_RELATED_CHARS: '999999',
+    ORVEX_MAX_OTHER_CHARS: '999999',
+  });
+  assert.equal(config.promptChangedChars, 32_000);
+  assert.equal(config.promptRelatedChars, 12_000);
+  assert.equal(config.promptOtherChars, 4_000);
 });
 
 test('review runtime preserves legacy empty-string and invalid-value fallbacks', () => {
