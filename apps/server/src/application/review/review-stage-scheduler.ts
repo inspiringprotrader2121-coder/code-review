@@ -56,17 +56,18 @@ function withFileShard(
   call: ReviewCall,
   shard: ChangedFile[],
   note: string,
-  includeChangedSource = true,
+  context: 'focused-source' | 'diff-only',
 ): ReviewCall {
   const paths = new Set(shard.map((file) => file.filename));
+  const changedContents =
+    context === 'focused-source'
+      ? call.ctx.changedContents?.filter((file) => paths.has(file.path))
+      : undefined;
   return {
     ...call,
     files: shard,
     ctx: {
-      ...call.ctx,
-      changedContents: includeChangedSource
-        ? call.ctx.changedContents?.filter((file) => paths.has(file.path))
-        : undefined,
+      changedContents,
       extraFocus: [call.ctx.extraFocus, note].filter(Boolean).join('\n'),
     },
   };
@@ -93,8 +94,8 @@ export function boundHighTierDiscoveryWorkloads(
       return withFileShard(
         call,
         shard,
-        `REQUIRED SHARD ${shardIndex + 1}/${repeated.length}: review every supplied diff. Other required reviewers cover the remaining changed files. Use maximum reasoning effort, but reserve enough output for the required final JSON; a reasoning-only response is unusable. Stop exploring once the supplied shard is covered and report at most 5 concrete findings.`,
-        false,
+        `REQUIRED DIFF-ONLY SHARD ${shardIndex + 1}/${repeated.length}: review every supplied diff and nothing outside it. Other required reviewers cover the remaining changed files and Luna verifies repository-wide callers. Use maximum reasoning quality, but keep analysis bounded and reserve the final response for the required JSON; a reasoning-only response is unusable. Return JSON as soon as this shard is covered and report at most 3 concrete findings.`,
+        'diff-only',
       );
     }
 
@@ -108,7 +109,8 @@ export function boundHighTierDiscoveryWorkloads(
     return withFileShard(
       call,
       shard,
-      `REQUIRED BREADTH SHARD: review every supplied diff. Luna and the DeepSeek discovery shards cover the full changed-file set.`,
+      `REQUIRED DIFF-ONLY BREADTH SHARD: review every supplied diff and nothing outside it. Luna and the DeepSeek discovery shards cover the full changed-file set. Keep analysis bounded, return the required JSON promptly, and report at most 5 concrete findings.`,
+      'diff-only',
     );
   });
 }

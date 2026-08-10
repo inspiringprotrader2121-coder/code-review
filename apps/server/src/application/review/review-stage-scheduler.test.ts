@@ -17,6 +17,10 @@ function call(model: string, index: number): ReviewCall {
     mode: 'api',
     ctx: {
       changedContents: files.map((file) => ({ path: file.filename, content: file.filename })),
+      related: [{ path: 'src/related.ts', content: 'related' }],
+      dependents: [{ path: 'src/dependent.ts', content: 'dependent' }],
+      others: [{ path: 'src/other.ts', content: 'other' }],
+      treePaths: ['src/file-0.ts', 'src/related.ts'],
     },
     target: { model, apiKey: 'test', api: 'chat' },
     tier: model.includes('deepseek') ? 'deepseek-flash' : 'standard',
@@ -42,17 +46,22 @@ test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
   );
   assert.equal(sharded[1]?.ctx.changedContents, undefined);
   assert.equal(sharded[2]?.ctx.changedContents, undefined);
-  assert.match(sharded[2]?.ctx.extraFocus ?? '', /REQUIRED SHARD 2\/2/);
-  assert.match(sharded[2]?.ctx.extraFocus ?? '', /reserve enough output.*final JSON/);
+  assert.equal(sharded[1]?.ctx.related, undefined);
+  assert.equal(sharded[1]?.ctx.dependents, undefined);
+  assert.equal(sharded[1]?.ctx.others, undefined);
+  assert.equal(sharded[1]?.ctx.treePaths, undefined);
+  assert.match(sharded[2]?.ctx.extraFocus ?? '', /REQUIRED DIFF-ONLY SHARD 2\/2/);
+  assert.match(sharded[2]?.ctx.extraFocus ?? '', /reserve the final response.*JSON/);
   assert.deepEqual(
     sharded[3]?.files?.map((file) => file.filename),
     ['src/file-1.ts', 'src/file-3.ts'],
   );
-  assert.deepEqual(
-    sharded[3]?.ctx.changedContents?.map((file) => file.path),
-    ['src/file-1.ts', 'src/file-3.ts'],
-  );
-  assert.match(sharded[3]?.ctx.extraFocus ?? '', /REQUIRED BREADTH SHARD/);
+  assert.equal(sharded[3]?.ctx.changedContents, undefined);
+  assert.equal(sharded[3]?.ctx.related, undefined);
+  assert.equal(sharded[3]?.ctx.dependents, undefined);
+  assert.equal(sharded[3]?.ctx.others, undefined);
+  assert.equal(sharded[3]?.ctx.treePaths, undefined);
+  assert.match(sharded[3]?.ctx.extraFocus ?? '', /REQUIRED DIFF-ONLY BREADTH SHARD/);
 });
 
 test('lower-tier single DeepSeek and MiniMax reviewers still receive the full PR', () => {
