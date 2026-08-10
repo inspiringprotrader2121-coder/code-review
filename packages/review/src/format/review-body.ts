@@ -69,7 +69,16 @@ export function formatReviewBody(
         `lens${count === 1 ? '' : 'es'}. Re-run \`${meta.trigger ?? '@orvex'} review\` to retry.`,
     );
   }
-  if (meta.verificationIncomplete) {
+  if ((meta.verificationInconclusiveCount ?? 0) > 0) {
+    const count = meta.verificationInconclusiveCount!;
+    const subject = `${count} P1/P2 finding${count === 1 ? '' : 's'}`;
+    lines.push(
+      '',
+      `> ⚠️ **Verification completed, but ${subject} ${count === 1 ? 'is' : 'are'} inconclusive.** ${
+        count === 1 ? 'It remains' : 'They remain'
+      } visible for manual review; the remaining posted findings were precision-gated.`,
+    );
+  } else if (meta.verificationIncomplete) {
     lines.push(
       '',
       `> ⚠️ **Verification incomplete** — ${meta.verificationIncomplete} ` +

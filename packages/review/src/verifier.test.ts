@@ -335,7 +335,24 @@ test('partial verification keeps confirmed verdicts but marks incomplete', () =>
   });
   assert.equal(out.toPost.length, 2);
   assert.equal(out.verificationIncomplete, true);
+  assert.equal(out.unverifiedRequiredCount, 1);
   assert.match(out.unavailableReason ?? '', /batch 2 failed/);
+});
+
+test('completed verification records a retained required finding as inconclusive', () => {
+  const confirmed = finding({ message: 'confirmed bug', severity: 'P2' });
+  const inconclusive = finding({ message: 'inconclusive bug', severity: 'P2', line: 2 });
+  const out = partitionVerifiedFindings([confirmed, inconclusive], [], {
+    status: 'verified',
+    kept: [confirmed],
+    dropped: [],
+    duplicates: [],
+    unverified: [inconclusive],
+  });
+  assert.equal(out.toPost.length, 2);
+  assert.equal(out.verificationIncomplete, true);
+  assert.equal(out.unverifiedRequiredCount, 1);
+  assert.equal(out.unavailableReason, undefined);
 });
 
 test('parsePositiveIntEnv rejects NaN and non-positive values', () => {

@@ -761,6 +761,7 @@ export async function executeReviewCore(
       llmSummary,
       skippedLenses,
       verificationIncomplete: verification.incomplete,
+      verificationInconclusiveCount: verification.inconclusiveRequiredCount,
       verificationUnavailableReason: verification.unavailableReason,
       usage,
       usagePolicy,

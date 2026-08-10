@@ -62,6 +62,8 @@ export interface VerificationDisposition {
   rescued: Array<{ finding: ReviewFinding; reason: string }>;
   refuted: Array<{ finding: ReviewFinding; reason: string }>;
   verificationIncomplete: boolean;
+  /** Required-severity findings kept visible despite a completed verifier returning no verdict. */
+  unverifiedRequiredCount: number;
   unavailableReason?: string;
 }
 

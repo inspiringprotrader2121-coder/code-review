@@ -11,6 +11,7 @@ export interface VerificationOrchestrationResult {
   toPost: ReviewFinding[];
   reviewOnly: ReviewSurfaceFinding[];
   incomplete: boolean;
+  inconclusiveRequiredCount?: number;
   unavailableReason?: string;
 }
 
@@ -110,6 +111,10 @@ export async function orchestrateVerification(input: {
     toPost: disposition.toPost,
     reviewOnly: disposition.reviewOnly,
     incomplete: disposition.verificationIncomplete || verified.status === 'unavailable',
+    inconclusiveRequiredCount:
+      verified.status === 'verified' && disposition.unverifiedRequiredCount > 0
+        ? disposition.unverifiedRequiredCount
+        : undefined,
     unavailableReason: disposition.unavailableReason ?? verified.unavailableReason,
   };
 }

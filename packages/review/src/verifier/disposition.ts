@@ -44,6 +44,7 @@ export function partitionVerifiedFindings(
       rescued: [],
       refuted: [],
       verificationIncomplete: true,
+      unverifiedRequiredCount: keptPost.length,
       unavailableReason: reason,
     };
   }
@@ -60,6 +61,7 @@ export function partitionVerifiedFindings(
     rescued: [],
     refuted: [],
     verificationIncomplete: false,
+    unverifiedRequiredCount: 0,
   };
   const addToReviewSurface = (item: ReviewSurfaceFinding) => {
     const fingerprint = fingerprintFinding(item.finding);
@@ -96,6 +98,7 @@ export function partitionVerifiedFindings(
     ) {
       result.toPost.push(finding);
       result.verificationIncomplete = true;
+      result.unverifiedRequiredCount++;
     } else addToReviewSurface({ finding, reason });
   }
   for (const dropped of verified.dropped) {

@@ -53,6 +53,7 @@ export async function publishReviewOutput(
       verificationIncomplete: input.verificationIncomplete
         ? (input.verificationUnavailableReason ?? 'Verification did not complete for this review.')
         : undefined,
+      verificationInconclusiveCount: input.verificationInconclusiveCount,
     },
     nitpicks,
   );

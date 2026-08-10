@@ -63,6 +63,7 @@ export interface PublicationInput {
   llmSummary?: string;
   skippedLenses: string[];
   verificationIncomplete: boolean;
+  verificationInconclusiveCount?: number;
   verificationUnavailableReason?: string;
   usage: TierUsage;
   usagePolicy: UsageCostPolicy;

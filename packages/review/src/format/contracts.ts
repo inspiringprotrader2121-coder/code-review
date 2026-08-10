@@ -23,6 +23,7 @@ export interface ReviewCommentMeta {
   skippedLenses?: string[];
   reviewOnly?: ReviewSurfaceFinding[];
   verificationIncomplete?: string;
+  verificationInconclusiveCount?: number;
 }
 
 export interface InlineFindingRender {
