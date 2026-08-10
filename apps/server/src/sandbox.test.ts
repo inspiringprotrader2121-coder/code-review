@@ -954,6 +954,14 @@ test('agentic Codex container mounts only its private checkout and receives no h
     const command = args.at(-1) ?? '';
     assert.match(command, /^mkdir -p '\/codex-home' && chmod 700 '\/codex-home' && exec node /);
     assert.match(command, /node '\/opt\/orvex\/node_modules\/@openai\/codex\/bin\/codex\.js'/);
+    assert.match(command, /'model_provider="orvex_broker"'/);
+    assert.match(
+      command,
+      /'model_providers\.orvex_broker\.base_url="http:\/\/orvex-openai-egress:8080\/v1"'/,
+    );
+    assert.match(command, /'model_providers\.orvex_broker\.supports_websockets=false'/);
+    assert.match(command, /'model_providers\.orvex_broker\.request_max_retries=1'/);
+    assert.match(command, /'model_providers\.orvex_broker\.stream_max_retries=1'/);
     assert.match(command, /< '\/work\/\.orvex-agentic\/prompt-/);
 
     fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 });

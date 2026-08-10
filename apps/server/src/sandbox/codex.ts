@@ -5,6 +5,7 @@ import type { CodexContainerResult, CodexContainerRuntime } from '@orvex-review/
 import {
   CODEX_CONTAINER_BINARY,
   CODEX_CONTAINER_HOME,
+  CODEX_EGRESS_BASE_URL,
   DEFAULT_SANDBOX_RUNTIME_OPTIONS,
   type CodexSandboxRunOptions,
   type SandboxResult,
@@ -31,7 +32,26 @@ function codexContainerCommand(args: readonly string[], promptInContainer: strin
   if (args[0] !== 'exec' || args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) {
     throw new Error('internal Codex runner refused malformed CLI arguments');
   }
-  return `mkdir -p ${shellQuote(CODEX_CONTAINER_HOME)} && chmod 700 ${shellQuote(CODEX_CONTAINER_HOME)} && exec node ${shellQuote(CODEX_CONTAINER_BINARY)} ${args.map(shellQuote).join(' ')} < ${shellQuote(promptInContainer)}`;
+  const brokerProviderArgs = [
+    '-c',
+    'model_provider="orvex_broker"',
+    '-c',
+    'model_providers.orvex_broker.name="Orvex broker"',
+    '-c',
+    `model_providers.orvex_broker.base_url="${CODEX_EGRESS_BASE_URL}"`,
+    '-c',
+    'model_providers.orvex_broker.env_key="OPENAI_API_KEY"',
+    '-c',
+    'model_providers.orvex_broker.wire_api="responses"',
+    '-c',
+    'model_providers.orvex_broker.supports_websockets=false',
+    '-c',
+    'model_providers.orvex_broker.request_max_retries=1',
+    '-c',
+    'model_providers.orvex_broker.stream_max_retries=1',
+  ];
+  const commandArgs = [args[0], ...brokerProviderArgs, ...args.slice(1)];
+  return `mkdir -p ${shellQuote(CODEX_CONTAINER_HOME)} && chmod 700 ${shellQuote(CODEX_CONTAINER_HOME)} && exec node ${shellQuote(CODEX_CONTAINER_BINARY)} ${commandArgs.map(shellQuote).join(' ')} < ${shellQuote(promptInContainer)}`;
 }
 
 async function runCodexInSandboxInternal(
