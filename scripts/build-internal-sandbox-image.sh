@@ -25,6 +25,6 @@ image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
 }
 docker run --rm --pull never --network none --cap-drop ALL \
   --security-opt no-new-privileges "$image_id" \
-  sh -c 'node --version && npm --version && pnpm --version && yarn --version' >/dev/null
+  sh -c 'node --version && npm --version && pnpm --version && yarn --version && node /opt/orvex/node_modules/@openai/codex/bin/codex.js --version' >/dev/null
 
 printf '%s\n' "$image_id"

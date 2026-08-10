@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import {
+  CODEX_CONTAINER_BINARY,
   CODEX_EGRESS_BROKER,
   CODEX_EGRESS_NETWORK,
   DEFAULT_SANDBOX_RUNTIME_OPTIONS,
@@ -197,6 +198,29 @@ async function inspectCodexEgressBoundary(
   return brokerParts[0] === brokerImage && brokerParts.slice(1).includes(network);
 }
 
+async function inspectCodexBinary(image: string, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return false;
+  const result = await runBoundedDockerCommand([
+    'run',
+    '--rm',
+    '--pull',
+    'never',
+    '--network',
+    'none',
+    '--cap-drop',
+    'ALL',
+    '--security-opt',
+    'no-new-privileges',
+    '--read-only',
+    '--entrypoint',
+    '/usr/bin/test',
+    image,
+    '-r',
+    CODEX_CONTAINER_BINARY,
+  ]);
+  return result.exitCode === 0 && !result.timedOut && !signal?.aborted;
+}
+
 function inspectBrokerSigningKey(file: string): Promise<boolean> {
   return Promise.resolve().then(() => {
     try {
@@ -226,6 +250,13 @@ export async function checkCodexSandboxRuntimeReadiness(
   }
   const runtime = await checkSandboxRuntimeReadiness({ ...opts, enabled: true });
   if (!runtime.ready) return runtime;
+  const inspectBinary = opts.inspectCodexBinary ?? inspectCodexBinary;
+  if (!(await inspectBinary(runtime.image, opts.signal))) {
+    return {
+      ready: false,
+      reason: 'internal Codex sandbox image is missing the pinned Codex CLI binary',
+    };
+  }
   const brokerImage = opts.brokerImage ?? configured.codexEgressBrokerImage;
   if (!isDigestPinnedSandboxImage(brokerImage)) {
     return {

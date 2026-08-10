@@ -78,6 +78,7 @@ export interface CodexSandboxRunOptions {
 }
 
 export interface CodexSandboxRuntimeReadinessOptions extends SandboxRuntimeReadinessOptions {
+  inspectCodexBinary?: (image: string, signal?: AbortSignal) => Promise<boolean>;
   inspectEgressBoundary?: (
     network: string,
     brokerName: string,

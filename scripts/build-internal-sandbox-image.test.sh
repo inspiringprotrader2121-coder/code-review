@@ -9,6 +9,18 @@ bash -n "$SCRIPT"
 grep -Eq '^ARG BASE_IMAGE=[^[:space:]]+@sha256:[a-f0-9]{64}$' "$DOCKERFILE"
 grep -q 'corepack prepare pnpm@11.7.0 --activate' "$DOCKERFILE"
 grep -q 'corepack prepare yarn@1.22.22 --activate' "$DOCKERFILE"
+grep -q '^ARG CODEX_VERSION=0.147.0$' "$DOCKERFILE"
+grep -q 'npm install --prefix /opt/orvex' "$DOCKERFILE"
+grep -q '/opt/orvex/node_modules/@openai/codex/bin/codex.js --version' "$SCRIPT"
+node - <<'NODE'
+const { readFileSync } = require('node:fs');
+const root = JSON.parse(readFileSync('package.json', 'utf8'));
+const dockerfile = readFileSync('sandbox/runtime/Dockerfile', 'utf8');
+const version = dockerfile.match(/^ARG CODEX_VERSION=(.+)$/m)?.[1];
+if (!version || root.dependencies?.['@openai/codex'] !== version) {
+  throw new Error('sandbox Codex version must equal the pinned application dependency');
+}
+NODE
 grep -q 'DOCKER_HOST must be' "$SCRIPT"
 grep -q "grep -Eq '(^|=)rootless\$'" "$SCRIPT"
 grep -q -- '--pull=false' "$SCRIPT"

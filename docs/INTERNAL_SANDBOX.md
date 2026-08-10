@@ -117,6 +117,11 @@ never leave the server, and omitting the generated attestation manifest keeps
 an unchanged build's local image ID reproducible between the initial build used
 to prepare configuration and the broker's guarded apply-time rebuild.
 
+The runtime image also contains the same pinned Codex CLI version as the
+application dependency. Its no-network build smoke test executes that binary,
+and application preflight checks the binary before a high-tier review may start
+any paid discovery stage.
+
 The current application integration uses this internal Docker boundary for
 runtime verification. It enforces the service account's rootless Unix socket,
 Docker's reported rootless mode, an immutable local image ID or registry

@@ -221,6 +221,7 @@ test('agentic Codex readiness requires a pinned broker on the internal-only netw
     inspectDockerSocket: privateSocket,
     inspectRootlessRuntime: async () => true,
     inspectImage: async () => true,
+    inspectCodexBinary: async () => true,
     brokerImage: `registry.example/orvex-egress@sha256:${'b'.repeat(64)}`,
     inspectBrokerSigningKey: async () => true,
   };
@@ -243,6 +244,16 @@ test('agentic Codex readiness requires a pinned broker on the internal-only netw
     },
   });
   assert.deepEqual(ready, { ready: true, image: PINNED_IMAGE });
+
+  const missingBinary = await checkCodexSandboxRuntimeReadiness({
+    ...base,
+    inspectCodexBinary: async () => false,
+    inspectEgressBoundary: async () => true,
+  });
+  assert.deepEqual(missingBinary, {
+    ready: false,
+    reason: 'internal Codex sandbox image is missing the pinned Codex CLI binary',
+  });
 
   const missingSigningKey = await checkCodexSandboxRuntimeReadiness({
     ...base,
