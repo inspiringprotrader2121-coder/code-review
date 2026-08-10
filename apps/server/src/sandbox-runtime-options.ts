@@ -1,4 +1,5 @@
 import { currentEnvironment } from '@orvex-review/config';
+import path from 'node:path';
 import {
   createCodexContainerRuntime,
   DEFAULT_SANDBOX_RUNTIME_OPTIONS,
@@ -12,10 +13,15 @@ import {
 } from './runtime-verify.js';
 import type { CodexContainerRuntime } from '@orvex-review/review';
 
-const MAX_SANDBOX_DISK_BYTES = 16 * 1024 * 1024 * 1024;
+const MAX_SANDBOX_DISK_BYTES = 2 * 1024 * 1024 * 1024;
 
 function optionalExact(value: string | undefined): string | undefined {
   return value && value.trim() === value ? value : undefined;
+}
+
+function optionalAbsolutePath(value: string | undefined): string | undefined {
+  const exact = optionalExact(value);
+  return exact && path.isAbsolute(exact) ? exact : undefined;
 }
 
 function boundedPositive(value: string | undefined, fallback: number, max: number): number {
@@ -37,11 +43,17 @@ export function loadSandboxRuntimeOptions(
     maxConcurrentSandboxes: boundedPositive(
       env.ORVEX_MAX_SANDBOXES,
       DEFAULT_SANDBOX_RUNTIME_OPTIONS.maxConcurrentSandboxes,
-      64,
+      8,
     ),
     slotWaitMs: boundedPositive(
       env.ORVEX_SANDBOX_SLOT_WAIT_MS,
       DEFAULT_SANDBOX_RUNTIME_OPTIONS.slotWaitMs,
+      3_600_000,
+    ),
+    slotDirectory: optionalAbsolutePath(env.ORVEX_SANDBOX_SLOT_DIR),
+    slotStaleMs: boundedPositive(
+      env.ORVEX_SANDBOX_SLOT_STALE_MS,
+      DEFAULT_SANDBOX_RUNTIME_OPTIONS.slotStaleMs,
       3_600_000,
     ),
     workdirMaxBytes: boundedPositive(

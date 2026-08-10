@@ -18,6 +18,8 @@ test('sandbox environment compatibility maps the existing names into one frozen 
     DOCKER_HOST: 'unix:///run/user/1000/docker.sock',
     ORVEX_MAX_SANDBOXES: '8',
     ORVEX_SANDBOX_SLOT_WAIT_MS: '45000',
+    ORVEX_SANDBOX_SLOT_DIR: '/var/run/orvex/sandbox-slots',
+    ORVEX_SANDBOX_SLOT_STALE_MS: '50000',
     ORVEX_SANDBOX_WORKDIR_MAX_BYTES: '1073741824',
   });
 
@@ -31,6 +33,8 @@ test('sandbox environment compatibility maps the existing names into one frozen 
     dockerContext: undefined,
     maxConcurrentSandboxes: 8,
     slotWaitMs: 45_000,
+    slotDirectory: '/var/run/orvex/sandbox-slots',
+    slotStaleMs: 50_000,
     workdirMaxBytes: 1_073_741_824,
   });
 });
@@ -40,9 +44,11 @@ test('sandbox compatibility loader preserves fail-closed defaults and numeric bo
   assert.equal(defaults.codeExecutionEnabled, false);
   assert.equal(defaults.codexContainerEnabled, false);
   assert.equal(defaults.image, undefined);
-  assert.equal(defaults.maxConcurrentSandboxes, 2);
+  assert.equal(defaults.maxConcurrentSandboxes, 8);
   assert.equal(defaults.slotWaitMs, 600_000);
-  assert.equal(defaults.workdirMaxBytes, 4 * 1024 * 1024 * 1024);
+  assert.equal(defaults.slotDirectory, undefined);
+  assert.equal(defaults.slotStaleMs, 600_000);
+  assert.equal(defaults.workdirMaxBytes, 1024 * 1024 * 1024);
 
   const bounded = loadSandboxRuntimeOptions({
     ORVEX_MAX_SANDBOXES: '999',
@@ -50,10 +56,15 @@ test('sandbox compatibility loader preserves fail-closed defaults and numeric bo
     ORVEX_SANDBOX_WORKDIR_MAX_BYTES: '999999999999',
     ORVEX_SANDBOX_IMAGE: ` ${RUNTIME_IMAGE}`,
   });
-  assert.equal(bounded.maxConcurrentSandboxes, 64);
+  assert.equal(bounded.maxConcurrentSandboxes, 8);
   assert.equal(bounded.slotWaitMs, 3_600_000);
-  assert.equal(bounded.workdirMaxBytes, 16 * 1024 * 1024 * 1024);
+  assert.equal(bounded.workdirMaxBytes, 2 * 1024 * 1024 * 1024);
   assert.equal(bounded.image, undefined, 'whitespace-altered image references stay invalid');
+  assert.equal(
+    loadSandboxRuntimeOptions({ ORVEX_SANDBOX_SLOT_DIR: 'relative-slots' }).slotDirectory,
+    undefined,
+    'slot leases never use a checkout-relative path',
+  );
 });
 
 test('runtime verification limits retain the existing environment contract and are immutable', () => {

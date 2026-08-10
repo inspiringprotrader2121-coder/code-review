@@ -49,6 +49,27 @@ test('review runtime preserves max reasoning, bounded timers, and pinned child e
   assert.deepEqual(config.childProcessEnvironment, { PATH: '/usr/bin' });
 });
 
+test('production capacity profile reserves eight reviews and 24 DeepSeek stages', () => {
+  const config = loadReviewRuntimeConfig({
+    ORVEX_CODEX_CLI: '1',
+    ORVEX_MAX_CONCURRENT_REVIEWS: '8',
+    ORVEX_CODEX_APIKEY_CONCURRENCY: '8',
+    ORVEX_PROVIDER_CONCURRENCY_LUNA: '8',
+    ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: '24',
+    ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '8',
+    ORVEX_VERIFY_CONCURRENCY: '1',
+    ORVEX_REVIEW_CONCURRENCY: '3',
+  });
+
+  assert.equal(config.reviewWorkerConcurrency, 8);
+  assert.equal(config.codexApiKeyConcurrency, 8);
+  assert.equal(config.providerConcurrency('luna'), 8);
+  assert.equal(config.providerConcurrency('deepseek'), 24);
+  assert.equal(config.providerConcurrency('minimax'), 8);
+  assert.equal(config.verifyConcurrency, 1);
+  assert.equal(config.execution.concurrency, 3);
+});
+
 test('review runtime preserves legacy empty-string and invalid-value fallbacks', () => {
   const config = loadReviewRuntimeConfig({
     ORVEX_RATELIMIT_MAX_RETRIES: '',

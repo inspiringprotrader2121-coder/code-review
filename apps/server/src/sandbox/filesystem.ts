@@ -96,12 +96,57 @@ export function assertCodexOutputPath(
   return { workdir: safeWorkdir, output: path.join(safeWorkdir, relative) };
 }
 
-export function readSandboxOutput(file: string): string {
+export function assertPrivateAgentDirectory(workdir: string): string {
+  const safeWorkdir = assertSafeSandboxWorkdir(workdir);
+  const agentDir = path.join(safeWorkdir, '.orvex-agentic');
   try {
+    const entry = fs.lstatSync(agentDir);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error('Codex private directory must be a real directory');
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    fs.mkdirSync(agentDir, { mode: 0o700 });
+  }
+  fs.chmodSync(agentDir, 0o700);
+  if (fs.realpathSync(agentDir) !== agentDir) {
+    throw new Error('Codex private directory escapes the sandbox checkout');
+  }
+  return agentDir;
+}
+
+function hasSafePrivateParent(workdir: string, file: string): boolean {
+  try {
+    const safeWorkdir = assertSafeSandboxWorkdir(workdir);
+    const expectedParent = path.join(safeWorkdir, '.orvex-agentic');
+    if (path.dirname(file) !== expectedParent) return false;
+    const parent = fs.lstatSync(expectedParent);
+    return (
+      parent.isDirectory() &&
+      !parent.isSymbolicLink() &&
+      fs.realpathSync(expectedParent) === expectedParent
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function readSandboxOutput(workdir: string, file: string): string {
+  try {
+    if (!hasSafePrivateParent(workdir, file)) return '';
     const stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_CAPTURE_BYTES) return '';
     return fs.readFileSync(file, 'utf8');
   } catch {
     return '';
+  }
+}
+
+export function removePrivateSandboxFile(workdir: string, file: string): void {
+  if (!hasSafePrivateParent(workdir, file)) return;
+  try {
+    fs.rmSync(file, { force: true });
+  } catch {
+    /* The outer checkout cleanup remains authoritative. */
   }
 }

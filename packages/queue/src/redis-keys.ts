@@ -17,6 +17,7 @@ export interface RedisQueueKeys {
   pendingCount: string;
   processing: string;
   processingMetaPrefix: string;
+  priorityBurst: string;
   recoveryLease: string;
   resumedPrefix: string;
   deadLetters: string;
@@ -35,6 +36,7 @@ export function createRedisQueueKeys(namespace: string): RedisQueueKeys {
     pendingCount: `${prefix}pending-count`,
     processing: `${prefix}processing`,
     processingMetaPrefix: `${prefix}processing-meta:`,
+    priorityBurst: `${prefix}priority-burst`,
     recoveryLease: `${prefix}recovery-leader`,
     resumedPrefix: `${prefix}resumed:`,
     deadLetters: `${prefix}dead-letters`,

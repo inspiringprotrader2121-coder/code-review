@@ -34,6 +34,7 @@ function config(overrides = {}) {
     maxConcurrent: 1,
     maxRequestsPerWindow: 2,
     rateWindowMs: 60_000,
+    bodyReadTimeoutMs: 100,
     upstreamTimeoutMs: 500,
     maxResponseBytes: 32_768,
     ...overrides,
@@ -86,6 +87,42 @@ async function request(port, options = {}) {
     );
     req.once('error', reject);
     req.end(requestBody);
+  });
+}
+
+function slowRequest(port, { token = capability(), requestBody = body() } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+    const req = http.request(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path: '/v1/responses',
+        method: 'POST',
+        headers: {
+          host: 'orvex-openai-egress:8080',
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(requestBody),
+          authorization: `Bearer ${token}`,
+        },
+      },
+      async (response) => {
+        const chunks = [];
+        for await (const chunk of response) chunks.push(chunk);
+        settle(resolve, {
+          status: response.statusCode,
+          body: Buffer.concat(chunks).toString('utf8'),
+        });
+        req.destroy();
+      },
+    );
+    req.once('error', (error) => settle(reject, error));
+    req.write(requestBody.slice(0, Math.max(1, Math.floor(requestBody.length / 2))));
   });
 }
 
@@ -236,6 +273,45 @@ test('bounds concurrent work and per-client requests while preserving streaming 
   assert.equal((await second).status, 200);
   const limited = await request(port, { token: sharedToken });
   assert.equal(limited.status, 429);
+});
+
+test('admits authenticated requests before body reads, times out trickle bodies, and releases capacity', async (t) => {
+  let calls = 0;
+  const server = createBrokerServer(config({ bodyReadTimeoutMs: 30, maxRequestsPerWindow: 8 }), {
+    upstreamRequest: (...args) => {
+      calls += 1;
+      return fakeUpstream()(...args);
+    },
+  });
+  t.after(() => server.close());
+  const port = await listen(server);
+  const slow = slowRequest(port);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const rejected = await request(port);
+  assert.equal(rejected.status, 429);
+  assert.match(rejected.body, /concurrency_limited/);
+
+  const timedOut = await slow;
+  assert.equal(timedOut.status, 408);
+  assert.match(timedOut.body, /request_body_timeout/);
+  assert.equal(calls, 0);
+
+  const accepted = await request(port);
+  assert.equal(accepted.status, 200);
+  assert.equal(calls, 1);
+});
+
+test('releases pre-body capacity when body validation rejects a request', async (t) => {
+  const server = createBrokerServer(config({ maxRequestsPerWindow: 8 }), {
+    upstreamRequest: fakeUpstream(),
+  });
+  t.after(() => server.close());
+  const port = await listen(server);
+  const rejected = await request(port, { body: '{' });
+  assert.equal(rejected.status, 400);
+  assert.match(rejected.body, /invalid_json/);
+  assert.equal((await request(port)).status, 200);
 });
 
 test('cuts off an oversized upstream response and destroys the fake upstream', async (t) => {

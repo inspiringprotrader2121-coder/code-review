@@ -56,11 +56,16 @@ export async function fetchPullRequest(octokit: Octokit, ref: PrRef): Promise<Pu
 
 /** Cheap, single-purpose re-check for mid-run abort — avoids re-fetching the
  *  full PR object (diff-adjacent fields) just to ask "is it still open?". */
-export async function isPrStillOpen(octokit: Octokit, ref: PrRef): Promise<boolean> {
+export async function isPrStillOpen(
+  octokit: Octokit,
+  ref: PrRef,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const { data } = await octokit.rest.pulls.get({
     owner: ref.owner,
     repo: ref.repo,
     pull_number: ref.number,
+    request: signal ? { signal } : undefined,
   });
   return data.state === 'open';
 }

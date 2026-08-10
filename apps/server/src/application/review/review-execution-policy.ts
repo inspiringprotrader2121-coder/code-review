@@ -10,6 +10,14 @@ export interface ReviewExecutionPolicy {
   aggregation: ReviewAggregationConfig;
 }
 
+/** GitHub lifecycle checks are authoritative but must not exhaust installation API quota. */
+export function resolvePrStatePollMs(ownershipHeartbeatMs: number): number {
+  const boundedHeartbeat = Number.isFinite(ownershipHeartbeatMs)
+    ? Math.max(1_000, Math.floor(ownershipHeartbeatMs))
+    : 5_000;
+  return Math.max(30_000, boundedHeartbeat);
+}
+
 export function takeReviewCallsByPriority<T>(
   core: readonly T[],
   optional: readonly T[],

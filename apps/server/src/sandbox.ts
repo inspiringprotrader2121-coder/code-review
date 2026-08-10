@@ -19,9 +19,12 @@ export {
   type SandboxStartupPreparationOptions,
 } from './sandbox/contracts.js';
 export {
+  assertPrivateAgentDirectory,
   assertSafeSandboxWorkdir,
   assertWorkdirWithinQuota,
   measureWorkdirBytes,
+  readSandboxOutput,
+  removePrivateSandboxFile,
   workdirMaxBytes,
 } from './sandbox/filesystem.js';
 export { buildSandboxDockerArgs, isDigestPinnedSandboxImage } from './sandbox/policy.js';

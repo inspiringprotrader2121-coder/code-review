@@ -12,6 +12,7 @@ grep -q 'corepack prepare yarn@1.22.22 --activate' "$DOCKERFILE"
 grep -q '^ARG CODEX_VERSION=0.147.0$' "$DOCKERFILE"
 grep -q 'npm install --prefix /opt/orvex' "$DOCKERFILE"
 grep -q '/opt/orvex/node_modules/@openai/codex/bin/codex.js --version' "$SCRIPT"
+grep -q 'orvex.codex-version' "$ROOT/sandbox/runtime/Dockerfile"
 node - <<'NODE'
 const { readFileSync } = require('node:fs');
 const root = JSON.parse(readFileSync('package.json', 'utf8'));

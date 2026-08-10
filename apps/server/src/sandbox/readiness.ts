@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import {
-  CODEX_CONTAINER_BINARY,
   CODEX_EGRESS_BROKER,
   CODEX_EGRESS_NETWORK,
   DEFAULT_SANDBOX_RUNTIME_OPTIONS,
@@ -15,6 +14,84 @@ import {
 import { runBoundedDockerCommand } from './docker-control.js';
 import { isDigestPinnedSandboxImage } from './policy.js';
 import { brokerSigningKeyPath } from './broker-capability.js';
+
+const CODEX_READINESS_CACHE_MS = 1_000;
+
+type CodexReadinessCacheEntry = {
+  key: string;
+  readyUntil: number;
+  result?: SandboxRuntimeReadiness;
+  inFlight?: Promise<SandboxRuntimeReadiness>;
+};
+
+let codexReadinessCache: CodexReadinessCacheEntry | undefined;
+let readinessProbeIdentitySequence = 0;
+const readinessProbeIdentities = new WeakMap<object, number>();
+
+function readinessProbeIdentity(probe: object | undefined): number {
+  if (!probe) return 0;
+  const known = readinessProbeIdentities.get(probe);
+  if (known !== undefined) return known;
+  readinessProbeIdentitySequence += 1;
+  readinessProbeIdentities.set(probe, readinessProbeIdentitySequence);
+  return readinessProbeIdentitySequence;
+}
+
+function codexReadinessCacheKey(opts: CodexSandboxRuntimeReadinessOptions): string {
+  const runtime = opts.runtime ?? DEFAULT_SANDBOX_RUNTIME_OPTIONS;
+  return JSON.stringify([
+    opts.enabled,
+    opts.image,
+    opts.brokerImage,
+    opts.dockerHost,
+    opts.dockerContext,
+    runtime.codeExecutionEnabled,
+    runtime.codexContainerEnabled,
+    runtime.image,
+    runtime.codexEgressBrokerImage,
+    runtime.dockerHost,
+    runtime.dockerContext,
+    readinessProbeIdentity(opts.inspectDockerSocket),
+    readinessProbeIdentity(opts.inspectRootlessRuntime),
+    readinessProbeIdentity(opts.inspectImage),
+    readinessProbeIdentity(opts.inspectCodexBinary),
+    readinessProbeIdentity(opts.inspectBrokerSigningKey),
+    readinessProbeIdentity(opts.inspectEgressBoundary),
+  ]);
+}
+
+function waitForReadiness(
+  inFlight: Promise<SandboxRuntimeReadiness>,
+  signal: AbortSignal | undefined,
+): Promise<SandboxRuntimeReadiness> {
+  if (!signal) return inFlight;
+  if (signal.aborted)
+    return Promise.resolve({ ready: false, reason: 'runtime verification cancelled' });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (
+      fn: (value: SandboxRuntimeReadiness) => void,
+      value: SandboxRuntimeReadiness,
+    ) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      fn(value);
+    };
+    const onAbort = () =>
+      finish(resolve, { ready: false, reason: 'runtime verification cancelled' });
+    signal.addEventListener('abort', onAbort, { once: true });
+    inFlight.then(
+      (result) => finish(resolve, result),
+      (error) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 
 function inspectSandboxImageWithSpawn(
   image: string,
@@ -201,24 +278,18 @@ async function inspectCodexEgressBoundary(
 async function inspectCodexBinary(image: string, signal?: AbortSignal): Promise<boolean> {
   if (signal?.aborted) return false;
   const result = await runBoundedDockerCommand([
-    'run',
-    '--rm',
-    '--pull',
-    'never',
-    '--network',
-    'none',
-    '--cap-drop',
-    'ALL',
-    '--security-opt',
-    'no-new-privileges',
-    '--read-only',
-    '--entrypoint',
-    '/usr/bin/test',
+    'image',
+    'inspect',
+    '--format',
+    '{{index .Config.Labels "orvex.codex-version"}}',
     image,
-    '-r',
-    CODEX_CONTAINER_BINARY,
   ]);
-  return result.exitCode === 0 && !result.timedOut && !signal?.aborted;
+  return (
+    result.exitCode === 0 &&
+    !result.timedOut &&
+    result.stdout.trim() === '0.147.0' &&
+    !signal?.aborted
+  );
 }
 
 function inspectBrokerSigningKey(file: string): Promise<boolean> {
@@ -241,7 +312,7 @@ function inspectBrokerSigningKey(file: string): Promise<boolean> {
   });
 }
 
-export async function checkCodexSandboxRuntimeReadiness(
+async function checkCodexSandboxRuntimeReadinessUncached(
   opts: CodexSandboxRuntimeReadinessOptions = {},
 ): Promise<SandboxRuntimeReadiness> {
   const configured = opts.runtime ?? DEFAULT_SANDBOX_RUNTIME_OPTIONS;
@@ -281,4 +352,45 @@ export async function checkCodexSandboxRuntimeReadiness(
     };
   }
   return runtime;
+}
+
+export async function checkCodexSandboxRuntimeReadiness(
+  opts: CodexSandboxRuntimeReadinessOptions = {},
+): Promise<SandboxRuntimeReadiness> {
+  if (opts.signal?.aborted) return { ready: false, reason: 'runtime verification cancelled' };
+
+  const key = codexReadinessCacheKey(opts);
+  const now = Date.now();
+  let entry = codexReadinessCache;
+  if (
+    !entry ||
+    entry.key !== key ||
+    (!entry.inFlight && (entry.readyUntil <= now || entry.result === undefined))
+  ) {
+    const { signal: _signal, ...uncancelledOptions } = opts;
+    const inFlight = checkCodexSandboxRuntimeReadinessUncached(uncancelledOptions);
+    const createdEntry: CodexReadinessCacheEntry = { key, readyUntil: 0, inFlight };
+    entry = createdEntry;
+    codexReadinessCache = createdEntry;
+    void inFlight.then(
+      (result) => {
+        if (codexReadinessCache !== createdEntry) return;
+        if (result.ready) {
+          createdEntry.result = result;
+          createdEntry.readyUntil = Date.now() + CODEX_READINESS_CACHE_MS;
+          createdEntry.inFlight = undefined;
+        } else {
+          codexReadinessCache = undefined;
+        }
+      },
+      () => {
+        if (codexReadinessCache === createdEntry) codexReadinessCache = undefined;
+      },
+    );
+  }
+
+  const activeEntry = entry;
+  if (!activeEntry) throw new Error('Codex readiness cache entry was not initialized');
+  const result = activeEntry.result ?? (await waitForReadiness(activeEntry.inFlight!, opts.signal));
+  return opts.signal?.aborted ? { ready: false, reason: 'runtime verification cancelled' } : result;
 }

@@ -162,8 +162,6 @@ IMAGE_ID=$(as_service_user docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
 [[ $IMAGE_ID =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'broker build did not return an immutable image ID'
 as_service_user mkdir -p "$STATE_DIR"
 as_service_user chmod 0700 "$STATE_DIR"
-printf '%s\n' "$IMAGE_ID" | as_service_user tee "$RECORD_FILE" >/dev/null
-as_service_user chmod 0600 "$RECORD_FILE"
 [[ $CONFIGURED_IMAGE == "$IMAGE_ID" ]] || fail "ORVEX_CODEX_EGRESS_BROKER_IMAGE does not equal the built broker image ID ($IMAGE_ID); update immutable configuration through the approved operator process before retrying"
 
 ensure_network "$INTERNAL_NETWORK" internal
@@ -186,11 +184,14 @@ as_service_user docker run --detach --name "$BROKER_NAME" --pull never \
   --env EGRESS_LISTEN_PORT=8080 --env EGRESS_ALLOWED_HOST="$BROKER_NAME" \
   --env EGRESS_MAX_CONTENT_BYTES=1048576 --env EGRESS_MAX_OUTPUT_TOKENS=65536 \
   --env EGRESS_MAX_CONCURRENT=8 --env EGRESS_MAX_REQUESTS_PER_WINDOW=24 \
-  --env EGRESS_RATE_WINDOW_MS=60000 --env EGRESS_UPSTREAM_TIMEOUT_MS=300000 \
+  --env EGRESS_RATE_WINDOW_MS=60000 --env EGRESS_BODY_READ_TIMEOUT_MS=30000 \
+  --env EGRESS_UPSTREAM_TIMEOUT_MS=300000 \
   --env EGRESS_MAX_RESPONSE_BYTES=8388608 \
   "$IMAGE_ID" >/dev/null
 as_service_user docker network connect "$EGRESS_NETWORK" "$BROKER_NAME"
 wait_for_healthy || fail 'broker failed its private health check; inspect rootless Docker logs without printing environment data'
+printf '%s\n' "$IMAGE_ID" | as_service_user tee "$RECORD_FILE" >/dev/null
+as_service_user chmod 0600 "$RECORD_FILE"
 cleanup_secret
 trap - EXIT
 log "broker is healthy; immutable image ID recorded at $RECORD_FILE"

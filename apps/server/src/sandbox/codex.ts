@@ -12,7 +12,12 @@ import {
   type SandboxSpawn,
 } from './contracts.js';
 import { runInSandbox, runInSandboxWithSpawnForTest } from './execution.js';
-import { assertCodexOutputPath, readSandboxOutput } from './filesystem.js';
+import {
+  assertCodexOutputPath,
+  assertPrivateAgentDirectory,
+  readSandboxOutput,
+  removePrivateSandboxFile,
+} from './filesystem.js';
 import { checkCodexSandboxRuntimeReadiness } from './readiness.js';
 import { createBrokerCapabilityToken } from './broker-capability.js';
 
@@ -33,33 +38,29 @@ async function runCodexInSandboxInternal(
   run: (options: SandboxRunOptions) => Promise<SandboxResult>,
 ): Promise<CodexContainerResult> {
   const { workdir, output } = assertCodexOutputPath(opts.workdir, opts.lastMessageFile);
-  const agentDir = path.join(workdir, '.orvex-agentic');
-  fs.mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(agentDir, 0o700);
+  const agentDir = assertPrivateAgentDirectory(workdir);
   const promptName = `prompt-${randomUUID()}.txt`;
   const hostPrompt = path.join(agentDir, promptName);
   const containerPrompt = `/work/.orvex-agentic/${promptName}`;
   try {
     fs.writeFileSync(hostPrompt, opts.prompt, { mode: 0o600, flag: 'wx' });
+    fs.writeFileSync(output, '', { mode: 0o600, flag: 'wx' });
     const result = await run({
       workdir,
       image: opts.image,
       command: codexContainerCommand(opts.args, containerPrompt),
       timeoutMs: opts.timeoutMs,
       inactivityTimeoutMs: opts.inactivityTimeoutMs,
-      readOnlyWorkdir: false,
+      readOnlyWorkdir: true,
       profile: 'agentic-codex',
       brokerToken: opts.brokerToken,
+      outputFile: output,
       signal: opts.signal,
     });
-    return { ...result, lastMessage: readSandboxOutput(output) };
+    return { ...result, lastMessage: readSandboxOutput(workdir, output) };
   } finally {
-    try {
-      fs.rmSync(hostPrompt, { force: true });
-      fs.rmSync(output, { force: true });
-    } catch {
-      /* outer review cleanup remains authoritative */
-    }
+    removePrivateSandboxFile(workdir, hostPrompt);
+    removePrivateSandboxFile(workdir, output);
   }
 }
 

@@ -114,16 +114,24 @@ return 'pending'`;
 
 export const DEQUEUE_LUA = `
 local count = math.min(50, redis.call('LLEN', KEYS[1]))
-if count == 0 then return false end
+if count == 0 then redis.call('DEL', KEYS[3]); return false end
+local forceFifo = tonumber(redis.call('GET', KEYS[3]) or '0') >= tonumber(ARGV[2])
 local selectedIndex = 0; local selectedPriority = -1000000
-for i = 0, count - 1 do
-  local candidate = redis.call('LINDEX', KEYS[1], i); local priority = 0
-  local ok, decoded = pcall(cjson.decode, candidate)
-  if ok and decoded and tonumber(decoded.priority) then priority = math.floor(tonumber(decoded.priority)) end
-  if priority > selectedPriority then selectedPriority = priority; selectedIndex = i end
+if not forceFifo then
+  for i = 0, count - 1 do
+    local candidate = redis.call('LINDEX', KEYS[1], i); local priority = 0
+    local ok, decoded = pcall(cjson.decode, candidate)
+    if ok and decoded and tonumber(decoded.priority) then priority = math.floor(tonumber(decoded.priority)) end
+    if priority > selectedPriority then selectedPriority = priority; selectedIndex = i end
+  end
 end
 local raw = redis.call('LINDEX', KEYS[1], selectedIndex); local marker = ARGV[1] .. ':reserved'
 redis.call('LSET', KEYS[1], selectedIndex, marker); redis.call('LREM', KEYS[1], 1, marker); redis.call('RPUSH', KEYS[2], ARGV[1] .. '\\n' .. raw)
+if forceFifo or selectedIndex == 0 then
+  redis.call('DEL', KEYS[3])
+else
+  redis.call('INCR', KEYS[3])
+end
 return raw`;
 
 export const DRAIN_LUA = `

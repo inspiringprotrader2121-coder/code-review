@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assertWorkdirWithinQuota, measureWorkdirBytes } from './sandbox.js';
+import {
+  assertPrivateAgentDirectory,
+  assertWorkdirWithinQuota,
+  measureWorkdirBytes,
+  readSandboxOutput,
+  removePrivateSandboxFile,
+} from './sandbox.js';
 import { isVerificationEnabled } from './verify-gate.js';
 import { formatRuntimeEvidence, type RuntimeVerifyResult } from './runtime-verify.js';
 import { testServerConfig } from './bootstrap/test-config.js';
@@ -17,6 +23,28 @@ test('assertWorkdirWithinQuota fails when workdir exceeds the budget', () => {
     assert.equal(assertWorkdirWithinQuota(dir, 20_000), measureWorkdirBytes(dir));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex host output never follows a container-replaced private-directory symlink', () => {
+  const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-rverify-output-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-output-target-'));
+  fs.chmodSync(workdir, 0o700);
+  fs.chmodSync(outside, 0o700);
+  const outsideFile = path.join(outside, 'last-message-deadbeef.txt');
+  const output = path.join(workdir, '.orvex-agentic', 'last-message-deadbeef.txt');
+  try {
+    const agentDir = assertPrivateAgentDirectory(workdir);
+    fs.rmSync(agentDir, { recursive: true });
+    fs.writeFileSync(outsideFile, 'must remain', { mode: 0o600 });
+    fs.symlinkSync(outside, agentDir);
+
+    assert.equal(readSandboxOutput(workdir, output), '');
+    removePrivateSandboxFile(workdir, output);
+    assert.equal(fs.readFileSync(outsideFile, 'utf8'), 'must remain');
+  } finally {
+    fs.rmSync(workdir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   }
 });
 

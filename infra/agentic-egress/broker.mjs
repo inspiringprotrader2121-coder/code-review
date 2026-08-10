@@ -67,6 +67,7 @@ function loadConfig(env = process.env) {
     maxConcurrent: requiredInteger(env, 'EGRESS_MAX_CONCURRENT', 1, 64),
     maxRequestsPerWindow: requiredInteger(env, 'EGRESS_MAX_REQUESTS_PER_WINDOW', 1, 1_000),
     rateWindowMs: requiredInteger(env, 'EGRESS_RATE_WINDOW_MS', 1_000, 3_600_000),
+    bodyReadTimeoutMs: requiredInteger(env, 'EGRESS_BODY_READ_TIMEOUT_MS', 1_000, 300_000),
     upstreamTimeoutMs: requiredInteger(env, 'EGRESS_UPSTREAM_TIMEOUT_MS', 1_000, 900_000),
     maxResponseBytes: requiredInteger(env, 'EGRESS_MAX_RESPONSE_BYTES', 1_024, 64 * 1024 * 1024),
   });
@@ -165,7 +166,7 @@ function safeStatus(code) {
   return Number.isInteger(code) && code >= 100 && code <= 599 ? code : 502;
 }
 
-function readRequestBody(request, maximum) {
+function readRequestBody(request, maximum, timeoutMs) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0;
@@ -177,12 +178,12 @@ function readRequestBody(request, maximum) {
       request.removeListener('end', onEnd);
       request.removeListener('error', onError);
       request.removeListener('aborted', onAborted);
+      clearTimeout(timeout);
       fn(value);
     };
     const onData = (chunk) => {
       total += chunk.length;
       if (total > maximum) {
-        request.resume();
         finish(reject, new Error('request_too_large'));
         return;
       }
@@ -191,11 +192,26 @@ function readRequestBody(request, maximum) {
     const onEnd = () => finish(resolve, Buffer.concat(chunks, total));
     const onError = () => finish(reject, new Error('request_read_error'));
     const onAborted = () => finish(reject, new Error('request_aborted'));
+    const onTimeout = () => {
+      finish(reject, new Error('request_body_timeout'));
+    };
+    const timeout = setTimeout(onTimeout, timeoutMs);
+    timeout.unref?.();
     request.on('data', onData);
     request.once('end', onEnd);
     request.once('error', onError);
     request.once('aborted', onAborted);
   });
+}
+
+function rejectRequest(request, response, status, payload) {
+  response.setHeader('connection', 'close');
+  response.once('finish', () => {
+    request.socket.end();
+    const forceClose = setTimeout(() => request.destroy(), 1_000);
+    forceClose.unref?.();
+  });
+  writeJson(response, status, payload);
 }
 
 function prepareResponsesRequest(body, config) {
@@ -357,12 +373,19 @@ function createBrokerServer(config, dependencies = {}) {
   const capabilityUsage = createCapabilityUsage(clock);
   let active = 0;
 
-  return http.createServer(async (request, response) => {
+  const server = http.createServer(async (request, response) => {
     const startedAt = clock.now();
     const requestId = randomUUID();
     let client = 'unauthenticated';
+    let capacityHeld = false;
+    let completed = false;
     const complete = ({ status, responseBytes = 0, outcome }) => {
-      active = Math.max(0, active - 1);
+      if (completed) return;
+      completed = true;
+      if (capacityHeld) {
+        capacityHeld = false;
+        active = Math.max(0, active - 1);
+      }
       log({
         event: 'openai_responses_proxy',
         requestId,
@@ -384,12 +407,12 @@ function createBrokerServer(config, dependencies = {}) {
       request.method !== 'POST' ||
       request.url !== OPENAI_RESPONSES_PATH
     ) {
-      writeJson(response, 404, { error: 'not_found' });
+      rejectRequest(request, response, 404, { error: 'not_found' });
       return;
     }
     const capability = verifyCapabilityToken(bearerToken(request), config.signingKey, clock);
     if (!capability) {
-      writeJson(response, 401, { error: 'invalid_capability' });
+      rejectRequest(request, response, 401, { error: 'invalid_capability' });
       return;
     }
     client = capability.jti;
@@ -399,48 +422,59 @@ function createBrokerServer(config, dependencies = {}) {
       declaredLength < 1 ||
       declaredLength > config.maxContentBytes
     ) {
-      writeJson(response, 413, { error: 'request_too_large' });
+      rejectRequest(request, response, 413, { error: 'request_too_large' });
       return;
     }
+    // Apply all authenticated admission controls before reading a body so a
+    // trickle upload cannot bypass request, rate, or concurrency bounds.
+    if (!capabilityUsage.consume(capability)) {
+      rejectRequest(request, response, 429, { error: 'capability_exhausted' });
+      return;
+    }
+    if (!limiter.allow(client)) {
+      rejectRequest(request, response, 429, { error: 'rate_limited' });
+      return;
+    }
+    if (active >= config.maxConcurrent) {
+      rejectRequest(request, response, 429, { error: 'concurrency_limited' });
+      return;
+    }
+    active += 1;
+    capacityHeld = true;
     let body;
     try {
-      body = await readRequestBody(request, config.maxContentBytes);
+      body = await readRequestBody(request, config.maxContentBytes, config.bodyReadTimeoutMs);
     } catch (error) {
-      writeJson(response, error.message === 'request_too_large' ? 413 : 400, {
-        error: 'invalid_request',
+      const reason = error instanceof Error ? error.message : 'request_read_error';
+      const status =
+        reason === 'request_too_large' ? 413 : reason === 'request_body_timeout' ? 408 : 400;
+      rejectRequest(request, response, status, {
+        error: reason === 'request_body_timeout' ? reason : 'invalid_request',
       });
+      complete({ status, outcome: reason });
       return;
     }
     const prepared = prepareResponsesRequest(body, config);
     if (prepared.error) {
-      writeJson(response, prepared.error === 'request_too_large' ? 413 : 400, {
+      const status = prepared.error === 'request_too_large' ? 413 : 400;
+      rejectRequest(request, response, status, {
         error: prepared.error,
       });
+      complete({ status, outcome: prepared.error });
       return;
     }
-    if (!capabilityUsage.consume(capability)) {
-      writeJson(response, 429, { error: 'capability_exhausted' });
-      return;
-    }
-    if (!limiter.allow(client)) {
-      writeJson(response, 429, { error: 'rate_limited' });
-      return;
-    }
-    if (active >= config.maxConcurrent) {
-      writeJson(response, 429, { error: 'concurrency_limited' });
-      return;
-    }
-    active += 1;
     proxyResponses({ request, response, body: prepared.body, config, upstreamRequest, complete });
   });
+  server.maxConnections = Math.max(16, config.maxConcurrent * 4);
+  server.requestTimeout = config.bodyReadTimeoutMs;
+  server.headersTimeout = Math.min(15_000, config.bodyReadTimeoutMs);
+  server.keepAliveTimeout = 5_000;
+  return server;
 }
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   const config = loadConfig();
   const server = createBrokerServer(config);
-  server.requestTimeout = 0;
-  server.headersTimeout = 15_000;
-  server.keepAliveTimeout = 5_000;
   server.listen(config.listenPort, '0.0.0.0');
 }
 

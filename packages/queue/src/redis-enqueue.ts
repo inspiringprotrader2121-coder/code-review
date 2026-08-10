@@ -17,6 +17,11 @@ import {
   type ReviewJobPayload,
 } from './types.js';
 
+// A priority tier may jump the FIFO head only this many times before one
+// oldest queued job is served. Redis owns the counter, so all worker processes
+// apply the same bound.
+const PRIORITY_BURST_LIMIT = 8;
+
 export interface ClaimTokens {
   get(job: ReviewJobPayload): string | undefined;
   set(job: ReviewJobPayload, value: string): void;
@@ -65,10 +70,12 @@ export class RedisEnqueueOperations {
       const token = randomUUID();
       const raw = (await this.redis.eval(
         DEQUEUE_LUA,
-        2,
+        3,
         this.keys.queue,
         this.keys.processing,
+        this.keys.priorityBurst,
         token,
+        PRIORITY_BURST_LIMIT,
       )) as string | null | false;
       if (!raw) return null;
       const processingEntry = `${token}\n${raw}`;

@@ -551,6 +551,47 @@ test(
 );
 
 test(
+  'Redis priority bursts always yield one FIFO job under a continuous higher-priority stream',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    const namespace = testNamespace();
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
+    t.after(async () => {
+      await queue.close();
+      await clearNamespace(cleanup, namespace);
+      await cleanup.quit();
+    });
+
+    const low = { ...job('low-fifo', 2_000, 'manual'), priority: 0 };
+    await queue.enqueue(low);
+    for (let index = 0; index < 8; index += 1) {
+      await queue.enqueue({
+        ...job(`high-initial-${index}`, 2_100 + index, 'manual'),
+        priority: 3,
+      });
+    }
+
+    for (let index = 0; index < 8; index += 1) {
+      const high = await queue.dequeue();
+      assert.match(high?.headSha ?? '', /^high-/);
+      await queue.markCompleted(high!);
+      await queue.releaseLockAndDrain(prKey(high!));
+      // Keep high-priority work arriving while the low-priority head waits.
+      await queue.enqueue({
+        ...job(`high-continuous-${index}`, 2_200 + index, 'manual'),
+        priority: 3,
+      });
+    }
+
+    const forcedFifo = await queue.dequeue();
+    assert.equal(forcedFifo?.headSha, low.headSha);
+    await queue.markCompleted(forcedFifo!);
+    await queue.releaseLockAndDrain(prKey(forcedFifo!));
+  },
+);
+
+test(
   'Redis orphan recovery scans processing incrementally instead of blocking on the full list',
   { skip: !redisUrl },
   async (t) => {

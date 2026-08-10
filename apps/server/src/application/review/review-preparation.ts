@@ -1,6 +1,5 @@
 import {
   buildRepoContext,
-  createCappedArchiveStream,
   createInstallationOctokit,
   fetchFileContent,
   fetchPrDiffWithCoverage,
@@ -17,10 +16,12 @@ import { parseReviewConfigYaml, type ReviewConfig } from '@orvex-review/rules';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { pipeline as streamPipeline } from 'node:stream/promises';
 import { noteActiveCheckoutDir } from '../../active-reviews.js';
 import type { WorkerConfig } from '../../review/worker-types.js';
+import {
+  agentCheckoutArchiveLimits,
+  extractAgentCheckoutArchive,
+} from './agent-checkout-archive.js';
 import { runDeterministicRules } from './finding-pipeline.js';
 import type { PreparedExecutionReview } from './types.js';
 
@@ -303,71 +304,8 @@ export async function checkoutRepoForAgent(
     // directories can never be bind-mounted by the Codex runner.
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-rverify-'));
     fs.chmodSync(dir, 0o700);
-    const tarPath = path.join(dir, 'repo.tar.gz');
-    await streamPipeline(
-      createCappedArchiveStream(res.data, maxArchiveBytes),
-      fs.createWriteStream(tarPath, { mode: 0o600 }),
-    );
-    // GitHub tarballs nest everything under a top-level `owner-repo-sha/` dir.
-    execFileSync(
-      'tar',
-      [
-        '-xzf',
-        tarPath,
-        '-C',
-        dir,
-        '--strip-components=1',
-        '--no-same-owner',
-        '--no-same-permissions',
-      ],
-      { stdio: 'ignore' },
-    );
-    fs.rmSync(tarPath, { force: true });
+    await extractAgentCheckoutArchive(res.data, dir, agentCheckoutArchiveLimits(maxArchiveBytes));
     noteActiveCheckoutDir(dir);
-    // Keep Codex from pulling build artifacts / lockfiles into the tool loop —
-    // those dumps are a common path to "Request too large" during compact.
-    try {
-      fs.writeFileSync(
-        path.join(dir, '.codexignore'),
-        [
-          'node_modules/',
-          'dist/',
-          'build/',
-          'out/',
-          '.git/',
-          'coverage/',
-          '.next/',
-          '.turbo/',
-          '.cache/',
-          'vendor/',
-          '*.lock',
-          'package-lock.json',
-          'pnpm-lock.yaml',
-          'yarn.lock',
-          'Bun.lockb',
-          '*.min.js',
-          '*.min.css',
-          '*.map',
-          '*.png',
-          '*.jpg',
-          '*.jpeg',
-          '*.gif',
-          '*.webp',
-          '*.woff',
-          '*.woff2',
-          '*.ttf',
-          '*.eot',
-          '*.pdf',
-          '*.zip',
-          '*.tar',
-          '*.gz',
-          '',
-        ].join('\n'),
-        { mode: 0o644 },
-      );
-    } catch (err) {
-      console.warn('[worker] failed to write .codexignore:', (err as Error).message);
-    }
     return dir;
   } catch (err) {
     if (dir) {

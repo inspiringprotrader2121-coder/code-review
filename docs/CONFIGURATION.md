@@ -143,7 +143,7 @@ Production uses durable storage outside the checkout and Redis with a namespaced
 | `ORVEX_CODEX_APIKEY_CONCURRENCY` | integer; 1..32; default worker concurrency | `8` | no / none | - | API-key-authenticated Codex/Luna concurrency cap. It cannot raise the whole-review limit. |
 | `ORVEX_PROVIDER_CONCURRENCY_<PROVIDER>` | integer-template; provider in LUNA, DEEPSEEK, MINIMAX; 1..32; defaults to the applicable worker/Codex limit | `(inherited; not rendered)` | no / none | - | Bounded provider-specific concurrency family. Supported instances are LUNA, DEEPSEEK, and MINIMAX; arbitrary names are rejected by schema drift checks. |
 | `ORVEX_PROVIDER_CONCURRENCY_LUNA` | integer; 1..32; default applicable worker/Codex limit | `8` | no / none | - | Luna provider-stage concurrency cap. |
-| `ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK` | integer; 1..32; default applicable worker/Codex limit | `8` | no / none | - | DeepSeek provider-stage concurrency cap. |
+| `ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK` | integer; 1..32; default applicable worker/Codex limit | `24` | no / none | - | DeepSeek provider-stage concurrency cap. The eight-review production profile uses 24 for two discovery stages plus verification. |
 | `ORVEX_PROVIDER_CONCURRENCY_MINIMAX` | integer; 1..32; default applicable worker/Codex limit | `8` | no / none | - | MiniMax provider-stage concurrency cap. |
 | `ORVEX_MONTHLY_COGS_CAP_USD` | number; positive USD; default 250 | `250` | no / none | - | Monthly spend circuit breaker for non-custom plans. |
 | `ORVEX_RUNNING_STALE_MS` | integer; 60000..86400000 ms; default 900000 | `900000` | no / none | - | Durable heartbeat staleness threshold before startup recovery interrupts a row. |
@@ -182,7 +182,7 @@ Limits bound time, spend, and context. Production verification remains on; max r
 | `ORVEX_VERIFY_FILE_CHARS` | integer; positive chars; default 32000 | `32000` | no / none | - | Verifier per-file context budget. |
 | `ORVEX_VERIFY_TOTAL_CHARS` | integer; positive chars; default 96000 | `96000` | no / none | - | Verifier total context budget. |
 | `ORVEX_VERIFY_BATCH_SIZE` | integer; positive; default 3 | `3` | no / none | - | Verifier candidate batch size. |
-| `ORVEX_VERIFY_CONCURRENCY` | integer; 1..8; default 3 | `3` | no / none | - | Verifier concurrency. |
+| `ORVEX_VERIFY_CONCURRENCY` | integer; 1..8; default 3 | `1` | no / none | - | Verifier batch concurrency. The production profile uses one per review to keep total DeepSeek fan-out bounded. |
 | `ORVEX_RISK_PROBES` | integer; 0..4; unset disables | `(unset)` | no / none | - | Optional number of additional risk probes. |
 | `ORVEX_RISK_PROBE_SELECTIVITY` | number; >=1.5; default 2 | `2` | no / none | - | Risk-probe selection threshold. |
 | `ORVEX_LARGE_PR_FILES` | integer; positive; default 40 | `40` | no / none | - | Changed-file count classifying a large PR. |
@@ -197,7 +197,7 @@ Limits bound time, spend, and context. Production verification remains on; max r
 | `ORVEX_REVIEW_AGGREGATION_MAX_CANDIDATES` | integer; 10..250; default 120 | `120` | no / none | - | Maximum candidates sent to aggregation. |
 | `ORVEX_MAX_INLINE_PER_PR` | integer; positive comments | `20` | no / none | - | Lifetime inline-comment cap per PR; remaining findings go to the summary. |
 | `ORVEX_MAX_UNANCHORED_COMMENTS` | integer; 0..50; default 3 | `3` | no / none | - | Maximum summary-only comments for findings without a safe diff anchor. |
-| `ORVEX_ABORT_POLL_MS` | integer; 1000..900000 ms; default 5000 | `5000` | no / none | - | Durable ownership and pull-request cancellation poll cadence. |
+| `ORVEX_ABORT_POLL_MS` | integer; 1000..900000 ms; default 5000 | `5000` | no / none | - | Durable review-run ownership heartbeat cadence. GitHub PR-state fallback polling is never more frequent than every 30 seconds. |
 | `ORVEX_REVIEW_MAX_CALLS` | integer; 1..100; default 28 | `28` | no / none | - | Hard per-review provider-call budget including optional work. |
 | `ORVEX_REVIEW_CONCURRENCY` | integer; 1..64; default 3 | `3` | no / none | - | Maximum concurrent stages inside one review after provider admission. |
 | `ORVEX_SWEEP_FILE_CHARS` | integer; 1..200000 chars; default 10000 | `10000` | no / none | - | Per-file context cap for optional repository sweeps. |
@@ -245,7 +245,7 @@ Agentic Luna execution is restricted to named trusted repositories, API-key auth
 | `ORVEX_CODEX_MAX_TREE_PATHS` | integer; positive; default 400 | `400` | no / none | - | Codex repository-tree path budget. |
 | `ORVEX_CODEX_SLIM_DIFF_CHARS` | integer; positive chars; default 30000 | `30000` | no / none | - | Slim retry diff budget after a request-too-large error. |
 | `ORVEX_CODEX_SLIM_PROMPT_CHARS` | integer; positive chars; default 50000 | `50000` | no / none | - | Slim retry prompt budget after a request-too-large error. |
-| `ORVEX_SANDBOX_WORKDIR_MAX_BYTES` | integer; positive bytes; default 4 GiB | `4294967296` | no / none | - | Runtime-verification /work disk budget checked after install and between steps. |
+| `ORVEX_SANDBOX_WORKDIR_MAX_BYTES` | integer; positive bytes; default 1 GiB; maximum 2 GiB | `1073741824` | no / none | - | Per-container /work disk budget checked after install and between steps. |
 | `ORVEX_SANDBOX_SLOT_WAIT_MS` | integer; milliseconds; default 600000 | `600000` | no / none | - | Maximum wait for an internal sandbox slot. |
 | `ORVEX_SANDBOX_STEP_TIMEOUT_MS` | integer; positive milliseconds; default 240000; maximum 900000 | `240000` | no / none | - | Maximum duration of one internal runtime-verification step. |
 | `ORVEX_SANDBOX_INSTALL_TIMEOUT_MS` | integer; positive milliseconds; default 600000; maximum 900000 | `600000` | no / none | - | Maximum dependency-install duration in an internal runtime-verification sandbox. |
@@ -253,7 +253,9 @@ Agentic Luna execution is restricted to named trusted repositories, API-key auth
 | `DOCKER_CONTEXT` | string; local rootless Docker context only; default unset | `(unset)` | no / connection | - | Optional Docker context for the internal sandbox. Keep it unset unless the rootless local context is explicitly required. |
 | `ORVEX_CODE_EXECUTION` | boolean; 1 enables after preflight; default disabled | `0` | no / none | - | Enable runtime execution only after the rootless-host preflight passes. |
 | `ORVEX_CODEX_CONTAINER_RUNTIME` | boolean; 1 enables after internal egress preflight; default disabled | `0` | no / none | - | Run agentic Codex only inside the rootless internal sandbox with the dedicated egress broker. |
-| `ORVEX_MAX_SANDBOXES` | integer; positive; default 4; maximum 64 | `4` | no / none | - | Maximum concurrent internal sandbox containers. |
+| `ORVEX_MAX_SANDBOXES` | integer; positive; default 8; maximum 8 | `8` | no / none | - | Host-wide maximum concurrent internal sandbox containers. |
+| `ORVEX_SANDBOX_SLOT_DIR` | path; absolute private service-owned directory; default system temporary directory | `/home/orvex/orvex-data/sandbox-slots` | no / path | - | Host-wide atomic sandbox-slot lease directory. Keep it outside the deployed checkout. |
+| `ORVEX_SANDBOX_SLOT_STALE_MS` | integer; positive milliseconds; default 600000; maximum 3600000 | `600000` | no / none | - | Grace period used when reclaiming a sandbox slot whose owning process is no longer alive. |
 | `ORVEX_SANDBOX_IMAGE` | image digest; locally loaded immutable digest | `sha256:<64-hex-local-image-id>` | no / none | - | Mandatory immutable internal sandbox image. It must be preloaded into the rootless daemon. |
 | `ORVEX_CODEX_EGRESS_BROKER_IMAGE` | image digest; locally loaded immutable digest | `sha256:<64-hex-local-image-id>` | no / none | - | Mandatory immutable image for the internal Codex-to-OpenAI egress broker when container runtime is enabled. |
 

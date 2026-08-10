@@ -34,6 +34,7 @@ import { PublicationService, type PublicationPolicy } from './publication-servic
 import { createReviewUsageAccounting } from './review-usage-accounting.js';
 import { scheduleReviewStages, selectScheduledReviewCalls } from './review-stage-scheduler.js';
 import type { ReviewExecutionPolicy } from './review-execution-policy.js';
+import { resolvePrStatePollMs } from './review-execution-policy.js';
 import { executeReviewProviderCalls, type ReviewCallOutcome } from './review-provider-execution.js';
 import { orchestrateVerification } from './verification-orchestrator.js';
 import type { PreparedExecutionReview, ProcessResult } from './types.js';
@@ -183,8 +184,9 @@ export async function executeReviewCore(
 
   // One cancellation signal follows every paid transport used by this review.
   // The close/merge webhook aborts the active-review signal immediately in the
-  // current process; a 5s authoritative GitHub poll provides the durable
-  // fallback across restarts or future multi-process workers.
+  // current process. A slower authoritative GitHub poll provides the durable
+  // fallback across restarts or future multi-process workers without spending
+  // the installation's API quota on one request per review every five seconds.
   let prClosedMidRun = false;
   let runOwnershipLost = false;
   const reviewAbortController = new AbortController();
@@ -213,15 +215,28 @@ export async function executeReviewCore(
   if (parentSignal?.aborted) cancelClosedReview();
 
   const abortPollMs = executionPolicy.abortPollMs;
-  const abortPoll = setInterval(() => {
+  const ownershipHeartbeat = setInterval(() => {
     if (runId && !config.store.heartbeatReviewRun(runId)) cancelForOwnershipLoss();
-    isPrStillOpen(octokit, ref)
-      .then((open) => {
-        if (!open) cancelClosedReview();
-      })
-      .catch(() => {});
   }, abortPollMs);
-  abortPoll.unref?.();
+  ownershipHeartbeat.unref?.();
+  const prStatePollMs = resolvePrStatePollMs(abortPollMs);
+  let prStatePoll: ReturnType<typeof setTimeout> | undefined;
+  let prStatePollingStopped = false;
+  const pollPrState = async () => {
+    try {
+      const open = await isPrStillOpen(octokit, ref, AbortSignal.timeout(25_000));
+      if (!open) cancelClosedReview();
+    } catch {
+      // The webhook remains authoritative; a bounded fallback poll retries later.
+    } finally {
+      if (!prStatePollingStopped) {
+        prStatePoll = setTimeout(pollPrState, prStatePollMs);
+        prStatePoll.unref?.();
+      }
+    }
+  };
+  prStatePoll = setTimeout(pollPrState, prStatePollMs);
+  prStatePoll.unref?.();
 
   try {
     if (!runId) throw new Error('durable fixed-finding publication requires a review run');
@@ -755,8 +770,10 @@ export async function executeReviewCore(
       cancelForOwnershipLoss,
     });
   } finally {
+    prStatePollingStopped = true;
+    if (prStatePoll) clearTimeout(prStatePoll);
     services.finalization.cleanupCancellation({
-      poll: abortPoll,
+      poll: ownershipHeartbeat,
       parentSignal,
       listener: cancelClosedReview,
     });

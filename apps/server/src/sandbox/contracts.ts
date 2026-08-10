@@ -13,6 +13,8 @@ export interface SandboxRunOptions {
   profile?: 'runtime-verify' | 'agentic-codex';
   /** Short-lived per-container broker capability; never the upstream API key. */
   brokerToken?: string;
+  /** Pre-created, validated host file exposed as the sole writable Codex output. */
+  outputFile?: string;
 }
 
 export interface SandboxResult {
@@ -38,6 +40,10 @@ export interface SandboxRuntimeOptions {
   readonly dockerContext?: string;
   readonly maxConcurrentSandboxes: number;
   readonly slotWaitMs: number;
+  /** Private service-owned directory for host-wide sandbox slot leases. */
+  readonly slotDirectory?: string;
+  /** A slot without a live owner may be reclaimed after this bounded grace period. */
+  readonly slotStaleMs: number;
   readonly workdirMaxBytes: number;
 }
 
@@ -48,9 +54,11 @@ export const DEFAULT_SANDBOX_RUNTIME_OPTIONS: SandboxRuntimeOptions = Object.fre
   codexEgressBrokerImage: undefined,
   dockerHost: undefined,
   dockerContext: undefined,
-  maxConcurrentSandboxes: 2,
+  maxConcurrentSandboxes: 8,
   slotWaitMs: 600_000,
-  workdirMaxBytes: 4 * 1024 * 1024 * 1024,
+  slotDirectory: undefined,
+  slotStaleMs: 600_000,
+  workdirMaxBytes: 1024 * 1024 * 1024,
 });
 
 export interface SandboxRuntimeReadinessOptions {
@@ -111,6 +119,7 @@ export interface SandboxStartupPreparationOptions {
   enabled?: boolean;
   runDockerCommand?: SandboxDockerCommandRunner;
   checkReadiness?: () => Promise<SandboxRuntimeReadiness>;
+  isProcessAlive?: (pid: number) => boolean;
 }
 
 export type SandboxSpawn = typeof import('node:child_process').spawn;
@@ -120,9 +129,13 @@ export const MAX_CAPTURE_BYTES = 64_000;
 export const SANDBOX_READINESS_TIMEOUT_MS = 10_000;
 export const SANDBOX_DOCKER_COMMAND_TIMEOUT_MS = 10_000;
 export const CONTAINER_CLEANUP_TIMEOUT_MS = 10_000;
+export const CONTAINER_CLEANUP_RETRY_MS = 50;
+export const MAX_HOST_SANDBOX_SLOTS = 8;
 export const ORVEX_MANAGED_LABEL = 'orvex.managed=true';
 export const ORVEX_RUNTIME_LABEL = 'orvex.runtime-verify=true';
 export const ORVEX_CODEX_LABEL = 'orvex.agentic-codex=true';
+export const ORVEX_OWNER_PID_LABEL = 'orvex.owner-pid';
+export const ORVEX_OWNER_TOKEN_LABEL = 'orvex.owner-token';
 export const ORVEX_WORKDIR_PREFIX = 'orvex-rverify-';
 export const MAX_SANDBOX_COMMAND_BYTES = 32_000;
 export const MAX_SANDBOX_OUTPUT_FILE_BYTES = 512 * 1024 * 1024;
@@ -131,4 +144,4 @@ export const CODEX_EGRESS_NETWORK = 'orvex-agentic-internal';
 export const CODEX_EGRESS_BROKER = 'orvex-openai-egress';
 export const CODEX_EGRESS_BASE_URL = `http://${CODEX_EGRESS_BROKER}:8080/v1`;
 export const CODEX_CONTAINER_BINARY = '/opt/orvex/node_modules/@openai/codex/bin/codex.js';
-export const DEFAULT_WORKDIR_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+export const DEFAULT_WORKDIR_MAX_BYTES = 1024 * 1024 * 1024;

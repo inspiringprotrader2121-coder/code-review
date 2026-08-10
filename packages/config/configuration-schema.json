@@ -1127,12 +1127,12 @@
         },
         {
           "name": "ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK",
-          "example": "8",
+          "example": "24",
           "type": "integer",
           "range": "1..32; default applicable worker/Codex limit",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek provider-stage concurrency cap.",
+          "description": "DeepSeek provider-stage concurrency cap. The eight-review production profile uses 24 for two discovery stages plus verification.",
           "deprecatedAliases": []
         },
         {
@@ -1476,13 +1476,13 @@
         },
         {
           "name": "ORVEX_VERIFY_CONCURRENCY",
-          "example": "3",
+          "example": "1",
           "type": "integer",
           "range": "1..8; default 3",
           "secret": false,
           "redaction": "none",
           "enabled": false,
-          "description": "Verifier concurrency.",
+          "description": "Verifier batch concurrency. The production profile uses one per review to keep total DeepSeek fan-out bounded.",
           "deprecatedAliases": []
         },
         {
@@ -1643,7 +1643,7 @@
           "secret": false,
           "redaction": "none",
           "enabled": false,
-          "description": "Durable ownership and pull-request cancellation poll cadence.",
+          "description": "Durable review-run ownership heartbeat cadence. GitHub PR-state fallback polling is never more frequent than every 30 seconds.",
           "deprecatedAliases": []
         },
         {
@@ -2085,13 +2085,13 @@
         },
         {
           "name": "ORVEX_SANDBOX_WORKDIR_MAX_BYTES",
-          "example": "4294967296",
+          "example": "1073741824",
           "type": "integer",
-          "range": "positive bytes; default 4 GiB",
+          "range": "positive bytes; default 1 GiB; maximum 2 GiB",
           "secret": false,
           "redaction": "none",
           "enabled": false,
-          "description": "Runtime-verification /work disk budget checked after install and between steps.",
+          "description": "Per-container /work disk budget checked after install and between steps.",
           "deprecatedAliases": []
         },
         {
@@ -2173,13 +2173,35 @@
         },
         {
           "name": "ORVEX_MAX_SANDBOXES",
-          "example": "4",
+          "example": "8",
           "type": "integer",
-          "range": "positive; default 4; maximum 64",
+          "range": "positive; default 8; maximum 8",
           "secret": false,
           "redaction": "none",
           "enabled": false,
-          "description": "Maximum concurrent internal sandbox containers.",
+          "description": "Host-wide maximum concurrent internal sandbox containers.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SANDBOX_SLOT_DIR",
+          "example": "/home/orvex/orvex-data/sandbox-slots",
+          "type": "path",
+          "range": "absolute private service-owned directory; default system temporary directory",
+          "secret": false,
+          "redaction": "path",
+          "enabled": false,
+          "description": "Host-wide atomic sandbox-slot lease directory. Keep it outside the deployed checkout.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_SANDBOX_SLOT_STALE_MS",
+          "example": "600000",
+          "type": "integer",
+          "range": "positive milliseconds; default 600000; maximum 3600000",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Grace period used when reclaiming a sandbox slot whose owning process is no longer alive.",
           "deprecatedAliases": []
         },
         {
