@@ -149,6 +149,7 @@ test('does NOT treat a genuine parse/model failure as transient (those degrade t
   assert.ok(!isTransientLlmError('LLM response contained no parseable JSON'));
   assert.ok(!isTransientLlmError('Unexpected token in JSON'));
   assert.ok(!isTransientLlmError('LLM returned no text content'));
+  assert.ok(isTransientLlmError('LLM provider returned empty response with zero usage'));
 });
 
 test('NaN env vars cannot defeat retry bounds (infinite-loop guard)', () => {

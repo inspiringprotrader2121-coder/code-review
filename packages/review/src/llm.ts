@@ -4,6 +4,7 @@ import { redactPatch, redactSecrets } from './redact.js';
 import {
   llmChat,
   extractJsonLoose,
+  isRetryableEmptyProviderResponse,
   isRetryableRateLimit,
   isReviewCancelledError,
   type LlmAttemptEvent,
@@ -19,6 +20,7 @@ import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } 
  * A model returning unparseable text is a different case (degrade to empty).
  */
 export function isTransientLlmError(message: string): boolean {
+  if (isRetryableEmptyProviderResponse(message)) return true;
   // Client errors are permanent unless the status explicitly means retry later.
   // Check the complete 4xx range before the broad `request failed` matcher so an
   // unsupported media type (415), validation error (422), etc. cannot be requeued

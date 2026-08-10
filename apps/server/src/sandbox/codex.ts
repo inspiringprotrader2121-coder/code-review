@@ -50,7 +50,10 @@ function codexContainerCommand(args: readonly string[], promptInContainer: strin
     '-c',
     'model_providers.orvex_broker.stream_max_retries=1',
   ];
-  const commandArgs = [args[0], ...brokerProviderArgs, ...args.slice(1)];
+  const configResetIndex = args.indexOf('--ignore-user-config');
+  if (configResetIndex < 0) throw new Error('internal Codex runner requires config isolation');
+  const insertAt = configResetIndex + 1;
+  const commandArgs = [...args.slice(0, insertAt), ...brokerProviderArgs, ...args.slice(insertAt)];
   return `mkdir -p ${shellQuote(CODEX_CONTAINER_HOME)} && chmod 700 ${shellQuote(CODEX_CONTAINER_HOME)} && exec node ${shellQuote(CODEX_CONTAINER_BINARY)} ${commandArgs.map(shellQuote).join(' ')} < ${shellQuote(promptInContainer)}`;
 }
 

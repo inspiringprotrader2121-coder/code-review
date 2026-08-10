@@ -14,7 +14,12 @@ import {
   trackedLlmAttempt,
   type AttemptLineage,
 } from './lifecycle.js';
-import { isRetryableRateLimit, parseRetryAfterMs, sleep } from './retry-policy.js';
+import {
+  isRetryableEmptyProviderResponse,
+  isRetryableRateLimit,
+  parseRetryAfterMs,
+  sleep,
+} from './retry-policy.js';
 import { clockFor } from './support.js';
 
 let keyCursor = 0;
@@ -85,7 +90,12 @@ export async function llmChat(
       if (!enteredProviderCall) recordProviderAdmissionFailure(opts, attempt, lineage, lastError);
       if (isReviewCancelledError(lastError) || opts.signal?.aborted)
         throw new ReviewCancelledError();
-      if (attempt === maxAttempts - 1 || !isRetryableRateLimit(lastError.message)) throw lastError;
+      const retryableEmptyResponse = isRetryableEmptyProviderResponse(lastError.message);
+      if (
+        attempt === maxAttempts - 1 ||
+        (!isRetryableRateLimit(lastError.message) && !retryableEmptyResponse)
+      )
+        throw lastError;
       const advertised = parseRetryAfterMs(lastError.message);
       if (advertised !== undefined && advertised > maxWaitMs) {
         console.warn(
@@ -109,7 +119,7 @@ export async function llmChat(
         opts.dependencies?.admission ?? currentProviderCoordinator(),
       );
       console.warn(
-        `[llm] rate-limited — holding ${Math.round(waitMs / 1000)}s then retrying (attempt ${attempt + 1}/${maxAttempts}): ${lastError.message.slice(0, 140)}`,
+        `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : 'rate-limited'} — holding ${Math.round(waitMs / 1000)}s then retrying (attempt ${attempt + 1}/${maxAttempts}): ${lastError.message.slice(0, 140)}`,
       );
       await sleep(waitMs, opts.signal, clockFor(opts));
       await waitForProviderAvailability(

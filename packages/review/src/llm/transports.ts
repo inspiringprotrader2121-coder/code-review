@@ -11,6 +11,7 @@ import {
   thinkingEnabled,
 } from './support.js';
 import { stripThinking } from './parsing.js';
+import { RETRYABLE_EMPTY_PROVIDER_RESPONSE } from './retry-policy.js';
 
 // Retain the original initialization behaviour for compatible-chat providers:
 // a malformed runtime value is normalized by the config loader before a stream
@@ -269,7 +270,11 @@ export async function anthropicChat(
   if (response.stop_reason === 'max_tokens')
     throw new Error('LLM response truncated (stop_reason=max_tokens); increase max tokens');
   const textBlock = response.content.find((block) => block.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') throw new Error('LLM returned no text content');
+  if (!textBlock || textBlock.type !== 'text') {
+    if (response.usage?.input_tokens === 0 && response.usage.output_tokens === 0)
+      throw new Error(RETRYABLE_EMPTY_PROVIDER_RESPONSE);
+    throw new Error('LLM returned no text content');
+  }
   const reasoningChars = response.content.reduce(
     (total, block) => total + (block.type === 'thinking' ? block.thinking.length : 0),
     0,
@@ -358,7 +363,10 @@ export async function openAiResponsesStreamChat(
   if (failed) throw new Error(`LLM responses stream failed: ${failed}`);
   if (incomplete)
     throw new Error(`LLM responses truncated (${incomplete}); increase ORVEX_MAX_OUTPUT_TOKENS`);
-  if (!content) throw new Error('LLM responses returned no text');
+  if (!content) {
+    if (inTok === 0 && outTok === 0) throw new Error(RETRYABLE_EMPTY_PROVIDER_RESPONSE);
+    throw new Error('LLM responses returned no text');
+  }
   return content;
 }
 

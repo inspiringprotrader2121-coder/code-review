@@ -909,6 +909,7 @@ test('agentic Codex container mounts only its private checkout and receives no h
         image: PINNED_IMAGE,
         args: [
           'exec',
+          '--ignore-user-config',
           '--model',
           'gpt-5.6-luna',
           '--json',
@@ -962,6 +963,11 @@ test('agentic Codex container mounts only its private checkout and receives no h
     assert.match(command, /'model_providers\.orvex_broker\.supports_websockets=false'/);
     assert.match(command, /'model_providers\.orvex_broker\.request_max_retries=1'/);
     assert.match(command, /'model_providers\.orvex_broker\.stream_max_retries=1'/);
+    assert.ok(
+      command.indexOf("'--ignore-user-config'") <
+        command.indexOf('\'model_provider="orvex_broker"\''),
+      'broker overrides must be applied after Codex resets user configuration',
+    );
     assert.match(command, /< '\/work\/\.orvex-agentic\/prompt-/);
 
     fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o700 });
@@ -987,7 +993,7 @@ test('agentic Codex runner rejects output traversal and cleans up a silent conta
         {
           workdir,
           image: PINNED_IMAGE,
-          args: ['exec', '-'],
+          args: ['exec', '--ignore-user-config', '-'],
           prompt: 'x',
           lastMessageFile: path.join(workdir, '..', 'last-message-a1.txt'),
           timeoutMs: 100,
@@ -1001,11 +1007,29 @@ test('agentic Codex runner rejects output traversal and cleans up a silent conta
     assert.equal(fake.calls.length, 0, 'invalid output path must not start Docker');
 
     const output = path.join(workdir, '.orvex-agentic', 'last-message-abc123.txt');
+    await assert.rejects(
+      runCodexInSandboxWithSpawnForTest(
+        {
+          workdir,
+          image: PINNED_IMAGE,
+          args: ['exec', '-'],
+          prompt: 'x',
+          lastMessageFile: output,
+          timeoutMs: 500,
+          inactivityTimeoutMs: 10,
+          brokerToken: BROKER_TOKEN,
+        },
+        fake.spawn,
+      ),
+      /requires config isolation/,
+    );
+    assert.equal(fake.calls.length, 0, 'missing config isolation must not start Docker');
+
     const result = await runCodexInSandboxWithSpawnForTest(
       {
         workdir,
         image: PINNED_IMAGE,
-        args: ['exec', '-'],
+        args: ['exec', '--ignore-user-config', '-'],
         prompt: 'x',
         lastMessageFile: output,
         timeoutMs: 500,

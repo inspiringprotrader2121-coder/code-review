@@ -35,7 +35,15 @@ export function isRetryableRateLimit(message: string): boolean {
   );
 }
 
+export const RETRYABLE_EMPTY_PROVIDER_RESPONSE =
+  'LLM provider returned empty response with zero usage';
+
+export function isRetryableEmptyProviderResponse(message: string): boolean {
+  return message.trim() === RETRYABLE_EMPTY_PROVIDER_RESPONSE;
+}
+
 export function providerCooldownForFailure(message: string): number | undefined {
+  if (isRetryableEmptyProviderResponse(message)) return 2_000;
   if (isOversizedModelRequest(message)) return undefined;
   if (/insufficient_quota|exceeded your current quota|billing_hard_limit/i.test(message))
     return 300_000;

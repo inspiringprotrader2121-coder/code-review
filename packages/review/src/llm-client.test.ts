@@ -37,6 +37,23 @@ function responsesStream(text: string): ReadableStream<Uint8Array> {
   });
 }
 
+function emptyZeroUsageResponsesStream(): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: { usage: { input_tokens: 0, output_tokens: 0 } },
+          })}\n\n`,
+        ),
+      );
+      controller.close();
+    },
+  });
+}
+
 /** Minimal /chat/completions SSE stream. */
 function chatStream(text: string): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -535,6 +552,46 @@ test('every actual provider request emits durable retry lineage and retries at m
   assert.equal(starts[1]!.parentAttemptId, starts[0]!.attemptId);
   assert.equal(finishes[0]!.outcome, 'rate_limited');
   assert.equal(finishes[1]!.outcome, 'succeeded');
+});
+
+test('an empty zero-usage provider response receives one bounded retry', async (t) => {
+  const originalRandom = Math.random;
+  Math.random = () => 0;
+  let calls = 0;
+  const events: LlmAttemptEvent[] = [];
+  t.after(() => {
+    Math.random = originalRandom;
+  });
+
+  const output = await llmChat('sys', 'user', {
+    apiKey: 'test-key',
+    model: 'empty-response-model',
+    baseUrl: 'https://empty-response.test/v1',
+    api: 'responses',
+    dependencies: {
+      retryPolicy: { maxAttempts: 2, baseMs: 250, maxWaitMs: 1_000, totalWaitBudgetMs: 5_000 },
+      http: {
+        async fetch() {
+          calls++;
+          return new Response(
+            calls === 1 ? emptyZeroUsageResponsesStream() : responsesStream('ok'),
+            {
+              status: 200,
+            },
+          );
+        },
+      },
+    },
+    onAttempt: (event) => events.push(event),
+  });
+
+  assert.equal(output, 'ok');
+  assert.equal(calls, 2);
+  assert.equal(events.filter((event) => event.phase === 'started').length, 2);
+  assert.deepEqual(
+    events.filter((event) => event.phase === 'finished').map((event) => event.outcome),
+    ['failed', 'succeeded'],
+  );
 });
 
 test('comma-separated API keys share one total provider-attempt ceiling', async () => {
