@@ -52,7 +52,20 @@ export interface ScheduledReviewCalls {
   aggregation: ReturnType<typeof fitReviewAggregationToBudget>;
 }
 
-export function shardRepeatedDeepSeekCalls(
+function withFileShard(call: ReviewCall, shard: ChangedFile[], note: string): ReviewCall {
+  const paths = new Set(shard.map((file) => file.filename));
+  return {
+    ...call,
+    files: shard,
+    ctx: {
+      ...call.ctx,
+      changedContents: call.ctx.changedContents?.filter((file) => paths.has(file.path)),
+      extraFocus: [call.ctx.extraFocus, note].filter(Boolean).join('\n'),
+    },
+  };
+}
+
+export function boundHighTierDiscoveryWorkloads(
   calls: ReviewCall[],
   files: ChangedFile[],
 ): ReviewCall[] {
@@ -68,24 +81,27 @@ export function shardRepeatedDeepSeekCalls(
   const assignment = new Map(repeated.map((call, index) => [call, index]));
   return calls.map((call) => {
     const shardIndex = assignment.get(call);
-    if (shardIndex === undefined) return call;
-    const shard = files.filter((_, index) => index % repeated.length === shardIndex);
-    const paths = new Set(shard.map((file) => file.filename));
-    const extraFocus = [
-      call.ctx.extraFocus,
-      `REQUIRED SHARD ${shardIndex + 1}/${repeated.length}: review every supplied diff. Other required reviewers cover the remaining changed files.`,
-    ]
-      .filter(Boolean)
-      .join('\n');
-    return {
-      ...call,
-      files: shard,
-      ctx: {
-        ...call.ctx,
-        changedContents: call.ctx.changedContents?.filter((file) => paths.has(file.path)),
-        extraFocus,
-      },
-    };
+    if (shardIndex !== undefined) {
+      const shard = files.filter((_, index) => index % repeated.length === shardIndex);
+      return withFileShard(
+        call,
+        shard,
+        `REQUIRED SHARD ${shardIndex + 1}/${repeated.length}: review every supplied diff. Other required reviewers cover the remaining changed files.`,
+      );
+    }
+
+    const isRequiredMiniMax =
+      call.kind === 'pass' &&
+      call.mode === 'api' &&
+      !call.bestEffort &&
+      call.target.model.toLowerCase().startsWith('minimax-');
+    if (!isRequiredMiniMax) return call;
+    const shard = files.filter((_, index) => index % repeated.length === repeated.length - 1);
+    return withFileShard(
+      call,
+      shard,
+      `REQUIRED BREADTH SHARD: review every supplied diff. Luna and the DeepSeek discovery shards cover the full changed-file set.`,
+    );
   });
 }
 
@@ -363,7 +379,7 @@ export function scheduleReviewStages(input: {
     pushBatch();
   }
   return {
-    calls: shardRepeatedDeepSeekCalls(calls, input.filesForLlm),
+    calls: boundHighTierDiscoveryWorkloads(calls, input.filesForLlm),
     discoveryPasses: discoveryAngles.length,
   };
 }

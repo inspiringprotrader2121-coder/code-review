@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ChangedFile } from '@orvex-review/github';
-import { shardRepeatedDeepSeekCalls, type ReviewCall } from './review-stage-scheduler.js';
+import { boundHighTierDiscoveryWorkloads, type ReviewCall } from './review-stage-scheduler.js';
 
 const files = Array.from({ length: 5 }, (_, index) => ({
   filename: `src/file-${index}.ts`,
@@ -28,10 +28,9 @@ test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
   const first = call('deepseek-v4-flash', 2);
   const second = call('deepseek-v4-flash', 3);
   const minimax = call('MiniMax-M3', 4);
-  const sharded = shardRepeatedDeepSeekCalls([luna, first, second, minimax], files);
+  const sharded = boundHighTierDiscoveryWorkloads([luna, first, second, minimax], files);
 
   assert.equal(sharded[0], luna);
-  assert.equal(sharded[3], minimax);
   assert.deepEqual(
     sharded[1]?.files?.map((file) => file.filename),
     ['src/file-0.ts', 'src/file-2.ts', 'src/file-4.ts'],
@@ -45,9 +44,22 @@ test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
     ['src/file-0.ts', 'src/file-2.ts', 'src/file-4.ts'],
   );
   assert.match(sharded[2]?.ctx.extraFocus ?? '', /REQUIRED SHARD 2\/2/);
+  assert.deepEqual(
+    sharded[3]?.files?.map((file) => file.filename),
+    ['src/file-1.ts', 'src/file-3.ts'],
+  );
+  assert.deepEqual(
+    sharded[3]?.ctx.changedContents?.map((file) => file.path),
+    ['src/file-1.ts', 'src/file-3.ts'],
+  );
+  assert.match(sharded[3]?.ctx.extraFocus ?? '', /REQUIRED BREADTH SHARD/);
 });
 
-test('a single DeepSeek reviewer still receives the full PR', () => {
+test('lower-tier single DeepSeek and MiniMax reviewers still receive the full PR', () => {
   const only = call('deepseek-v4-flash', 1);
-  assert.equal(shardRepeatedDeepSeekCalls([only], files)[0], only);
+  const minimax = call('MiniMax-M3', 2);
+  const calls = [only, minimax];
+  const scheduled = boundHighTierDiscoveryWorkloads(calls, files);
+  assert.equal(scheduled[0], only);
+  assert.equal(scheduled[1], minimax);
 });
