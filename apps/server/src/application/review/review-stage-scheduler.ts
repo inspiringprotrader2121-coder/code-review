@@ -39,6 +39,7 @@ export interface ReviewCall {
   temperature?: number;
   bestEffort?: boolean;
   freshAgenticSession?: boolean;
+  files?: ChangedFile[];
 }
 
 export interface ReviewStageSchedule {
@@ -49,6 +50,43 @@ export interface ReviewStageSchedule {
 export interface ScheduledReviewCalls {
   calls: ReviewCall[];
   aggregation: ReturnType<typeof fitReviewAggregationToBudget>;
+}
+
+export function shardRepeatedDeepSeekCalls(
+  calls: ReviewCall[],
+  files: ChangedFile[],
+): ReviewCall[] {
+  const repeated = calls.filter(
+    (call) =>
+      call.kind === 'pass' &&
+      call.mode === 'api' &&
+      !call.bestEffort &&
+      call.target.model.toLowerCase().includes('deepseek-v4-flash'),
+  );
+  if (repeated.length < 2 || files.length < 2) return calls;
+
+  const assignment = new Map(repeated.map((call, index) => [call, index]));
+  return calls.map((call) => {
+    const shardIndex = assignment.get(call);
+    if (shardIndex === undefined) return call;
+    const shard = files.filter((_, index) => index % repeated.length === shardIndex);
+    const paths = new Set(shard.map((file) => file.filename));
+    const extraFocus = [
+      call.ctx.extraFocus,
+      `REQUIRED SHARD ${shardIndex + 1}/${repeated.length}: review every supplied diff. Other required reviewers cover the remaining changed files.`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    return {
+      ...call,
+      files: shard,
+      ctx: {
+        ...call.ctx,
+        changedContents: call.ctx.changedContents?.filter((file) => paths.has(file.path)),
+        extraFocus,
+      },
+    };
+  });
 }
 
 /** Applies the call budget after the immutable plan lineup has been constructed. */
@@ -324,5 +362,8 @@ export function scheduleReviewStages(input: {
     }
     pushBatch();
   }
-  return { calls, discoveryPasses: discoveryAngles.length };
+  return {
+    calls: shardRepeatedDeepSeekCalls(calls, input.filesForLlm),
+    discoveryPasses: discoveryAngles.length,
+  };
 }

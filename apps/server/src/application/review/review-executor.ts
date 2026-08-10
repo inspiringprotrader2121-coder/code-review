@@ -284,8 +284,9 @@ export async function executeReviewCore(
         tier: PassTier,
         passName: string,
         temperature?: number,
+        reviewFiles = filesForLlm,
       ) =>
-        providerRegistry.runReview(filesForLlm, target, {
+        providerRegistry.runReview(reviewFiles, target, {
           temperature,
           context: ctx,
           signal: reviewAbortController.signal,

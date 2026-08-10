@@ -37,6 +37,7 @@ export interface ReviewProviderExecutionInput {
     tier: PassTier,
     name: string,
     temperature?: number,
+    files?: ChangedFile[],
   ) => Promise<LlmReviewResponse>;
   repoDirectory: string | null;
   repoId: string;
@@ -134,6 +135,7 @@ export async function executeReviewProviderCalls(
         call.tier,
         call.label,
         call.temperature,
+        call.files ?? input.filesForLlm,
       );
       const findings = llmFindingsToReviewFindings(response.findings);
       input.tagFindings(findings, call.tier, call.passTag);
