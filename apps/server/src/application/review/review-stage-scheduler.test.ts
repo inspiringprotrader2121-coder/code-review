@@ -49,7 +49,9 @@ test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
   );
   assert.equal(sharded[1]?.ctx.changedContents, undefined);
   assert.equal(sharded[1]?.ctx.promptProfile, 'focused');
+  assert.equal(sharded[1]?.ctx.diffBudgetChars, 24_000);
   assert.equal(sharded[2]?.ctx.changedContents, undefined);
+  assert.equal(sharded[2]?.ctx.diffBudgetChars, 24_000);
   assert.equal(sharded[1]?.ctx.related, undefined);
   assert.equal(sharded[1]?.ctx.dependents, undefined);
   assert.equal(sharded[1]?.ctx.others, undefined);
@@ -64,6 +66,7 @@ test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
   );
   assert.equal(sharded[3]?.ctx.changedContents, undefined);
   assert.equal(sharded[3]?.ctx.promptProfile, 'focused');
+  assert.equal(sharded[3]?.ctx.diffBudgetChars, 24_000);
   assert.equal(sharded[3]?.ctx.related, undefined);
   assert.equal(sharded[3]?.ctx.dependents, undefined);
   assert.equal(sharded[3]?.ctx.others, undefined);
@@ -92,6 +95,35 @@ test('repeated Flash shards balance uneven diffs instead of assigning by source 
     sharded[2]?.files?.map((file) => file.filename),
     ['src/small-test.ts', 'src/pagination.test.ts'],
   );
+});
+
+test('a single large file is split into valid hunk shards for both Flash reviewers', () => {
+  const lineCount = 1_000;
+  const patch = [
+    `@@ -1,${lineCount} +1,${lineCount} @@`,
+    ...Array.from({ length: lineCount }, (_, index) => `-OLD_${index}\n+NEW_${index}`),
+  ].join('\n');
+  const calls = [
+    call('gpt-5.6-luna', 1),
+    call('deepseek-v4-flash', 2),
+    call('deepseek-v4-flash', 3),
+  ];
+  const scheduled = boundHighTierDiscoveryWorkloads(calls, [
+    { filename: 'src/large.ts', status: 'modified', patch } as ChangedFile,
+  ]);
+  const flashPatches = scheduled
+    .slice(1)
+    .flatMap((call) => call.files ?? [])
+    .map((file) => file.patch ?? '');
+
+  assert.ok(scheduled[1]?.files?.length, 'first Flash reviewer must receive a hunk shard');
+  assert.ok(scheduled[2]?.files?.length, 'second Flash reviewer must receive a hunk shard');
+  assert.ok(flashPatches.every((piece) => piece.length <= 12_000));
+  assert.ok(flashPatches.every((piece) => /^@@ -\d+,\d+ \+\d+,\d+ @@/m.test(piece)));
+  const combined = flashPatches.join('\n');
+  for (const index of [0, 250, 500, 999]) assert.match(combined, new RegExp(`NEW_${index}`));
+  assert.equal(scheduled[1]?.ctx.diffBudgetChars, 24_000);
+  assert.equal(scheduled[2]?.ctx.diffBudgetChars, 24_000);
 });
 
 test('lower-tier single DeepSeek and MiniMax reviewers still receive the full PR', () => {

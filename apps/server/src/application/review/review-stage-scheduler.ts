@@ -51,12 +51,16 @@ export interface ScheduledReviewCalls {
   aggregation: ReturnType<typeof fitReviewAggregationToBudget>;
 }
 
+const FOCUSED_REVIEW_DIFF_BUDGET_CHARS = 24_000;
+const FOCUSED_REVIEW_HUNK_CHUNK_CHARS = 12_000;
+
 function withFileShard(
   call: ReviewCall,
   shard: ChangedFile[],
   note: string,
   context: 'focused-source' | 'diff-only',
   replaceExistingFocus = false,
+  diffBudgetChars?: number,
 ): ReviewCall {
   const paths = new Set(shard.map((file) => file.filename));
   const changedContents =
@@ -68,6 +72,7 @@ function withFileShard(
     files: shard,
     ctx: {
       ...(context === 'diff-only' ? { promptProfile: 'focused' as const } : {}),
+      ...(diffBudgetChars ? { diffBudgetChars } : {}),
       changedContents,
       extraFocus: replaceExistingFocus
         ? note
@@ -78,6 +83,80 @@ function withFileShard(
 
 function patchWeight(file: ChangedFile): number {
   return Math.max(1, file.patch?.length ?? 0);
+}
+
+function hunkHeaderParts(
+  header: string,
+): { oldStart: number; newStart: number; suffix: string } | undefined {
+  const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(header);
+  if (!match) return undefined;
+  return { oldStart: Number(match[1]), newStart: Number(match[2]), suffix: match[3] ?? '' };
+}
+
+function hunkLineCounts(line: string): { old: number; next: number } {
+  if (line.startsWith('+')) return { old: 0, next: 1 };
+  if (line.startsWith('-')) return { old: 1, next: 0 };
+  if (line.startsWith('\\')) return { old: 0, next: 0 };
+  return { old: 1, next: 1 };
+}
+
+/** Split an oversized unified-diff hunk while retaining valid line anchors. */
+function splitOversizedHunk(hunk: string, maxChars: number): string[] {
+  const [header, ...body] = hunk.split('\n');
+  if (body.at(-1) === '') body.pop();
+  const parts = hunkHeaderParts(header ?? '');
+  if (!parts || body.length === 0) return [hunk];
+  const chunks: string[] = [];
+  let lines: string[] = [];
+  let oldStart = parts.oldStart;
+  let newStart = parts.newStart;
+  let oldCount = 0;
+  let newCount = 0;
+  const render = () =>
+    `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${parts.suffix}\n${lines.join('\n')}`;
+  const flush = () => {
+    if (lines.length === 0) return;
+    chunks.push(render());
+    oldStart += oldCount;
+    newStart += newCount;
+    lines = [];
+    oldCount = 0;
+    newCount = 0;
+  };
+  for (const line of body) {
+    const proposed = `${render()}\n${line}`;
+    if (lines.length > 0 && proposed.length > maxChars) flush();
+    lines.push(line);
+    const counts = hunkLineCounts(line);
+    oldCount += counts.old;
+    newCount += counts.next;
+  }
+  flush();
+  return chunks.length > 0 ? chunks : [hunk];
+}
+
+/** Break large files at unified-diff hunk boundaries before balanced assignment. */
+function splitFileForFocusedReview(file: ChangedFile): ChangedFile[] {
+  const patch = file.patch;
+  if (!patch || patch.length <= FOCUSED_REVIEW_HUNK_CHUNK_CHARS) return [file];
+  const lines = patch.split('\n');
+  const hunkStarts = lines
+    .map((line, index) => (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line) ? index : -1))
+    .filter((index) => index >= 0);
+  if (hunkStarts.length === 0) return [file];
+  const prefix = lines.slice(0, hunkStarts[0]).join('\n');
+  const chunks: string[] = [];
+  for (let index = 0; index < hunkStarts.length; index++) {
+    const start = hunkStarts[index]!;
+    const end = hunkStarts[index + 1] ?? lines.length;
+    const hunk = lines.slice(start, end).join('\n');
+    chunks.push(...splitOversizedHunk(hunk, FOCUSED_REVIEW_HUNK_CHUNK_CHARS));
+  }
+  if (chunks.length < 2) return [file];
+  return chunks.map((chunk, index) => ({
+    ...file,
+    patch: index === 0 && prefix ? `${prefix}\n${chunk}` : chunk,
+  }));
 }
 
 /** Balance repeated provider calls by diff size, keeping source order within each shard. */
@@ -132,10 +211,11 @@ export function boundHighTierDiscoveryWorkloads(
       !call.bestEffort &&
       call.target.model.toLowerCase().includes('deepseek-v4-flash'),
   );
-  if (repeated.length < 2 || files.length < 2) return calls;
+  const shardedFiles = files.flatMap(splitFileForFocusedReview);
+  if (repeated.length < 2 || shardedFiles.length < 2) return calls;
 
   const assignment = new Map(repeated.map((call, index) => [call, index]));
-  const shards = balancedFileShards(files, repeated.length);
+  const shards = balancedFileShards(shardedFiles, repeated.length);
   return calls.map((call) => {
     const shardIndex = assignment.get(call);
     if (shardIndex !== undefined) {
@@ -146,6 +226,7 @@ export function boundHighTierDiscoveryWorkloads(
         compactHighTierShardFocus(call, shardIndex, repeated.length),
         'diff-only',
         true,
+        FOCUSED_REVIEW_DIFF_BUDGET_CHARS,
       );
     }
 
@@ -162,6 +243,7 @@ export function boundHighTierDiscoveryWorkloads(
       'REQUIRED DIFF-ONLY BREADTH SHARD: review every supplied diff and nothing outside it. Audit only concrete performance, completeness, and API-contract regressions visible in this shard. Luna and the DeepSeek discovery shards cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass and reserve the response budget for a compact final JSON. The final JSON must stay under 3,000 tokens: at most 3 concrete findings, each message at most 3 sentences, a 2-sentence summary, and no originalCode or fixedCode fields. Do not narrate private reasoning.',
       'diff-only',
       true,
+      FOCUSED_REVIEW_DIFF_BUDGET_CHARS,
     );
   });
 }

@@ -59,11 +59,18 @@ function sampleDiff(patch: string, budget: number): string {
   return sections.map((section, index) => sampleSection(section, budgets[index]!)).join('');
 }
 
-export function buildDiffSections(files: readonly ReviewPromptFile[]): string[] {
+export function buildDiffSections(
+  files: readonly ReviewPromptFile[],
+  requestedBudget?: number,
+): string[] {
   const patches = files.map((file) => promptData(file.patch ?? '(no patch — binary or too large)'));
+  const budget =
+    Number.isFinite(requestedBudget) && (requestedBudget ?? 0) > 0
+      ? Math.min(MAX_DIFF_CHARS, Math.floor(requestedBudget!))
+      : MAX_DIFF_CHARS;
   const budgets = fairPromptBudgets(
     patches.map((patch) => patch.length),
-    MAX_DIFF_CHARS,
+    budget,
   );
   return files.map(
     (file, index) =>

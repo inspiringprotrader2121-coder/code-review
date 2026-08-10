@@ -16,7 +16,9 @@ export interface ReviewRoutingPolicy {
 }
 
 export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = 36_000;
-export const MINIMAX_REVIEW_OUTPUT_TOKENS = 20_000;
+// MiniMax's reasoning tokens share this response budget. 20k can end before it
+// emits the required JSON for a complex review, despite a compact final answer.
+export const MINIMAX_REVIEW_OUTPUT_TOKENS = 32_000;
 
 export const DEFAULT_REVIEW_ROUTING_POLICY: ReviewRoutingPolicy = Object.freeze({
   codexCliEnabled: false,

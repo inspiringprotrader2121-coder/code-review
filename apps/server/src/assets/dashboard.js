@@ -38,16 +38,20 @@ const wholeNumber = (value, fallback = 0) => Math.max(0, Math.trunc(finiteNumber
 const sevCls = (s) => ({ P1: 'p1', P2: 'p2', P3: 'p3' })[s] || 'muted';
 const runCls = (s) =>
   s === 'completed' ? 'done' : s === 'failed' ? 'fail' : s === 'running' ? 'run' : 'queued';
-const runReason = (r) =>
-  r.skipReason === 'pr_closed_mid_run'
-    ? 'PR closed during review'
-    : r.skipReason === 'provider_not_configured'
-      ? 'Provider unavailable'
-      : r.skipReason
-        ? String(r.skipReason).replaceAll('_', ' ')
-        : r.status === 'failed'
-          ? 'No verdict — retry'
-          : '';
+const runReason = (r) => {
+  if (r.skipReason === 'pr_closed_mid_run') return 'PR closed during review';
+  if (r.skipReason === 'provider_not_configured') return 'Provider unavailable';
+  if (r.skipReason) return String(r.skipReason).replaceAll('_', ' ');
+  if (r.status !== 'failed') return '';
+  const error = String(r.error || '');
+  if (/wall-clock cap|produced no container output/i.test(error))
+    return 'Provider timed out before verdict — retry';
+  if (/fork failed|sandbox slot/i.test(error)) return 'Review sandbox was unavailable — retry';
+  if (/truncated|stop_reason=max_tokens/i.test(error))
+    return 'Provider response exceeded its output budget — retry';
+  if (/rate.?limit|\b429\b|quota/i.test(error)) return 'Provider temporarily rate-limited — retry';
+  return 'No verdict — retry';
+};
 const runChip = (s, reason) => {
   const status = typeof s === 'string' && s ? s : 'queued';
   return (

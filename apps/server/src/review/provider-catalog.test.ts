@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createProviderCatalog } from './provider-catalog.js';
+import { MINIMAX_REVIEW_OUTPUT_TOKENS, maxOutputTokensForModel } from './model-routing.js';
 import type { WorkerConfig } from './worker-types.js';
 
 function config(): WorkerConfig {
@@ -116,4 +117,9 @@ test('catalog refuses substitutions and incomplete reasoning contracts before a 
       }).compilePublicPlan('dual-model', { agenticLuna: false }),
     /MiniMax thinking/,
   );
+});
+
+test('MiniMax has room for reasoning and a compact completed review response', () => {
+  assert.equal(MINIMAX_REVIEW_OUTPUT_TOKENS, 32_000);
+  assert.equal(maxOutputTokensForModel('MiniMax-M3'), 32_000);
 });

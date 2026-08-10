@@ -12,6 +12,8 @@ export interface PromptSourceFile {
 export interface ReviewPromptContext {
   /** A compact system policy for bounded, diff-only reviewer shards. */
   promptProfile?: 'focused';
+  /** Per-call diff budget for focused reviewers. It can only reduce the global prompt cap. */
+  diffBudgetChars?: number;
   /** Repo file paths at the reviewed SHA. */
   treePaths?: string[];
   /** Files the changed code imports, for cross-file reasoning. */

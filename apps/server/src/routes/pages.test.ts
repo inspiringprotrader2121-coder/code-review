@@ -7,7 +7,7 @@ test('page shell uses landmarks, external CSS, and escapes account data in text 
 
   assert.match(html, /<header class="top">/);
   assert.match(html, /<main class="card" id="main-content">/);
-  assert.match(html, /href="\/assets\/shell\.css"/);
+  assert.match(html, /href="\/assets\/shell\.css\?v=[a-f0-9]{12}"/);
   assert.match(html, /team-&quot;&lt;script&gt;/);
   assert.doesNotMatch(html, /<style|<script(?=[\s>])|\s+on[a-z]+\s*=/i);
 });

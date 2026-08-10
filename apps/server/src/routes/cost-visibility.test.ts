@@ -76,8 +76,8 @@ test('only allowlisted tenants receive LLM cost data or dashboard controls', asy
   const customerHtml = await customerDashboard.text();
   assert.match(customerHtml, /data-show-llm-cost="false"/);
   assert.doesNotMatch(customerHtml, /<th class="r">LLM cost<\/th>/);
-  assert.match(customerHtml, /href="\/assets\/dashboard\.css"/);
-  assert.match(customerHtml, /src="\/assets\/dashboard\.js" defer/);
+  assert.match(customerHtml, /href="\/assets\/dashboard\.css\?v=[a-f0-9]{12}"/);
+  assert.match(customerHtml, /src="\/assets\/dashboard\.js\?v=[a-f0-9]{12}" defer/);
   assert.doesNotMatch(customerHtml, /<style|onclick=|style=/);
   assert.match(customerHtml, /role="tablist"/);
   assert.match(customerHtml, /role="tab" aria-controls="v-overview" aria-selected="true"/);

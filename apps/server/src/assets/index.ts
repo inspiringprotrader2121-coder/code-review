@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
@@ -45,5 +46,13 @@ export function assetRoutes() {
 }
 
 export function assetHref(name: AssetName): string {
-  return `/assets/${name}`;
+  try {
+    const version = createHash('sha256')
+      .update(readFileSync(path.join(assetDirectory, name)))
+      .digest('hex')
+      .slice(0, 12);
+    return `/assets/${name}?v=${version}`;
+  } catch {
+    return `/assets/${name}`;
+  }
 }

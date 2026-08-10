@@ -89,6 +89,20 @@ test('oversized raw diffs are fairly sampled under one aggregate budget', () => 
   );
 });
 
+test('focused reviewers can use a smaller diff budget without widening the global cap', () => {
+  const patch =
+    '@@ -1,1 +1,1 @@\n-old\n+new\n' +
+    Array.from({ length: 420 }, (_, index) => `+CHANGE_${index}_${'x'.repeat(100)}`).join('\n');
+  const prompt = buildUserPrompt([{ filename: 'src/focused.ts', status: 'modified', patch }], {
+    diffBudgetChars: 24_000,
+  });
+
+  assert.ok(prompt.length < 26_000, `focused prompt grew to ${prompt.length} chars`);
+  assert.match(prompt, /diff chars omitted; sampled start and end/);
+  assert.match(prompt, /CHANGE_0_/);
+  assert.match(prompt, /CHANGE_419_/);
+});
+
 test('cross-file context budgets disclose every skipped path', () => {
   const prompt = buildUserPrompt(
     [{ filename: 'src/app.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { assetRoutes, resolveAssetDirectory } from './index.js';
+import { assetHref, assetRoutes, resolveAssetDirectory } from './index.js';
 
 test('compiled asset routes resolve the deployed source bundle', () => {
   const serverDirectory = path.resolve(import.meta.dirname, '../..');
@@ -25,6 +25,10 @@ test('application assets are served externally with typed content', async () => 
   assert.match(script.headers.get('content-type') ?? '', /^text\/javascript/);
   assert.equal(missing.status, 404);
   assert.equal(missing.headers.get('cache-control'), null);
+});
+
+test('asset hrefs carry a source fingerprint', () => {
+  assert.match(assetHref('dashboard.js'), /^\/assets\/dashboard\.js\?v=[a-f0-9]{12}$/);
 });
 
 test('public pages and assets remain strict-CSP compatible and accessible', () => {
