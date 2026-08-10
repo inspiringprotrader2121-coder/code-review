@@ -315,7 +315,11 @@ export function loadReviewRuntimeConfig(
         32,
       );
       const sharedCapacity = env.ORVEX_CODEX_CLI === '1' ? codexConcurrency : workerConcurrency;
-      return boundedConcurrency(env[`ORVEX_PROVIDER_CONCURRENCY_${name}`], sharedCapacity, 32);
+      // Enterprise runs have two Flash discovery passes plus Flash verification.
+      // Let those stages use the provider's bounded global admission capacity.
+      const defaultCapacity =
+        name === 'DEEPSEEK' ? Math.min(32, sharedCapacity * 3) : sharedCapacity;
+      return boundedConcurrency(env[`ORVEX_PROVIDER_CONCURRENCY_${name}`], defaultCapacity, 32);
     },
     codexApiKeyConcurrency: boundedConcurrency(
       env.ORVEX_CODEX_APIKEY_CONCURRENCY,

@@ -73,7 +73,7 @@ test('lower-tier single DeepSeek and MiniMax reviewers still receive the full PR
   assert.equal(scheduled[1], minimax);
 });
 
-test('same-provider review calls share an ordered lane while independent providers stay parallel', () => {
+test('same-provider review calls are independently scheduled behind provider admission', () => {
   const first = call('deepseek-v4-flash', 1);
   first.target.admissionBucket = 'deepseek';
   const second = call('deepseek-v4-flash', 2);
@@ -81,5 +81,9 @@ test('same-provider review calls share an ordered lane while independent provide
   const minimax = call('MiniMax-M3', 3);
   minimax.target.admissionBucket = 'minimax';
 
-  assert.deepEqual(groupApiCallsByProvider([first, minimax, second]), [[first, second], [minimax]]);
+  assert.deepEqual(groupApiCallsByProvider([first, minimax, second]), [
+    [first],
+    [minimax],
+    [second],
+  ]);
 });

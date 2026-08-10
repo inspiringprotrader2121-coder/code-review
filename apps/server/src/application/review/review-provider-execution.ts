@@ -70,14 +70,9 @@ export interface ReviewProviderExecutionInput {
 }
 
 export function groupApiCallsByProvider(calls: ReviewCall[]): ReviewCall[][] {
-  const lanes = new Map<string, ReviewCall[]>();
-  for (const call of calls) {
-    const bucket = call.target.admissionBucket ?? call.target.baseUrl ?? call.target.model;
-    const lane = lanes.get(bucket) ?? [];
-    lane.push(call);
-    lanes.set(bucket, lane);
-  }
-  return [...lanes.values()];
+  // Provider admission owns the global capacity and cooldown. Keeping repeated
+  // DeepSeek passes in a per-review lane needlessly serialized independent work.
+  return calls.map((call) => [call]);
 }
 
 /** Executes independent providers in parallel while retaining Codex's ordered session lane. */

@@ -17,6 +17,7 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.reviewWorkerConcurrency, 8);
   assert.equal(config.codexApiKeyConcurrency, 8);
   assert.equal(config.providerConcurrency('luna'), 8);
+  assert.equal(config.providerConcurrency('deepseek'), 24);
   assert.equal(config.promptChangedChars, 16_000);
   assert.equal(config.promptRelatedChars, 6_000);
   assert.equal(config.promptOtherChars, 2_000);
