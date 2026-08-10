@@ -23,11 +23,8 @@ export function isDigestPinnedSandboxImage(image: string | undefined): image is 
   );
 }
 
-function sandboxFileSizeLimitBlocks(workdirBytes: number): number {
-  return Math.max(
-    1,
-    Math.min(Math.floor(workdirBytes / 512), Math.floor(MAX_SANDBOX_OUTPUT_FILE_BYTES / 512)),
-  );
+function sandboxFileSizeLimitBytes(workdirBytes: number): number {
+  return Math.max(1, Math.min(Math.floor(workdirBytes), MAX_SANDBOX_OUTPUT_FILE_BYTES));
 }
 
 function assertSafeSandboxRunOptions(
@@ -113,7 +110,7 @@ export function buildSandboxDockerArgs(
     '--ulimit',
     'core=0:0',
     '--ulimit',
-    `fsize=${sandboxFileSizeLimitBlocks(diskBytes)}:${sandboxFileSizeLimitBlocks(diskBytes)}`,
+    `fsize=${sandboxFileSizeLimitBytes(diskBytes)}:${sandboxFileSizeLimitBytes(diskBytes)}`,
     '--read-only',
     '--tmpfs',
     '/tmp:size=256m,noexec,nosuid,nodev',

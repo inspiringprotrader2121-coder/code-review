@@ -111,7 +111,7 @@ test('buildSandboxDockerArgs keeps the internal sandbox contract without host se
     assert.ok(args.includes('--ipc'));
     assert.ok(args.includes('--init'));
     assert.ok(args.includes('nofile=256:256'));
-    assert.ok(args.some((arg) => arg.startsWith('fsize=')));
+    assert.ok(args.includes('fsize=536870912:536870912'));
     assert.deepEqual(
       args.filter((arg) => arg.startsWith('/')),
       ['/tmp:size=256m,noexec,nosuid,nodev', '/work'],
