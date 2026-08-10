@@ -87,7 +87,7 @@ function compactHighTierShardFocus(
       : call.passTag === 'removed-behavior/callers'
         ? 'Audit deleted or changed behaviour, visible caller/test contracts, and retry or legacy-state regressions.'
         : 'Audit concrete performance, completeness, and API-contract regressions visible in this diff.';
-  return `REQUIRED DIFF-ONLY SHARD ${shardIndex + 1}/${shardCount}: review every supplied diff and nothing outside it. ${lens} Luna covers repository-wide callers and the other reviewers cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass and emit the required JSON before exhausting the response budget. Do not narrate private reasoning. Report at most 3 concrete findings.`;
+  return `REQUIRED DIFF-ONLY SHARD ${shardIndex + 1}/${shardCount}: review every supplied diff and nothing outside it. ${lens} Luna covers repository-wide callers and the other reviewers cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass with no more than 12,000 reasoning tokens and reserve the remaining budget for the final JSON. The final JSON must stay under 3,000 tokens: at most 3 concrete findings, each message at most 3 sentences, a 2-sentence summary, and no originalCode or fixedCode fields. Do not narrate private reasoning.`;
 }
 
 export function boundHighTierDiscoveryWorkloads(
@@ -127,7 +127,7 @@ export function boundHighTierDiscoveryWorkloads(
     return withFileShard(
       call,
       shard,
-      'REQUIRED DIFF-ONLY BREADTH SHARD: review every supplied diff and nothing outside it. Audit only concrete performance, completeness, and API-contract regressions visible in this shard. Luna and the DeepSeek discovery shards cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass and emit the required JSON before exhausting the response budget. Do not narrate private reasoning. Report at most 5 concrete findings.',
+      'REQUIRED DIFF-ONLY BREADTH SHARD: review every supplied diff and nothing outside it. Audit only concrete performance, completeness, and API-contract regressions visible in this shard. Luna and the DeepSeek discovery shards cover the remaining changed files. Use the configured maximum reasoning effort, but make one evidence-led pass and reserve the response budget for a compact final JSON. The final JSON must stay under 3,000 tokens: at most 3 concrete findings, each message at most 3 sentences, a 2-sentence summary, and no originalCode or fixedCode fields. Do not narrate private reasoning.',
       'diff-only',
       true,
     );
