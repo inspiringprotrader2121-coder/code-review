@@ -676,15 +676,24 @@ fs.writeFileSync(process.env.ARGS_FILE, JSON.stringify(args));
 const output = args[args.indexOf('--output-last-message') + 1];
 fs.writeFileSync(output, '{"findings":[],"summary":"ok"}');
 console.log(JSON.stringify({type:'thread.started', thread_id:'fixture-thread'}));
-console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:12, output_tokens:3, reasoning_output_tokens:2}}));
+console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:12, cached_input_tokens:4, output_tokens:3, reasoning_output_tokens:2}}));
 `);
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
   const argsFile = path.join(fixture.dir, 'args.json');
+  const usage: Array<{
+    inputTokens: number;
+    cachedInputTokens?: number;
+    outputTokens: number;
+    tokenSource?: string;
+    model?: string;
+    provider?: string;
+  }> = [];
   const result = await runCodexExecForTest('review this', {
     binaryPath: fixture.binary,
     env: { ...process.env, ARGS_FILE: argsFile },
     hardMs: 5_000,
     inactivityMs: 3_000,
+    onUsage: (event) => usage.push(event),
   });
   assert.equal(result.threadId, 'fixture-thread');
   const args = JSON.parse(readFileSync(argsFile, 'utf8')) as string[];
@@ -697,6 +706,16 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:12, outpu
   assert.ok(args.includes('--ignore-user-config'));
   assert.ok(args.includes('--ignore-rules'));
   assert.equal(args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+  assert.deepEqual(usage, [
+    {
+      inputTokens: 12,
+      cachedInputTokens: 4,
+      outputTokens: 3,
+      tokenSource: 'provider',
+      model: DEFAULT_CODEX_CLI_MODEL,
+      provider: 'codex-cli',
+    },
+  ]);
 });
 
 test('actual Codex child model substitution on stdout fails closed', async (t) => {
@@ -725,7 +744,12 @@ setInterval(() => {}, 1000);
   `);
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
   const grandchildFile = path.join(fixture.dir, 'grandchild.pid');
-  const usage: Array<{ inputTokens: number; outputTokens: number; tokenSource?: string }> = [];
+  const usage: Array<{
+    inputTokens: number;
+    cachedInputTokens?: number;
+    outputTokens: number;
+    tokenSource?: string;
+  }> = [];
   const pending = runCodexExecForTest('review', {
     binaryPath: fixture.binary,
     hardMs: 5_000,
@@ -744,6 +768,7 @@ setInterval(() => {}, 1000);
   assert.deepEqual(usage, [
     {
       inputTokens: 50_000,
+      cachedInputTokens: 0,
       outputTokens: 5_000,
       tokenSource: 'estimate',
       model: DEFAULT_CODEX_CLI_MODEL,

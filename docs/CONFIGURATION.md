@@ -106,15 +106,23 @@ Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenti
 | `ORVEX_OPENAI_REASONING_EFFORT` | enum; max | `max` | no / none | - | Luna reasoning effort. Production must remain maximum. |
 | `ORVEX_LLM_MAX_TOTAL_MS` | integer; 30000..300000 ms; default 300000 | `300000` | no / none | - | Hard budget for a provider attempt. Hard timeouts are not retried. |
 | `ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS` | integer; positive tokens; unset disables | `20000` | no / none | - | Anthropic-compatible provider thinking-token budget. |
-| `ORVEX_OPENAI_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.2` | no / none | - | OpenAI input cost used in metering. Keep current with provider pricing. |
-| `ORVEX_OPENAI_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.2` | no / none | - | OpenAI output cost used in metering. Keep current with provider pricing. |
+| `ORVEX_OPENAI_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.2` | no / none | - | Legacy generic OpenAI input fallback. The pinned Luna stage uses its dedicated Luna rates instead. |
+| `ORVEX_OPENAI_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.02` | no / none | - | Legacy generic OpenAI cached-input fallback. The pinned Luna stage uses its dedicated Luna rates instead. |
+| `ORVEX_OPENAI_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.2` | no / none | - | Legacy generic OpenAI output fallback. The pinned Luna stage uses its dedicated Luna rates instead. |
+| `ORVEX_LUNA_COST_INPUT_PER_M` | number; USD / 1M input tokens | `1` | no / none | - | GPT-5.6 Luna input pricing, verified 2026-08-10. |
+| `ORVEX_LUNA_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.1` | no / none | - | GPT-5.6 Luna cached-input pricing, verified 2026-08-10. |
+| `ORVEX_LUNA_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `6` | no / none | - | GPT-5.6 Luna output pricing, verified 2026-08-10. |
 | `ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.14` | no / none | - | DeepSeek Flash input pricing, verified 2026-08-01. |
+| `ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.0028` | no / none | - | DeepSeek Flash cached-input pricing, verified 2026-08-10. |
 | `ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `0.28` | no / none | - | DeepSeek Flash output pricing, verified 2026-08-01. |
 | `ORVEX_COST_INPUT_PER_M` | number; USD / 1M input tokens | `1.4` | no / none | - | Legacy premium-route input pricing. |
+| `ORVEX_COST_CACHED_INPUT_PER_M` | number; USD / 1M cached input tokens | `1.4` | no / none | - | Legacy premium-route cached-input pricing. |
 | `ORVEX_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `4.4` | no / none | - | Legacy premium-route output pricing. |
 | `ORVEX_STANDARD_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.3` | no / none | - | MiniMax standard-route input pricing. |
+| `ORVEX_STANDARD_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.06` | no / none | - | MiniMax M3 cached-input pricing, verified 2026-08-10. |
 | `ORVEX_STANDARD_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.2` | no / none | - | MiniMax standard-route output pricing. |
 | `ORVEX_DEEPSEEK_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.435` | no / none | - | DeepSeek Pro input pricing. |
+| `ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.003625` | no / none | - | DeepSeek Pro cached-input pricing, verified 2026-08-10. |
 | `ORVEX_DEEPSEEK_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `0.87` | no / none | - | DeepSeek Pro output pricing. |
 | `MOONSHOT_API_KEY` | string; provider API key | `(unset)` | yes / secret | - | Reserved future multi-model provider key; not wired. |
 | `ZHIPU_API_KEY` | string; provider API key | `(unset)` | yes / secret | - | Reserved future multi-model provider key; not wired. |

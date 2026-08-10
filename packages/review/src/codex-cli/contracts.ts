@@ -19,6 +19,7 @@ export interface CodexCliReviewOptions {
   promptMode?: CodexPromptMode;
   onUsage?: (usage: {
     inputTokens: number;
+    cachedInputTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     model?: string;

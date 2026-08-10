@@ -5,6 +5,7 @@ import {
   canRunInvestigate,
   canRunRiskHunt,
   createReviewRoutingPolicy,
+  createUsageCostPolicy,
   accountUsage,
   buildReviewPassAngles,
   effectiveReviewConfig,
@@ -233,6 +234,31 @@ test('usage accounting clamps malformed provider token counts instead of poisoni
   assert.equal(accounted.inputTokens, 0);
   assert.equal(accounted.outputTokens, 0);
   assert.equal(accounted.costUsd, 0);
+});
+
+test('usage accounting keeps Luna pricing pinned and prices DeepSeek cache reads separately', () => {
+  const staleGenericOpenAi = createUsageCostPolicy({
+    openai: { input: 0.2, cachedInput: 0.02, output: 1.2 },
+  });
+  const luna = accountUsage(
+    'openai',
+    modelRoutingConfig().openaiModel,
+    'agentic discovery',
+    { inputTokens: 50_000, outputTokens: 5_000, tokenSource: 'estimate' },
+    staleGenericOpenAi,
+  );
+  assert.equal(luna.inputRatePerM, 1);
+  assert.equal(luna.cachedInputRatePerM, 0.1);
+  assert.equal(luna.outputRatePerM, 6);
+  assert.equal(luna.costUsd, 0.08);
+
+  const flash = accountUsage(
+    'deepseek-flash',
+    modelRoutingConfig().deepseekFlashModel,
+    'verification',
+    { inputTokens: 1_000_000, cachedInputTokens: 900_000, outputTokens: 1_000_000 },
+  );
+  assert.equal(flash.costUsd, 0.29652);
 });
 
 test('post-publication finalizers are non-fatal after GitHub accepted a review', async () => {

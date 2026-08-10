@@ -817,7 +817,17 @@
           "range": "USD / 1M input tokens",
           "secret": false,
           "redaction": "none",
-          "description": "OpenAI input cost used in metering. Keep current with provider pricing.",
+          "description": "Legacy generic OpenAI input fallback. The pinned Luna stage uses its dedicated Luna rates instead.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_OPENAI_CACHED_INPUT_COST_PER_M",
+          "example": "0.02",
+          "type": "number",
+          "range": "USD / 1M cached input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "Legacy generic OpenAI cached-input fallback. The pinned Luna stage uses its dedicated Luna rates instead.",
           "deprecatedAliases": []
         },
         {
@@ -827,7 +837,37 @@
           "range": "USD / 1M output tokens",
           "secret": false,
           "redaction": "none",
-          "description": "OpenAI output cost used in metering. Keep current with provider pricing.",
+          "description": "Legacy generic OpenAI output fallback. The pinned Luna stage uses its dedicated Luna rates instead.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LUNA_COST_INPUT_PER_M",
+          "example": "1",
+          "type": "number",
+          "range": "USD / 1M input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "GPT-5.6 Luna input pricing, verified 2026-08-10.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LUNA_CACHED_INPUT_COST_PER_M",
+          "example": "0.1",
+          "type": "number",
+          "range": "USD / 1M cached input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "GPT-5.6 Luna cached-input pricing, verified 2026-08-10.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LUNA_COST_OUTPUT_PER_M",
+          "example": "6",
+          "type": "number",
+          "range": "USD / 1M output tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "GPT-5.6 Luna output pricing, verified 2026-08-10.",
           "deprecatedAliases": []
         },
         {
@@ -838,6 +878,16 @@
           "secret": false,
           "redaction": "none",
           "description": "DeepSeek Flash input pricing, verified 2026-08-01.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M",
+          "example": "0.0028",
+          "type": "number",
+          "range": "USD / 1M cached input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek Flash cached-input pricing, verified 2026-08-10.",
           "deprecatedAliases": []
         },
         {
@@ -861,6 +911,16 @@
           "deprecatedAliases": []
         },
         {
+          "name": "ORVEX_COST_CACHED_INPUT_PER_M",
+          "example": "1.4",
+          "type": "number",
+          "range": "USD / 1M cached input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "Legacy premium-route cached-input pricing.",
+          "deprecatedAliases": []
+        },
+        {
           "name": "ORVEX_COST_OUTPUT_PER_M",
           "example": "4.4",
           "type": "number",
@@ -881,6 +941,16 @@
           "deprecatedAliases": []
         },
         {
+          "name": "ORVEX_STANDARD_CACHED_INPUT_COST_PER_M",
+          "example": "0.06",
+          "type": "number",
+          "range": "USD / 1M cached input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "MiniMax M3 cached-input pricing, verified 2026-08-10.",
+          "deprecatedAliases": []
+        },
+        {
           "name": "ORVEX_STANDARD_COST_OUTPUT_PER_M",
           "example": "1.2",
           "type": "number",
@@ -898,6 +968,16 @@
           "secret": false,
           "redaction": "none",
           "description": "DeepSeek Pro input pricing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M",
+          "example": "0.003625",
+          "type": "number",
+          "range": "USD / 1M cached input tokens",
+          "secret": false,
+          "redaction": "none",
+          "description": "DeepSeek Pro cached-input pricing, verified 2026-08-10.",
           "deprecatedAliases": []
         },
         {

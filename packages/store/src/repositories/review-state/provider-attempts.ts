@@ -116,60 +116,74 @@ export class SqliteReviewAttemptRepository {
   recordReviewRunUsage(
     input: Omit<ReviewRunUsage, 'id' | 'createdAt'> & { createdAt?: string },
   ): ReviewRunUsage | null {
+    // Older in-process callers can omit cache fields because their provider did
+    // not report cache usage. Persist a zero-value, rather than rejecting an
+    // otherwise valid usage record during a rolling deployment.
+    const usage = {
+      ...input,
+      cachedInputTokens: input.cachedInputTokens ?? 0,
+      cachedInputRatePerM: input.cachedInputRatePerM ?? 0,
+    };
     const run = this.db
       .prepare(`SELECT tenant_id, status, worker_id FROM review_runs WHERE id = ?`)
-      .get(input.runId) as RunOwnership | undefined;
-    if (!run) throw new Error(`cannot record usage for unknown review run ${input.runId}`);
-    if (run.tenant_id !== input.tenantId)
-      throw new Error(`review usage tenant mismatch for run ${input.runId}`);
-    if (input.attemptId) {
+      .get(usage.runId) as RunOwnership | undefined;
+    if (!run) throw new Error(`cannot record usage for unknown review run ${usage.runId}`);
+    if (run.tenant_id !== usage.tenantId)
+      throw new Error(`review usage tenant mismatch for run ${usage.runId}`);
+    if (usage.attemptId) {
       const attempt = this.db
         .prepare(`SELECT run_id, tenant_id FROM review_run_attempts WHERE id = ?`)
-        .get(input.attemptId) as { run_id: string; tenant_id: string } | undefined;
-      if (!attempt || attempt.run_id !== input.runId || attempt.tenant_id !== input.tenantId) {
-        throw new Error(`review usage attempt lineage mismatch for ${input.attemptId}`);
+        .get(usage.attemptId) as { run_id: string; tenant_id: string } | undefined;
+      if (!attempt || attempt.run_id !== usage.runId || attempt.tenant_id !== usage.tenantId) {
+        throw new Error(`review usage attempt lineage mismatch for ${usage.attemptId}`);
       }
     }
     if (run.status !== 'running' || run.worker_id !== this.workerId) return null;
     for (const [name, value] of Object.entries({
-      inputTokens: input.inputTokens,
-      outputTokens: input.outputTokens,
-      inputRatePerM: input.inputRatePerM,
-      outputRatePerM: input.outputRatePerM,
-      costUsd: input.costUsd,
+      inputTokens: usage.inputTokens,
+      cachedInputTokens: usage.cachedInputTokens,
+      outputTokens: usage.outputTokens,
+      inputRatePerM: usage.inputRatePerM,
+      cachedInputRatePerM: usage.cachedInputRatePerM,
+      outputRatePerM: usage.outputRatePerM,
+      costUsd: usage.costUsd,
     })) {
       if (!Number.isFinite(value) || value < 0) throw new Error(`invalid review usage ${name}`);
     }
+    if (usage.cachedInputTokens > usage.inputTokens)
+      throw new Error('invalid review usage cachedInputTokens');
     const id = randomUUID();
-    const createdAt = input.createdAt ?? new Date().toISOString();
+    const createdAt = usage.createdAt ?? new Date().toISOString();
     const recorded = this.db
       .prepare(
         `INSERT INTO review_run_usage
-       (id, run_id, tenant_id, provider, model, tier, pass_name, input_tokens, output_tokens, input_rate_per_m, output_rate_per_m, cost_usd, token_source, attempt_id, created_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       (id, run_id, tenant_id, provider, model, tier, pass_name, input_tokens, cached_input_tokens, output_tokens, input_rate_per_m, cached_input_rate_per_m, output_rate_per_m, cost_usd, token_source, attempt_id, created_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM review_runs WHERE id = ? AND tenant_id = ? AND status = 'running' AND worker_id = ?)`,
       )
       .run(
         id,
-        input.runId,
-        input.tenantId,
-        input.provider,
-        input.model,
-        input.tier,
-        input.passName ?? null,
-        input.inputTokens,
-        input.outputTokens,
-        input.inputRatePerM,
-        input.outputRatePerM,
-        input.costUsd,
-        input.tokenSource,
-        input.attemptId ?? null,
+        usage.runId,
+        usage.tenantId,
+        usage.provider,
+        usage.model,
+        usage.tier,
+        usage.passName ?? null,
+        usage.inputTokens,
+        usage.cachedInputTokens,
+        usage.outputTokens,
+        usage.inputRatePerM,
+        usage.cachedInputRatePerM,
+        usage.outputRatePerM,
+        usage.costUsd,
+        usage.tokenSource,
+        usage.attemptId ?? null,
         createdAt,
-        input.runId,
-        input.tenantId,
+        usage.runId,
+        usage.tenantId,
         this.workerId,
       );
-    return recorded.changes > 0 ? { ...input, id, createdAt } : null;
+    return recorded.changes > 0 ? { ...usage, id, createdAt } : null;
   }
 
   listReviewRunUsage(runId: string): ReviewRunUsage[] {
@@ -185,8 +199,10 @@ export class SqliteReviewAttemptRepository {
       tier: String(row.tier),
       passName: row.pass_name ? String(row.pass_name) : undefined,
       inputTokens: Number(row.input_tokens),
+      cachedInputTokens: Number(row.cached_input_tokens),
       outputTokens: Number(row.output_tokens),
       inputRatePerM: Number(row.input_rate_per_m),
+      cachedInputRatePerM: Number(row.cached_input_rate_per_m),
       outputRatePerM: Number(row.output_rate_per_m),
       costUsd: Number(row.cost_usd),
       tokenSource: row.token_source as ReviewRunUsage['tokenSource'],

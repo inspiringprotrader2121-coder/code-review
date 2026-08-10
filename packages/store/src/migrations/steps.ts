@@ -1,5 +1,5 @@
 import type { SqliteConnection } from '../connection.js';
-import { STORE_MIGRATIONS } from './artifacts.js';
+import { REVIEW_USAGE_CACHE_PRICING_ARTIFACT, STORE_MIGRATIONS } from './artifacts.js';
 import { BASELINE_SCHEMA_V2 } from './baseline.js';
 
 export interface ExecutableMigrationArtifact {
@@ -233,6 +233,29 @@ function migrateReviewAttemptLineageIntegrity(db: SqliteConnection): void {
   db.exec(REVIEW_ATTEMPT_LINEAGE_SQL);
 }
 
+const REVIEW_USAGE_CACHE_PRICING_SQL = `
+CREATE TRIGGER IF NOT EXISTS trg_review_usage_cached_input_insert BEFORE INSERT ON review_run_usage
+WHEN NEW.cached_input_tokens < 0 OR NEW.cached_input_tokens > NEW.input_tokens
+  OR NEW.cached_input_rate_per_m < 0
+BEGIN SELECT RAISE(ABORT, 'review usage cached-input constraint violation'); END;
+CREATE TRIGGER IF NOT EXISTS trg_review_usage_cached_input_update BEFORE UPDATE OF cached_input_tokens, input_tokens, cached_input_rate_per_m ON review_run_usage
+WHEN NEW.cached_input_tokens < 0 OR NEW.cached_input_tokens > NEW.input_tokens
+  OR NEW.cached_input_rate_per_m < 0
+BEGIN SELECT RAISE(ABORT, 'review usage cached-input constraint violation'); END;`;
+
+function migrateReviewUsageCachePricingColumns(db: SqliteConnection): void {
+  const current = columns(db, 'review_run_usage');
+  if (!current.has('cached_input_tokens'))
+    db.exec(
+      `ALTER TABLE review_run_usage ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0`,
+    );
+  if (!current.has('cached_input_rate_per_m'))
+    db.exec(
+      `ALTER TABLE review_run_usage ADD COLUMN cached_input_rate_per_m REAL NOT NULL DEFAULT 0`,
+    );
+  db.exec(REVIEW_USAGE_CACHE_PRICING_SQL);
+}
+
 function migrateCanonicalMigrationArtifacts(db: SqliteConnection): void {
   if (!columns(db, 'orvex_schema_migrations').has('artifact_timestamp'))
     db.exec(`ALTER TABLE orvex_schema_migrations ADD COLUMN artifact_timestamp TEXT`);
@@ -361,6 +384,11 @@ export const STORE_MIGRATION_STEPS: readonly ExecutableMigrationStep[] = Object.
       version: 17,
       artifact: sql(REVIEW_PUBLICATION_RESOLUTION_AUDIT_SQL),
       apply: (db: SqliteConnection) => db.exec(REVIEW_PUBLICATION_RESOLUTION_AUDIT_SQL),
+    },
+    {
+      version: 18,
+      artifact: REVIEW_USAGE_CACHE_PRICING_ARTIFACT,
+      apply: migrateReviewUsageCachePricingColumns,
     },
   ].map((step) => Object.freeze(step)),
 );

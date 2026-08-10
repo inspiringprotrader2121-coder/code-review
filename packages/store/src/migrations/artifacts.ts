@@ -15,6 +15,15 @@ export interface ExecutableMigrationArtifact {
   readonly operations?: readonly string[];
 }
 
+export const REVIEW_USAGE_CACHE_PRICING_ARTIFACT: ExecutableMigrationArtifact = Object.freeze({
+  format: 'sqlite-program-v1',
+  operations: Object.freeze([
+    'add review_run_usage.cached_input_tokens with zero backfill',
+    'add review_run_usage.cached_input_rate_per_m with zero backfill',
+    'add review usage cached-input integrity triggers',
+  ]),
+});
+
 interface HistoricalMigrationArtifact {
   version: number;
   timestamp: string;
@@ -228,15 +237,21 @@ export function defineExecutableMigration(input: {
   });
 }
 
-export const STORE_MIGRATIONS: readonly StoreMigrationMetadata[] = Object.freeze(
-  historicalArtifacts.map((artifact) =>
+export const STORE_MIGRATIONS: readonly StoreMigrationMetadata[] = Object.freeze([
+  ...historicalArtifacts.map((artifact) =>
     Object.freeze({
       ...artifact,
       checksum: checksumHistoricalArtifact(artifact),
       legacyChecksums: Object.freeze([...(artifact.legacyChecksums ?? [])]),
     }),
   ),
-);
+  defineExecutableMigration({
+    version: 18,
+    timestamp: '2026-08-10T00:00:00.000Z',
+    name: 'review-usage-cache-pricing',
+    artifact: REVIEW_USAGE_CACHE_PRICING_ARTIFACT,
+  }),
+]);
 
 export interface MigrationLedgerRow {
   version: number;

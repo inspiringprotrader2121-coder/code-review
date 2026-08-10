@@ -397,7 +397,15 @@ test('usage accounting records provider lifecycle through its narrow store port'
     keyIndex: 0,
     startedAt: '2026-01-01T00:00:00.000Z',
   });
-  accounting.onUsageFor('standard', target, 'discovery')({ inputTokens: 3, outputTokens: 5 });
+  accounting.onUsageFor(
+    'standard',
+    target,
+    'discovery',
+  )({
+    inputTokens: 3,
+    cachedInputTokens: 0,
+    outputTokens: 5,
+  });
   accounting.onAttemptFor(
     'standard',
     'discovery',
@@ -410,7 +418,12 @@ test('usage accounting records provider lifecycle through its narrow store port'
   });
   assert.equal(attempts.length, 2);
   assert.equal(usage.length, 1);
-  assert.deepEqual(accounting.usage.openai, { in: 3, out: 5 });
+  assert.deepEqual(accounting.usage.openai, {
+    in: 3,
+    cachedIn: 0,
+    out: 5,
+    costUsd: 0.000033,
+  });
 });
 
 test('verification does not call a provider when the feature is disabled', async () => {

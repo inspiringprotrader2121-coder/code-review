@@ -66,6 +66,7 @@ export interface LlmReviewOptions {
   /** token-usage callback for cost tracking (per model call) */
   onUsage?: (usage: {
     inputTokens: number;
+    cachedInputTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     provider?: string;

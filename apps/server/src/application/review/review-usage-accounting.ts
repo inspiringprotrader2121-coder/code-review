@@ -15,8 +15,10 @@ export interface ReviewAttemptStore {
     tier: PassTier;
     passName: string;
     inputTokens: number;
+    cachedInputTokens: number;
     outputTokens: number;
     inputRatePerM: number;
+    cachedInputRatePerM: number;
     outputRatePerM: number;
     costUsd: number;
     tokenSource: 'provider' | 'estimate';
@@ -61,6 +63,7 @@ export interface ReviewUsageAccounting {
     passName: string,
   ): (usage: {
     inputTokens: number;
+    cachedInputTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     model?: string;
@@ -75,16 +78,17 @@ export function createReviewUsageAccounting(
   dependencies: ReviewUsageAccountingDependencies,
 ): ReviewUsageAccounting {
   const usage: TierUsage = {
-    standard: { in: 0, out: 0 },
-    premium: { in: 0, out: 0 },
-    openai: { in: 0, out: 0 },
-    deepseek: { in: 0, out: 0 },
-    'deepseek-flash': { in: 0, out: 0 },
+    standard: { in: 0, cachedIn: 0, out: 0, costUsd: 0 },
+    premium: { in: 0, cachedIn: 0, out: 0, costUsd: 0 },
+    openai: { in: 0, cachedIn: 0, out: 0, costUsd: 0 },
+    deepseek: { in: 0, cachedIn: 0, out: 0, costUsd: 0 },
+    'deepseek-flash': { in: 0, cachedIn: 0, out: 0, costUsd: 0 },
   };
   const onUsageFor =
     (tier: PassTier, target: LlmTarget, passName: string) =>
     (reported: {
       inputTokens: number;
+      cachedInputTokens?: number;
       outputTokens: number;
       tokenSource?: 'provider' | 'estimate';
       model?: string;
@@ -93,7 +97,9 @@ export function createReviewUsageAccounting(
     }) => {
       const accounted = accountUsage(tier, target, passName, reported, dependencies.policy);
       usage[accounted.tier].in += accounted.inputTokens;
+      usage[accounted.tier].cachedIn += accounted.cachedInputTokens;
       usage[accounted.tier].out += accounted.outputTokens;
+      usage[accounted.tier].costUsd += accounted.costUsd;
       if (!dependencies.runId) return;
       const recorded = dependencies.store.recordReviewRunUsage({
         runId: dependencies.runId,
@@ -103,8 +109,10 @@ export function createReviewUsageAccounting(
         tier: accounted.tier,
         passName,
         inputTokens: accounted.inputTokens,
+        cachedInputTokens: accounted.cachedInputTokens,
         outputTokens: accounted.outputTokens,
         inputRatePerM: accounted.inputRatePerM,
+        cachedInputRatePerM: accounted.cachedInputRatePerM,
         outputRatePerM: accounted.outputRatePerM,
         costUsd: accounted.costUsd,
         tokenSource:

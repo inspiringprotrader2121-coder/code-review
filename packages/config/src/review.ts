@@ -101,11 +101,14 @@ export interface ReviewRuntimeConfig {
     cogsReservationUsd: number;
   }>;
   readonly pricing: Readonly<{
-    premium: Readonly<{ input: number; output: number }>;
-    standard: Readonly<{ input: number; output: number }>;
-    openai: Readonly<{ input: number; output: number }>;
-    deepseek: Readonly<{ input: number; output: number }>;
-    deepseekFlash: Readonly<{ input: number; output: number }>;
+    premium: Readonly<{ input: number; cachedInput: number; output: number }>;
+    standard: Readonly<{ input: number; cachedInput: number; output: number }>;
+    openai: Readonly<{ input: number; cachedInput: number; output: number }>;
+    deepseek: Readonly<{ input: number; cachedInput: number; output: number }>;
+    deepseekFlash: Readonly<{ input: number; cachedInput: number; output: number }>;
+    modelRates: Readonly<
+      Record<string, Readonly<{ input: number; cachedInput: number; output: number }>>
+    >;
   }>;
   readonly preparation: Readonly<{
     deepContextEnabled: boolean;
@@ -385,23 +388,52 @@ export function loadReviewRuntimeConfig(
     pricing: Object.freeze({
       premium: Object.freeze({
         input: positiveNumber(env.ORVEX_COST_INPUT_PER_M, 1.4),
+        cachedInput: positiveNumber(env.ORVEX_COST_CACHED_INPUT_PER_M, 1.4),
         output: positiveNumber(env.ORVEX_COST_OUTPUT_PER_M, 4.4),
       }),
       standard: Object.freeze({
         input: positiveNumber(env.ORVEX_STANDARD_COST_INPUT_PER_M, 0.3),
+        cachedInput: positiveNumber(env.ORVEX_STANDARD_CACHED_INPUT_COST_PER_M, 0.06),
         output: positiveNumber(env.ORVEX_STANDARD_COST_OUTPUT_PER_M, 1.2),
       }),
       openai: Object.freeze({
         input: positiveNumber(env.ORVEX_OPENAI_COST_INPUT_PER_M, 0.2),
+        cachedInput: positiveNumber(env.ORVEX_OPENAI_CACHED_INPUT_COST_PER_M, 0.02),
         output: positiveNumber(env.ORVEX_OPENAI_COST_OUTPUT_PER_M, 1.2),
       }),
       deepseek: Object.freeze({
         input: positiveNumber(env.ORVEX_DEEPSEEK_COST_INPUT_PER_M, 0.435),
+        cachedInput: positiveNumber(env.ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M, 0.003625),
         output: positiveNumber(env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M, 0.87),
       }),
       deepseekFlash: Object.freeze({
         input: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M, 0.14),
+        cachedInput: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M, 0.0028),
         output: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M, 0.28),
+      }),
+      // The contracted public reviewer models retain their own rates so a
+      // legacy generic OpenAI variable cannot silently understate Luna spend.
+      modelRates: Object.freeze({
+        'gpt-5.6-luna': Object.freeze({
+          input: positiveNumber(env.ORVEX_LUNA_COST_INPUT_PER_M, 1),
+          cachedInput: positiveNumber(env.ORVEX_LUNA_CACHED_INPUT_COST_PER_M, 0.1),
+          output: positiveNumber(env.ORVEX_LUNA_COST_OUTPUT_PER_M, 6),
+        }),
+        'deepseek-v4-pro': Object.freeze({
+          input: positiveNumber(env.ORVEX_DEEPSEEK_COST_INPUT_PER_M, 0.435),
+          cachedInput: positiveNumber(env.ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M, 0.003625),
+          output: positiveNumber(env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M, 0.87),
+        }),
+        'deepseek-v4-flash': Object.freeze({
+          input: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M, 0.14),
+          cachedInput: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M, 0.0028),
+          output: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M, 0.28),
+        }),
+        'minimax-m3': Object.freeze({
+          input: positiveNumber(env.ORVEX_STANDARD_COST_INPUT_PER_M, 0.3),
+          cachedInput: positiveNumber(env.ORVEX_STANDARD_CACHED_INPUT_COST_PER_M, 0.06),
+          output: positiveNumber(env.ORVEX_STANDARD_COST_OUTPUT_PER_M, 1.2),
+        }),
       }),
     }),
     preparation: Object.freeze({

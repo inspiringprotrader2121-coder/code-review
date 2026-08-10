@@ -32,6 +32,7 @@ export interface LlmClientOptions {
   signal?: AbortSignal;
   onUsage?: (usage: {
     inputTokens: number;
+    cachedInputTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     provider?: string;

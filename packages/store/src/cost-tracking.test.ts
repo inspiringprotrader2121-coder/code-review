@@ -136,10 +136,12 @@ test('persists per-model usage and builds operator profitability analytics', () 
     tier: 'deepseek-flash',
     passName: 'verification',
     inputTokens: 1_000_000,
+    cachedInputTokens: 500_000,
     outputTokens: 100_000,
     inputRatePerM: 0.14,
+    cachedInputRatePerM: 0.0028,
     outputRatePerM: 0.28,
-    costUsd: 0.168,
+    costUsd: 0.0994,
     tokenSource: 'provider',
     attemptId: 'attempt-1',
   });
@@ -178,7 +180,7 @@ test('persists per-model usage and builds operator profitability analytics', () 
     { verify: 9900 },
   );
   assert.equal(analytics.overview.instrumentedRuns, 1);
-  assert.ok(Math.abs(analytics.overview.costUsd - 0.168) < 1e-9);
+  assert.ok(Math.abs(analytics.overview.costUsd - 0.0994) < 1e-9);
   assert.ok(Math.abs(analytics.overview.actualRevenueUsd - 99) < 1e-9);
   assert.equal(analytics.byModel[0]?.model, 'deepseek-v4-flash');
   assert.equal(analytics.byTenant[0]?.plan, 'verify');
@@ -186,6 +188,8 @@ test('persists per-model usage and builds operator profitability analytics', () 
   assert.equal(analytics.overview.monthlyFixedCostUsd, 10);
   assert.equal(analytics.platformCosts[0]?.category, 'server');
   assert.equal(analytics.recentRuns[0]?.usage.length, 1);
+  assert.equal(analytics.recentRuns[0]?.usage[0]?.cachedInputTokens, 500_000);
+  assert.equal(analytics.recentRuns[0]?.usage[0]?.cachedInputRatePerM, 0.0028);
 });
 
 test('usage ledger rejects unknown runs and cross-tenant attribution', () => {

@@ -70,6 +70,25 @@ function chatStream(text: string): ReadableStream<Uint8Array> {
   });
 }
 
+function chatStreamWithUsage(
+  text: string,
+  usage: { prompt_tokens: number; prompt_cache_hit_tokens: number; completion_tokens: number },
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const events = [
+    JSON.stringify({ choices: [{ delta: { content: text } }] }),
+    JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+    JSON.stringify({ choices: [], usage }),
+  ];
+  return new ReadableStream({
+    start(controller) {
+      for (const event of events) controller.enqueue(encoder.encode(`data: ${event}\n\n`));
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+}
+
 async function withStubbedFetch(
   stream: (url: string) => ReadableStream<Uint8Array>,
   run: () => Promise<void>,
@@ -135,6 +154,53 @@ test('the OpenAI-compatible chat API still honours an explicit sample temperatur
 
   assert.equal(captured.length, 1);
   assert.equal(captured[0].body.temperature, 0.2);
+  assert.equal('stream_options' in captured[0].body, false);
+});
+
+test('DeepSeek streaming usage reports cache reads at provider precision', async () => {
+  let usage:
+    | {
+        inputTokens: number;
+        cachedInputTokens?: number;
+        outputTokens: number;
+        tokenSource?: string;
+        provider?: string;
+        model?: string;
+        attemptId?: string;
+      }
+    | undefined;
+  const captured = await withStubbedFetch(
+    () =>
+      chatStreamWithUsage('{"findings":[]}', {
+        prompt_tokens: 100,
+        prompt_cache_hit_tokens: 70,
+        completion_tokens: 50,
+      }),
+    async () => {
+      await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.com/v1',
+        api: 'chat',
+        thinking: false,
+        onUsage: (event) => {
+          usage = event;
+        },
+      });
+    },
+  );
+
+  assert.deepEqual(captured[0]?.body.stream_options, { include_usage: true });
+  assert.match(usage?.attemptId ?? '', /^[0-9a-f-]{36}$/i);
+  const { attemptId: _attemptId, ...reportedUsage } = usage!;
+  assert.deepEqual(reportedUsage, {
+    inputTokens: 100,
+    cachedInputTokens: 70,
+    outputTokens: 50,
+    tokenSource: 'provider',
+    provider: 'api.deepseek.com',
+    model: 'deepseek-v4-flash',
+  });
 });
 
 test('an explicit max reasoning effort is never downgraded on a retry-style call', async () => {

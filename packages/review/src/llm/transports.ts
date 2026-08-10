@@ -259,6 +259,7 @@ export async function anthropicChat(
   if (response.usage)
     opts.onUsage?.({
       inputTokens: response.usage.input_tokens,
+      cachedInputTokens: response.usage.cache_read_input_tokens ?? 0,
       outputTokens: response.usage.output_tokens,
       tokenSource: 'provider',
       provider: providerName(opts.baseUrl, opts.api),
@@ -310,6 +311,7 @@ export async function openAiResponsesStreamChat(
   let content = '';
   let reasoningTokens = 0;
   let inTok = 0;
+  let cachedInTok = 0;
   let outTok = 0;
   let failed: string | undefined;
   let incomplete: string | undefined;
@@ -338,6 +340,7 @@ export async function openAiResponsesStreamChat(
             error?: { message?: string };
             usage?: {
               input_tokens?: number;
+              input_tokens_details?: { cached_tokens?: number };
               output_tokens?: number;
               output_tokens_details?: { reasoning_tokens?: number };
             };
@@ -350,6 +353,7 @@ export async function openAiResponsesStreamChat(
           const usage = event.response?.usage;
           if (usage) {
             inTok = usage.input_tokens ?? 0;
+            cachedInTok = usage.input_tokens_details?.cached_tokens ?? 0;
             outTok = usage.output_tokens ?? 0;
             reasoningTokens = usage.output_tokens_details?.reasoning_tokens ?? 0;
           }
@@ -367,6 +371,7 @@ export async function openAiResponsesStreamChat(
   );
   opts.onUsage?.({
     inputTokens: inTok || estimateTokens(system.length + user.length),
+    cachedInputTokens: inTok ? Math.min(inTok, cachedInTok) : 0,
     outputTokens: outTok || estimateTokens(content.length),
     tokenSource: inTok && outTok ? 'provider' : 'estimate',
     provider: providerName(opts.baseUrl, opts.api),
@@ -392,6 +397,9 @@ export async function openAiCompatStreamChat(
   let content = '';
   let reasoningChars = 0;
   let finishReason: string | undefined;
+  let providerUsage:
+    | { inputTokens: number; cachedInputTokens: number; outputTokens: number }
+    | undefined;
   const startedAt = clock.now();
   await openStream(
     `${opts.baseUrl!.replace(/\/$/, '')}/chat/completions`,
@@ -400,6 +408,9 @@ export async function openAiCompatStreamChat(
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       max_tokens: resolveMaxOutputTokens(opts.maxTokens),
       stream: true,
+      ...(supportsCompatibleUsageStream(opts.baseUrl)
+        ? { stream_options: { include_usage: true } }
+        : {}),
       ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
       ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
       chat_template_kwargs: { thinking_mode: thinkingEnabled(opts) ? 'enabled' : 'disabled' },
@@ -424,7 +435,28 @@ export async function openAiCompatStreamChat(
               reasoning?: string | null;
             };
           }>;
+          usage?: {
+            prompt_tokens?: number;
+            prompt_cache_hit_tokens?: number;
+            completion_tokens?: number;
+          } | null;
         };
+        const usage = chunk.usage;
+        if (
+          usage &&
+          Number.isFinite(usage.prompt_tokens) &&
+          Number.isFinite(usage.completion_tokens)
+        ) {
+          const inputTokens = Math.max(0, usage.prompt_tokens ?? 0);
+          providerUsage = {
+            inputTokens,
+            cachedInputTokens: Math.min(
+              inputTokens,
+              Math.max(0, usage.prompt_cache_hit_tokens ?? 0),
+            ),
+            outputTokens: Math.max(0, usage.completion_tokens ?? 0),
+          };
+        }
         const choice = chunk.choices?.[0];
         if (choice?.delta?.content) content += choice.delta.content;
         if (choice?.delta?.reasoning_content)
@@ -447,18 +479,36 @@ export async function openAiCompatStreamChat(
   console.log(
     `[llm] model=${opts.model} thinking=${thinkingEnabled(opts) ? 'on' : 'off'} reasoning=${totalReasoning}c answer=${answerChars}c ${Math.round((clock.now() - startedAt) / 1000)}s finish=${finishReason ?? 'stop'}`,
   );
-  opts.onUsage?.({
-    inputTokens: estimateTokens(system.length + user.length),
-    outputTokens: estimateTokens(totalReasoning + answerChars),
-    tokenSource: 'estimate',
-    provider: providerName(opts.baseUrl, opts.api),
-    model: opts.model,
-  });
+  opts.onUsage?.(
+    providerUsage
+      ? {
+          ...providerUsage,
+          tokenSource: 'provider',
+          provider: providerName(opts.baseUrl, opts.api),
+          model: opts.model,
+        }
+      : {
+          inputTokens: estimateTokens(system.length + user.length),
+          cachedInputTokens: 0,
+          outputTokens: estimateTokens(totalReasoning + answerChars),
+          tokenSource: 'estimate',
+          provider: providerName(opts.baseUrl, opts.api),
+          model: opts.model,
+        },
+  );
   const text = stripThinking(content);
   if (finishReason === 'length')
     throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
   if (!text) throw new Error('LLM returned no text content');
   return text;
+}
+
+function supportsCompatibleUsageStream(baseUrl: string | undefined): boolean {
+  try {
+    return new URL(baseUrl ?? '').hostname.toLowerCase() === 'api.deepseek.com';
+  } catch {
+    return false;
+  }
 }
 
 export async function llmChatSingle(

@@ -195,8 +195,10 @@ export interface ReviewRunUsage {
   tier: string;
   passName?: string;
   inputTokens: number;
+  cachedInputTokens: number;
   outputTokens: number;
   inputRatePerM: number;
+  cachedInputRatePerM: number;
   outputRatePerM: number;
   costUsd: number;
   tokenSource: UsageTokenSource;

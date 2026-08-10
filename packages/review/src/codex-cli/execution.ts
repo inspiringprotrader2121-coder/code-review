@@ -25,7 +25,15 @@ import {
 const MAX_STDOUT_CHARS = 8_000_000;
 const MAX_STDERR_CHARS = 256_000;
 const MAX_USAGE_TOTALS = 10_000;
-const usageTotals = new Map<string, { input: number; output: number; reasoning: number }>();
+const usageTotals = new Map<
+  string,
+  {
+    input: number;
+    cachedInput: number;
+    output: number;
+    reasoning: number;
+  }
+>();
 const liveChildren = new Set<number>();
 let childListener: CodexChildListener = {};
 
@@ -55,6 +63,7 @@ export type CodexExecutionOptions = {
   homeIdx?: number;
   onUsage?: (usage: {
     inputTokens: number;
+    cachedInputTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     model?: string;
@@ -306,6 +315,7 @@ function reportUsageFloor(options: CodexExecutionOptions): void {
   const runtime = loadReviewRuntimeConfig();
   options.onUsage?.({
     inputTokens: runtime.codexUsageFloorInput,
+    cachedInputTokens: 0,
     outputTokens: runtime.codexUsageFloorOutput,
     tokenSource: 'estimate',
     model: options.model,
@@ -315,7 +325,7 @@ function reportUsageFloor(options: CodexExecutionOptions): void {
 
 function reportUsage(
   options: CodexExecutionOptions,
-  usage?: { input?: number; output?: number; reasoning?: number },
+  usage?: { input?: number; cachedInput?: number; output?: number; reasoning?: number },
   threadId?: string,
   tempDir?: string,
 ): void {
@@ -323,6 +333,7 @@ function reportUsage(
   if (!tempDir) {
     options.onUsage?.({
       inputTokens: usage.input ?? 0,
+      cachedInputTokens: usage.cachedInput ?? 0,
       outputTokens: usage.output ?? 0,
       tokenSource: 'provider',
       model: options.model,
@@ -333,6 +344,7 @@ function reportUsage(
   const key = `${options.homeIdx ?? 0}:${options.threadId ?? tempDir ?? threadId ?? 'container'}:${options.model}`;
   const total = {
     input: usage.input ?? 0,
+    cachedInput: usage.cachedInput ?? 0,
     output: usage.output ?? 0,
     reasoning: usage.reasoning ?? 0,
   };
@@ -340,6 +352,10 @@ function reportUsage(
   const delta = { ...total };
   if (previous && total.input >= previous.input && total.output >= previous.output) {
     delta.input -= previous.input;
+    delta.cachedInput =
+      total.cachedInput >= previous.cachedInput
+        ? total.cachedInput - previous.cachedInput
+        : total.cachedInput;
     delta.output -= previous.output;
     delta.reasoning =
       total.reasoning >= previous.reasoning
@@ -356,6 +372,7 @@ function reportUsage(
   }
   options.onUsage?.({
     inputTokens: delta.input,
+    cachedInputTokens: delta.cachedInput,
     outputTokens: delta.output,
     tokenSource: 'provider',
     model: options.model,

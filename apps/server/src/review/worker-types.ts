@@ -60,7 +60,13 @@ export interface WorkerConfig {
       minimaxMaxOutputTokens: number;
     }>;
     accountLimits: Readonly<{ freeTierDailyCap: number; cogsReservationUsd: number }>;
-    usageCosts: Readonly<Record<PassTier, Readonly<{ input: number; output: number }>>>;
+    usageCosts: Readonly<
+      Record<PassTier, Readonly<{ input: number; cachedInput?: number; output: number }>> & {
+        modelRates?: Readonly<
+          Record<string, Readonly<{ input: number; cachedInput?: number; output: number }>>
+        >;
+      }
+    >;
     preparation: Readonly<{
       deepContextEnabled: boolean;
       contextSourceFiles: number;

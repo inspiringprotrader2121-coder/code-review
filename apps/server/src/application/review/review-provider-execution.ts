@@ -51,6 +51,7 @@ export interface ReviewProviderExecutionInput {
     passName: string,
   ) => (usage: {
     inputTokens: number;
+    cachedInputTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     model?: string;

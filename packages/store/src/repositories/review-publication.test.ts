@@ -246,7 +246,7 @@ test('a v16 database gains operator resolution audit without losing an in-progre
       }
     ).db;
     raw.exec('DROP TABLE review_publication_resolutions');
-    raw.prepare('DELETE FROM orvex_schema_migrations WHERE version = 17').run();
+    raw.prepare('DELETE FROM orvex_schema_migrations WHERE version >= 17').run();
     current.close();
 
     const upgraded = new AppDatabase(dbPath, 'worker-b');

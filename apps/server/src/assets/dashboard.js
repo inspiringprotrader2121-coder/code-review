@@ -77,7 +77,7 @@ const dur = (ms) => {
     ? sec + 's'
     : Math.floor(sec / 60) + 'm ' + String(sec % 60).padStart(2, '0') + 's';
 };
-const usd = (n) => (n == null ? '—' : '$' + finiteNumber(n).toFixed(2));
+const estimatedUsd = (n) => (n == null ? '—' : '~$' + finiteNumber(n).toFixed(2));
 const repoShort = (fn) => String(fn || '').split('/');
 
 // —— theme toggle (persisted) ——
@@ -392,8 +392,8 @@ async function tiles(o) {
     tileList.push(
       t(
         '<svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.2A2.4 2 0 0 1 12 8c1.5 0 2.3.8 2.3 1.7s-.8 1.6-2.3 1.9-2.3 1-2.3 1.9.9 1.7 2.3 1.7a2.4 2 0 0 0 2.5-1.2"/></svg>',
-        'LLM cost · 14d',
-        '<small>$</small><span class="num">' + Number(s.costUsd || 0).toFixed(2) + '</span>',
+        'Est. LLM cost · 14d',
+        '<small>~$</small><span class="num">' + Number(s.costUsd || 0).toFixed(2) + '</span>',
         '<div class="spark">' +
           spark(
             days.map((d) => d.cost),
@@ -778,7 +778,11 @@ async function loadReviews() {
               '</td><td>' +
               runChip(r.status, runReason(r)) +
               '</td>' +
-              (SHOW_LLM_COST ? '<td class="r mono">' + usd(r.costUsd) + '</td>' : '') +
+              (SHOW_LLM_COST
+                ? '<td class="r mono" title="Estimated provider cost; the invoice can differ when a provider omits usage.">' +
+                  estimatedUsd(r.costUsd) +
+                  '</td>'
+                : '') +
               '<td class="r mono">' +
               (r.status === 'running' ? '…' : dur(r.durationMs)) +
               '</td><td class="r mono">' +

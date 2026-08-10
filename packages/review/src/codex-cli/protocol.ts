@@ -46,17 +46,33 @@ export function extractThreadId(stdout: string): string {
   return '';
 }
 
-export type CodexUsage = { input?: number; output?: number; reasoning?: number };
+export type CodexUsage = {
+  input?: number;
+  cachedInput?: number;
+  output?: number;
+  reasoning?: number;
+};
 export function extractUsage(stdout: string): CodexUsage | undefined {
   for (const line of stdout.split('\n')) {
     try {
       const event = JSON.parse(line) as {
         type?: string;
-        usage?: { input_tokens?: number; output_tokens?: number; reasoning_output_tokens?: number };
+        usage?: {
+          input_tokens?: number;
+          cached_input_tokens?: number;
+          output_tokens?: number;
+          reasoning_output_tokens?: number;
+          input_tokens_details?: { cached_tokens?: number };
+          prompt_tokens_details?: { cached_tokens?: number };
+        };
       };
       if (event.type === 'turn.completed' && event.usage) {
         return {
           input: event.usage.input_tokens,
+          cachedInput:
+            event.usage.cached_input_tokens ??
+            event.usage.input_tokens_details?.cached_tokens ??
+            event.usage.prompt_tokens_details?.cached_tokens,
           output: event.usage.output_tokens,
           reasoning: event.usage.reasoning_output_tokens,
         };

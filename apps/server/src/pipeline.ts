@@ -122,11 +122,17 @@ function runtimeFor(config: WorkerConfig): NonNullable<WorkerConfig['reviewRunti
       routingPolicy: DEFAULT_REVIEW_ROUTING_POLICY,
       accountLimits: Object.freeze({ freeTierDailyCap: 300, cogsReservationUsd: 5 }),
       usageCosts: Object.freeze({
-        premium: Object.freeze({ input: 1.4, output: 4.4 }),
-        standard: Object.freeze({ input: 0.3, output: 1.2 }),
-        openai: Object.freeze({ input: 0.2, output: 1.2 }),
-        deepseek: Object.freeze({ input: 0.435, output: 0.87 }),
-        'deepseek-flash': Object.freeze({ input: 0.14, output: 0.28 }),
+        premium: Object.freeze({ input: 1.4, cachedInput: 1.4, output: 4.4 }),
+        standard: Object.freeze({ input: 0.3, cachedInput: 0.06, output: 1.2 }),
+        openai: Object.freeze({ input: 1, cachedInput: 0.1, output: 6 }),
+        deepseek: Object.freeze({ input: 0.435, cachedInput: 0.003625, output: 0.87 }),
+        'deepseek-flash': Object.freeze({ input: 0.14, cachedInput: 0.0028, output: 0.28 }),
+        modelRates: Object.freeze({
+          'gpt-5.6-luna': Object.freeze({ input: 1, cachedInput: 0.1, output: 6 }),
+          'deepseek-v4-pro': Object.freeze({ input: 0.435, cachedInput: 0.003625, output: 0.87 }),
+          'deepseek-v4-flash': Object.freeze({ input: 0.14, cachedInput: 0.0028, output: 0.28 }),
+          'minimax-m3': Object.freeze({ input: 0.3, cachedInput: 0.06, output: 1.2 }),
+        }),
       }),
       preparation: Object.freeze({
         deepContextEnabled: true,

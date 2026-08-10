@@ -29,6 +29,7 @@ export async function orchestrateVerification(input: {
   findings: Pick<FindingPipeline, 'applyVerification'>;
   onUsage: (usage: {
     inputTokens: number;
+    cachedInputTokens?: number;
     outputTokens: number;
     tokenSource?: 'provider' | 'estimate';
     model?: string;

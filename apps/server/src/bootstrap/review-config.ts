@@ -163,6 +163,7 @@ export function createWorkerConfig(config: ServerConfig, store: AppDatabase): Wo
         openai: runtime.pricing.openai,
         deepseek: runtime.pricing.deepseek,
         'deepseek-flash': runtime.pricing.deepseekFlash,
+        modelRates: runtime.pricing.modelRates,
       }),
       preparation: Object.freeze({
         ...runtime.preparation,
