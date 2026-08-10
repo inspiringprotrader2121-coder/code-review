@@ -1967,9 +1967,9 @@
         },
         {
           "name": "ORVEX_CODEX_TIMEOUT_MS",
-          "example": "300000",
+          "example": "480000",
           "type": "integer",
-          "range": "60000..300000 ms; default 300000",
+          "range": "60000..480000 ms; default 480000",
           "secret": false,
           "redaction": "none",
           "description": "Wall-clock cap for one agentic pass.",
@@ -1977,9 +1977,9 @@
         },
         {
           "name": "ORVEX_CODEX_INACTIVITY_TIMEOUT_MS",
-          "example": "180000",
+          "example": "300000",
           "type": "integer",
-          "range": "30000..ORVEX_CODEX_TIMEOUT_MS; default 180000",
+          "range": "30000..ORVEX_CODEX_TIMEOUT_MS; default 300000",
           "secret": false,
           "redaction": "none",
           "description": "Stdout/stderr silence cap for one agentic pass.",
