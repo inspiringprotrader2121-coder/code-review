@@ -11,6 +11,7 @@ ENV_FILE="/home/orvex/code-review/.env"
 MODE="dry-run"
 UPDATE_PINNED_IMAGE=0
 IMAGE_TAG="orvex-agentic-egress:local"
+ROLLBACK_IMAGE_TAG="${IMAGE_TAG}-rollback"
 INTERNAL_NETWORK="orvex-agentic-internal"
 EGRESS_NETWORK="orvex-agentic-egress"
 BROKER_NAME="orvex-openai-egress"
@@ -142,6 +143,24 @@ rewrite_broker_image_pin() {
   PIN_RELOCK_ENV=0
 }
 
+resolve_rollback_image() {
+  local current image running rollback
+  if as_service_user docker image inspect "$CONFIGURED_IMAGE" >/dev/null 2>&1; then
+    printf '%s' "$CONFIGURED_IMAGE"
+    return
+  fi
+  current=$(as_service_user docker inspect --format '{{.Image}} {{.State.Running}}' "$BROKER_NAME" 2>/dev/null || true)
+  IFS=' ' read -r image running <<<"$current"
+  [[ $image == "$CONFIGURED_IMAGE" && $running == true ]] ||
+    fail 'previous configured broker image is unavailable and no matching running broker can be snapshotted'
+  as_service_user docker commit --pause=false "$BROKER_NAME" "$ROLLBACK_IMAGE_TAG" >/dev/null ||
+    fail 'could not snapshot the running broker for rollback'
+  rollback=$(as_service_user docker image inspect --format '{{.Id}}' "$ROLLBACK_IMAGE_TAG")
+  [[ $rollback =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'rollback broker snapshot did not return an immutable image ID'
+  log 'configured broker image was unavailable; created a local rollback snapshot of the running broker' >&2
+  printf '%s' "$rollback"
+}
+
 check_network() {
   local network=$1 expected_internal=$2
   local actual
@@ -248,9 +267,10 @@ IMAGE_ID=$(as_service_user docker image inspect --format '{{.Id}}' "$IMAGE_TAG")
 as_service_user mkdir -p "$STATE_DIR"
 as_service_user chmod 0700 "$STATE_DIR"
 PIN_UPDATED=0
+ROLLBACK_IMAGE="$CONFIGURED_IMAGE"
 if [[ $CONFIGURED_IMAGE != "$IMAGE_ID" ]]; then
   ((UPDATE_PINNED_IMAGE)) || fail "ORVEX_CODEX_EGRESS_BROKER_IMAGE does not equal the built broker image ID ($IMAGE_ID); update immutable configuration through the approved operator process before retrying"
-  as_service_user docker image inspect "$CONFIGURED_IMAGE" >/dev/null 2>&1 || fail 'previous configured broker image is unavailable for rollback'
+  ROLLBACK_IMAGE=$(resolve_rollback_image)
   rewrite_broker_image_pin "$IMAGE_ID"
   PIN_UPDATED=1
 fi
@@ -263,8 +283,8 @@ prepare_signing_key
 if ! start_broker "$IMAGE_ID"; then
   if ((PIN_UPDATED)); then
     log 'new broker failed its private health check; restoring the previous pinned broker'
-    rewrite_broker_image_pin "$CONFIGURED_IMAGE"
-    start_broker "$CONFIGURED_IMAGE" || fail 'new broker failed and the previous broker could not be restored'
+    rewrite_broker_image_pin "$ROLLBACK_IMAGE"
+    start_broker "$ROLLBACK_IMAGE" || fail 'new broker failed and the previous broker could not be restored'
   fi
   fail 'broker failed its private health check; inspect rootless Docker logs without printing environment data'
 fi

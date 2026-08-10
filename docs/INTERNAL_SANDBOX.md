@@ -91,7 +91,9 @@ sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --apply
 # A broker source update builds a new local image. During a guarded deployment
 # while the review worker is drained, this root-only option atomically changes
 # only ORVEX_CODEX_EGRESS_BROKER_IMAGE, restores the immutable file flag, and
-# restores the previous pin and broker if the new broker is unhealthy.
+# restores the previous functioning broker if the new broker is unhealthy. If
+# Docker has already removed the old image record, it creates a local snapshot
+# of the currently running read-only broker and pins that snapshot for rollback.
 sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --apply --update-pinned-image
 ```
 
