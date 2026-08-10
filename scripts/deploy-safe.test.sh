@@ -211,15 +211,17 @@ fi
 node <<'NODE'
 const config = require('./ecosystem.config.cjs');
 const args = config.apps?.find((app) => app.name === 'velatrix-review')?.args ?? '';
-for (const variable of [
-  'ORVEX_MAX_CONCURRENT_REVIEWS',
-  'ORVEX_CODEX_APIKEY_CONCURRENCY',
-  'ORVEX_PROVIDER_CONCURRENCY_LUNA',
-  'ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK',
-  'ORVEX_PROVIDER_CONCURRENCY_MINIMAX',
-]) {
-  if (!args.includes(`${variable}=8`)) {
-    throw new Error(`production profile does not pin ${variable}=8`);
+for (const [variable, expected] of Object.entries({
+  ORVEX_MAX_CONCURRENT_REVIEWS: 8,
+  ORVEX_CODEX_APIKEY_CONCURRENCY: 8,
+  ORVEX_PROVIDER_CONCURRENCY_LUNA: 8,
+  ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 24,
+  ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 8,
+  ORVEX_VERIFY_CONCURRENCY: 1,
+  ORVEX_MAX_SANDBOXES: 8,
+})) {
+  if (!args.includes(`${variable}=${expected}`)) {
+    throw new Error(`production profile does not pin ${variable}=${expected}`);
   }
 }
 if (args.indexOf('. ./.env') > args.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8')) {
