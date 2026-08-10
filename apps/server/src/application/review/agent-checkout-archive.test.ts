@@ -46,6 +46,17 @@ function archive(entries: readonly ArchiveEntry[]): Buffer {
   return gzipSync(Buffer.concat(blocks));
 }
 
+function paxRecord(key: string, value: string): string {
+  const body = ` ${key}=${value}\n`;
+  let length = Buffer.byteLength(body) + 1;
+  for (;;) {
+    const record = `${length}${body}`;
+    const actual = Buffer.byteLength(record);
+    if (actual === length) return record;
+    length = actual;
+  }
+}
+
 async function withCheckout(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'orvex-checkout-archive-test-'));
   await fs.chmod(dir, 0o700);
@@ -79,6 +90,51 @@ test('extracts only bounded regular files and reserves Orvex control paths', asy
     assert.equal((await fs.lstat(path.join(dir, '.orvex-agentic'))).isDirectory(), true);
     assert.match(await fs.readFile(path.join(dir, '.codexignore'), 'utf8'), /node_modules/);
   });
+});
+
+test('accepts bounded GitHub-style global PAX metadata without applying it as a path', async () => {
+  await withCheckout(async (dir) => {
+    await extractAgentCheckoutArchive(
+      archive([
+        {
+          name: 'pax_global_header',
+          type: 'g',
+          contents: paxRecord('comment', 'b58821e803e2baf73b05a091ecf87acfc6ea012d'),
+        },
+        { name: 'owner-repo-sha/', type: '5' },
+        { name: 'owner-repo-sha/src/index.ts', contents: 'export const ok = true;\n' },
+      ]),
+      dir,
+      limits(),
+    );
+
+    assert.equal(
+      await fs.readFile(path.join(dir, 'src/index.ts'), 'utf8'),
+      'export const ok = true;\n',
+    );
+  });
+});
+
+test('rejects semantic PAX overrides that the bounded extractor does not implement', async () => {
+  for (const [type, metadata] of [
+    ['g', paxRecord('path', 'owner-repo-sha/escape.ts')],
+    ['x', paxRecord('size', '999999999')],
+    ['x', paxRecord('linkpath', '../../escape')],
+  ] as const) {
+    await withCheckout(async (dir) => {
+      await assert.rejects(
+        extractAgentCheckoutArchive(
+          archive([
+            { name: 'pax_header', type, contents: metadata },
+            { name: 'owner-repo-sha/file.ts', contents: 'safe' },
+          ]),
+          dir,
+          limits(),
+        ),
+        /unsupported PAX|global PAX path override/,
+      );
+    });
+  }
 });
 
 test('rejects symlink, hardlink, and special archive entries before they reach the checkout', async () => {

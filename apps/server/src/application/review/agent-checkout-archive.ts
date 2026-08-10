@@ -38,7 +38,7 @@ interface TarHeader {
 
 interface ActiveEntry {
   readonly kind: 'file' | 'metadata';
-  readonly type: 'pax' | 'long-name' | null;
+  readonly type: 'pax' | 'pax-global' | 'long-name' | null;
   readonly size: number;
   remaining: number;
   padding: number;
@@ -89,7 +89,7 @@ function archivePathSegments(value: string): string[] {
   return segments;
 }
 
-function parsePaxPath(contents: Buffer): string | undefined {
+function parsePaxPath(contents: Buffer, scope: 'entry' | 'global'): string | undefined {
   let offset = 0;
   let resolved: string | undefined;
   while (offset < contents.length) {
@@ -109,7 +109,18 @@ function parsePaxPath(contents: Buffer): string | undefined {
     if (equals <= 0) throw archiveError('PAX metadata record is malformed');
     const key = record.subarray(0, equals).toString('utf8');
     const value = record.subarray(equals + 1, -1).toString('utf8');
-    if (key === 'path') resolved = value;
+    if (
+      key === 'size' ||
+      key === 'linkpath' ||
+      key.startsWith('GNU.sparse.') ||
+      key === 'SCHILY.realsize'
+    ) {
+      throw archiveError(`unsupported PAX ${key} override`);
+    }
+    if (key === 'path') {
+      if (scope === 'global') throw archiveError('global PAX path override is unsupported');
+      resolved = value;
+    }
     offset += length;
   }
   return resolved;
@@ -270,7 +281,12 @@ export async function extractAgentCheckoutArchive(
     if (!current) return;
     if (current.remaining !== 0 || current.padding !== 0) return;
     if (current.file) await current.file.close();
-    if (current.type === 'pax') paxPath = parsePaxPath(Buffer.concat(current.chunks));
+    if (current.type === 'pax') {
+      paxPath = parsePaxPath(Buffer.concat(current.chunks), 'entry');
+    }
+    if (current.type === 'pax-global') {
+      parsePaxPath(Buffer.concat(current.chunks), 'global');
+    }
     if (current.type === 'long-name') {
       longName = Buffer.concat(current.chunks)
         .toString('utf8')
@@ -298,7 +314,14 @@ export async function extractAgentCheckoutArchive(
         entries++;
         if (entries > limits.maxEntries) throw archiveError('archive exceeds maximum entry count');
         const header = parseHeader(headerBlock);
-        const metadata = header.type === 'x' ? 'pax' : header.type === 'L' ? 'long-name' : null;
+        const metadata =
+          header.type === 'x'
+            ? 'pax'
+            : header.type === 'g'
+              ? 'pax-global'
+              : header.type === 'L'
+                ? 'long-name'
+                : null;
         if (!metadata && header.type !== '0' && header.type !== '\0' && header.type !== '5') {
           throw archiveError(`unsupported archive entry type ${JSON.stringify(header.type)}`);
         }
