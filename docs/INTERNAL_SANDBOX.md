@@ -92,8 +92,9 @@ sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --apply
 # while the review worker is drained, this root-only option atomically changes
 # only ORVEX_CODEX_EGRESS_BROKER_IMAGE, restores the immutable file flag, and
 # restores the previous functioning broker if the new broker is unhealthy. If
-# Docker has already removed the old image record, it creates a local snapshot
-# of the currently running read-only broker and pins that snapshot for rollback.
+# Docker has already removed the old image record, it snapshots the currently
+# running read-only broker; when a normal Docker snapshot cannot be created, it
+# safely exports and imports that running broker as the rollback image.
 sudo /home/orvex/code-review/scripts/provision-agentic-sandbox.sh --apply --update-pinned-image
 ```
 

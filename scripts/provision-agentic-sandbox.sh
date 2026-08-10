@@ -153,8 +153,14 @@ resolve_rollback_image() {
   IFS=' ' read -r image running <<<"$current"
   [[ $image == "$CONFIGURED_IMAGE" && $running == true ]] ||
     fail 'previous configured broker image is unavailable and no matching running broker can be snapshotted'
-  as_service_user docker commit --pause=false "$BROKER_NAME" "$ROLLBACK_IMAGE_TAG" >/dev/null ||
-    fail 'could not snapshot the running broker for rollback'
+  if ! as_service_user docker commit --pause=false "$BROKER_NAME" "$ROLLBACK_IMAGE_TAG" >/dev/null; then
+    # A running rootless container can still be exported when its historical
+    # image content has been garbage-collected, so retain a rollback image.
+    as_service_user docker export "$BROKER_NAME" |
+      as_service_user docker import - "$ROLLBACK_IMAGE_TAG" >/dev/null ||
+      fail 'could not export the running broker for rollback'
+    log 'configured broker image was unavailable; exported the running broker for rollback' >&2
+  fi
   rollback=$(as_service_user docker image inspect --format '{{.Id}}' "$ROLLBACK_IMAGE_TAG")
   [[ $rollback =~ ^sha256:[a-f0-9]{64}$ ]] || fail 'rollback broker snapshot did not return an immutable image ID'
   log 'configured broker image was unavailable; created a local rollback snapshot of the running broker' >&2
