@@ -250,10 +250,6 @@ export async function executeReviewCore(
       fixed: verifiedFixed,
     });
 
-    // Codex CLI session id for this PR — re-used across re-reviews so the model
-    // keeps the same conversation context; undefined starts a fresh session.
-    let codexThreadId = priorState?.codexThreadId;
-
     let llmSummary: string | undefined;
     // Best-effort passes that failed — surfaced in the posted review so a partial
     // run can never read as a full sign-off.
@@ -406,10 +402,6 @@ export async function executeReviewCore(
           repoId: `${owner}/${repo}`,
           signal: reviewAbortController.signal,
           isCancelled: () => prClosedMidRun,
-          getCodexThreadId: () => codexThreadId,
-          setCodexThreadId: (threadId) => {
-            codexThreadId = threadId;
-          },
           onUsageFor,
           onAttemptFor,
           tagFindings,
@@ -755,7 +747,6 @@ export async function executeReviewCore(
       filesForLlm,
       reviewContextFiles,
       priorState,
-      codexThreadId,
       merged,
       findings,
       llmSummary,

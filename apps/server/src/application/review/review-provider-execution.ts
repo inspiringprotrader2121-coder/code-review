@@ -1,5 +1,4 @@
 import {
-  isOversizedModelRequest,
   isTransientLlmError,
   llmFindingsToReviewFindings,
   REVIEW_INCOMPLETE_SUMMARY,
@@ -43,8 +42,6 @@ export interface ReviewProviderExecutionInput {
   repoId: string;
   signal: AbortSignal;
   isCancelled: () => boolean;
-  getCodexThreadId: () => string | undefined;
-  setCodexThreadId: (threadId: string | undefined) => void;
   onUsageFor: (
     tier: PassTier,
     target: LlmTarget,
@@ -84,11 +81,10 @@ export async function executeReviewProviderCalls(
     try {
       if (call.mode === 'agentic') {
         try {
-          const { response, threadId } = await input.providers.runCodexReview(
+          const { response } = await input.providers.runCodexReview(
             input.filesForLlm,
             call.target,
             {
-              threadId: call.freshAgenticSession ? undefined : input.getCodexThreadId(),
               context: call.ctx,
               cwd: input.repoDirectory ?? undefined,
               repoId: input.repoId,
@@ -97,7 +93,6 @@ export async function executeReviewProviderCalls(
               onAttempt: input.onAttemptFor(call.tier, call.label),
             },
           );
-          if (!call.freshAgenticSession) input.setCodexThreadId(threadId);
           const findings = llmFindingsToReviewFindings(response.findings);
           input.tagFindings(findings, call.tier, call.passTag);
           const degraded = findings.length === 0 && response.summary === REVIEW_INCOMPLETE_SUMMARY;
@@ -107,7 +102,6 @@ export async function executeReviewProviderCalls(
           return outcome(call, !degraded, false, degraded, response.summary, findings);
         } catch (error) {
           const message = (error as Error).message;
-          if (isOversizedModelRequest(message)) input.setCodexThreadId(undefined);
           console.error(
             `[worker] ${call.label} Codex CLI failed; refusing substitute model/API: ${message.slice(0, 160)}`,
           );

@@ -38,7 +38,6 @@ export interface ReviewCall {
   stage?: ReviewStage;
   temperature?: number;
   bestEffort?: boolean;
-  freshAgenticSession?: boolean;
   files?: ChangedFile[];
 }
 
@@ -208,7 +207,7 @@ export function selectScheduledReviewCalls(input: {
           ? input.catalog.resolveStage(call.stage, { agenticLuna: repeatedAgentic })
           : null;
         // Existing calls were already compiled from the public plan. Repeating a
-        // sample changes only its session/temperature, never its provider route.
+        // sample changes only its temperature, never its provider route.
         const routed = fixedRoute ?? { target: call.target, tier: call.tier };
         return {
           ...call,
@@ -218,7 +217,6 @@ export function selectScheduledReviewCalls(input: {
           tier: routed.tier,
           sample,
           temperature: aggregation.temperature,
-          freshAgenticSession: repeatedAgentic,
         };
       }),
     ).flat();

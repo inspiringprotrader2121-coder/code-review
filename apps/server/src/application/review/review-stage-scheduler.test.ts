@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ChangedFile } from '@orvex-review/github';
-import { groupApiCallsByProvider } from './review-provider-execution.js';
+import {
+  executeReviewProviderCalls,
+  groupApiCallsByProvider,
+} from './review-provider-execution.js';
 import { boundHighTierDiscoveryWorkloads, type ReviewCall } from './review-stage-scheduler.js';
 
 const files = Array.from({ length: 5 }, (_, index) => ({
@@ -113,4 +116,47 @@ test('same-provider review calls are independently scheduled behind provider adm
     [minimax],
     [second],
   ]);
+});
+
+test('agentic reviews start a fresh Codex thread in the isolated container', async () => {
+  const agentic = call('gpt-5.6-luna', 1);
+  agentic.mode = 'agentic';
+  agentic.target = {
+    apiKey: 'test',
+    model: 'gpt-5.6-luna',
+    transport: 'codex-cli',
+    admissionBucket: 'luna',
+    thinking: true,
+    reasoningEffort: 'max',
+  };
+  const receivedOptions: Array<Record<string, unknown>> = [];
+
+  const outcomes = await executeReviewProviderCalls({
+    calls: [agentic],
+    filesForLlm: [],
+    filesForInvestigate: [],
+    providers: {
+      async runCodexReview(_files, _target, options) {
+        receivedOptions.push(options as Record<string, unknown>);
+        return { response: { findings: [], summary: 'fresh thread' }, threadId: 'new-thread' };
+      },
+      async runReview() {
+        return { findings: [] };
+      },
+    },
+    contextRun: async () => ({ findings: [] }),
+    repoDirectory: '/tmp/isolated-checkout',
+    repoId: 'acme/repo',
+    signal: new AbortController().signal,
+    isCancelled: () => false,
+    onUsageFor: () => () => {},
+    onAttemptFor: () => () => {},
+    tagFindings: () => {},
+    mapConcurrent: async (items, _limit, run) => Promise.all(items.map(run)),
+    apiConcurrency: 1,
+  });
+
+  assert.equal(outcomes[0]?.ok, true);
+  assert.equal(receivedOptions.length, 1);
+  assert.equal('threadId' in (receivedOptions[0] ?? {}), false);
 });
