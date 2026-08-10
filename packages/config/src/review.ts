@@ -167,6 +167,17 @@ function positiveBounded(raw: string | undefined, fallback: number, maximum: num
   return Math.min(maximum, positive(raw, fallback));
 }
 
+/**
+ * Historical deployments set tiny MAX_FILES/MAX_FILE_BYTES values to keep a
+ * single prompt small. Discovery now splits required work into bounded hunks,
+ * so accepting those values would silently prevent a complete review before
+ * the scheduler can do its job. Keep larger explicit values, but never let a
+ * legacy setting reduce the product-wide intake floor.
+ */
+function reviewInputBounded(raw: string | undefined, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, positive(raw, minimum)));
+}
+
 function nonNegativeBounded(raw: string | undefined, fallback: number, maximum: number): number {
   if (raw === undefined || raw.trim() === '') return fallback;
   const value = Number(raw);
@@ -381,11 +392,11 @@ export function loadReviewRuntimeConfig(
         : 'deepseek-flash',
     }),
     reviewInput: Object.freeze({
-      maxFileBytes: positiveBounded(env.MAX_FILE_BYTES, 1_000_000, 10_000_000),
+      maxFileBytes: reviewInputBounded(env.MAX_FILE_BYTES, 1_000_000, 10_000_000),
       // GitHub's API exposes at most 3,000 changed files. Keep the local default
-      // at that boundary so ordinary large PRs are fully queued into bounded
-      // review chunks instead of being silently limited to the old 150 files.
-      maxFiles: positiveBounded(env.MAX_FILES, 3_000, 3_000),
+      // at that boundary so legacy 40/150-file settings cannot silently limit
+      // work before it is queued into bounded complete-coverage chunks.
+      maxFiles: reviewInputBounded(env.MAX_FILES, 3_000, 3_000),
       checkRunsEnabled: env.CHECK_RUNS_ENABLED === '1',
     }),
     accountLimits: Object.freeze({

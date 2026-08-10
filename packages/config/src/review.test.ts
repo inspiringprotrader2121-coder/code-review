@@ -121,6 +121,12 @@ test("large-PR intake reaches GitHub's file boundary without exceeding it", () =
   assert.equal(config.reviewInput.maxFiles, 3_000);
 });
 
+test('large-PR intake raises legacy prompt-era caps to the complete-coverage floor', () => {
+  const config = loadReviewRuntimeConfig({ MAX_FILE_BYTES: '120000', MAX_FILES: '40' });
+  assert.equal(config.reviewInput.maxFileBytes, 1_000_000);
+  assert.equal(config.reviewInput.maxFiles, 3_000);
+});
+
 test('GitHub and rules runtime loaders preserve secure defaults', () => {
   const github = loadGitHubRuntimeConfig({});
   assert.equal(github.webhookSecret, '');
