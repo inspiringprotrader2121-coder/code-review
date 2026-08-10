@@ -479,9 +479,9 @@ test('provider-specific LLM concurrency hands off slots without exceeding the co
   assert.equal(maximum, 1);
 });
 
-test('production provider defaults expose all eight review slots', () => {
+test('production provider defaults expose eight review slots and 24 DeepSeek stages', () => {
   assert.equal(providerConcurrency('luna', {}), 8);
-  assert.equal(providerConcurrency('deepseek', {}), 8);
+  assert.equal(providerConcurrency('deepseek', {}), 24);
   assert.equal(providerConcurrency('minimax', {}), 8);
   assert.equal(providerConcurrency('luna', { ORVEX_PROVIDER_CONCURRENCY_LUNA: '3' }), 3);
 });
