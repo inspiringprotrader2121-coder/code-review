@@ -26,11 +26,11 @@ const PASS_TIERS: readonly PassTier[] = [
 export const DEFAULT_USAGE_COST_POLICY: UsageCostPolicy = {
   premium: { input: 1.4, cachedInput: 1.4, output: 4.4 },
   standard: { input: 0.3, cachedInput: 0.06, output: 1.2 },
-  openai: { input: 1, cachedInput: 0.1, output: 6 },
+  openai: { input: 0.2, cachedInput: 0.02, output: 1.2 },
   deepseek: { input: 0.435, cachedInput: 0.003625, output: 0.87 },
   'deepseek-flash': { input: 0.14, cachedInput: 0.0028, output: 0.28 },
   modelRates: {
-    'gpt-5.6-luna': { input: 1, cachedInput: 0.1, output: 6 },
+    'gpt-5.6-luna': { input: 0.2, cachedInput: 0.02, output: 1.2 },
     'deepseek-v4-pro': { input: 0.435, cachedInput: 0.003625, output: 0.87 },
     'deepseek-v4-flash': { input: 0.14, cachedInput: 0.0028, output: 0.28 },
     'minimax-m3': { input: 0.3, cachedInput: 0.06, output: 1.2 },

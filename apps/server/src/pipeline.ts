@@ -124,11 +124,11 @@ function runtimeFor(config: WorkerConfig): NonNullable<WorkerConfig['reviewRunti
       usageCosts: Object.freeze({
         premium: Object.freeze({ input: 1.4, cachedInput: 1.4, output: 4.4 }),
         standard: Object.freeze({ input: 0.3, cachedInput: 0.06, output: 1.2 }),
-        openai: Object.freeze({ input: 1, cachedInput: 0.1, output: 6 }),
+        openai: Object.freeze({ input: 0.2, cachedInput: 0.02, output: 1.2 }),
         deepseek: Object.freeze({ input: 0.435, cachedInput: 0.003625, output: 0.87 }),
         'deepseek-flash': Object.freeze({ input: 0.14, cachedInput: 0.0028, output: 0.28 }),
         modelRates: Object.freeze({
-          'gpt-5.6-luna': Object.freeze({ input: 1, cachedInput: 0.1, output: 6 }),
+          'gpt-5.6-luna': Object.freeze({ input: 0.2, cachedInput: 0.02, output: 1.2 }),
           'deepseek-v4-pro': Object.freeze({ input: 0.435, cachedInput: 0.003625, output: 0.87 }),
           'deepseek-v4-flash': Object.freeze({ input: 0.14, cachedInput: 0.0028, output: 0.28 }),
           'minimax-m3': Object.freeze({ input: 0.3, cachedInput: 0.06, output: 1.2 }),

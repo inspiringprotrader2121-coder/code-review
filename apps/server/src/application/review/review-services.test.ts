@@ -422,7 +422,7 @@ test('usage accounting records provider lifecycle through its narrow store port'
     in: 3,
     cachedIn: 0,
     out: 5,
-    costUsd: 0.000033,
+    costUsd: 0.0000066,
   });
 });
 

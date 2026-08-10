@@ -27,16 +27,16 @@ test('review runtime defaults preserve production safety limits', () => {
 
 test('pinned Luna pricing cannot inherit stale generic OpenAI rates', () => {
   const config = loadReviewRuntimeConfig({
-    ORVEX_OPENAI_COST_INPUT_PER_M: '0.2',
-    ORVEX_OPENAI_CACHED_INPUT_COST_PER_M: '0.02',
-    ORVEX_OPENAI_COST_OUTPUT_PER_M: '1.2',
+    ORVEX_OPENAI_COST_INPUT_PER_M: '1',
+    ORVEX_OPENAI_CACHED_INPUT_COST_PER_M: '0.1',
+    ORVEX_OPENAI_COST_OUTPUT_PER_M: '6',
   });
 
-  assert.deepEqual(config.pricing.openai, { input: 0.2, cachedInput: 0.02, output: 1.2 });
+  assert.deepEqual(config.pricing.openai, { input: 1, cachedInput: 0.1, output: 6 });
   assert.deepEqual(config.pricing.modelRates['gpt-5.6-luna'], {
-    input: 1,
-    cachedInput: 0.1,
-    output: 6,
+    input: 0.2,
+    cachedInput: 0.02,
+    output: 1.2,
   });
 });
 

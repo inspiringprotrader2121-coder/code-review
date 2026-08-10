@@ -415,9 +415,9 @@ export function loadReviewRuntimeConfig(
       // legacy generic OpenAI variable cannot silently understate Luna spend.
       modelRates: Object.freeze({
         'gpt-5.6-luna': Object.freeze({
-          input: positiveNumber(env.ORVEX_LUNA_COST_INPUT_PER_M, 1),
-          cachedInput: positiveNumber(env.ORVEX_LUNA_CACHED_INPUT_COST_PER_M, 0.1),
-          output: positiveNumber(env.ORVEX_LUNA_COST_OUTPUT_PER_M, 6),
+          input: positiveNumber(env.ORVEX_LUNA_COST_INPUT_PER_M, 0.2),
+          cachedInput: positiveNumber(env.ORVEX_LUNA_CACHED_INPUT_COST_PER_M, 0.02),
+          output: positiveNumber(env.ORVEX_LUNA_COST_OUTPUT_PER_M, 1.2),
         }),
         'deepseek-v4-pro': Object.freeze({
           input: positiveNumber(env.ORVEX_DEEPSEEK_COST_INPUT_PER_M, 0.435),

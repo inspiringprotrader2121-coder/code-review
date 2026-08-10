@@ -238,7 +238,7 @@ test('usage accounting clamps malformed provider token counts instead of poisoni
 
 test('usage accounting keeps Luna pricing pinned and prices DeepSeek cache reads separately', () => {
   const staleGenericOpenAi = createUsageCostPolicy({
-    openai: { input: 0.2, cachedInput: 0.02, output: 1.2 },
+    openai: { input: 1, cachedInput: 0.1, output: 6 },
   });
   const luna = accountUsage(
     'openai',
@@ -247,10 +247,10 @@ test('usage accounting keeps Luna pricing pinned and prices DeepSeek cache reads
     { inputTokens: 50_000, outputTokens: 5_000, tokenSource: 'estimate' },
     staleGenericOpenAi,
   );
-  assert.equal(luna.inputRatePerM, 1);
-  assert.equal(luna.cachedInputRatePerM, 0.1);
-  assert.equal(luna.outputRatePerM, 6);
-  assert.equal(luna.costUsd, 0.08);
+  assert.equal(luna.inputRatePerM, 0.2);
+  assert.equal(luna.cachedInputRatePerM, 0.02);
+  assert.equal(luna.outputRatePerM, 1.2);
+  assert.equal(luna.costUsd, 0.016);
 
   const flash = accountUsage(
     'deepseek-flash',
