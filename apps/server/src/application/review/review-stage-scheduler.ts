@@ -68,12 +68,44 @@ function withFileShard(
     ...call,
     files: shard,
     ctx: {
+      ...(context === 'diff-only' ? { promptProfile: 'focused' as const } : {}),
       changedContents,
       extraFocus: replaceExistingFocus
         ? note
         : [call.ctx.extraFocus, note].filter(Boolean).join('\n'),
     },
   };
+}
+
+function patchWeight(file: ChangedFile): number {
+  return Math.max(1, file.patch?.length ?? 0);
+}
+
+/** Balance repeated provider calls by diff size, keeping source order within each shard. */
+function balancedFileShards(files: ChangedFile[], shardCount: number): ChangedFile[][] {
+  const shards = Array.from({ length: shardCount }, () => ({
+    files: [] as ChangedFile[],
+    weight: 0,
+  }));
+  const ranked = files
+    .map((file, index) => ({ file, index, weight: patchWeight(file) }))
+    .sort((left, right) => right.weight - left.weight || left.index - right.index);
+  for (const item of ranked) {
+    const target = shards.reduce(
+      (best, candidate, index) =>
+        candidate.weight < shards[best]!.weight ||
+        (candidate.weight === shards[best]!.weight && index < best)
+          ? index
+          : best,
+      0,
+    );
+    const shard = shards[target]!;
+    shard.files.push(item.file);
+    shard.weight += item.weight;
+  }
+  return shards.map((shard) =>
+    shard.files.sort((left, right) => files.indexOf(left) - files.indexOf(right)),
+  );
 }
 
 function compactHighTierShardFocus(
@@ -104,10 +136,11 @@ export function boundHighTierDiscoveryWorkloads(
   if (repeated.length < 2 || files.length < 2) return calls;
 
   const assignment = new Map(repeated.map((call, index) => [call, index]));
+  const shards = balancedFileShards(files, repeated.length);
   return calls.map((call) => {
     const shardIndex = assignment.get(call);
     if (shardIndex !== undefined) {
-      const shard = files.filter((_, index) => index % repeated.length === shardIndex);
+      const shard = shards[shardIndex]!;
       return withFileShard(
         call,
         shard,
@@ -123,7 +156,7 @@ export function boundHighTierDiscoveryWorkloads(
       !call.bestEffort &&
       call.target.model.toLowerCase().startsWith('minimax-');
     if (!isRequiredMiniMax) return call;
-    const shard = files.filter((_, index) => index % repeated.length === repeated.length - 1);
+    const shard = shards[repeated.length - 1]!;
     return withFileShard(
       call,
       shard,

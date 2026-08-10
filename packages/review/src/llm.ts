@@ -108,6 +108,7 @@ export async function runLlmReview(
     files?.map((f) => ({ ...f, content: redactSecrets(f.content) }));
   const context = opts.context
     ? {
+        promptProfile: opts.context.promptProfile,
         treePaths: opts.context.treePaths,
         related: redactAll(opts.context.related),
         dependents: redactAll(opts.context.dependents),
@@ -119,7 +120,7 @@ export async function runLlmReview(
       }
     : undefined;
 
-  const system = loadOrvexRules();
+  const system = loadOrvexRules(context?.promptProfile);
   const user = buildUserPrompt(redactedFiles, context);
 
   const call = (thinking: boolean, temperature = opts.temperature) => {

@@ -55,6 +55,7 @@ test('public pages and assets remain strict-CSP compatible and accessible', () =
   assert.match(marketingScript, /setAttribute\(["']aria-pressed["']/);
   assert.match(dashboardScript, /const\s+finiteNumber\s*=/);
   assert.match(dashboardScript, /const\s+wholeNumber\s*=/);
+  assert.match(dashboardScript, /finiteNumber\(ms\)\s*\/\s*1000/);
   assert.match(dashboardScript, /event\.key\s*===\s*["']ArrowDown["']/);
   assert.match(dashboardScript, /activeElementIsInside/);
   assert.doesNotMatch(dashboardScript, /tip\.innerHTML/);

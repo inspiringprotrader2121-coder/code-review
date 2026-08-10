@@ -71,7 +71,7 @@ const rel = (iso) => {
   return Math.floor(d / 86400) + 'd ago';
 };
 const dur = (ms) => {
-  const sec = Math.round(finiteNumber(ms));
+  const sec = Math.round(finiteNumber(ms) / 1000);
   if (sec <= 0) return '—';
   return sec < 60
     ? sec + 's'

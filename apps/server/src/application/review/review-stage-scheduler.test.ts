@@ -45,6 +45,7 @@ test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
     ['src/file-1.ts', 'src/file-3.ts'],
   );
   assert.equal(sharded[1]?.ctx.changedContents, undefined);
+  assert.equal(sharded[1]?.ctx.promptProfile, 'focused');
   assert.equal(sharded[2]?.ctx.changedContents, undefined);
   assert.equal(sharded[1]?.ctx.related, undefined);
   assert.equal(sharded[1]?.ctx.dependents, undefined);
@@ -59,11 +60,35 @@ test('repeated required DeepSeek calls cover balanced disjoint shards', () => {
     ['src/file-1.ts', 'src/file-3.ts'],
   );
   assert.equal(sharded[3]?.ctx.changedContents, undefined);
+  assert.equal(sharded[3]?.ctx.promptProfile, 'focused');
   assert.equal(sharded[3]?.ctx.related, undefined);
   assert.equal(sharded[3]?.ctx.dependents, undefined);
   assert.equal(sharded[3]?.ctx.others, undefined);
   assert.equal(sharded[3]?.ctx.treePaths, undefined);
   assert.match(sharded[3]?.ctx.extraFocus ?? '', /REQUIRED DIFF-ONLY BREADTH SHARD/);
+});
+
+test('repeated Flash shards balance uneven diffs instead of assigning by source position', () => {
+  const uneven = [
+    { filename: 'src/small-test.ts', status: 'modified', patch: '+x' },
+    { filename: 'src/pagination.test.ts', status: 'modified', patch: '+'.repeat(6_000) },
+    { filename: 'src/auth.ts', status: 'modified', patch: '+'.repeat(7_800) },
+  ] as ChangedFile[];
+  const calls = [
+    call('gpt-5.6-luna', 1),
+    call('deepseek-v4-flash', 2),
+    call('deepseek-v4-flash', 3),
+  ];
+  const sharded = boundHighTierDiscoveryWorkloads(calls, uneven);
+
+  assert.deepEqual(
+    sharded[1]?.files?.map((file) => file.filename),
+    ['src/auth.ts'],
+  );
+  assert.deepEqual(
+    sharded[2]?.files?.map((file) => file.filename),
+    ['src/small-test.ts', 'src/pagination.test.ts'],
+  );
 });
 
 test('lower-tier single DeepSeek and MiniMax reviewers still receive the full PR', () => {
