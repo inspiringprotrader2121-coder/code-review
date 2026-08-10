@@ -119,6 +119,11 @@ test('buildSandboxDockerArgs keeps the internal sandbox contract without host se
     assert.equal(args[args.indexOf('--memory') + 1], '1g');
     assert.equal(args[args.indexOf('--cpus') + 1], '0.75');
     assert.equal(args[args.indexOf('--pids-limit') + 1], '256');
+    assert.equal(
+      args.some((arg) => arg.startsWith('nproc=')),
+      false,
+      'rootless containers share RLIMIT_NPROC through the mapped service user; the PID cgroup is per container',
+    );
     assert.throws(
       () =>
         buildSandboxDockerArgs(

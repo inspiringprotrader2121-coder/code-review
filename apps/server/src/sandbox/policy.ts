@@ -103,10 +103,10 @@ export function buildSandboxDockerArgs(
     opts.cpus ?? '0.75',
     '--pids-limit',
     '256',
+    // In rootless Docker, RLIMIT_NPROC is shared by the host-mapped service
+    // user across containers. The cgroup PID limit above is per container.
     '--ulimit',
     'nofile=256:256',
-    '--ulimit',
-    'nproc=256:256',
     '--ulimit',
     'core=0:0',
     '--ulimit',
