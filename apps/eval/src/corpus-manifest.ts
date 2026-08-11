@@ -7,10 +7,10 @@ import {
 } from './cases.js';
 
 /** Bump deliberately when a hand-verified label changes. */
-export const GOLD_CORPUS_VERSION = 2;
-/** Deliberate snapshot identity for the 26 positive and 6 negative labels. */
+export const GOLD_CORPUS_VERSION = 3;
+/** Deliberate snapshot identity for the 29 positive and 6 negative labels. */
 export const GOLD_CORPUS_SHA256 =
-  'a64d9caf83c6f1a43a1821a0a98585b37914d18abf111ae6dd5cfded535a7f63';
+  '42e751e1651af8e4a187c3425657b18b2cc5aaac6c4a9bc1335181de9f2ef11e';
 
 export interface GoldCorpusManifest {
   schemaVersion: 1;

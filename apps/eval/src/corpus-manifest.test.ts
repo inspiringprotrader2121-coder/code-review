@@ -16,7 +16,7 @@ test('gold corpus manifest binds labels to immutable PR base/head provenance', (
   assert.match(manifest.sha256, /^[a-f0-9]{64}$/);
   assert.equal(manifest.sha256, GOLD_CORPUS_SHA256);
   assert.equal(manifest.provenance, 'hand-verified immutable PR base/head diffs');
-  assert.deepEqual(manifest.labels, { positive: 26, negative: 6 });
+  assert.deepEqual(manifest.labels, { positive: 29, negative: 6 });
 });
 
 test('the checked-in gold corpus refuses an unreviewed fingerprint change', () => {

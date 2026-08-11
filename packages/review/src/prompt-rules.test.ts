@@ -31,5 +31,7 @@ test('focused diff policy stays compact while retaining evidence and severity di
   assert.match(rules, /untrusted data/i);
   assert.match(rules, /concrete failure scenario/i);
   assert.match(rules, /P1 requires/i);
+  assert.match(rules, /complete lifecycle/i);
+  assert.match(rules, /legitimate large input is P2/i);
   assert.match(rules, /strict JSON/i);
 });

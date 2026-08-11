@@ -26,6 +26,7 @@ Focus on issues that impact CORRECTNESS, PERFORMANCE, SECURITY, MAINTAINABILITY,
 - Stated-contract violations: code/comments CLAIM a behavior (fail-open, idempotent, atomic, retries) — verify the implementation delivers it on EVERY path; a claimed contract the code breaks is a bug.
 - Performance: N+1 queries, repeated I/O, blocking work on hot paths, unbounded growth, accidental O(n^2).
 - Reliability: unhandled errors/rejections, missing timeouts/retries on I/O, resource leaks (unclosed handles/connections/listeners), no cleanup on failure paths, crash-on-malformed-input, partial failures that leave state inconsistent. Hunt two patterns explicitly: (a) ASYMMETRIC error handling — a failure/early-return branch that skips a side-effect the SUCCESS path performs (recording a failure, releasing a reservation, updating state, emitting a tenant-guarded metric/usage) — compare the two branches; (b) LEAKED EXTERNAL RESOURCE — a coupon/subscription/reservation/lock/temp-record created via an external API or store but not released on every failure or abandonment path (e.g. a checkout that throws after the coupon was created).
+- EXPORT & STREAM LIFECYCLE: trace data snapshot/read -> buffering/spooling -> response headers -> stream/pipeline error -> cleanup as one operation. A route that promises a complete or uncapped export but retains a fixed row/time ceiling that makes a legitimate large export fail is P2 (P1 only when it silently ships partial critical/compliance data). A pre-write stream failure must give a usable non-download error; an attachment header or destroyed response that hides the error is P2. Report one root cause with its related effects, not multiple comments for the same failure trigger.
 - Maintainability: duplicated logic that will drift, dead/unreachable code, needless complexity, a bandaid where a deeper fix belongs, misleading names, a changed function whose tests were not updated.
 - API & contracts: breaking changes to callers, wrong status codes, pagination/limit bugs.
 - Migration & schema consistency: a new/edited migration (especially a baseline) must be SHAPE-CONSISTENT with the ORM schema and with what other migrations assume — compare each created/altered table's columns against the schema definition (schema.prisma/schema.sql, provided when migrations change) and against later migrations referencing those columns. A later CREATE TABLE IF NOT EXISTS silently no-ops (missing columns are never added); a later index/FK/UPDATE on an absent column fails the whole deploy. A baseline omitting columns live code queries breaks every fresh install = P1.
@@ -75,6 +76,8 @@ Report only concrete bugs introduced or exposed by this change. Prioritize corre
 
 Every finding needs an exact changed file and new-side line plus a concrete failure scenario. P1 requires a concrete security bypass, data loss/corruption, or service outage. P2 is a real user, trust, or data-impacting bug. P3 is a smaller proven correctness issue. Do not report style, nits, or unsupported assumptions about external systems.
 
+For exports or streams, trace the complete lifecycle: snapshot/read, timeout, buffering, headers, pipeline error, and cleanup. A promised complete export that fails for a legitimate large input is P2; do not split one stream failure trigger into multiple findings.
+
 Return strict JSON as soon as the evidence is sufficient. Include at most three findings, keep each message to three sentences or fewer, and omit originalCode and fixedCode.`;
 
 export const REQUIRED_RULE_ANCHORS: readonly RegExp[] = [
@@ -92,6 +95,7 @@ export const REQUIRED_RULE_ANCHORS: readonly RegExp[] = [
   /silent truncation is wrong data/i,
   /partial batch failure/i,
   /failed authorization lookup is not an authorization/i,
+  /EXPORT & STREAM LIFECYCLE/i,
   /\.init\(/i,
   /migration/i,
   /Emit the JSON as soon as the evidence is sufficient/i,

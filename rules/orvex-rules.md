@@ -85,6 +85,14 @@ maintainability, or developer experience**.
   coupon/subscription/reservation/lock/temp-record created via an external API or
   store but not released on EVERY failure or abandonment path (e.g. a checkout
   that throws after the coupon was created).
+- **Export & stream lifecycle** — trace snapshot/read -> buffering/spooling ->
+  response headers -> stream/pipeline error -> cleanup as one operation. A route
+  that promises a complete or uncapped export but retains a fixed row/time ceiling
+  that makes a legitimate large export fail is **P2** (P1 only when it silently
+  ships partial critical/compliance data). A pre-write stream failure must give a
+  usable non-download error; an attachment header or destroyed response that hides
+  the error is **P2**. Report one root cause with its related effects, not multiple
+  comments for the same failure trigger.
 - **Maintainability** — duplicated logic that will drift out of sync, dead /
   unreachable code, needless complexity, a bandaid where a deeper fix belongs,
   misleading names, a changed function whose tests were not updated to match.

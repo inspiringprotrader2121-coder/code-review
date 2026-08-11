@@ -68,3 +68,27 @@ test('the evaluation corpus has a stable, labelled snapshot identity', () => {
   const labels = evaluationCorpusLabelCounts();
   assert.deepEqual(labels, EXPECTED_GOLD_LABEL_COUNTS);
 });
+
+test('the audit-export regression labels retain their immutable source witnesses', () => {
+  const expected = new Map([
+    [
+      'audit-export-client-backpressure-truncates-snapshot',
+      ['639a97595d5a8d1d51c9f83e327ba507090f4bc2', 'P1'],
+    ],
+    [
+      'audit-export-hard-timeout-breaks-uncapped-export',
+      ['350302622d3a068b6d8a5c7c371c8e145338f1a4', 'P2'],
+    ],
+    [
+      'audit-export-pipeline-error-keeps-download-headers',
+      ['350302622d3a068b6d8a5c7c371c8e145338f1a4', 'P2'],
+    ],
+  ]);
+  for (const [name, [sha, severity]] of expected) {
+    const entry = CASES.find((candidate) => candidate.name === name);
+    assert.ok(entry, `${name} must remain in the labelled corpus`);
+    assert.equal(entry.sha, sha);
+    assert.equal(entry.evidence.path, 'backend/src/services/auth.js');
+    assert.ok(entry.shouldFlagSevere?.some((label) => label.minSeverity === severity));
+  }
+});

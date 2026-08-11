@@ -488,6 +488,61 @@ const CASES_WITHOUT_EVIDENCE: UnwitnessedEvalCase[] = [
     ],
     note: 'greptile P1: a resumed job initializes panelSlug from an earlier attempt, so an early failure can destructively roll back the wrong panel.',
   },
+  // --- Velatrix PR #280 audit-export regression cases (2026-08-11) ---
+  // These labels are verified against immutable source, not inferred only from
+  // another reviewer's comment. The first is the original partial-export defect;
+  // the latter two remain after the spool follow-up at the PR's current head.
+  {
+    name: 'audit-export-client-backpressure-truncates-snapshot',
+    owner: 'inspiringprotrader2121-coder',
+    repo: 'Velatrix-Cloud',
+    pr: 280,
+    sha: '639a97595d5a8d1d51c9f83e327ba507090f4bc2',
+    baseSha: 'c7b3cc856b77b5692ec41742bdc04deb839393a7',
+    shouldFlagSevere: [
+      {
+        file: /backend\/src\/services\/auth\.js/i,
+        pattern:
+          /(?:client|response|res\.).*(?:backpressure|drain|write)|(?:transaction|snapshot).*(?:timeout|partial|truncat)|(?:csv|export).*(?:partial|truncat|timeout)/is,
+        minSeverity: 'P1',
+      },
+    ],
+    note: 'The Repeatable Read transaction waits for client-paced res.write drains. A slow download can exceed its fixed timeout after CSV bytes are sent, leaving a silently truncated compliance export.',
+  },
+  {
+    name: 'audit-export-hard-timeout-breaks-uncapped-export',
+    owner: 'inspiringprotrader2121-coder',
+    repo: 'Velatrix-Cloud',
+    pr: 280,
+    sha: '350302622d3a068b6d8a5c7c371c8e145338f1a4',
+    baseSha: 'c7b3cc856b77b5692ec41742bdc04deb839393a7',
+    shouldFlagSevere: [
+      {
+        file: /backend\/src\/services\/auth\.js/i,
+        pattern:
+          /(?:uncapped|large|complete).*(?:export|csv).*(?:timeout|fail)|(?:transaction|snapshot).*(?:5|10).*(?:minute|timeout).*(?:export|csv)/is,
+        minSeverity: 'P2',
+      },
+    ],
+    note: 'The follow-up moves HTTP backpressure outside the transaction, but still materializes every row under a fixed 5-minute default and 10-minute ceiling. A legitimate large export can therefore fail rather than fulfilling the new uncapped-export contract.',
+  },
+  {
+    name: 'audit-export-pipeline-error-keeps-download-headers',
+    owner: 'inspiringprotrader2121-coder',
+    repo: 'Velatrix-Cloud',
+    pr: 280,
+    sha: '350302622d3a068b6d8a5c7c371c8e145338f1a4',
+    baseSha: 'c7b3cc856b77b5692ec41742bdc04deb839393a7',
+    shouldFlagSevere: [
+      {
+        file: /backend\/src\/services\/auth\.js/i,
+        pattern:
+          /(?:content-disposition|attachment|csv).*(?:error|500|pipeline|header)|(?:pipeline|createReadStream).*(?:destroy|error|500|header)/is,
+        minSeverity: 'P2',
+      },
+    ],
+    note: 'The route sets CSV download headers before pipeline(createReadStream(...), res). A pre-write source/pipeline failure can leave a JSON error with download headers or a destroyed response, so the administrator does not receive a usable route error.',
+  },
 ];
 
 /**
@@ -665,6 +720,24 @@ const EVIDENCE_BY_CASE: Record<string, EvidenceWithoutCommit> = {
     provenance: 'hand-verified-immutable-source',
     reviewOutcome: 'missed',
   },
+  'audit-export-client-backpressure-truncates-snapshot': {
+    path: 'backend/src/services/auth.js',
+    line: 1813,
+    provenance: 'hand-verified-immutable-source',
+    reviewOutcome: 'missed',
+  },
+  'audit-export-hard-timeout-breaks-uncapped-export': {
+    path: 'backend/src/services/auth.js',
+    line: 1859,
+    provenance: 'hand-verified-immutable-source',
+    reviewOutcome: 'missed',
+  },
+  'audit-export-pipeline-error-keeps-download-headers': {
+    path: 'backend/src/services/auth.js',
+    line: 1883,
+    provenance: 'hand-verified-immutable-source',
+    reviewOutcome: 'under-rated',
+  },
 };
 
 export const CASES: EvalCase[] = CASES_WITHOUT_EVIDENCE.map((entry) => {
@@ -715,4 +788,4 @@ export function evaluationCorpusLabelCounts(cases: readonly EvalCase[] = CASES):
 /** The gold corpus is intentionally a fixed regression set, not a growing
  * collection of competitor claims. Any count change needs a reviewed corpus
  * version and fingerprint update. */
-export const EXPECTED_GOLD_LABEL_COUNTS = { positive: 26, negative: 6 } as const;
+export const EXPECTED_GOLD_LABEL_COUNTS = { positive: 29, negative: 6 } as const;
