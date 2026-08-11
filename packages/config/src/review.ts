@@ -527,7 +527,7 @@ export function loadReviewRuntimeConfig(
     execution: Object.freeze({
       abortPollMs: boundedRange(env.ORVEX_ABORT_POLL_MS, 5_000, 1_000, 900_000),
       maxCalls: boundedRange(env.ORVEX_REVIEW_MAX_CALLS, 28, 1, 100),
-      concurrency: boundedRange(env.ORVEX_REVIEW_CONCURRENCY, 3, 1, 64),
+      concurrency: boundedRange(env.ORVEX_REVIEW_CONCURRENCY, 8, 1, 64),
       maxOtherChars: positiveBounded(env.ORVEX_MAX_OTHER_CHARS, 45_000, 2_000_000),
       sweepFileChars: positiveBounded(env.ORVEX_SWEEP_FILE_CHARS, 10_000, 200_000),
       maxInlinePerPr: nonNegativeBounded(env.ORVEX_MAX_INLINE_PER_PR, 100, 10_000),

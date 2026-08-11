@@ -39,6 +39,8 @@ export interface WorkerConfig {
   store: AppDatabase;
   leaseValid?: () => boolean | Promise<boolean>;
   persistJob?: (job: ReviewJobPayload) => Promise<void>;
+  /** Redis-wide in-flight review count used for fair per-review provider sharing. */
+  activeReviewCount?: () => Promise<number>;
   /** New provider path: injected per worker instead of a mutable module global. */
   providerAdmission?: ProviderAdmission;
   providerDependencies?: Omit<ProviderDependencies, 'admission'>;

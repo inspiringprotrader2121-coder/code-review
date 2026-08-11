@@ -12,7 +12,7 @@ import {
   compileReviewPlan,
 } from '@orvex-review/review';
 import { planFeatures } from '@orvex-review/tenants';
-import { activeReviewSignal } from '../../active-reviews.js';
+import { activeReviewSignal, getActiveReviewCount } from '../../active-reviews.js';
 import {
   canRunAgentic,
   canRunCodexCli,
@@ -444,6 +444,17 @@ export async function executeReviewCore(
           );
         }
 
+        let activeReviewCount = getActiveReviewCount();
+        if (config.activeReviewCount) {
+          try {
+            activeReviewCount = await config.activeReviewCount();
+          } catch (error) {
+            console.warn(
+              '[worker] could not read fleet review activity; using local active-review count:',
+              (error as Error).message,
+            );
+          }
+        }
         const outcomes: ReviewCallOutcome[] = await executeReviewProviderCalls({
           calls: toRun,
           filesForLlm,
@@ -458,6 +469,7 @@ export async function executeReviewCore(
           onAttemptFor,
           tagFindings,
           mapConcurrent: services.executor.mapConcurrent.bind(services.executor),
+          activeReviewCount: Math.max(1, activeReviewCount),
           apiConcurrency: concurrency,
         });
 

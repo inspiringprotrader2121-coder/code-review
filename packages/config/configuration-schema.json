@@ -1223,7 +1223,7 @@
           "range": "1..32; default applicable worker/Codex limit",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek provider-stage concurrency cap. Same-provider stages run sequentially within each review, so the eight-review production profile uses eight concurrent stages.",
+          "description": "DeepSeek provider-stage concurrency cap. Idle capacity can fan out bounded chunks; the scheduler divides the cap fairly among active reviews.",
           "deprecatedAliases": []
         },
         {
@@ -1817,13 +1817,13 @@
         },
         {
           "name": "ORVEX_REVIEW_CONCURRENCY",
-          "example": "3",
+          "example": "8",
           "type": "integer",
-          "range": "1..64; default 3",
+          "range": "1..64; default 8",
           "secret": false,
           "redaction": "none",
           "enabled": false,
-          "description": "Maximum concurrent stages inside one review after provider admission.",
+          "description": "Maximum per-provider stages a single idle review can use after provider admission. Capacity is divided fairly among active reviews.",
           "deprecatedAliases": []
         },
         {

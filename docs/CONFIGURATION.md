@@ -152,7 +152,7 @@ Production uses durable storage outside the checkout and Redis with a namespaced
 | `ORVEX_CODEX_APIKEY_CONCURRENCY` | integer; 1..32; default worker concurrency | `8` | no / none | - | API-key-authenticated Codex/Luna concurrency cap. It cannot raise the whole-review limit. |
 | `ORVEX_PROVIDER_CONCURRENCY_<PROVIDER>` | integer-template; provider in LUNA, DEEPSEEK, MINIMAX; 1..32; defaults to the applicable worker/Codex limit | `(inherited; not rendered)` | no / none | - | Bounded provider-specific concurrency family. Supported instances are LUNA, DEEPSEEK, and MINIMAX; arbitrary names are rejected by schema drift checks. |
 | `ORVEX_PROVIDER_CONCURRENCY_LUNA` | integer; 1..32; default applicable worker/Codex limit | `8` | no / none | - | Luna provider-stage concurrency cap. |
-| `ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK` | integer; 1..32; default applicable worker/Codex limit | `8` | no / none | - | DeepSeek provider-stage concurrency cap. Same-provider stages run sequentially within each review, so the eight-review production profile uses eight concurrent stages. |
+| `ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK` | integer; 1..32; default applicable worker/Codex limit | `8` | no / none | - | DeepSeek provider-stage concurrency cap. Idle capacity can fan out bounded chunks; the scheduler divides the cap fairly among active reviews. |
 | `ORVEX_PROVIDER_CONCURRENCY_MINIMAX` | integer; 1..32; default applicable worker/Codex limit | `8` | no / none | - | MiniMax provider-stage concurrency cap. |
 | `ORVEX_FLEET_CAPACITY_EPOCH` | string; 1..64 safe characters; default v1 | `v1` | no / none | - | Version of the scheduler-owned Redis provider-capacity plan. Bump it only during a coordinated drained fleet capacity change. |
 | `ORVEX_FLEET_PROVIDER_CONCURRENCY_<PROVIDER>` | integer-template; provider in LUNA, DEEPSEEK, MINIMAX; 1..10000; defaults to the corresponding per-process provider limit | `(inherited; not rendered)` | no / none | - | Whole-fleet provider capacity. The scheduler registers it in Redis and every worker checks that same epoch before paid calls; it is not multiplied by replica count. |
@@ -214,7 +214,7 @@ Limits bound time, spend, and context. Production verification remains on; max r
 | `ORVEX_MAX_UNANCHORED_COMMENTS` | integer; 0..50; default 3 | `3` | no / none | - | Maximum summary-only comments for findings without a safe diff anchor. |
 | `ORVEX_ABORT_POLL_MS` | integer; 1000..900000 ms; default 5000 | `5000` | no / none | - | Durable review-run ownership heartbeat cadence. GitHub PR-state fallback polling is never more frequent than every 30 seconds. |
 | `ORVEX_REVIEW_MAX_CALLS` | integer; 1..100; default 28 | `28` | no / none | - | Hard per-review provider-call budget including optional work. |
-| `ORVEX_REVIEW_CONCURRENCY` | integer; 1..64; default 3 | `3` | no / none | - | Maximum concurrent stages inside one review after provider admission. |
+| `ORVEX_REVIEW_CONCURRENCY` | integer; 1..64; default 8 | `8` | no / none | - | Maximum per-provider stages a single idle review can use after provider admission. Capacity is divided fairly among active reviews. |
 | `ORVEX_SWEEP_FILE_CHARS` | integer; 1..200000 chars; default 10000 | `10000` | no / none | - | Per-file context cap for optional repository sweeps. |
 | `ORVEX_REVIEW_COOLDOWN_S` | integer; 0..86400 seconds; default 120 | `120` | no / none | - | Duplicate-review cooldown per pull-request head. |
 | `ORVEX_REQUEST_CHANGES` | boolean; 1 enables; default advisory | `1` | no / none | - | Use GitHub REQUEST_CHANGES for open P1 findings. |

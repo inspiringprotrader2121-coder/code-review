@@ -64,16 +64,19 @@ export interface ReviewProviderExecutionInput {
     limit: number,
     run: (item: T, index: number) => Promise<R>,
   ): Promise<R[]>;
+  /**
+   * Redis-wide snapshot of in-flight reviews. Provider capacity is shared
+   * fairly between them so one large PR can use idle capacity without starving
+   * a burst of other reviews across the worker fleet.
+   */
+  activeReviewCount: number;
   apiConcurrency: number;
 }
 
 export function groupApiCallsByProvider(calls: ReviewCall[]): ReviewCall[][] {
-  // A high-tier review deliberately has two DeepSeek lenses. Starting both at
-  // once from each worker turned an eight-review burst into sixteen concurrent
-  // DeepSeek generations, which consistently pushed some calls past their hard
-  // deadline. Keep one active call per provider per review; the distributed
-  // admission lease still permits independent reviews to use the provider up to
-  // its configured global capacity.
+  // Calls retain their provider lane for capacity accounting. Individual lanes
+  // may use more than one slot when capacity is idle; see
+  // `perReviewProviderParallelism` below.
   const lanes = new Map<string, ReviewCall[]>();
   for (const call of calls) {
     const key = call.target.admissionBucket;
@@ -82,6 +85,48 @@ export function groupApiCallsByProvider(calls: ReviewCall[]): ReviewCall[][] {
     else lanes.set(key, [call]);
   }
   return [...lanes.values()];
+}
+
+/**
+ * Divide the configured provider budget between active reviews. With one
+ * review, a large PR can fan out all of its bounded chunks. At the normal
+ * eight-review production ceiling, each review keeps one slot so a single PR
+ * cannot monopolise the provider and make its peers time out waiting.
+ */
+export function perReviewProviderParallelism(
+  apiConcurrency: number,
+  activeReviewCount: number,
+): number {
+  const capacity = Math.max(1, Math.floor(apiConcurrency));
+  const active = Math.max(1, Math.floor(activeReviewCount));
+  return Math.max(1, Math.floor(capacity / active));
+}
+
+/**
+ * Alternate lenses before advancing to later shards. This gives a high-tier
+ * review its two DeepSeek perspectives promptly instead of spending every
+ * available slot on one perspective's chunks first.
+ */
+export function interleaveProviderLane(calls: readonly ReviewCall[]): ReviewCall[] {
+  const lanes = new Map<string, ReviewCall[]>();
+  for (const call of calls) {
+    const key = `${call.modelPassIndex ?? -1}:${call.passTag ?? ''}:${call.sample}`;
+    const lane = lanes.get(key);
+    if (lane) lane.push(call);
+    else lanes.set(key, [call]);
+  }
+  const queues = [...lanes.values()].map((lane) => [...lane]);
+  const interleaved: ReviewCall[] = [];
+  for (;;) {
+    let added = false;
+    for (const queue of queues) {
+      const call = queue.shift();
+      if (!call) continue;
+      interleaved.push(call);
+      added = true;
+    }
+    if (!added) return interleaved;
+  }
 }
 
 /** Executes independent providers in parallel while retaining Codex's ordered session lane. */
@@ -174,13 +219,19 @@ export async function executeReviewProviderCalls(
   };
   const runApiLanes = async () => {
     const lanes = groupApiCallsByProvider(api);
+    const perProviderConcurrency = perReviewProviderParallelism(
+      input.apiConcurrency,
+      input.activeReviewCount,
+    );
+    console.log(
+      `[worker] API provider scheduling: activeReviews=${Math.max(1, Math.floor(input.activeReviewCount))} ` +
+        `perProviderPerReview=${perProviderConcurrency}`,
+    );
     const laneOutcomes = await input.mapConcurrent(
       lanes,
       Math.min(input.apiConcurrency, lanes.length),
       async (lane) => {
-        const outcomes: ReviewCallOutcome[] = [];
-        for (const call of lane) outcomes.push(await runOne(call));
-        return outcomes;
+        return input.mapConcurrent(interleaveProviderLane(lane), perProviderConcurrency, runOne);
       },
     );
     return laneOutcomes.flat();

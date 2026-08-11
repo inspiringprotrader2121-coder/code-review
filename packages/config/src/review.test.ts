@@ -16,6 +16,7 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.codexInactivityTimeoutMs, 300_000);
   assert.equal(config.maxFindings, 25);
   assert.equal(config.reviewWorkerConcurrency, 8);
+  assert.equal(config.execution.concurrency, 8);
   assert.equal(config.codexApiKeyConcurrency, 8);
   assert.equal(config.providerConcurrency('luna'), 8);
   assert.equal(config.providerConcurrency('deepseek'), 8);
@@ -75,7 +76,7 @@ test('review runtime preserves max reasoning, bounded timers, and pinned child e
   assert.deepEqual(config.childProcessEnvironment, { PATH: '/usr/bin' });
 });
 
-test('production capacity profile reserves one DeepSeek lane for each concurrent review', () => {
+test('review-stage concurrency remains an explicit bounded operator override', () => {
   const config = loadReviewRuntimeConfig({
     ORVEX_CODEX_CLI: '1',
     ORVEX_MAX_CONCURRENT_REVIEWS: '8',
@@ -122,10 +123,10 @@ test('fleet provider capacity is independent from per-worker capacity and snapsh
   );
 });
 
-test('production PM2 profile keeps DeepSeek at one lane per review', () => {
+test('production PM2 profile allocates the full idle provider capacity to a review', () => {
   const ecosystem = readFileSync(new URL('../../../ecosystem.config.cjs', import.meta.url), 'utf8');
   assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=8(?:\s|\\")/);
-  assert.doesNotMatch(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=24(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
 });
 
 test('supporting context cannot override the diff-first production ceiling', () => {

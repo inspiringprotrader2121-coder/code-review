@@ -5,6 +5,8 @@ import { buildUserPrompt } from '@orvex-review/review';
 import {
   executeReviewProviderCalls,
   groupApiCallsByProvider,
+  interleaveProviderLane,
+  perReviewProviderParallelism,
 } from './review-provider-execution.js';
 import { boundHighTierDiscoveryWorkloads, type ReviewCall } from './review-stage-scheduler.js';
 
@@ -109,40 +111,52 @@ test('lower-tier required DeepSeek and MiniMax calls also fan out without sampli
   assert.ok(scheduled.every((entry) => entry.requiredCoverageKey));
 });
 
-test('same-provider review calls share a per-review lane while independent providers run separately', () => {
+test('same-provider review calls retain a provider lane and alternate reviewer lenses by shard', () => {
   const first = call('deepseek-v4-flash', 1);
   first.target.admissionBucket = 'deepseek';
+  first.modelPassIndex = 1;
+  first.passTag = 'deep-dive';
   const second = call('deepseek-v4-flash', 2);
   second.target.admissionBucket = 'deepseek';
+  second.modelPassIndex = 2;
+  second.passTag = 'removed-behavior/callers';
+  const third = call('deepseek-v4-flash', 3);
+  third.target.admissionBucket = 'deepseek';
+  third.modelPassIndex = 1;
+  third.passTag = 'deep-dive';
   const minimax = call('MiniMax-M3', 3);
   minimax.target.admissionBucket = 'minimax';
 
-  assert.deepEqual(groupApiCallsByProvider([first, minimax, second]), [[first, second], [minimax]]);
+  assert.deepEqual(groupApiCallsByProvider([first, minimax, second, third]), [
+    [first, second, third],
+    [minimax],
+  ]);
+  assert.deepEqual(interleaveProviderLane([first, third, second]), [first, second, third]);
+  assert.equal(perReviewProviderParallelism(8, 1), 8);
+  assert.equal(perReviewProviderParallelism(8, 2), 4);
+  assert.equal(perReviewProviderParallelism(8, 4), 2);
+  assert.equal(perReviewProviderParallelism(8, 8), 1);
 });
 
-test('same-provider lanes do not overlap while a different provider starts promptly', async () => {
+test('an idle large review fans out same-provider shards while retaining a bounded lane', async () => {
   const first = call('deepseek-v4-flash', 1);
   first.target.admissionBucket = 'deepseek';
+  first.modelPassIndex = 1;
+  first.passTag = 'deep-dive';
   const second = call('deepseek-v4-flash', 2);
   second.target.admissionBucket = 'deepseek';
-  const minimax = call('MiniMax-M3', 3);
+  second.modelPassIndex = 2;
+  second.passTag = 'removed-behavior/callers';
+  const third = call('deepseek-v4-flash', 3);
+  third.target.admissionBucket = 'deepseek';
+  third.modelPassIndex = 1;
+  third.passTag = 'deep-dive';
+  const minimax = call('MiniMax-M3', 4);
   minimax.target.admissionBucket = 'minimax';
   const started: string[] = [];
-  let releaseFirst!: () => void;
-  const firstReleased = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
-  let firstStarted!: () => void;
-  const firstStartedPromise = new Promise<void>((resolve) => {
-    firstStarted = resolve;
-  });
-  let minimaxStarted!: () => void;
-  const minimaxStartedPromise = new Promise<void>((resolve) => {
-    minimaxStarted = resolve;
-  });
 
-  const running = executeReviewProviderCalls({
-    calls: [first, minimax, second],
+  await executeReviewProviderCalls({
+    calls: [first, third, minimax, second],
     filesForLlm: [],
     filesForInvestigate: [],
     providers: {
@@ -155,11 +169,7 @@ test('same-provider lanes do not overlap while a different provider starts promp
     },
     contextRun: async (_context, _target, _tier, name) => {
       started.push(name);
-      if (name === first.label) {
-        firstStarted();
-        await firstReleased;
-      }
-      if (name === minimax.label) minimaxStarted();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       return { findings: [] };
     },
     repoDirectory: null,
@@ -169,15 +179,91 @@ test('same-provider lanes do not overlap while a different provider starts promp
     onUsageFor: () => () => {},
     onAttemptFor: () => () => {},
     tagFindings: () => {},
-    mapConcurrent: async (items, _limit, run) => Promise.all(items.map(run)),
-    apiConcurrency: 2,
+    mapConcurrent: async (items, limit, run) => {
+      const results: unknown[] = [];
+      let index = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(limit, items.length) }, async () => {
+          for (;;) {
+            const current = index++;
+            if (current >= items.length) return;
+            results[current] = await run(items[current]!, current);
+          }
+        }),
+      );
+      return results as never;
+    },
+    activeReviewCount: 1,
+    apiConcurrency: 8,
   });
 
-  await Promise.all([firstStartedPromise, minimaxStartedPromise]);
-  assert.deepEqual(started.sort(), [first.label, minimax.label].sort());
-  releaseFirst();
-  await running;
-  assert.equal(started.at(-1), second.label);
+  assert.deepEqual(
+    new Set(started),
+    new Set([first.label, second.label, third.label, minimax.label]),
+  );
+});
+
+test('busy workers reduce a review to a fair per-provider share', async () => {
+  const first = call('deepseek-v4-flash', 1);
+  first.modelPassIndex = 1;
+  first.passTag = 'deep-dive';
+  const second = call('deepseek-v4-flash', 2);
+  second.modelPassIndex = 2;
+  second.passTag = 'removed-behavior/callers';
+  const third = call('deepseek-v4-flash', 3);
+  third.modelPassIndex = 1;
+  third.passTag = 'deep-dive';
+  const fourth = call('deepseek-v4-flash', 4);
+  fourth.modelPassIndex = 2;
+  fourth.passTag = 'removed-behavior/callers';
+  let active = 0;
+  let peak = 0;
+
+  await executeReviewProviderCalls({
+    calls: [first, third, second, fourth],
+    filesForLlm: [],
+    filesForInvestigate: [],
+    providers: {
+      async runCodexReview() {
+        throw new Error('not used');
+      },
+      async runReview() {
+        return { findings: [] };
+      },
+    },
+    contextRun: async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      active--;
+      return { findings: [] };
+    },
+    repoDirectory: null,
+    repoId: 'acme/repo',
+    signal: new AbortController().signal,
+    isCancelled: () => false,
+    onUsageFor: () => () => {},
+    onAttemptFor: () => () => {},
+    tagFindings: () => {},
+    mapConcurrent: async (items, limit, run) => {
+      const results: unknown[] = [];
+      let index = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(limit, items.length) }, async () => {
+          for (;;) {
+            const current = index++;
+            if (current >= items.length) return;
+            results[current] = await run(items[current]!, current);
+          }
+        }),
+      );
+      return results as never;
+    },
+    activeReviewCount: 4,
+    apiConcurrency: 8,
+  });
+
+  assert.equal(peak, 2, 'four active reviews receive two DeepSeek slots each');
 });
 
 test('agentic reviews start a fresh Codex thread in the isolated container', async () => {
@@ -215,6 +301,7 @@ test('agentic reviews start a fresh Codex thread in the isolated container', asy
     onAttemptFor: () => () => {},
     tagFindings: () => {},
     mapConcurrent: async (items, _limit, run) => Promise.all(items.map(run)),
+    activeReviewCount: 1,
     apiConcurrency: 1,
   });
 
