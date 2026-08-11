@@ -217,7 +217,7 @@ for (const [variable, expected] of Object.entries({
   ORVEX_PROVIDER_CONCURRENCY_LUNA: 8,
   ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 8,
   ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 8,
-  ORVEX_VERIFY_CONCURRENCY: 1,
+  ORVEX_VERIFY_CONCURRENCY: 8,
   ORVEX_MAX_SANDBOXES: 8,
 })) {
   if (!args.includes(`${variable}=${expected}`)) {
