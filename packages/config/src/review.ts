@@ -489,10 +489,12 @@ export function loadReviewRuntimeConfig(
       // The contracted public reviewer models retain their own rates so a
       // legacy generic OpenAI variable cannot silently understate Luna spend.
       modelRates: Object.freeze({
+        // Published Luna pricing must not be overridden by stale deployment
+        // environment values, which would make the dashboard under-report spend.
         'gpt-5.6-luna': Object.freeze({
-          input: positiveNumber(env.ORVEX_LUNA_COST_INPUT_PER_M, 0.2),
-          cachedInput: positiveNumber(env.ORVEX_LUNA_CACHED_INPUT_COST_PER_M, 0.02),
-          output: positiveNumber(env.ORVEX_LUNA_COST_OUTPUT_PER_M, 1.2),
+          input: 1,
+          cachedInput: 0.1,
+          output: 6,
         }),
         'deepseek-v4-pro': Object.freeze({
           input: positiveNumber(env.ORVEX_DEEPSEEK_COST_INPUT_PER_M, 0.435),

@@ -51,6 +51,52 @@ export const REVIEW_ATTEMPT_ROLE_ARTIFACT: ExecutableMigrationArtifact = Object.
   ]),
 });
 
+export const REVIEW_USAGE_LUNA_REPRICE_ARTIFACT: ExecutableMigrationArtifact = Object.freeze({
+  format: 'sqlite-sql-v1',
+  sql: `
+UPDATE review_run_usage
+SET input_rate_per_m = 1,
+    cached_input_rate_per_m = 0.1,
+    cache_write_rate_per_m = 1.25,
+    output_rate_per_m = 6,
+    cost_usd = (
+      ((input_tokens - cached_input_tokens - cache_write_tokens) * 1)
+      + (cached_input_tokens * 0.1)
+      + (cache_write_tokens * 1.25)
+      + (output_tokens * 6)
+    ) / 1000000.0
+WHERE lower(trim(model)) = 'gpt-5.6-luna'
+  AND abs(input_rate_per_m - 0.2) < 0.000001
+  AND abs(cached_input_rate_per_m - 0.02) < 0.000001
+  AND abs(output_rate_per_m - 1.2) < 0.000001;
+
+UPDATE review_runs
+SET input_tokens = COALESCE((
+      SELECT SUM(usage.input_tokens)
+      FROM review_run_usage AS usage
+      WHERE usage.run_id = review_runs.id
+    ), 0),
+    output_tokens = COALESCE((
+      SELECT SUM(usage.output_tokens)
+      FROM review_run_usage AS usage
+      WHERE usage.run_id = review_runs.id
+    ), 0),
+    cost_usd = COALESCE((
+      SELECT SUM(usage.cost_usd)
+      FROM review_run_usage AS usage
+      WHERE usage.run_id = review_runs.id
+    ), 0)
+WHERE EXISTS (
+  SELECT 1
+  FROM review_run_usage AS usage
+  WHERE usage.run_id = review_runs.id
+    AND lower(trim(usage.model)) = 'gpt-5.6-luna'
+    AND abs(usage.input_rate_per_m - 1) < 0.000001
+    AND abs(usage.cached_input_rate_per_m - 0.1) < 0.000001
+    AND abs(usage.output_rate_per_m - 6) < 0.000001
+);`,
+});
+
 interface HistoricalMigrationArtifact {
   version: number;
   timestamp: string;
@@ -295,6 +341,12 @@ export const STORE_MIGRATIONS: readonly StoreMigrationMetadata[] = Object.freeze
     timestamp: '2026-08-11T00:00:00.000Z',
     name: 'review-attempt-role-provenance',
     artifact: REVIEW_ATTEMPT_ROLE_ARTIFACT,
+  }),
+  defineExecutableMigration({
+    version: 22,
+    timestamp: '2026-08-11T00:00:00.000Z',
+    name: 'reprice-gpt-5-6-luna-usage',
+    artifact: REVIEW_USAGE_LUNA_REPRICE_ARTIFACT,
   }),
 ]);
 

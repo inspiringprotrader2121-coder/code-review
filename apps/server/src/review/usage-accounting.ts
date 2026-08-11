@@ -31,7 +31,7 @@ export const DEFAULT_USAGE_COST_POLICY: UsageCostPolicy = {
   deepseek: { input: 0.435, cachedInput: 0.003625, cacheWrite: 0.435, output: 0.87 },
   'deepseek-flash': { input: 0.14, cachedInput: 0.0028, cacheWrite: 0.14, output: 0.28 },
   modelRates: {
-    'gpt-5.6-luna': { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 },
+    'gpt-5.6-luna': { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 6 },
     'deepseek-v4-pro': {
       input: 0.435,
       cachedInput: 0.003625,

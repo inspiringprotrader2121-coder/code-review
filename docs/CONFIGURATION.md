@@ -106,12 +106,9 @@ Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenti
 | `ORVEX_OPENAI_REASONING_EFFORT` | enum; max | `max` | no / none | - | Luna reasoning effort. Production must remain maximum. |
 | `ORVEX_LLM_MAX_TOTAL_MS` | integer; 30000..300000 ms; default 300000 | `300000` | no / none | - | Hard budget for a provider attempt. Hard timeouts are not retried. |
 | `ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS` | integer; positive tokens; unset disables | `20000` | no / none | - | Anthropic-compatible provider thinking-token budget. |
-| `ORVEX_OPENAI_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.2` | no / none | - | Legacy generic OpenAI input fallback. The pinned Luna stage uses its dedicated Luna rates instead. |
-| `ORVEX_OPENAI_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.02` | no / none | - | Legacy generic OpenAI cached-input fallback. The pinned Luna stage uses its dedicated Luna rates instead. |
-| `ORVEX_OPENAI_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.2` | no / none | - | Legacy generic OpenAI output fallback. The pinned Luna stage uses its dedicated Luna rates instead. |
-| `ORVEX_LUNA_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.2` | no / none | - | GPT-5.6 Luna input pricing after the 2026-07-30 OpenAI price reduction. |
-| `ORVEX_LUNA_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.02` | no / none | - | GPT-5.6 Luna cached-input pricing after the 2026-07-30 OpenAI price reduction. |
-| `ORVEX_LUNA_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.2` | no / none | - | GPT-5.6 Luna output pricing after the 2026-07-30 OpenAI price reduction. |
+| `ORVEX_OPENAI_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.2` | no / none | - | Legacy generic OpenAI input fallback. The pinned Luna stage uses its published fixed rate instead. |
+| `ORVEX_OPENAI_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.02` | no / none | - | Legacy generic OpenAI cached-input fallback. The pinned Luna stage uses its published fixed rate instead. |
+| `ORVEX_OPENAI_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.2` | no / none | - | Legacy generic OpenAI output fallback. The pinned Luna stage uses its published fixed rate instead. |
 | `ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.14` | no / none | - | DeepSeek Flash input pricing, verified 2026-08-01. |
 | `ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.0028` | no / none | - | DeepSeek Flash cached-input pricing, verified 2026-08-10. |
 | `ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `0.28` | no / none | - | DeepSeek Flash output pricing, verified 2026-08-01. |

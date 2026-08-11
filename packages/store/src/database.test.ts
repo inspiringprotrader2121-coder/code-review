@@ -144,6 +144,82 @@ test('migration ledger is unchanged on repeat boot', () => {
   }
 });
 
+test('Luna pricing migration repairs only usage recorded at the known bad rate', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-luna-reprice-'));
+  try {
+    const dbPath = path.join(directory, 'store.db');
+    const legacy = new AppDatabase(dbPath, 'legacy-worker');
+    const tenant = legacy.createTenant('luna-reprice');
+    const recordRun = (pr: number, outputRatePerM: number, costUsd: number): string => {
+      const runId = legacy.startReviewRun({
+        tenantId: tenant.id,
+        installationId: 1,
+        owner: 'luna-reprice',
+        repo: 'api',
+        pr,
+        headSha: `sha-${pr}`,
+        action: 'manual',
+      });
+      legacy.recordReviewRunUsage({
+        runId,
+        tenantId: tenant.id,
+        provider: 'codex-cli',
+        model: 'gpt-5.6-luna',
+        tier: 'openai',
+        inputTokens: 80_000,
+        cachedInputTokens: 20_000,
+        cacheWriteTokens: 10_000,
+        outputTokens: 5_000,
+        inputRatePerM: 0.2,
+        cachedInputRatePerM: 0.02,
+        cacheWriteRatePerM: 0.25,
+        outputRatePerM,
+        costUsd,
+        tokenSource: 'estimate',
+      });
+      legacy.completeReviewRun(runId, { status: 'completed', durationMs: 1 });
+      return runId;
+    };
+
+    const repricedRunId = recordRun(1, 1.2, 0.0189);
+    const untouchedRunId = recordRun(2, 1.3, 0.0194);
+    const raw = (
+      legacy as unknown as {
+        db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
+      }
+    ).db;
+    raw.prepare('DELETE FROM orvex_schema_migrations WHERE version = 22').run();
+    legacy.close();
+
+    const upgraded = new AppDatabase(dbPath, 'upgraded-worker');
+    const repricedUsage = upgraded.listReviewRunUsage(repricedRunId)[0]!;
+    assert.equal(repricedUsage.inputRatePerM, 1);
+    assert.equal(repricedUsage.cachedInputRatePerM, 0.1);
+    assert.equal(repricedUsage.cacheWriteRatePerM, 1.25);
+    assert.equal(repricedUsage.outputRatePerM, 6);
+    assert.ok(Math.abs(repricedUsage.costUsd - 0.0945) < 1e-12);
+    assert.ok(
+      Math.abs(
+        upgraded.listReviewRuns(tenant.id, 10).find((run) => run.id === repricedRunId)!.costUsd -
+          0.0945,
+      ) < 1e-12,
+    );
+
+    const untouchedUsage = upgraded.listReviewRunUsage(untouchedRunId)[0]!;
+    assert.equal(untouchedUsage.outputRatePerM, 1.3);
+    assert.equal(untouchedUsage.costUsd, 0.0194);
+    upgraded.close();
+
+    const repeatedBoot = new AppDatabase(dbPath, 'repeat-worker');
+    assert.ok(
+      Math.abs(repeatedBoot.listReviewRunUsage(repricedRunId)[0]!.costUsd - 0.0945) < 1e-12,
+    );
+    repeatedBoot.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('lineage migration preserves legacy usage while clearing unprovable links', () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'orvex-store-migrations-'));
   try {

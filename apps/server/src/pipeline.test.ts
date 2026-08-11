@@ -250,11 +250,11 @@ test('usage accounting keeps Luna pricing pinned and prices provider cache reads
     { inputTokens: 50_000, outputTokens: 5_000, tokenSource: 'estimate' },
     staleGenericOpenAi,
   );
-  assert.equal(luna.inputRatePerM, 0.2);
-  assert.equal(luna.cachedInputRatePerM, 0.02);
-  assert.equal(luna.cacheWriteRatePerM, 0.25);
-  assert.equal(luna.outputRatePerM, 1.2);
-  assert.equal(luna.costUsd, 0.016);
+  assert.equal(luna.inputRatePerM, 1);
+  assert.equal(luna.cachedInputRatePerM, 0.1);
+  assert.equal(luna.cacheWriteRatePerM, 1.25);
+  assert.equal(luna.outputRatePerM, 6);
+  assert.equal(luna.costUsd, 0.08);
 
   const flash = accountUsage(
     'deepseek-flash',
@@ -271,11 +271,11 @@ test('usage accounting keeps Luna pricing pinned and prices provider cache reads
     outputTokens: 1_000_000,
     tokenSource: 'provider',
   });
-  assert.equal(longLuna.inputRatePerM, 0.4);
-  assert.equal(longLuna.cachedInputRatePerM, 0.04);
-  assert.equal(longLuna.cacheWriteRatePerM, 0.5);
-  assert.ok(Math.abs(longLuna.outputRatePerM - 1.8) < 1e-12);
-  assert.ok(Math.abs(longLuna.costUsd - 1.889) < 1e-12);
+  assert.equal(longLuna.inputRatePerM, 2);
+  assert.equal(longLuna.cachedInputRatePerM, 0.2);
+  assert.equal(longLuna.cacheWriteRatePerM, 2.5);
+  assert.ok(Math.abs(longLuna.outputRatePerM - 9) < 1e-12);
+  assert.ok(Math.abs(longLuna.costUsd - 9.445) < 1e-12);
 
   const longMiniMax = accountUsage('standard', modelRoutingConfig().standardModel, 'discovery', {
     inputTokens: 600_000,

@@ -2,6 +2,7 @@ import type { SqliteConnection } from '../connection.js';
 import {
   REVIEW_ATTEMPT_DISPATCH_ARTIFACT,
   REVIEW_ATTEMPT_ROLE_ARTIFACT,
+  REVIEW_USAGE_LUNA_REPRICE_ARTIFACT,
   REVIEW_USAGE_CACHE_PRICING_ARTIFACT,
   REVIEW_USAGE_CACHE_WRITE_PRICING_ARTIFACT,
   STORE_MIGRATIONS,
@@ -451,6 +452,15 @@ export const STORE_MIGRATION_STEPS: readonly ExecutableMigrationStep[] = Object.
       version: 21,
       artifact: REVIEW_ATTEMPT_ROLE_ARTIFACT,
       apply: migrateReviewAttemptRoleColumn,
+    },
+    {
+      version: 22,
+      artifact: REVIEW_USAGE_LUNA_REPRICE_ARTIFACT,
+      apply: (db: SqliteConnection) => {
+        const statement = REVIEW_USAGE_LUNA_REPRICE_ARTIFACT.sql;
+        if (typeof statement !== 'string') throw new Error('Luna reprice migration is missing SQL');
+        db.exec(statement);
+      },
     },
   ].map((step) => Object.freeze(step)),
 );
