@@ -42,15 +42,22 @@ const runReason = (r) => {
   if (r.skipReason === 'pr_closed_mid_run') return 'PR closed during review';
   if (r.skipReason === 'provider_not_configured') return 'Provider unavailable';
   if (r.skipReason) return String(r.skipReason).replaceAll('_', ' ');
-  if (r.status !== 'failed') return '';
   const error = String(r.error || '');
+  if (/^review incomplete:/i.test(error))
+    return 'Partial review posted — one or more required passes did not complete';
+  if (r.status !== 'failed') return '';
+  if (/review input coverage incomplete/i.test(error))
+    return 'GitHub diff incomplete — no model calls were made';
+  if (/required review (?:coverage unit|lens).*did not complete|completed fewer than/i.test(error))
+    return 'Required model pass did not complete — retry';
   if (/wall-clock cap|produced no container output/i.test(error))
     return 'Provider timed out before verdict — retry';
-  if (/fork failed|sandbox slot/i.test(error)) return 'Review sandbox was unavailable — retry';
+  if (/fork failed|resource temporarily unavailable|sandbox slot/i.test(error))
+    return 'Review sandbox was unavailable — retry';
   if (/truncated|stop_reason=max_tokens/i.test(error))
     return 'Provider response exceeded its output budget — retry';
   if (/rate.?limit|\b429\b|quota/i.test(error)) return 'Provider temporarily rate-limited — retry';
-  return 'No verdict — retry';
+  return 'Review pipeline failed — retry';
 };
 const runChip = (s, reason) => {
   const status = typeof s === 'string' && s ? s : 'queued';
@@ -82,7 +89,11 @@ const dur = (ms) => {
     : Math.floor(sec / 60) + 'm ' + String(sec % 60).padStart(2, '0') + 's';
 };
 const estimatedUsd = (n, estimated = false) =>
-  n == null ? '—' : (estimated ? '~' : '') + '$' + finiteNumber(n).toFixed(2);
+  n == null
+    ? estimated
+      ? 'usage pending*'
+      : '—'
+    : (estimated ? '~' : '') + '$' + finiteNumber(n).toFixed(2) + (estimated ? '*' : '');
 const repoShort = (fn) => String(fn || '').split('/');
 
 // —— theme toggle (persisted) ——
@@ -786,7 +797,7 @@ async function loadReviews() {
               (SHOW_LLM_COST
                 ? '<td class="r mono" title="' +
                   (r.costEstimated
-                    ? 'Estimated because a provider omitted usage.'
+                    ? 'Estimated because one or more provider attempts did not report usage. A timed-out call may have incurred additional spend.'
                     : 'Reported provider usage, including cache reads when supplied.') +
                   '">' +
                   estimatedUsd(r.costUsd, r.costEstimated) +

@@ -95,6 +95,44 @@ test('workspace read repository is tenant-scoped and preserves facade dashboard 
   db.close();
 });
 
+test('dashboard cost is marked estimated when a terminal provider attempt omitted usage', () => {
+  const db = new AppDatabase(':memory:');
+  const tenant = db.createTenant('incomplete-usage');
+  const runId = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'incomplete',
+    repo: 'usage',
+    pr: 1,
+    headSha: 'sha',
+    action: 'manual',
+  });
+  db.startReviewRunAttempt({
+    id: 'timed-out-attempt',
+    runId,
+    tenantId: tenant.id,
+    provider: 'deepseek',
+    model: 'deepseek-v4-flash',
+    tier: 'deepseek-flash',
+    transport: 'chat',
+    retryIndex: 0,
+    keyIndex: 0,
+    startedAt: new Date().toISOString(),
+  });
+  db.completeReviewRunAttempt({
+    id: 'timed-out-attempt',
+    outcome: 'timed_out',
+    durationMs: 300_000,
+    completedAt: new Date().toISOString(),
+    error: 'LLM chat call exceeded 300000ms wall-clock cap',
+  });
+  db.completeReviewRun(runId, { status: 'failed', durationMs: 300_000, costUsd: 0 });
+
+  const { workspaceReads } = repositories(db);
+  assert.equal(workspaceReads.listReviewRuns(tenant.id)[0]?.costEstimated, true);
+  db.close();
+});
+
 test('repository read repository is explicitly installation-scoped and tenant list scoped', () => {
   const db = new AppDatabase(':memory:');
   const first = db.createTenant('repo-first');

@@ -51,6 +51,17 @@ function emitAttempt(options: CodexCliReviewOptions, event: LlmAttemptEvent): vo
 }
 
 type AttemptState = { lastAttemptId?: string; nextRetryIndex: number };
+
+/**
+ * Docker can reject a container before Codex starts when a burst exhausts a
+ * short-lived host resource. These messages occur before a model response and
+ * are safe to retry once with a fresh isolated container.
+ */
+export function isRecoverableSandboxLaunchFailure(message: string): boolean {
+  return /(?:\btini\b[\s\S]*\bfork failed\b|\bfork failed:\s*resource temporarily unavailable\b|\bdocker\b[\s\S]*resource temporarily unavailable)/i.test(
+    message,
+  );
+}
 async function executeAttempt(
   prompt: string,
   options: CodexCliReviewOptions,
@@ -197,6 +208,37 @@ async function executeWithRateLimitRecovery(
   }
 }
 
+async function executeWithSandboxLaunchRecovery(
+  prompt: string,
+  options: CodexCliReviewOptions,
+  state: AttemptState,
+  homeIndex: number,
+  threadId: string | undefined,
+): Promise<{ text: string; threadId: string }> {
+  let retryThreadId = threadId;
+  for (let launchAttempt = 0; launchAttempt < 2; launchAttempt++) {
+    try {
+      return await executeWithRateLimitRecovery(prompt, options, state, homeIndex, retryThreadId);
+    } catch (error) {
+      const message = (error as Error).message;
+      if (
+        launchAttempt > 0 ||
+        options.signal?.aborted ||
+        !isRecoverableSandboxLaunchFailure(message)
+      ) {
+        throw error;
+      }
+      // The failed container never produced a model response. Retry only once,
+      // on a clean thread, so a capacity blip cannot erase the other completed
+      // review lenses or trigger an unbounded paid retry loop.
+      console.warn('[codex-cli] sandbox launch failed before model execution; retrying once');
+      retryThreadId = undefined;
+      await waitForCodexRetry(1_000, options.signal, clockFor(options));
+    }
+  }
+  throw new Error('codex-cli sandbox launch recovery exhausted');
+}
+
 /** Run the pinned Luna agent via the internal credential-isolating container only. */
 export async function runCodexCliReview(
   files: ReviewableFile[],
@@ -224,7 +266,7 @@ export async function runCodexCliReview(
   let result: { text: string; threadId: string } | undefined;
   for (let homeAttempts = 0; ; homeAttempts++) {
     try {
-      result = await executeWithRateLimitRecovery(prompt, options, state, homeIndex, threadId);
+      result = await executeWithSandboxLaunchRecovery(prompt, options, state, homeIndex, threadId);
       break;
     } catch (error) {
       const message = (error as Error).message;

@@ -62,6 +62,8 @@ export interface PublicationInput {
   findings: FindingPipelineResult;
   llmSummary?: string;
   skippedLenses: string[];
+  /** Persisted with a completed run so the dashboard can distinguish partial output. */
+  incompleteReason?: string;
   verificationIncomplete: boolean;
   verificationInconclusiveCount?: number;
   verificationUnavailableReason?: string;

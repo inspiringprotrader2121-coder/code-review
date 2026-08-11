@@ -74,6 +74,51 @@ export function failedRequiredCoverageKeys(
   );
 }
 
+export interface RequiredCoverageDegradation {
+  missingCoverageKeys: string[];
+  skippedLenses: string[];
+  reason: string;
+  transient: boolean;
+}
+
+/**
+ * A review with at least one completed discovery pass can publish its findings
+ * safely, provided the missing coverage is explicit. This avoids throwing away
+ * completed provider work while ensuring the result is never presented as a
+ * full sign-off.
+ */
+export function describeRequiredCoverageDegradation(
+  coverageKeys: readonly string[],
+  outcomes: readonly (RequiredLensOutcome & { label?: string; transient?: boolean })[],
+  requiredSuccesses: number,
+): RequiredCoverageDegradation | null {
+  const missingCoverageKeys = failedRequiredCoverageKeys(coverageKeys, outcomes, requiredSuccesses);
+  if (missingCoverageKeys.length === 0) return null;
+  const failed = outcomes.filter(
+    (outcome) =>
+      missingCoverageKeys.includes(outcome.requiredCoverageKey ?? '') &&
+      !outcome.bestEffort &&
+      !outcome.ok,
+  );
+  const skippedLenses = [
+    ...new Set(
+      failed.map((outcome) => outcome.label ?? outcome.requiredCoverageKey ?? 'required pass'),
+    ),
+  ];
+  const transient = failed.some((outcome) => outcome.transient === true);
+  const cause = transient
+    ? 'a provider timed out or was temporarily unavailable'
+    : 'a required provider pass did not complete';
+  return {
+    missingCoverageKeys,
+    skippedLenses,
+    transient,
+    reason:
+      `review incomplete: ${missingCoverageKeys.length}/${coverageKeys.length} required review ` +
+      `coverage unit(s) did not complete because ${cause}`,
+  };
+}
+
 export { takeReviewCallsByPriority } from './review-execution-policy.js';
 export type { ReviewExecutionPolicy } from './review-execution-policy.js';
 
@@ -270,6 +315,7 @@ export async function executeReviewCore(
     // Best-effort passes that failed — surfaced in the posted review so a partial
     // run can never read as a full sign-off.
     let skippedLenses: string[] = [];
+    let reviewIncompleteReason: string | undefined;
     // Only true once an extra deep lens has actually produced a review.
     let deepLensesRan = false;
     let llmFindings: ReviewFinding[] = [];
@@ -476,43 +522,23 @@ export async function executeReviewCore(
             ),
           ),
         ];
-        // A required lens aborts the review only when it has ZERO successful
-        // samples — the pre-aggregation semantics. Requiring minOccurrences
-        // successes here aborted whole reviews (discarding every OTHER lens's
-        // completed sample set and the sweep) whenever one model was flaky for
-        // 4 of 5 samples, and a correlated TPM squeeze made the requeued retry
-        // re-fire the identical burst into the same window. A lens with 1..min-1
-        // successes instead DEGRADES below (posted with a disclosure): its
-        // findings can still recur via other samples' lenses, and losing solo
-        // findings to manual review beats losing the entire review.
+        // A required lens is incomplete only when it has ZERO successful samples.
+        // Publish the other completed lenses with a clear disclosure instead of
+        // discarding paid work. Under aggregation, a lens with 1..min-1 samples
+        // also remains visibly degraded below rather than blocking the whole run.
         const requiredSuccesses = 1;
-        const failedRequiredCoverage = failedRequiredCoverageKeys(
+        const requiredCoverageDegradation = describeRequiredCoverageDegradation(
           requiredCoverageKeys,
           outcomes,
           requiredSuccesses,
         );
-        if (failedRequiredCoverage.length > 0) {
-          // PRESERVE TRANSIENCE. queue-runner decides whether to requeue by pattern-
-          // matching this message with isTransientLlmError; naming it keeps a
-          // rate-limited required lens retryable rather than silently partial.
-          const failedRequiredPasses = outcomes.filter(
-            (outcome) =>
-              failedRequiredCoverage.includes(
-                outcome.requiredCoverageKey ?? `lens:${outcome.modelPassIndex ?? -1}`,
-              ) &&
-              !outcome.bestEffort &&
-              !outcome.ok,
-          );
-          const transientFailures = failedRequiredPasses.filter(
-            (outcome) => outcome.transient,
-          ).length;
-          const cause =
-            transientFailures > 0
-              ? ' — required provider call timed out or was temporarily unavailable'
-              : '; no partial review was posted';
-          throw new Error(
-            `review aborted: ${failedRequiredCoverage.length}/${requiredCoverageKeys.length} required review coverage unit(s) ` +
-              `completed fewer than ${requiredSuccesses} sample(s)${cause}`,
+        if (requiredCoverageDegradation) {
+          reviewIncompleteReason = requiredCoverageDegradation.reason;
+          skippedLenses = [
+            ...new Set([...skippedLenses, ...requiredCoverageDegradation.skippedLenses]),
+          ];
+          console.warn(
+            `[worker] ${requiredCoverageDegradation.reason}; publishing completed pass results with disclosure`,
           );
         }
         const degradedRequired = outcomes
@@ -781,6 +807,7 @@ export async function executeReviewCore(
       findings,
       llmSummary,
       skippedLenses,
+      incompleteReason: reviewIncompleteReason,
       verificationIncomplete: verification.incomplete,
       verificationInconclusiveCount: verification.inconclusiveRequiredCount,
       verificationUnavailableReason: verification.unavailableReason,

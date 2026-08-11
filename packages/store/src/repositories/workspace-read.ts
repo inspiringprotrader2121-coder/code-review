@@ -38,10 +38,20 @@ export class WorkspaceReadRepository implements WorkspaceReadStore {
   listReviewRuns(tenantId: string, limit = 50): ReviewRun[] {
     const rows = this.db
       .prepare(
-        `SELECT review_runs.*, EXISTS (
-           SELECT 1 FROM review_run_usage
-           WHERE review_run_usage.run_id = review_runs.id
-             AND review_run_usage.token_source != 'provider'
+        `SELECT review_runs.*, (
+           EXISTS (
+             SELECT 1 FROM review_run_usage
+             WHERE review_run_usage.run_id = review_runs.id
+               AND review_run_usage.token_source != 'provider'
+           ) OR EXISTS (
+             SELECT 1 FROM review_run_attempts AS attempt
+             WHERE attempt.run_id = review_runs.id
+               AND attempt.outcome IN ('failed', 'timed_out', 'rate_limited', 'cancelled')
+               AND NOT EXISTS (
+                 SELECT 1 FROM review_run_usage AS usage
+                 WHERE usage.attempt_id = attempt.id
+               )
+           )
          ) AS cost_estimated
          FROM review_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`,
       )

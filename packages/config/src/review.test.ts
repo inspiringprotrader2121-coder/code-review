@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   loadGitHubRuntimeConfig,
@@ -17,7 +18,7 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.reviewWorkerConcurrency, 8);
   assert.equal(config.codexApiKeyConcurrency, 8);
   assert.equal(config.providerConcurrency('luna'), 8);
-  assert.equal(config.providerConcurrency('deepseek'), 24);
+  assert.equal(config.providerConcurrency('deepseek'), 8);
   assert.equal(config.promptChangedChars, 16_000);
   assert.equal(config.promptRelatedChars, 6_000);
   assert.equal(config.promptOtherChars, 2_000);
@@ -70,13 +71,13 @@ test('review runtime preserves max reasoning, bounded timers, and pinned child e
   assert.deepEqual(config.childProcessEnvironment, { PATH: '/usr/bin' });
 });
 
-test('production capacity profile reserves eight reviews and 24 DeepSeek stages', () => {
+test('production capacity profile reserves one DeepSeek lane for each concurrent review', () => {
   const config = loadReviewRuntimeConfig({
     ORVEX_CODEX_CLI: '1',
     ORVEX_MAX_CONCURRENT_REVIEWS: '8',
     ORVEX_CODEX_APIKEY_CONCURRENCY: '8',
     ORVEX_PROVIDER_CONCURRENCY_LUNA: '8',
-    ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: '24',
+    ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: '8',
     ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '8',
     ORVEX_VERIFY_CONCURRENCY: '1',
     ORVEX_REVIEW_CONCURRENCY: '3',
@@ -85,10 +86,16 @@ test('production capacity profile reserves eight reviews and 24 DeepSeek stages'
   assert.equal(config.reviewWorkerConcurrency, 8);
   assert.equal(config.codexApiKeyConcurrency, 8);
   assert.equal(config.providerConcurrency('luna'), 8);
-  assert.equal(config.providerConcurrency('deepseek'), 24);
+  assert.equal(config.providerConcurrency('deepseek'), 8);
   assert.equal(config.providerConcurrency('minimax'), 8);
   assert.equal(config.verifyConcurrency, 1);
   assert.equal(config.execution.concurrency, 3);
+});
+
+test('production PM2 profile keeps DeepSeek at one lane per review', () => {
+  const ecosystem = readFileSync(new URL('../../../ecosystem.config.cjs', import.meta.url), 'utf8');
+  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=8(?:\s|\\")/);
+  assert.doesNotMatch(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=24(?:\s|\\")/);
 });
 
 test('supporting context cannot override the diff-first production ceiling', () => {

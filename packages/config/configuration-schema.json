@@ -1207,12 +1207,12 @@
         },
         {
           "name": "ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK",
-          "example": "24",
+          "example": "8",
           "type": "integer",
           "range": "1..32; default applicable worker/Codex limit",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek provider-stage concurrency cap. The eight-review production profile uses 24 for two discovery stages plus verification.",
+          "description": "DeepSeek provider-stage concurrency cap. Same-provider stages run sequentially within each review, so the eight-review production profile uses eight concurrent stages.",
           "deprecatedAliases": []
         },
         {

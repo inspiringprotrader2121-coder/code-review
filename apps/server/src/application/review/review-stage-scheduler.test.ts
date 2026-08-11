@@ -104,7 +104,7 @@ test('lower-tier required DeepSeek and MiniMax calls also fan out without sampli
   assert.ok(scheduled.every((entry) => entry.requiredCoverageKey));
 });
 
-test('same-provider review calls are independently scheduled behind provider admission', () => {
+test('same-provider review calls share a per-review lane while independent providers run separately', () => {
   const first = call('deepseek-v4-flash', 1);
   first.target.admissionBucket = 'deepseek';
   const second = call('deepseek-v4-flash', 2);
@@ -112,11 +112,67 @@ test('same-provider review calls are independently scheduled behind provider adm
   const minimax = call('MiniMax-M3', 3);
   minimax.target.admissionBucket = 'minimax';
 
-  assert.deepEqual(groupApiCallsByProvider([first, minimax, second]), [
-    [first],
-    [minimax],
-    [second],
-  ]);
+  assert.deepEqual(groupApiCallsByProvider([first, minimax, second]), [[first, second], [minimax]]);
+});
+
+test('same-provider lanes do not overlap while a different provider starts promptly', async () => {
+  const first = call('deepseek-v4-flash', 1);
+  first.target.admissionBucket = 'deepseek';
+  const second = call('deepseek-v4-flash', 2);
+  second.target.admissionBucket = 'deepseek';
+  const minimax = call('MiniMax-M3', 3);
+  minimax.target.admissionBucket = 'minimax';
+  const started: string[] = [];
+  let releaseFirst!: () => void;
+  const firstReleased = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let firstStarted!: () => void;
+  const firstStartedPromise = new Promise<void>((resolve) => {
+    firstStarted = resolve;
+  });
+  let minimaxStarted!: () => void;
+  const minimaxStartedPromise = new Promise<void>((resolve) => {
+    minimaxStarted = resolve;
+  });
+
+  const running = executeReviewProviderCalls({
+    calls: [first, minimax, second],
+    filesForLlm: [],
+    filesForInvestigate: [],
+    providers: {
+      async runCodexReview() {
+        throw new Error('not used');
+      },
+      async runReview() {
+        return { findings: [] };
+      },
+    },
+    contextRun: async (_context, _target, _tier, name) => {
+      started.push(name);
+      if (name === first.label) {
+        firstStarted();
+        await firstReleased;
+      }
+      if (name === minimax.label) minimaxStarted();
+      return { findings: [] };
+    },
+    repoDirectory: null,
+    repoId: 'acme/repo',
+    signal: new AbortController().signal,
+    isCancelled: () => false,
+    onUsageFor: () => () => {},
+    onAttemptFor: () => () => {},
+    tagFindings: () => {},
+    mapConcurrent: async (items, _limit, run) => Promise.all(items.map(run)),
+    apiConcurrency: 2,
+  });
+
+  await Promise.all([firstStartedPromise, minimaxStartedPromise]);
+  assert.deepEqual(started.sort(), [first.label, minimax.label].sort());
+  releaseFirst();
+  await running;
+  assert.equal(started.at(-1), second.label);
 });
 
 test('agentic reviews start a fresh Codex thread in the isolated container', async () => {

@@ -23,6 +23,8 @@ export interface ProcessResult {
   fixedCount: number;
   reviewId?: number;
   skipReason?: string;
+  /** Completed output was published, but one or more required passes failed. */
+  incompleteReason?: string;
   inputTokens?: number;
   outputTokens?: number;
   costUsd?: number;

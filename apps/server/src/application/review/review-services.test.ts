@@ -4,7 +4,7 @@ import { DEFAULT_REVIEW_CONFIG } from '@orvex-review/rules';
 import { AdmissionService } from './admission-service.js';
 import { FindingPipeline } from './finding-pipeline.js';
 import { PublicationInProgressError, PublicationService } from './publication-service.js';
-import { ReviewExecutor } from './review-executor.js';
+import { describeRequiredCoverageDegradation, ReviewExecutor } from './review-executor.js';
 import { createReviewUsageAccounting } from './review-usage-accounting.js';
 import { orchestrateVerification } from './verification-orchestrator.js';
 import { DEFAULT_USAGE_COST_POLICY } from '../../review/usage-accounting.js';
@@ -53,6 +53,34 @@ test('review execution accepts an injected computation without provider or GitHu
     await executor.mapConcurrent([1, 2, 3], 2, async (value) => value * 2),
     [2, 4, 6],
   );
+});
+
+test('missing required coverage is publishable only with an explicit incomplete disclosure', () => {
+  const degradation = describeRequiredCoverageDegradation(
+    ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1'],
+    [
+      {
+        requiredCoverageKey: 'required:general:0:chunk:1/1',
+        label: 'pass 1/4 (general)',
+        ok: true,
+      },
+      {
+        requiredCoverageKey: 'required:deep-dive:1:chunk:1/1',
+        label: 'pass 2/4 (deep-dive)',
+        ok: false,
+        transient: true,
+      },
+    ],
+    1,
+  );
+
+  assert.deepEqual(degradation, {
+    missingCoverageKeys: ['required:deep-dive:1:chunk:1/1'],
+    skippedLenses: ['pass 2/4 (deep-dive)'],
+    transient: true,
+    reason:
+      'review incomplete: 1/2 required review coverage unit(s) did not complete because a provider timed out or was temporarily unavailable',
+  });
 });
 
 test('admission can reject an unavailable provider before review computation', async () => {

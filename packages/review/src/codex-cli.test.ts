@@ -17,6 +17,7 @@ import {
   DEFAULT_CODEX_CLI_MODEL,
   detectCodexAuthMode,
   isCodexRepoAllowed,
+  isRecoverableSandboxLaunchFailure,
   normalizeCodexAttemptError,
   resolveCodexBinary,
   resolveCodexHomeConcurrency,
@@ -438,6 +439,20 @@ test('Codex lease-wait cancellation is normalized before attempt telemetry', () 
   );
   assert.equal(normalized.name, 'ReviewCancelledError');
   assert.match(normalized.message, /codex-cli review cancelled/);
+});
+
+test('only pre-model sandbox launch failures are eligible for the one bounded retry', () => {
+  assert.equal(
+    isRecoverableSandboxLaunchFailure(
+      '[FATAL tini (1)] fork failed: Resource temporarily unavailable',
+    ),
+    true,
+  );
+  assert.equal(
+    isRecoverableSandboxLaunchFailure('codex-cli produced no container output for 300000ms'),
+    false,
+  );
+  assert.equal(isRecoverableSandboxLaunchFailure('LLM request failed (429): rate limited'), false);
 });
 
 test('CountingSemaphore allows up to N concurrent runners', async () => {

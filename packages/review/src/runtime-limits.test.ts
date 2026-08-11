@@ -6,11 +6,11 @@ import {
   resolveReviewWorkerConcurrency,
 } from './runtime-limits.js';
 
-test('runtime limits reserve eight review slots and 24 DeepSeek stages', () => {
+test('runtime limits reserve one DeepSeek lane for each review slot', () => {
   assert.equal(resolveReviewWorkerConcurrency({}), 8);
   assert.equal(resolveCodexApiKeyConcurrency({}), 8);
   assert.equal(resolveProviderConcurrency('luna', {}), 8);
-  assert.equal(resolveProviderConcurrency('deepseek', {}), 24);
+  assert.equal(resolveProviderConcurrency('deepseek', {}), 8);
   assert.equal(resolveProviderConcurrency('minimax', {}), 8);
 });
 

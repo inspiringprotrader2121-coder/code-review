@@ -52,7 +52,9 @@ export class FinalizationService {
       config.store.completeReviewRun(runId, {
         status: result.skipReason ? 'failed' : 'completed',
         skipReason: result.skipReason,
-        error: result.skipReason ? `review did not complete: ${result.skipReason}` : undefined,
+        error: result.skipReason
+          ? `review did not complete: ${result.skipReason}`
+          : result.incompleteReason,
         durationMs: (this.dependencies.now?.() ?? Date.now()) - startedAt,
         findingsNew: result.newCount,
         findingsFixed: result.fixedCount,

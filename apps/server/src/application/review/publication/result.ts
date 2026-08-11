@@ -25,6 +25,7 @@ export function createPublishedResult(
     outputTokens,
     costUsd,
     published: true,
+    incompleteReason: input.incompleteReason,
     newFindings: input.merged.toPost.map((finding) => ({
       severity: finding.severity,
       file: finding.file,
