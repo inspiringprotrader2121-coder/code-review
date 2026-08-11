@@ -24,34 +24,27 @@ test('buildReviewPassAngles keeps breadth last when present', () => {
       modelTier: 'multi-model',
       files: [{ filename: 'a.ts', patch: '+x', status: 'modified' }],
     }).map((a) => a.tag);
-    assert.deepEqual(tags, [
-      'general',
-      'deep-dive',
-      'removed-behavior/callers',
-      'perf/completeness/api',
-    ]);
+    assert.deepEqual(tags, ['general', 'deep-dive', 'perf/completeness/api']);
   } finally {
     delete process.env.ORVEX_BREADTH_ON;
     delete process.env.ORVEX_REMOVED_BEHAVIOR;
   }
 });
 
-test('buildReviewPassAngles gives small multi-model PRs the full four-pass track', () => {
+test('buildReviewPassAngles gives small multi-model PRs the full three-pass track', () => {
   delete process.env.ORVEX_BREADTH_ON;
   delete process.env.ORVEX_REMOVED_BEHAVIOR;
-  // Small diff, no deletes — Verify/Enterprise must still run all four discovery passes.
+  // Small diff, no deletes — Verify/Enterprise still run all three discovery passes.
   const small = Array.from({ length: 5 }, (_, i) => ({
     filename: `src/f${i}.ts`,
     patch: '+const x = 1;\n',
     status: 'modified',
   }));
   const tags = buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag);
-  assert.deepEqual(tags, [
-    'general',
-    'deep-dive',
-    'removed-behavior/callers',
-    'perf/completeness/api',
-  ]);
+  assert.deepEqual(tags, ['general', 'deep-dive', 'perf/completeness/api']);
+  const flash = buildReviewPassAngles({ modelTier: 'multi-model', files: small })[1];
+  assert.match(flash?.focus ?? '', /REMOVED \/ WEAKENED BEHAVIOUR/);
+  assert.match(flash?.focus ?? '', /CALLER & CONTRACT AUDIT/);
 });
 
 test('buildReviewPassAngles dual-model stays at general + deep-dive on small PRs', () => {
@@ -78,12 +71,7 @@ test('buildReviewPassAngles cannot reduce a multi-model purchase through env dri
     const tags = buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map(
       (a) => a.tag,
     );
-    assert.deepEqual(tags, [
-      'general',
-      'deep-dive',
-      'removed-behavior/callers',
-      'perf/completeness/api',
-    ]);
+    assert.deepEqual(tags, ['general', 'deep-dive', 'perf/completeness/api']);
   } finally {
     delete process.env.ORVEX_BREADTH_ON;
     delete process.env.ORVEX_REMOVED_BEHAVIOR;

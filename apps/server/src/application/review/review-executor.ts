@@ -339,7 +339,7 @@ export async function executeReviewCore(
     const { usage, onUsageFor, onAttemptFor } = accounting;
     if (filesForLlm.length > 0) {
       // Depth is enforced HERE, in the harness, and scaled BY PLAN — not left to
-      // how long one model call decides to think. Higher tiers get the fixed four
+      // how long one model call decides to think. Higher tiers get the fixed three
       // discovery lenses plus verification. Findings accumulate and dedupe by
       // fingerprint; a hard call-count cap prevents runaway.
       // Reviewers and verifier receive diff and code context only — PR title/body

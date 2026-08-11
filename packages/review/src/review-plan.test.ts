@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { compileReviewPlan, reviewPlanStages } from './review-plan.js';
 
-test('high-tier plan is four required reviewers followed by Flash verification', () => {
+test('high-tier plan is three required reviewers followed by Flash verification', () => {
   for (const tier of ['multi-model']) {
     const plan = compileReviewPlan(tier);
     assert.ok(plan);
@@ -16,16 +16,12 @@ test('high-tier plan is four required reviewers followed by Flash verification',
       [
         { id: 'luna-agentic', model: 'luna', kind: 'discovery', required: true },
         { id: 'flash-deep-dive', model: 'deepseek-flash', kind: 'discovery', required: true },
-        {
-          id: 'flash-removed-behavior',
-          model: 'deepseek-flash',
-          kind: 'discovery',
-          required: true,
-        },
         { id: 'minimax-breadth', model: 'minimax', kind: 'discovery', required: true },
         { id: 'flash-verification', model: 'deepseek-flash', kind: 'verification', required: true },
       ],
     );
+    assert.match(plan.discovery[1]?.focus ?? '', /REMOVED \/ WEAKENED BEHAVIOUR/);
+    assert.match(plan.discovery[1]?.focus ?? '', /CALLER & CONTRACT AUDIT/);
   }
 });
 

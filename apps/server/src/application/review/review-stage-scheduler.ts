@@ -222,10 +222,8 @@ function compactCompleteDiffFocus(
 ): string {
   const lens =
     call.passTag === 'deep-dive'
-      ? 'Audit concrete regressions in data integrity, authorization, concurrency, and failure/cleanup branch parity.'
-      : call.passTag === 'removed-behavior/callers'
-        ? 'Audit deleted or changed behaviour and visible caller/test contracts.'
-        : 'Audit concrete performance, completeness, and API-contract regressions.';
+      ? 'Audit concrete regressions in data integrity, authorization, concurrency, failure/cleanup parity, removed or weakened guards, visible callers/tests/contracts, retry and legacy state, and rolling-deploy compatibility.'
+      : 'Audit concrete performance, completeness, and API-contract regressions.';
   return `REQUIRED COMPLETE DIFF CHUNK ${shardIndex + 1}/${shardCount}: review every supplied diff hunk in this chunk. This is one explicit coverage unit of a larger PR; do not infer a clean result for chunks you were not given. ${lens} Complete one evidence-led pass and return compact JSON before the worker time limit. Report at most 3 concrete findings, each with a file:line and failure scenario. Do not narrate private reasoning.`;
 }
 

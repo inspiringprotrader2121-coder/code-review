@@ -37,19 +37,9 @@ export const THIRD_ANGLE_FOCUS =
   'Every finding must name a concrete failure or measurable cost. Skip anything the correctness/security passes would already catch.\n' +
   'Before finalizing, take ONE more look at the 2-3 most complex changed areas through this lens — the subtlest miss is usually there.';
 
-/**
- * FOURTH PASS — removed behaviour & caller audit.
- *
- * Promoted from the `@orvex deep` extras to a standard pass on the top tiers.
- * The 161-180 competitor benchmarks showed our residual misses concentrated in
- * multi-step STATE and DATA-FLOW bugs (state surviving a retry, a guard dropped
- * on one path, a caller broken by a changed contract) — the class a
- * hunk-focused read is worst at. This lens targets exactly that, and running it
- * on a DIFFERENT model from the deep-dive pass is what makes it an ensemble
- * rather than a re-run.
- */
+/** Removed behaviour and caller audit, reusable inside a broader review pass. */
 export const REMOVED_BEHAVIOR_FOCUS =
-  'This is a FOURTH review pass with a lens the earlier passes do NOT cover. Do not repeat their findings; hunt these things specifically:\n' +
+  'As part of this same deep-dive pass, also audit the changed behaviour and its callers. Do not repeat findings from the general pass; hunt these things specifically:\n' +
   '- REMOVED / WEAKENED BEHAVIOUR: for every line this diff DELETES or replaces, name the invariant it enforced (a guard, validation, error path, cleanup, ordering constraint, permission check), then find where the new code re-establishes it. A dropped guard, a narrowed validation, a deleted error branch, or a cleanup that now only runs on the happy path is a finding. State what input now gets through that previously did not.\n' +
   '- CALLER & CONTRACT AUDIT: trace every changed function to its CALLERS. Does any call site break on a new precondition, a changed return shape or type, a new thrown error, a changed null/empty result, or a different ordering/timing? Check the tests that exercise it too — a test that still passes because it asserts the OLD contract is a finding.\n' +
   '- STATE ACROSS ATTEMPTS: for any retry, resume, reconnect, or replay path, enumerate what state SURVIVES from the previous attempt and what must be reset. State carried into a retry that should have been cleared is a bug even when each line looks correct.\n' +
@@ -60,6 +50,13 @@ export const REMOVED_BEHAVIOR_FOCUS =
   '- OVER-STRICT NEW VALIDATION: a new validator must still accept every LEGITIMATE existing configuration and input. If a valid legacy setup, a documented feature, or a value the system itself generates now gets rejected, that is a functional regression, not safety. Never recommend loosening a control that was deliberately tightened for security — flag only genuine functional breakage.\n' +
   'GROUNDING: cite only files and lines that actually appear in the diff or the source context you were given. If the sibling flow, consumer, or legacy-data path you suspect is NOT visible in that context, do not invent a file:line or assert the bug exists — these checks earn findings only when the evidence is on screen.\n' +
   'Report only concrete breakages with file:line and the input or sequence that triggers them.';
+
+/**
+ * One high-tier Flash pass combines the deep correctness audit with the
+ * removed-behaviour/caller audit. Keeping this as one shared constant prevents
+ * production and evaluation from drifting into different review contracts.
+ */
+export const HIGH_TIER_FLASH_FOCUS = `${DEEP_DIVE_FOCUS}\n\n${REMOVED_BEHAVIOR_FOCUS}`;
 
 /**
  * RISK HUNT — additive, best-effort Flash pass for high-risk diffs only.

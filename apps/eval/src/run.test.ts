@@ -22,19 +22,18 @@ test('evaluation pass targets mirror the fixed model lineup at max effort', () =
   });
 
   const flash = targets.find((target) => target.tag === 'deep-dive');
-  const callers = targets.find((target) => target.tag === 'removed-behavior/callers');
   const standard = targets.find((target) => target.tag === 'perf/completeness/api');
   assert.ok(flash);
-  assert.ok(callers);
   assert.ok(standard);
+  assert.equal(targets.length, 3);
   assert.equal(flash.target.reasoningEffort, 'max');
   assert.equal(flash.tier, 'deepseek-flash');
-  assert.equal(callers.tier, 'deepseek-flash');
-  assert.equal(callers.target.model, 'deepseek-v4-flash');
+  assert.match(flash.focus ?? '', /REMOVED \/ WEAKENED BEHAVIOUR/);
+  assert.match(flash.focus ?? '', /CALLER & CONTRACT AUDIT/);
   assert.equal(standard.target.api, 'responses');
 });
 
-test('evaluation pass 3 ignores stale Pro overrides and stays on Flash', () => {
+test('evaluation combined deep-dive ignores stale Pro overrides and stays on Flash', () => {
   const targets = evaluationPassTargets({
     ORVEX_STANDARD_API_KEY: 'standard-test-key',
     ORVEX_STANDARD_MODEL: 'standard-test-model',
@@ -42,10 +41,10 @@ test('evaluation pass 3 ignores stale Pro overrides and stays on Flash', () => {
     ORVEX_DEEPSEEK_API_KEY: 'deepseek-test-key',
     ORVEX_PASS3_ON_DEEPSEEK_PRO: '1',
   });
-  const callers = targets.find((target) => target.tag === 'removed-behavior/callers');
-  assert.ok(callers);
-  assert.equal(callers.tier, 'deepseek-flash');
-  assert.equal(callers.target.model, 'deepseek-v4-flash');
+  const flash = targets.find((target) => target.tag === 'deep-dive');
+  assert.ok(flash);
+  assert.equal(flash.tier, 'deepseek-flash');
+  assert.equal(flash.target.model, 'deepseek-v4-flash');
 });
 
 test('evaluationVerifier defaults to DeepSeek Flash and passes the tier for peer-hedge partitioning', () => {

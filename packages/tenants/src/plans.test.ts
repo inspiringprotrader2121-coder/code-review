@@ -21,7 +21,7 @@ test('each plan uses its configured pass count with shared retrieval and strict 
     'verify',
     'enterprise',
   ] as const) {
-    const expected = planFeatures(p).modelTier === 'multi-model' ? 4 : 2;
+    const expected = planFeatures(p).modelTier === 'multi-model' ? 3 : 2;
     assert.equal(planFeatures(p).reviewPasses, expected, `${p} runs its full pipeline`);
     assert.equal(planFeatures(p).retrievalTopK, 28, `${p} gets the same retrieval depth`);
     assert.equal(planFeatures(p).deepVerify, true, `${p} gets the strict verification`);

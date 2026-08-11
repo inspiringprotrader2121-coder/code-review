@@ -11,9 +11,9 @@ test('golden entitlement matrix covers every public plan decision', () => {
     free: { modelTier: 'dual-model', passes: 2, priority: 0, deep: false, nightly: false },
     review: { modelTier: 'dual-model', passes: 2, priority: 1, deep: true, nightly: true },
     'review-plus': { modelTier: 'dual-model', passes: 2, priority: 1, deep: true, nightly: true },
-    'verify-lite': { modelTier: 'multi-model', passes: 4, priority: 2, deep: true, nightly: true },
-    verify: { modelTier: 'multi-model', passes: 4, priority: 3, deep: true, nightly: true },
-    enterprise: { modelTier: 'multi-model', passes: 4, priority: 4, deep: true, nightly: true },
+    'verify-lite': { modelTier: 'multi-model', passes: 3, priority: 2, deep: true, nightly: true },
+    verify: { modelTier: 'multi-model', passes: 3, priority: 3, deep: true, nightly: true },
+    enterprise: { modelTier: 'multi-model', passes: 3, priority: 4, deep: true, nightly: true },
   };
 
   for (const planId of Object.keys(cases) as PlanId[]) {

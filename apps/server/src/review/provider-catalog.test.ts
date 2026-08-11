@@ -58,13 +58,12 @@ test('catalog compiles exact public-plan targets without URL or api inference', 
     [
       ['gpt-5.6-luna', 'codex-cli', 'max', 'luna', true],
       ['deepseek-v4-flash', 'compatible-chat', 'max', 'deepseek', true],
-      ['deepseek-v4-flash', 'compatible-chat', 'max', 'deepseek', true],
       ['MiniMax-M3', 'anthropic', undefined, 'minimax', true],
     ],
   );
   assert.equal(high.verification.target.model, 'deepseek-v4-flash');
   assert.equal(high.verification.target.transport, 'compatible-chat');
-  assert.equal(high.discovery.filter((stage) => stage.required).length, 4);
+  assert.equal(high.discovery.filter((stage) => stage.required).length, 3);
   assert.equal(high.verification.required, true);
 
   const lower = catalog.compilePublicPlan('dual-model', { agenticLuna: false });

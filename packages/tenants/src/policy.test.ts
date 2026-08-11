@@ -80,7 +80,7 @@ test('plan capability matrix matches the product contract for every tier', () =>
 test('review entitlement preserves the configured execution profile', () => {
   assert.deepEqual(reviewEntitlement(PLANS.verify), {
     modelTier: 'multi-model',
-    discoveryPasses: 4,
+    discoveryPasses: 3,
     retrievalTopK: 28,
     queuePriority: 3,
   });

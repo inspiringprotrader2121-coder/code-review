@@ -83,11 +83,13 @@ export type PassAngle = {
   bestEffort?: boolean;
   /**
    * Stable model-routing slot for multi-model plans. Must NOT be derived from
-   * the compacted array index — when removed-behavior is omitted, breadth used
-   * to shift into passIndex 2 and get Flash instead of MiniMax.
+   * the compacted array index. Slot 2 remains reserved for historical records
+   * and optional lenses, so breadth keeps its established MiniMax routing and
+   * context partition after the standalone removed-behaviour stage was folded
+   * into the Flash deep-dive.
    *   0 = general (frontier/Codex)
-   *   1 = deep-dive (Flash)
-   *   2 = removed-behavior (Flash/Pro)
+   *   1 = combined deep-dive/caller audit (Flash)
+   *   2 = reserved legacy/optional lens slot
    *   3 = breadth (MiniMax)
    */
   modelIdx: number;
@@ -96,14 +98,14 @@ export type PassAngle = {
 /**
  * Build the discovery lens list for this review.
  *
- * Multi-model / Verify / Enterprise always run the full four discovery passes
- * (Luna/Codex + Flash deep-dive + Flash removed-behavior + MiniMax breadth),
+ * Multi-model / Verify / Enterprise always run three discovery passes
+ * (Luna/Codex + one combined Flash deep-dive/caller audit + MiniMax breadth),
  * then Flash verify when there are candidates. That is the paid precision track.
  *
  * Dual-model (Free/Starter/Pro) stays at general + deep-dive only.
  *
  * Multi-model routing is intentionally not environment-conditional: changing a
- * flag must not reduce a purchased four-reviewer run to two reviewers.
+ * flag must not reduce a purchased three-reviewer run to two reviewers.
  */
 export function buildReviewPassAngles(opts: {
   modelTier?: string;

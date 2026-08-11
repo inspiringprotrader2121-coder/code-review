@@ -1,10 +1,9 @@
-import { DEEP_DIVE_FOCUS, REMOVED_BEHAVIOR_FOCUS, THIRD_ANGLE_FOCUS } from './lenses.js';
+import { DEEP_DIVE_FOCUS, HIGH_TIER_FLASH_FOCUS, THIRD_ANGLE_FOCUS } from './lenses.js';
 
 export type ReviewStageId =
   | 'luna-agentic'
   | 'minimax-general'
   | 'flash-deep-dive'
-  | 'flash-removed-behavior'
   | 'minimax-breadth'
   | 'flash-verification';
 
@@ -56,16 +55,7 @@ const HIGH_TIER_DISCOVERY: readonly ReviewStage[] = [
     tag: 'deep-dive',
     modelIndex: 1,
     required: true,
-    focus: DEEP_DIVE_FOCUS,
-  },
-  {
-    id: 'flash-removed-behavior',
-    kind: 'discovery',
-    modelSlot: 'deepseek-flash',
-    tag: 'removed-behavior/callers',
-    modelIndex: 2,
-    required: true,
-    focus: REMOVED_BEHAVIOR_FOCUS,
+    focus: HIGH_TIER_FLASH_FOCUS,
   },
   {
     id: 'minimax-breadth',

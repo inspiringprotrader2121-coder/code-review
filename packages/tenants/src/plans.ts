@@ -83,8 +83,8 @@ export interface PlanFeatures {
    * Which LLM(s) run the review:
    * - 'dual-model' — MiniMax (general) + DeepSeek v4 Flash (deep-dive); Flash verify.
    *   Free / Starter / Pro. Two discovery passes.
-   * - 'multi-model' — Luna/Codex + Flash + Flash + MiniMax; Flash verify.
-   *   Verify Lite / Verify / Enterprise. Four discovery passes.
+   * - 'multi-model' — Luna/Codex + combined Flash deep-dive + MiniMax; Flash verify.
+   *   Verify Lite / Verify / Enterprise. Three discovery passes.
    * - 'codex-hybrid' — Codex/Luna general, MiniMax thereafter (legacy hybrid).
    * - 'standard' — MiniMax on every pass. 'premium' — GLM on every pass.
    * - 'hybrid' / 'openai' — legacy single-provider ensembles.
@@ -103,7 +103,7 @@ export interface PlanFeatures {
 
 /**
  * Cost model. Entry plans run two focused discovery stages; higher tiers run
- * four. A separate Flash verifier checks the merged candidates. Optional deep,
+ * three. A separate Flash verifier checks the merged candidates. Optional deep,
  * aggregation, investigate, and risk-hunt work is excluded unless explicitly
  * enabled. Hard per-review/provider caps prevent runaway calls.
  *
@@ -120,8 +120,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   //   dual-model (free / Starter / Pro) → TWO discovery passes + Flash verify:
   //     MiniMax (general) + DeepSeek v4 Flash (deep-dive) + Flash verify.
   //     No investigate — cost-bounded trial/entry track.
-  //   multi-model (Verify Lite / Verify / Enterprise) → four discovery passes
-  //     (Luna/Codex + Flash + Flash + MiniMax) + Flash verify. Diagnostic bonus
+  //   multi-model (Verify Lite / Verify / Enterprise) → three discovery passes
+  //     (Luna/Codex + combined Flash + MiniMax) + Flash verify. Diagnostic bonus
   //     passes are opt-in and are not part of the normal plan contract.
   //
   // ONE deliberate exception: nightlyScans. Unlike every other feature here,
@@ -205,7 +205,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     monthlyPriceCents: 4900,
     // $49/mo — 50 reviews included, then prepaid overage at $0.75/review up to
     // a 500/mo hard safety ceiling on the multi-model track.
-    reviewPasses: 4,
+    reviewPasses: 3,
     retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,
@@ -227,15 +227,14 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     id: 'verify',
     label: 'Verify',
     monthlyPriceCents: 9900,
-    // multi-model full track (~5 model calls) on EVERY PR:
+    // multi-model full track (four required model stages) on EVERY PR:
     //   pass 1 — Luna / Codex CLI (general)
-    //   pass 2 — DeepSeek v4 Flash (deep-dive)
-    //   pass 3 — DeepSeek v4 Flash (removed-behavior/callers)
-    //   pass 4 — MiniMax (perf / completeness / API-contract)
+    //   pass 2 — DeepSeek v4 Flash (deep-dive + removed-behavior/callers)
+    //   pass 3 — MiniMax (perf / completeness / API-contract)
     //   then ONE strict verification on DeepSeek v4 Flash (when candidates exist)
     // $99/mo — 120 reviews included, then prepaid overage at $1.50/review up to
     // a 1000/mo hard safety ceiling at 10/hour.
-    reviewPasses: 4,
+    reviewPasses: 3,
     retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,
@@ -256,7 +255,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   enterprise: {
     id: 'enterprise',
     label: 'Enterprise',
-    reviewPasses: 4,
+    reviewPasses: 3,
     retrievalTopK: 28,
     repoSweep: false,
     sweepMaxFiles: 0,

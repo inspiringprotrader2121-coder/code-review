@@ -183,7 +183,7 @@ test('named public-plan stages are resolved only by the ProviderCatalog', () => 
   );
   assert.deepEqual(
     routed.map((item) => item.target.model),
-    ['gpt-5.6-luna', 'deepseek-v4-flash', 'deepseek-v4-flash', 'MiniMax-M3'],
+    ['gpt-5.6-luna', 'deepseek-v4-flash', 'MiniMax-M3'],
   );
   assert.equal(
     catalog.resolveStage(plan.verification, { agenticLuna: false }).target.model,
@@ -432,7 +432,6 @@ test('Verify routes all paid public stages through the catalog', () => {
     high.discovery.map((stage) => [stage.tier, stage.target.model, stage.target.apiKey]),
     [
       ['openai', 'gpt-5.6-luna', ''],
-      ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-flash-key'],
       ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-flash-key'],
       ['standard', 'MiniMax-M3', 'standard-key'],
     ],
@@ -716,7 +715,7 @@ test('a successful required chunk cannot satisfy a failed sibling chunk', () => 
   assert.deepEqual(failed, ['required:deep-dive:1:chunk:2/2']);
 });
 
-test('buildReviewPassAngles: multi-model always runs the full four-pass track', (t) => {
+test('buildReviewPassAngles: multi-model always runs the full three-pass track', (t) => {
   t.after(() => {
     delete process.env.ORVEX_BREADTH_ON;
     delete process.env.ORVEX_REMOVED_BEHAVIOR;
@@ -731,28 +730,28 @@ test('buildReviewPassAngles: multi-model always runs the full four-pass track', 
   // Verify/Enterprise multi-model: full track even on tiny PRs.
   assert.deepEqual(
     buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag),
-    ['general', 'deep-dive', 'removed-behavior/callers', 'perf/completeness/api'],
+    ['general', 'deep-dive', 'perf/completeness/api'],
   );
   assert.ok(
     buildReviewPassAngles({ modelTier: 'multi-model', files: small }).every((a) => !a.bestEffort),
-    'all four purchased high-tier reviewer stages are required',
+    'all three purchased high-tier reviewer stages are required',
   );
-  // Dual-model never gets the fourth-tier lenses.
+  // Dual-model never gets the high-tier breadth lens.
   const withDelete = [...small, { filename: 'gone.ts', patch: '-old\n', status: 'removed' }];
   assert.deepEqual(
     buildReviewPassAngles({ modelTier: 'dual-model', files: withDelete }).map((a) => a.tag),
     ['general', 'deep-dive'],
   );
-  // Stale conditional flags cannot reduce the purchased four-pass track.
+  // Stale conditional flags cannot reduce the purchased three-pass track.
   process.env.ORVEX_BREADTH_ON = 'deep-or-large';
   process.env.ORVEX_REMOVED_BEHAVIOR = 'deletes-or-renames';
   assert.deepEqual(
     buildReviewPassAngles({ modelTier: 'multi-model', files: small }).map((a) => a.tag),
-    ['general', 'deep-dive', 'removed-behavior/callers', 'perf/completeness/api'],
+    ['general', 'deep-dive', 'perf/completeness/api'],
   );
   assert.deepEqual(
     buildReviewPassAngles({ modelTier: 'multi-model', files: withDelete }).map((a) => a.tag),
-    ['general', 'deep-dive', 'removed-behavior/callers', 'perf/completeness/api'],
+    ['general', 'deep-dive', 'perf/completeness/api'],
   );
 });
 

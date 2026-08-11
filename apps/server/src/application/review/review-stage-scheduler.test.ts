@@ -43,12 +43,9 @@ test('required API stages each cover every complete bounded diff shard', () => {
   const luna = call('gpt-5.6-luna', 1);
   luna.mode = 'agentic';
   const first = call('deepseek-v4-flash', 2);
-  const second = call('deepseek-v4-flash', 3);
-  const minimax = call('MiniMax-M3', 4);
+  const minimax = call('MiniMax-M3', 3);
   first.modelPassIndex = 1;
   first.passTag = 'deep-dive';
-  second.modelPassIndex = 2;
-  second.passTag = 'removed-behavior/callers';
   minimax.modelPassIndex = 3;
   minimax.passTag = 'perf/completeness/api';
   const large = Array.from({ length: 12 }, (_, index) => ({
@@ -56,12 +53,11 @@ test('required API stages each cover every complete bounded diff shard', () => {
     status: 'modified',
     patch: `@@ -${index * 10 + 1},1 +${index * 10 + 1},1 @@\n-OLD_MARKER_${index}\n+NEW_MARKER_${index}\n${'+x'.repeat(1_400)}`,
   })) as ChangedFile[];
-  const scheduled = boundHighTierDiscoveryWorkloads([luna, first, second, minimax], large);
+  const scheduled = boundHighTierDiscoveryWorkloads([luna, first, minimax], large);
 
   assert.equal(scheduled.filter((entry) => entry.mode === 'agentic').length, 1);
   const apiStages = [
     ['deep-dive', 1],
-    ['removed-behavior/callers', 2],
     ['perf/completeness/api', 3],
   ] as const;
   const chunksPerStage = scheduled.filter((entry) => entry.passTag === 'deep-dive').length;
@@ -89,6 +85,10 @@ test('required API stages each cover every complete bounded diff shard', () => {
       const prompt = buildUserPrompt(entry.files ?? [], entry.ctx);
       assert.doesNotMatch(prompt, /diff chars omitted; sampled start and end/);
       assert.doesNotMatch(prompt, /Focused source context|Cross-file coverage notice/);
+      if (tag === 'deep-dive') {
+        assert.match(prompt, /removed or weakened guards/);
+        assert.match(prompt, /visible callers\/tests\/contracts/);
+      }
     }
   }
 });
@@ -119,7 +119,7 @@ test('same-provider review calls retain a provider lane and alternate reviewer l
   const second = call('deepseek-v4-flash', 2);
   second.target.admissionBucket = 'deepseek';
   second.modelPassIndex = 2;
-  second.passTag = 'removed-behavior/callers';
+  second.passTag = 'risk-hunt';
   const third = call('deepseek-v4-flash', 3);
   third.target.admissionBucket = 'deepseek';
   third.modelPassIndex = 1;
@@ -143,7 +143,7 @@ test('an idle large review fans out same-provider shards while retaining a bound
   const second = call('deepseek-v4-flash', 2);
   second.target.admissionBucket = 'deepseek';
   second.modelPassIndex = 2;
-  second.passTag = 'removed-behavior/callers';
+  second.passTag = 'risk-hunt';
   const third = call('deepseek-v4-flash', 3);
   third.target.admissionBucket = 'deepseek';
   third.modelPassIndex = 1;
@@ -214,9 +214,9 @@ test('six concurrent reviews keep independent provider chunks in parallel', asyn
   const reviews = Array.from({ length: 6 }, (_, reviewIndex) => {
     const calls = Array.from({ length: 4 }, (_, callIndex) => {
       const entry = call('deepseek-v4-flash', callIndex + 1);
-      entry.label = `review ${reviewIndex + 1} pass ${callIndex + 1}`;
-      entry.modelPassIndex = callIndex % 2 === 0 ? 1 : 2;
-      entry.passTag = callIndex % 2 === 0 ? 'deep-dive' : 'removed-behavior/callers';
+      entry.label = `review ${reviewIndex + 1} chunk ${callIndex + 1}`;
+      entry.modelPassIndex = 1;
+      entry.passTag = 'deep-dive';
       return entry;
     });
     return executeReviewProviderCalls({

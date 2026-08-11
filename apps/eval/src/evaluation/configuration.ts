@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
-  DEEP_DIVE_FOCUS,
   buildReviewPassAngles,
+  HIGH_TIER_FLASH_FOCUS,
   maxRiskProbes,
-  REMOVED_BEHAVIOR_FOCUS,
   THIRD_ANGLE_FOCUS,
   type ReviewFinding,
 } from '@orvex-review/review';
@@ -111,13 +110,7 @@ export function evaluationPassTargets(
     throw new Error('ORVEX_DEEPSEEK_API_KEY is required for the DeepSeek v4 Flash review stages');
   const catalog: EvaluationPass[] = [
     { tag: 'general', target: openai, tier: 'openai' },
-    { tag: 'deep-dive', target: flash, focus: DEEP_DIVE_FOCUS, tier: 'deepseek-flash' },
-    {
-      tag: 'removed-behavior/callers',
-      target: flash,
-      focus: REMOVED_BEHAVIOR_FOCUS,
-      tier: 'deepseek-flash',
-    },
+    { tag: 'deep-dive', target: flash, focus: HIGH_TIER_FLASH_FOCUS, tier: 'deepseek-flash' },
     {
       tag: 'perf/completeness/api',
       target: standard,

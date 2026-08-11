@@ -216,6 +216,7 @@ export {
 } from './aggregation.js';
 export {
   DEEP_DIVE_FOCUS,
+  HIGH_TIER_FLASH_FOCUS,
   THIRD_ANGLE_FOCUS,
   REMOVED_BEHAVIOR_FOCUS,
   RISK_HUNT_FOCUS,

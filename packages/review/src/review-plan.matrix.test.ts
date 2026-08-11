@@ -17,7 +17,6 @@ test('golden public routing matrix keeps each tier on its declared model slots',
       stages: [
         'luna-agentic:luna',
         'flash-deep-dive:deepseek-flash',
-        'flash-removed-behavior:deepseek-flash',
         'minimax-breadth:minimax',
         'flash-verification:deepseek-flash',
       ],

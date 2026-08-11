@@ -74,7 +74,7 @@ the existing review contract until focused tests explicitly authorize a change.
 The refactor must not silently change:
 
 - Plan names, limits, pricing, overage behavior, or customer entitlements.
-- High-tier routing: Luna, DeepSeek Flash twice, MiniMax, then Flash verification.
+- High-tier routing: Luna, one combined DeepSeek Flash pass, MiniMax, then Flash verification.
 - Lower-tier routing: MiniMax and DeepSeek Flash, then Flash verification.
 - Luna and DeepSeek maximum reasoning effort.
 - Luna's pinned Codex CLI, API-key authentication, model-substitution refusal,

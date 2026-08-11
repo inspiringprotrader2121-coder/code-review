@@ -138,14 +138,14 @@ tracks differ in pass count, model mix, included volume, rate limits, and billin
 
 | Capability                       | Free trial                   | Starter (`review`)                                              | Pro (`review-plus`)          | Verify Lite                                   | Verify                                           |
 | -------------------------------- | ---------------------------- | --------------------------------------------------------------- | ---------------------------- | --------------------------------------------- | ------------------------------------------------ |
-| Review passes                    | 2                            | 2                                                               | 2                            | 4                                             | 4                                                |
+| Review passes                    | 2                            | 2                                                               | 2                            | 3                                             | 3                                                |
 | Index retrieval (top-K files)    | 28                           | 28                                                              | 28                           | 28                                            | 28                                               |
 | Review track                     | dual-model (MiniMax + Flash) | dual-model (MiniMax + Flash)                                    | dual-model (MiniMax + Flash) | multi-model                                   | multi-model                                      |
 | Strict verification              | ✓ (Flash)                    | ✓ (Flash)                                                       | ✓ (Flash)                    | ✓ (Flash)                                     | ✓ (Flash)                                        |
 | Commit fixes / `@orvex` commands | ✓                            | ✓                                                               | ✓                            | ✓                                             | ✓                                                |
 | Code execution (runtime verify)  | ✓ (flag)                     | ✓ (flag)                                                        | ✓ (flag)                     | ✓ (flag)                                      | ✓ (flag)                                         |
 | Nightly whole-repo scans         | —                            | ✓ (flag)                                                        | ✓ (flag)                     | ✓ (flag)                                      | ✓ (flag)                                         |
-| Included reviews and rate        | 10 lifetime, 2/hr            | 100 included + prepaid overage ($0.50), hard ceiling 1000, 5/hr | 500/mo hard, 10/hr           | 50 included + prepaid ($0.75), hard 500, 5/hr | 120 included + prepaid ($0.75), hard 1000, 10/hr |
+| Included reviews and rate        | 10 lifetime, 2/hr            | 100 included + prepaid overage ($0.50), hard ceiling 1000, 5/hr | 500/mo hard, 10/hr           | 50 included + prepaid ($0.75), hard 500, 5/hr | 120 included + prepaid ($1.50), hard 1000, 10/hr |
 
 The hourly/monthly numbers are **safety ceilings, not usage targets** — sized as
 tail-risk insurance (see `packages/tenants/src/plans.ts` for the cost math) so a
@@ -159,16 +159,16 @@ commit also has a 2-minute cooldown for the same reason — a fresh push is neve
 affected.
 
 Dual-model and multi-model tracks use different review mixes. Verify Lite,
-Verify, and Enterprise always run four discovery passes (Luna/Codex
-
-- Flash deep-dive + Flash removed-behavior + MiniMax breadth) then Flash verify
-  — see `packages/review/src/pass-budget.ts`. Free/Starter/Pro stay on two
-  discovery passes (MiniMax + DeepSeek v4 Flash) plus Flash verify. Diagnostic
-  risk-hunt and sandboxed investigate passes are opt-in (`ORVEX_RISK_HUNT=1`,
-  `ORVEX_INVESTIGATE=1`) and are not part of a normal plan run. Paid plans can
-  request the two-unit `@orvex deep`
-  review. Code execution and nightly scans sit behind ops flags
-  (`ORVEX_CODE_EXECUTION`, `ORVEX_NIGHTLY_SCANS`).
+Verify, and Enterprise always run three discovery passes (Luna/Codex + one
+Flash pass combining deep-dive with removed-behavior/caller checks + MiniMax
+breadth), followed by Flash verification; see `packages/review/src/pass-budget.ts`.
+Free/Starter/Pro stay on two
+discovery passes (MiniMax + DeepSeek v4 Flash) plus Flash verify. Diagnostic
+risk-hunt and sandboxed investigate passes are opt-in (`ORVEX_RISK_HUNT=1`,
+`ORVEX_INVESTIGATE=1`) and are not part of a normal plan run. Paid plans can
+request the two-unit `@orvex deep`
+review. Code execution and nightly scans sit behind ops flags
+(`ORVEX_CODE_EXECUTION`, `ORVEX_NIGHTLY_SCANS`).
 
 Free is a **lifetime trial (10 reviews, 2/hour) anchored to the GitHub account** —
 a second workspace or a reinstall can't reset it. Defined in
