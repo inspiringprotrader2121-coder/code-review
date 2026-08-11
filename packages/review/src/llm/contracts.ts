@@ -1,6 +1,7 @@
 import type {
   Clock,
   ModelAttemptEvent,
+  ModelAttemptLineage,
   ModelAttemptOutcome,
   ProviderAdmission,
   ProviderDependencies,
@@ -41,6 +42,8 @@ export interface LlmClientOptions {
     attemptId?: string;
   }) => void;
   onAttempt?: (event: LlmAttemptEvent) => void;
+  /** Shared only by explicit semantic retries so durable attempts retain lineage. */
+  attemptLineage?: ModelAttemptLineage;
   /** Internal state for a bounded DeepSeek thinking-mode prefix continuation. */
   compatibleContinuation?: {
     reasoningContent: string;

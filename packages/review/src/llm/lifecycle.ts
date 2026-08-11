@@ -1,14 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import type { ModelAttemptLineage } from '../providers/types.js';
 import type { LlmAttemptEvent, LlmAttemptOutcome, LlmClientOptions } from './contracts.js';
 import { isReviewCancelledError } from './cancellation.js';
 import { clockFor, observerFor, providerName, transportFor } from './support.js';
 import { isRateLimitOrQuotaError } from './retry-policy.js';
 import { llmChatSingle } from './transports.js';
 
-export interface AttemptLineage {
-  lastAttemptId?: string;
-  nextRetryIndex?: number;
-}
+export type AttemptLineage = ModelAttemptLineage;
 
 export function allocateAttemptIndex(lineage: AttemptLineage): number {
   const index = lineage.nextRetryIndex ?? 0;

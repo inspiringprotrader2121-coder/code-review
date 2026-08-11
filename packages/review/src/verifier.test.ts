@@ -13,6 +13,7 @@ import {
   verifyFindings,
 } from './verifier.js';
 import type { ReviewFinding } from './finding.js';
+import type { LlmAttemptEvent } from './llm-client.js';
 
 const finding = (over: Partial<ReviewFinding>): ReviewFinding => ({
   file: 'a.js',
@@ -426,6 +427,69 @@ test('verification does not replay a failed paid provider call', async (t) => {
 
   assert.equal(result.status, 'unavailable');
   assert.equal(calls, 1);
+});
+
+test('verification makes one parent-linked retry when a successful response violates the JSON contract', async (t) => {
+  const originalFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  const events: LlmAttemptEvent[] = [];
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    const content =
+      calls === 1
+        ? 'I confirmed the finding but forgot the required object.'
+        : '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`),
+          );
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+            ),
+          );
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const candidate = finding({ severity: 'P2', message: 'concrete failure' });
+  const result = await verifyFindings(
+    [candidate],
+    [{ path: 'a.js', content: 'function broken() { throw new Error(); }' }],
+    {
+      apiKey: 'test-key',
+      model: 'test-verifier',
+      baseUrl: 'https://compatible.test/v1',
+      api: 'chat',
+      reasoningEffort: 'max',
+      maxTokens: 8_000,
+      onAttempt: (event) => events.push(event),
+    },
+  );
+
+  assert.equal(result.status, 'verified');
+  assert.equal(result.kept.length, 1);
+  assert.equal(calls, 2);
+  const starts = events.filter((event) => event.phase === 'started');
+  assert.deepEqual(
+    starts.map((event) => event.role),
+    ['primary', 'retry'],
+  );
+  assert.equal(starts[1]?.parentAttemptId, starts[0]?.attemptId);
+  assert.deepEqual(
+    starts.map((event) => event.retryIndex),
+    [0, 1],
+  );
 });
 
 test('the verifier keeps the promotion rules for classes it measurably under-rates', () => {

@@ -77,7 +77,7 @@ export async function llmChat(
     Math.max(5_000, injectedPolicy?.totalWaitBudgetMs ?? runtime.rateLimitTotalWaitMs),
   );
   const provider = providerBucketForTarget(opts);
-  const lineage: AttemptLineage = {};
+  const lineage: AttemptLineage = opts.attemptLineage ?? {};
   let sleptMs = 0;
   let lastError: Error | undefined;
   let providerAttempt = 0;

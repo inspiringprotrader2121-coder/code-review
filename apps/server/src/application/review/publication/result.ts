@@ -16,6 +16,9 @@ export function createPublishedResult(
   reviewId: number,
 ): PublicationResult {
   const { inputTokens, outputTokens, costUsd } = totalUsage(input.usage, input.usagePolicy);
+  const verificationIncompleteReason = input.verificationIncomplete
+    ? `review incomplete: verification did not complete${input.verificationUnavailableReason ? ` (${input.verificationUnavailableReason})` : ''}`
+    : undefined;
   return {
     findingCount: input.findings.stats.openCount,
     newCount: input.findings.stats.newCount,
@@ -25,7 +28,7 @@ export function createPublishedResult(
     outputTokens,
     costUsd,
     published: true,
-    incompleteReason: input.incompleteReason,
+    incompleteReason: input.incompleteReason ?? verificationIncompleteReason,
     newFindings: input.merged.toPost.map((finding) => ({
       severity: finding.severity,
       file: finding.file,

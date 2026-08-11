@@ -41,6 +41,7 @@ function llmOptions(
     signal: request.signal,
     onUsage: request.onUsage,
     onAttempt: request.onAttempt,
+    attemptLineage: request.attemptLineage,
     dependencies,
   };
 }

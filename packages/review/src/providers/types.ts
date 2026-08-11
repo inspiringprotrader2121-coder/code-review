@@ -14,6 +14,12 @@ export type ModelAttemptOutcome =
 
 export type ModelAttemptRole = 'primary' | 'retry' | 'continuation';
 
+/** Mutable lineage shared across explicitly related provider invocations. */
+export interface ModelAttemptLineage {
+  lastAttemptId?: string;
+  nextRetryIndex?: number;
+}
+
 export type ModelAttemptEvent =
   | {
       phase: 'started';
@@ -155,6 +161,7 @@ export interface TextModelRunRequest {
     attemptId?: string;
   }) => void;
   onAttempt?: (event: ModelAttemptEvent) => void;
+  attemptLineage?: ModelAttemptLineage;
 }
 
 export interface ModelRunner<TRequest = TextModelRunRequest, TResult = string> {

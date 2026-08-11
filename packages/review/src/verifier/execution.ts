@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { extractJsonLoose, llmChat } from '../llm-client.js';
 import type { ReviewFinding } from '../finding.js';
+import type { ModelAttemptLineage } from '../providers/types.js';
 import {
   VerdictSchema,
   type VerifierOptions,
@@ -15,6 +16,7 @@ const runtimeConfig = loadReviewRuntimeConfig();
 const MAX_VERIFY_FILE_CHARS = runtimeConfig.verifyFileChars;
 const MAX_VERIFY_TOTAL_CHARS = runtimeConfig.verifyTotalChars;
 const MAX_FINDINGS_PER_BATCH = runtimeConfig.verifyBatchSize;
+const MAX_VERIFIER_FORMAT_ATTEMPTS = 2;
 
 function chunkFindings<T>(items: T[], size: number): T[][] {
   if (items.length === 0) return [];
@@ -28,6 +30,7 @@ async function invokeVerifier(
   system: string,
   user: string,
   options: VerifierOptions,
+  attemptLineage: ModelAttemptLineage,
 ): Promise<string> {
   if (options.runner && options.target) {
     return options.runner.run({
@@ -38,6 +41,7 @@ async function invokeVerifier(
       signal: options.signal,
       onUsage: options.onUsage,
       onAttempt: options.onAttempt,
+      attemptLineage,
     });
   }
   try {
@@ -52,11 +56,22 @@ async function invokeVerifier(
       json: true,
       onUsage: options.onUsage,
       onAttempt: options.onAttempt,
+      attemptLineage,
     });
   } catch (error) {
     console.warn('[verifier] call failed (no whole-call replay):', (error as Error).message);
     throw error;
   }
+}
+
+function parseVerifierResponse(text: string) {
+  return VerdictSchema.parse(extractJsonLoose(text));
+}
+
+function isVerifierContractError(error: unknown): boolean {
+  const name = error instanceof Error ? error.name : '';
+  const message = error instanceof Error ? error.message : String(error);
+  return name === 'ZodError' || /no parseable JSON/i.test(message);
 }
 
 async function verifyFindingsBatch(
@@ -66,12 +81,31 @@ async function verifyFindingsBatch(
 ): Promise<VerificationBatchResult> {
   const sentinel = `ORVEX_DATA_${randomBytes(9).toString('hex')}`;
   const prompt = buildVerifierPrompt(findings, files, sentinel, options);
-  const text = await invokeVerifier(prompt.system, prompt.user, options);
-  return applyVerdicts(
-    findings,
-    VerdictSchema.parse(extractJsonLoose(text)),
-    options.confirmedCount ?? findings.length,
-  );
+  const attemptLineage: ModelAttemptLineage = {};
+  let text = await invokeVerifier(prompt.system, prompt.user, options, attemptLineage);
+  let parsed;
+  try {
+    parsed = parseVerifierResponse(text);
+  } catch (error) {
+    if (!isVerifierContractError(error) || MAX_VERIFIER_FORMAT_ATTEMPTS < 2) throw error;
+    console.warn(
+      '[verifier] response violated the verdict JSON contract; making one bounded semantic retry',
+    );
+    text = await invokeVerifier(
+      prompt.system,
+      [
+        prompt.user,
+        '',
+        'FORMAT RETRY: the previous response could not be validated. Re-evaluate the same',
+        'candidates once and return ONLY the exact JSON object requested above. Do not use',
+        'Markdown, prose outside the JSON, or omit any candidate id.',
+      ].join('\n'),
+      options,
+      attemptLineage,
+    );
+    parsed = parseVerifierResponse(text);
+  }
+  return applyVerdicts(findings, parsed, options.confirmedCount ?? findings.length);
 }
 
 export async function verifyFindings(
