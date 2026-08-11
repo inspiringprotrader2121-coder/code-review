@@ -83,6 +83,28 @@ test('missing required coverage is publishable only with an explicit incomplete 
   });
 });
 
+test('a successful unsharded agentic lens satisfies its fallback coverage key', () => {
+  const degradation = describeRequiredCoverageDegradation(
+    ['lens:0', 'required:deep-dive:1:chunk:1/1'],
+    [
+      {
+        modelPassIndex: 0,
+        label: 'pass 1/4 (general) [gpt-5.6-luna]',
+        ok: true,
+      },
+      {
+        modelPassIndex: 1,
+        requiredCoverageKey: 'required:deep-dive:1:chunk:1/1',
+        label: 'pass 2/4 (deep-dive) [deepseek-v4-flash] chunk 1/1',
+        ok: true,
+      },
+    ],
+    1,
+  );
+
+  assert.equal(degradation, null);
+});
+
 test('admission can reject an unavailable provider before review computation', async () => {
   const recorded: unknown[] = [];
   const admission = new AdmissionService({

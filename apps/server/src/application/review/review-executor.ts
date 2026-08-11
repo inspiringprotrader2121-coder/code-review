@@ -45,6 +45,10 @@ export interface RequiredLensOutcome {
   bestEffort?: boolean;
 }
 
+function requiredCoverageKeyFor(outcome: RequiredLensOutcome): string {
+  return outcome.requiredCoverageKey ?? `lens:${outcome.modelPassIndex ?? -1}`;
+}
+
 export function failedRequiredLensIds(
   lensIds: readonly number[],
   outcomes: readonly RequiredLensOutcome[],
@@ -68,7 +72,7 @@ export function failedRequiredCoverageKeys(
     (coverageKey) =>
       outcomes.filter(
         (outcome) =>
-          outcome.requiredCoverageKey === coverageKey && outcome.ok && !outcome.bestEffort,
+          requiredCoverageKeyFor(outcome) === coverageKey && outcome.ok && !outcome.bestEffort,
       ).length < requiredSuccesses,
   );
 }
@@ -95,7 +99,7 @@ export function describeRequiredCoverageDegradation(
   if (missingCoverageKeys.length === 0) return null;
   const failed = outcomes.filter(
     (outcome) =>
-      missingCoverageKeys.includes(outcome.requiredCoverageKey ?? '') &&
+      missingCoverageKeys.includes(requiredCoverageKeyFor(outcome)) &&
       !outcome.bestEffort &&
       !outcome.ok,
   );

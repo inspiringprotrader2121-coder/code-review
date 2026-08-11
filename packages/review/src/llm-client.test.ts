@@ -529,7 +529,7 @@ test('official DeepSeek resumes a partially streamed response after a provider t
           }
           controller.enqueue(
             encoder.encode(
-              `data: ${JSON.stringify({ choices: [{ delta: { content: '[]}' } }] })}\n\n`,
+              `data: ${JSON.stringify({ choices: [{ delta: { content: '{"summary":"complete","findings":[]}' } }] })}\n\n`,
             ),
           );
           controller.enqueue(
@@ -553,7 +553,7 @@ test('official DeepSeek resumes a partially streamed response after a provider t
         json: true,
         onAttempt: (event) => events.push(event),
       });
-      assert.equal(result, '{"findings":[]}');
+      assert.equal(result, '{"summary":"complete","findings":[]}');
     },
   );
 

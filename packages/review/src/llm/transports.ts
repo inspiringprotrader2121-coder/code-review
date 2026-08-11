@@ -10,7 +10,7 @@ import {
   resolveMaxOutputTokens,
   thinkingEnabled,
 } from './support.js';
-import { stripThinking } from './parsing.js';
+import { extractJsonLoose, stripThinking } from './parsing.js';
 import { RETRYABLE_EMPTY_PROVIDER_RESPONSE } from './retry-policy.js';
 
 // Retain the original initialization behaviour for compatible-chat providers:
@@ -22,6 +22,16 @@ export class DeepSeekContinuationRequiredError extends Error {
   constructor(readonly continuation: NonNullable<LlmClientOptions['compatibleContinuation']>) {
     super('DeepSeek max-reasoning response requires bounded prefix continuation');
     this.name = 'DeepSeekContinuationRequiredError';
+  }
+}
+
+function combineContinuationText(prefix: string, streamedText: string): string {
+  if (!prefix || streamedText.startsWith(prefix)) return streamedText;
+  try {
+    extractJsonLoose(streamedText);
+    return streamedText;
+  } catch {
+    return `${prefix}${streamedText}`;
   }
 }
 
@@ -547,9 +557,7 @@ export async function openAiCompatStreamChat(
     ) {
       const streamedText = stripThinking(content);
       const contentPrefix = continuationPrefix
-        ? streamedText.startsWith(continuationPrefix)
-          ? streamedText
-          : `${continuationPrefix}${streamedText}`
+        ? combineContinuationText(continuationPrefix, streamedText)
         : streamedText || '{"findings":';
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
@@ -565,9 +573,7 @@ export async function openAiCompatStreamChat(
   const totalReasoning = reasoningContent.length + inlineThinkChars;
   const streamedText = stripThinking(content);
   const text = continuationPrefix
-    ? streamedText.startsWith(continuationPrefix)
-      ? streamedText
-      : `${continuationPrefix}${streamedText}`
+    ? combineContinuationText(continuationPrefix, streamedText)
     : streamedText;
   const answerChars = text.length;
   console.log(
