@@ -468,6 +468,11 @@ test('official DeepSeek resumes one truncated max-reasoning response through pre
   assert.equal(captured[1]?.url, 'https://api.deepseek.com/beta/chat/completions');
   assert.equal(captured[1]?.body.reasoning_effort, 'max');
   assert.equal(captured[1]?.body.max_tokens, 8_000);
+  assert.equal(
+    'response_format' in captured[1]!.body,
+    false,
+    'DeepSeek prefix completion rejects response_format',
+  );
   assert.deepEqual(captured[1]?.body.thinking, { type: 'enabled' });
   const messages = captured[1]?.body.messages as Array<Record<string, unknown>>;
   assert.deepEqual(messages.at(-1), {

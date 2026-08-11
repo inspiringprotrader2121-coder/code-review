@@ -458,7 +458,7 @@ export async function openAiCompatStreamChat(
         ...(supportsCompatibleUsageStream(opts.baseUrl)
           ? { stream_options: { include_usage: true } }
           : {}),
-        ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
+        ...(opts.json && !continuation ? { response_format: { type: 'json_object' } } : {}),
         ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
         ...(supportsCompatibleUsageStream(opts.baseUrl)
           ? { thinking: { type: thinkingEnabled(opts) ? 'enabled' : 'disabled' } }
