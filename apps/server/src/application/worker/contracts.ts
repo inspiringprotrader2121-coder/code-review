@@ -14,6 +14,8 @@ export interface WorkerLoopDependencies {
   maxConcurrent?: number;
   pollMs?: number;
   recoveryMs?: number;
+  /** Lifecycle-owned schedulers run recovery once per fleet instead of per worker process. */
+  enablePeriodicRecovery?: boolean;
   isDraining?: () => boolean;
   loadConfig?: () => ReturnType<typeof loadWorkerConfig>;
   processReview?: typeof processReviewJob;

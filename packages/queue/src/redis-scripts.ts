@@ -9,6 +9,15 @@ end
 return 0`;
 
 export const RECOVER_PROCESSING_LUA = `
+local function releaseTenantClaim()
+  local tenant = redis.call('HGET', KEYS[12], ARGV[5])
+  if tenant then
+    local remaining = redis.call('HINCRBY', KEYS[11], tenant, -1)
+    if remaining <= 0 then redis.call('HDEL', KEYS[11], tenant) end
+    redis.call('HDEL', KEYS[12], ARGV[5])
+  end
+  redis.call('ZREM', KEYS[13], ARGV[5])
+end
 local cur = redis.call('GET', KEYS[3])
 if cur then
   if ARGV[5] == '' then return 'live' end
@@ -17,6 +26,7 @@ if cur then
   if curToken == ARGV[5] then return 'live' end
   local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
   if removed == 0 then return 'claimed-by-peer' end
+  releaseTenantClaim()
   redis.call('DEL', KEYS[2])
   return 'superseded'
 end
@@ -28,6 +38,7 @@ end
 if tonumber(ARGV[2]) - started < tonumber(ARGV[3]) then return 'grace' end
 local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
 if removed == 0 then return 'claimed-by-peer' end
+releaseTenantClaim()
 redis.call('DEL', KEYS[2])
 if redis.call('EXISTS', KEYS[4]) == 1 or redis.call('EXISTS', KEYS[5]) == 1 then
   return 'done'
@@ -89,8 +100,44 @@ end
 redis.call('RPUSH', KEYS[4], ARGV[1]); redis.call('SET', KEYS[6], 'ready', 'EX', ARGV[6]); return 'enqueued'`;
 
 export const CLAIM_LUA = `
+local function cleanupExpiredTenantClaims()
+  local expired = redis.call('ZRANGEBYSCORE', KEYS[9], '-inf', ARGV[10], 'LIMIT', 0, 256)
+  for _, claimToken in ipairs(expired) do
+    local expiredTenant = redis.call('HGET', KEYS[8], claimToken)
+    if expiredTenant then
+      local remaining = redis.call('HINCRBY', KEYS[7], expiredTenant, -1)
+      if remaining <= 0 then redis.call('HDEL', KEYS[7], expiredTenant) end
+      redis.call('HDEL', KEYS[8], claimToken)
+    end
+    redis.call('ZREM', KEYS[9], claimToken)
+  end
+end
+local tenantLimit = 0
+if ARGV[11] == '1' then
+  cleanupExpiredTenantClaims()
+  tenantLimit = tonumber(redis.call('HGET', KEYS[10], ARGV[12]) or '')
+  if not tenantLimit or tenantLimit < 1 then
+    redis.call('LREM', KEYS[5], 1, ARGV[8])
+    redis.call('RPUSH', KEYS[6], ARGV[1])
+    return {'capacity_missing', ARGV[12]}
+  end
+  local active = tonumber(redis.call('HGET', KEYS[7], ARGV[9]) or '0')
+  if active >= tenantLimit then
+    redis.call('LREM', KEYS[5], 1, ARGV[8])
+    redis.call('RPUSH', KEYS[6], ARGV[1])
+    return 'tenant_full'
+  end
+end
 local ok = redis.call('SET', KEYS[1], ARGV[4] .. '\\n' .. ARGV[1], 'EX', ARGV[3], 'NX')
-if ok then redis.call('SET', KEYS[4], 'claimed', 'EX', ARGV[7]); return 'claimed' end
+if ok then
+  if tenantLimit > 0 then
+    redis.call('HSET', KEYS[8], ARGV[4], ARGV[9])
+    redis.call('HINCRBY', KEYS[7], ARGV[9], 1)
+    redis.call('ZADD', KEYS[9], tonumber(ARGV[10]) + tonumber(ARGV[3]) * 1000, ARGV[4])
+  end
+  redis.call('SET', KEYS[4], 'claimed', 'EX', ARGV[7])
+  return 'claimed'
+end
 local coalesced = 0
 if ARGV[2] == 'review' then
   local list = redis.call('LRANGE', KEYS[2], 0, -1)
@@ -113,17 +160,51 @@ if coalesced == 0 then redis.call('RPUSH', KEYS[2], ARGV[1]); redis.call('INCR',
 return 'pending'`;
 
 export const DEQUEUE_LUA = `
+local function cleanupExpiredTenantClaims()
+  local expired = redis.call('ZRANGEBYSCORE', KEYS[6], '-inf', ARGV[3], 'LIMIT', 0, 256)
+  for _, claimToken in ipairs(expired) do
+    local tenant = redis.call('HGET', KEYS[5], claimToken)
+    if tenant then
+      local remaining = redis.call('HINCRBY', KEYS[4], tenant, -1)
+      if remaining <= 0 then redis.call('HDEL', KEYS[4], tenant) end
+      redis.call('HDEL', KEYS[5], claimToken)
+    end
+    redis.call('ZREM', KEYS[6], claimToken)
+  end
+end
 local count = math.min(50, redis.call('LLEN', KEYS[1]))
 if count == 0 then redis.call('DEL', KEYS[3]); return false end
+local tenantLimit = 0
+if ARGV[4] == '1' then
+  cleanupExpiredTenantClaims()
+  tenantLimit = tonumber(redis.call('HGET', KEYS[7], ARGV[5]) or '')
+  if not tenantLimit or tenantLimit < 1 then return {'capacity_missing', ARGV[5]} end
+end
 local forceFifo = tonumber(redis.call('GET', KEYS[3]) or '0') >= tonumber(ARGV[2])
-local selectedIndex = 0; local selectedPriority = -1000000
-if not forceFifo then
-  for i = 0, count - 1 do
-    local candidate = redis.call('LINDEX', KEYS[1], i); local priority = 0
-    local ok, decoded = pcall(cjson.decode, candidate)
-    if ok and decoded and tonumber(decoded.priority) then priority = math.floor(tonumber(decoded.priority)) end
+local selectedIndex = nil; local selectedPriority = -1000000
+for i = 0, count - 1 do
+  local candidate = redis.call('LINDEX', KEYS[1], i); local priority = 0
+  local ok, decoded = pcall(cjson.decode, candidate)
+  if ok and decoded and tonumber(decoded.priority) then priority = math.floor(tonumber(decoded.priority)) end
+  local tenant = ok and decoded and tostring(decoded.tenantId or '') or ''
+  local active = tenantLimit > 0 and tonumber(redis.call('HGET', KEYS[4], tenant) or '0') or 0
+  if tenantLimit == 0 or active < tenantLimit then
+    if forceFifo then
+      selectedIndex = i
+      break
+    end
     if priority > selectedPriority then selectedPriority = priority; selectedIndex = i end
   end
+end
+if selectedIndex == nil then
+  -- All currently inspected tenants are saturated. Rotate this bounded window
+  -- so a later eligible tenant is reachable in the same worker poll cycle.
+  for i = 1, count do
+    local blocked = redis.call('LPOP', KEYS[1])
+    if not blocked then break end
+    redis.call('RPUSH', KEYS[1], blocked)
+  end
+  return 'tenant-blocked'
 end
 local raw = redis.call('LINDEX', KEYS[1], selectedIndex); local marker = ARGV[1] .. ':reserved'
 redis.call('LSET', KEYS[1], selectedIndex, marker); redis.call('LREM', KEYS[1], 1, marker); redis.call('RPUSH', KEYS[2], ARGV[1] .. '\\n' .. raw)

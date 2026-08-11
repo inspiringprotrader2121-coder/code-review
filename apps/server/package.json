@@ -14,6 +14,9 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node --enable-source-maps dist/index.js",
+    "start:api": "ORVEX_PROCESS_ROLE=api node --enable-source-maps dist/index.js",
+    "start:worker": "ORVEX_PROCESS_ROLE=worker node --enable-source-maps dist/index.js",
+    "start:scheduler": "ORVEX_PROCESS_ROLE=scheduler node --enable-source-maps dist/index.js",
     "build": "tsc -b",
     "typecheck": "tsc -b --pretty false",
     "test": "node --import tsx --test \"src/**/*.test.ts\""

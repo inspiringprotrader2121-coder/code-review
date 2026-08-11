@@ -108,6 +108,63 @@ test('readiness reports Redis-wide in-flight work from the queue ledger', async 
   assert.equal(((await ready.json()) as Record<string, unknown>).activeJobs, 4);
 });
 
+test('traffic readiness removes draining and non-HTTP roles from load-balancer traffic', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'orvex-app-traffic-ready-'));
+  const drainPath = path.join(dir, 'deploy-drain');
+  const db = new AppDatabase(':memory:');
+  const queue = { ping: async () => true } as unknown as ReviewQueue;
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const app = createApp(queue, {
+    db,
+    config: testServerConfig({ ORVEX_DEPLOY_DRAIN_PATH: drainPath }),
+    releaseFile: path.join(dir, 'missing-release.json'),
+  });
+  const readyForTraffic = await app.request('/traffic-ready');
+  assert.equal(readyForTraffic.status, 200);
+  assert.deepEqual(await readyForTraffic.json(), {
+    ok: true,
+    role: 'all',
+    db: 'ok',
+    queue: 'ok',
+    draining: false,
+    releaseId: 'unknown',
+  });
+
+  writeFileSync(drainPath, 'draining\n');
+  const draining = await app.request('/traffic-ready');
+  assert.equal(draining.status, 503);
+  assert.equal(((await draining.json()) as Record<string, unknown>).draining, true);
+  const deploymentReadyWhileDraining = await app.request('/ready');
+  assert.equal(deploymentReadyWhileDraining.status, 200);
+  assert.equal(
+    ((await deploymentReadyWhileDraining.json()) as Record<string, unknown>).draining,
+    true,
+  );
+
+  const workerOnlyApp = createApp(queue, {
+    db,
+    config: testServerConfig({
+      ORVEX_PROCESS_ROLE: 'worker',
+      ORVEX_DEPLOY_DRAIN_PATH: path.join(dir, 'worker-drain'),
+    }),
+    releaseFile: path.join(dir, 'missing-release.json'),
+  });
+  const workerTraffic = await workerOnlyApp.request('/traffic-ready');
+  assert.equal(workerTraffic.status, 503);
+  assert.deepEqual(await workerTraffic.json(), {
+    ok: false,
+    role: 'worker',
+    db: 'ok',
+    queue: 'ok',
+    draining: false,
+    releaseId: 'unknown',
+  });
+});
+
 test('readiness fails closed when the queue-wide activity probe cannot be read', async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), 'orvex-app-global-ready-fail-'));
   const db = new AppDatabase(':memory:');

@@ -55,6 +55,7 @@ export class RedisLeaseOperations {
       `${this.keys.inflightPrefix}${prKey(job)}`,
       claimToken(claim),
       LEASE_TTL_SECONDS,
+      this.keys,
     );
     if (!renewed) throw new Error(`review lease lost for ${prKey(job)}`);
   }
@@ -128,6 +129,7 @@ export class RedisLeaseOperations {
       processingEntry: claim,
       record: JSON.stringify({ ...record, job: JSON.stringify(record.job) }),
       stateTtlSeconds: STATE_TTL_SECONDS,
+      tenantLeaseKeys: this.keys,
     });
     this.claims.delete(job);
     if (finalized)
@@ -170,6 +172,7 @@ export class RedisLeaseOperations {
       deleteSeen,
       state,
       stateTtlSeconds: STATE_TTL_SECONDS,
+      tenantLeaseKeys: this.keys,
     });
     this.claims.delete(job);
     return finalized;

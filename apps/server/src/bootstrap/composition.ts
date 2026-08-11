@@ -7,6 +7,7 @@ import { configureLlmProviderCoordinator, type LlmProviderCoordinator } from '@o
 import { createAppDatabase, type AppDatabase } from '@orvex-review/store';
 import { createApp } from '../app.js';
 import { githubAppConfig, type ServerConfig } from './config.js';
+import { providerCapacityPlanFor } from './provider-capacity.js';
 
 export interface AppServices {
   db: AppDatabase;
@@ -17,7 +18,10 @@ export interface AppServices {
 export interface CompositionFactories {
   db?: AppDatabase;
   queue?: ReviewQueueRuntime;
-  configureProviderCoordinator?: (coordinator?: LlmProviderCoordinator) => void;
+  configureProviderCoordinator?: (
+    coordinator?: LlmProviderCoordinator,
+    localProviderConcurrency?: (provider: string) => number,
+  ) => void;
 }
 
 export function composeApplication(
@@ -25,9 +29,14 @@ export function composeApplication(
   factories: CompositionFactories = {},
 ): AppServices {
   const db = factories.db ?? createAppDatabase(config.store);
-  const queue = factories.queue ?? createReviewQueue(config.queue);
+  const queue =
+    factories.queue ??
+    createReviewQueue(config.queue, { providerCapacityPlan: providerCapacityPlanFor(config) });
   const coordinator = providerAdmissionFor(queue) ?? undefined;
-  (factories.configureProviderCoordinator ?? configureLlmProviderCoordinator)(coordinator);
+  (factories.configureProviderCoordinator ?? configureLlmProviderCoordinator)(
+    coordinator,
+    config.review.providerConcurrency,
+  );
   const githubConfig = githubAppConfig(config);
   const app = createApp(queue, { db, config, githubConfig });
   return { db, queue, app };

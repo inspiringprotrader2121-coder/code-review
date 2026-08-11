@@ -1,5 +1,8 @@
 import { currentEnvironment } from './runtime.js';
 
+/** Provider buckets Orvex currently allows in its paid production plans. */
+export const FLEET_PROVIDER_BUCKETS = ['luna', 'deepseek', 'minimax'] as const;
+
 export interface ReviewRuntimeConfig {
   readonly llmTimeoutMs: number;
   readonly llmMaxTotalMs: number;
@@ -46,7 +49,14 @@ export interface ReviewRuntimeConfig {
   readonly codexUsageFloorInput: number;
   readonly codexUsageFloorOutput: number;
   readonly childProcessEnvironment: Readonly<NodeJS.ProcessEnv>;
+  /** Per-process provider ceiling. This protects local CPU, sockets, and sandbox work. */
   readonly providerConcurrency: (provider: string) => number;
+  /** Fleet-wide provider ceiling enforced by the Redis admission registry. */
+  readonly fleetProviderConcurrency: (provider: string) => number;
+  /** Explicit epoch required when an operator changes fleet provider capacity. */
+  readonly fleetProviderCapacityEpoch: string;
+  /** Whole-fleet review slots any one tenant may hold at once. */
+  readonly fleetTenantConcurrency: number;
   readonly codexApiKeyConcurrency: number;
   readonly reviewWorkerConcurrency: number;
   readonly codexCliEnabled: boolean;
@@ -157,6 +167,40 @@ function boundedConcurrency(raw: string | undefined, fallback: number, maximum: 
   return Number.isFinite(parsed) ? Math.min(maximum, Math.max(1, Math.floor(parsed))) : fallback;
 }
 
+function providerEnvironmentName(provider: string): string {
+  return provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+}
+
+function snapshotProviderOverrides(
+  env: NodeJS.ProcessEnv,
+  prefix: string,
+): Readonly<Record<string, string>> {
+  const values: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined || !key.startsWith(prefix)) continue;
+    const suffix = key.slice(prefix.length);
+    if (/^[A-Z][A-Z0-9_]*$/.test(suffix)) values[suffix] = value;
+  }
+  return Object.freeze(values);
+}
+
+function providerCapacity(
+  provider: string,
+  overrides: Readonly<Record<string, string>>,
+  fallback: number,
+  maximum: number,
+): number {
+  return boundedConcurrency(overrides[providerEnvironmentName(provider)], fallback, maximum);
+}
+
+function capacityEpoch(raw: string | undefined): string {
+  const value = raw?.trim() || 'v1';
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(value)) {
+    throw new Error('ORVEX_FLEET_CAPACITY_EPOCH must be 1-64 safe characters');
+  }
+  return value;
+}
+
 function promptLimit(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === '') return fallback;
   const parsed = Number(raw);
@@ -235,6 +279,34 @@ export function loadReviewRuntimeConfig(
       SSL_CERT_DIR: env.SSL_CERT_DIR,
       NODE_EXTRA_CA_CERTS: env.NODE_EXTRA_CA_CERTS,
     }).filter(([, value]) => value !== undefined),
+  );
+  const reviewWorkerConcurrency = boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 100);
+  const codexApiKeyConcurrency = boundedConcurrency(
+    env.ORVEX_CODEX_APIKEY_CONCURRENCY,
+    boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 32),
+    32,
+  );
+  const sharedProviderCapacity =
+    env.ORVEX_CODEX_CLI === '1'
+      ? codexApiKeyConcurrency
+      : boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 32);
+  const providerOverrides = snapshotProviderOverrides(env, 'ORVEX_PROVIDER_CONCURRENCY_');
+  const fleetProviderOverrides = snapshotProviderOverrides(
+    env,
+    'ORVEX_FLEET_PROVIDER_CONCURRENCY_',
+  );
+  const localProviderConcurrency = (provider: string): number =>
+    providerCapacity(provider, providerOverrides, sharedProviderCapacity, 32);
+  const fleetProviderConcurrency = (provider: string): number =>
+    providerCapacity(provider, fleetProviderOverrides, localProviderConcurrency(provider), 10_000);
+  const fleetProviderCapacityEpoch = capacityEpoch(env.ORVEX_FLEET_CAPACITY_EPOCH);
+  // Keep the compatible one-host default equal to the review-worker ceiling.
+  // A multi-tenant fleet should set this deliberately below its total worker
+  // count, so one workspace cannot occupy the entire fleet.
+  const fleetTenantConcurrency = boundedConcurrency(
+    env.ORVEX_FLEET_TENANT_CONCURRENCY,
+    reviewWorkerConcurrency,
+    10_000,
   );
   const config: ReviewRuntimeConfig = {
     llmTimeoutMs: Math.min(Math.max(positive(env.ORVEX_LLM_TIMEOUT_MS, 240_000), 1_000), 900_000),
@@ -317,26 +389,12 @@ export function loadReviewRuntimeConfig(
     codexUsageFloorInput: positive(env.ORVEX_CODEX_USAGE_FLOOR_INPUT, 50_000),
     codexUsageFloorOutput: positive(env.ORVEX_CODEX_USAGE_FLOOR_OUTPUT, 5_000),
     childProcessEnvironment: Object.freeze(childProcessEnvironment),
-    providerConcurrency(provider: string): number {
-      const name = provider.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
-      const workerConcurrency = boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 32);
-      const codexConcurrency = boundedConcurrency(
-        env.ORVEX_CODEX_APIKEY_CONCURRENCY,
-        workerConcurrency,
-        32,
-      );
-      const sharedCapacity = env.ORVEX_CODEX_CLI === '1' ? codexConcurrency : workerConcurrency;
-      // Same-provider lenses run sequentially within one review. The default
-      // therefore represents concurrent reviews, rather than multiplying a
-      // provider burst by the number of lenses in each review.
-      return boundedConcurrency(env[`ORVEX_PROVIDER_CONCURRENCY_${name}`], sharedCapacity, 32);
-    },
-    codexApiKeyConcurrency: boundedConcurrency(
-      env.ORVEX_CODEX_APIKEY_CONCURRENCY,
-      boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 32),
-      32,
-    ),
-    reviewWorkerConcurrency: boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 100),
+    providerConcurrency: localProviderConcurrency,
+    fleetProviderConcurrency,
+    fleetProviderCapacityEpoch,
+    fleetTenantConcurrency,
+    codexApiKeyConcurrency,
+    reviewWorkerConcurrency,
     codexCliEnabled: env.ORVEX_CODEX_CLI === '1',
     promptTreePaths: promptLimit(env.ORVEX_MAX_TREE_PATHS, 400),
     promptDiffChars: promptLimit(env.ORVEX_MAX_DIFF_CHARS, 96_000),

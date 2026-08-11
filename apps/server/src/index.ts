@@ -3,9 +3,11 @@ import { serve } from '@hono/node-server';
 import { composeApplication } from './bootstrap/composition.js';
 import { isLoopbackHost, loadServerRuntimeConfig } from './bootstrap/config.js';
 import { startApplicationLifecycle } from './bootstrap/lifecycle.js';
+import { processRoleRunsHttp } from './bootstrap/topology.js';
 
 const runtime = loadServerRuntimeConfig();
 const { host, port } = runtime;
+const servesHttp = processRoleRunsHttp(runtime.topology.role);
 
 // FAIL CLOSED: refuse to serve the dashboard on a public interface with no
 // authentication configured. Prod sets ORVEX_REQUIRE_LOGIN=1 (or OAuth), so this
@@ -16,7 +18,7 @@ const isLoopbackBind = isLoopbackHost(host);
 // AUTH_DISABLED makes every request the shared `dev` user — never allow that on
 // a non-loopback bind (legacyAuthMode() is false when AUTH_DISABLED=1, so the
 // check below would otherwise miss it).
-if (!isLoopbackBind && runtime.authDisabled) {
+if (servesHttp && !isLoopbackBind && runtime.authDisabled) {
   throw new Error(
     `Refusing to bind ${host}:${port} with AUTH_DISABLED=1 (every request is auto-authed as "dev"). ` +
       `Unset AUTH_DISABLED, or bind to 127.0.0.1 for local bypass.`,
@@ -24,7 +26,7 @@ if (!isLoopbackBind && runtime.authDisabled) {
 }
 const hasOauth = Boolean(runtime.oauth.github || runtime.oauth.google);
 const legacyNoLogin = !runtime.requireLogin && !hasOauth && !runtime.authDisabled;
-if (!isLoopbackBind && legacyNoLogin && !runtime.allowPublicNoLogin) {
+if (servesHttp && !isLoopbackBind && legacyNoLogin && !runtime.allowPublicNoLogin) {
   throw new Error(
     `Refusing to bind ${host}:${port} with NO authentication (legacy no-login mode). ` +
       `Set ORVEX_REQUIRE_LOGIN=1 (or configure GitHub OAuth), bind to 127.0.0.1, ` +
@@ -35,9 +37,16 @@ if (!isLoopbackBind && legacyNoLogin && !runtime.allowPublicNoLogin) {
 const { db: bootDb, queue, app } = composeApplication(runtime);
 const lifecycle = await startApplicationLifecycle(bootDb, queue, runtime);
 
-console.log(`[server] Orvex Review listening on http://${host}:${port}`);
-
-serve({ fetch: app.fetch, port, hostname: host });
+if (servesHttp) {
+  console.log(
+    `[server] Orvex Review ${runtime.topology.role} role listening on http://${host}:${port}`,
+  );
+  serve({ fetch: app.fetch, port, hostname: host });
+} else {
+  console.log(
+    `[server] Orvex Review ${runtime.topology.role} role started without an HTTP listener`,
+  );
+}
 
 async function shutdown() {
   await lifecycle.shutdown();
@@ -46,3 +55,7 @@ async function shutdown() {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Workers and schedulers may only hold unref'd maintenance timers while idle.
+// Keep a role-only process alive until a signal initiates its normal shutdown.
+if (!servesHttp) await new Promise<never>(() => {});

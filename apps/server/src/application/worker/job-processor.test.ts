@@ -81,7 +81,8 @@ test('exhausted work is dead-lettered and produces an operator alert', async () 
       ORVEX_ALERT_WEBHOOK_URL: 'https://alerts.invalid/worker',
     }),
     loadConfig: () => ({ store: {} }) as WorkerConfig,
-    processReview: async () => {
+    processReview: async (_job, config) => {
+      assert.equal(config.providerAdmission, queue.providerAdmission);
       throw new Error('provider response failed permanently');
     },
     active: () => 1,

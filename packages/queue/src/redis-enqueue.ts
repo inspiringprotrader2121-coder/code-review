@@ -16,6 +16,7 @@ import {
   type EnqueueResult,
   type ReviewJobPayload,
 } from './types.js';
+import type { RedisTenantAdmission } from './redis-tenant-admission.js';
 
 // A priority tier may jump the FIFO head only this many times before one
 // oldest queued job is served. Redis owns the counter, so all worker processes
@@ -33,6 +34,7 @@ export class RedisEnqueueOperations {
     private readonly redis: Redis,
     private readonly keys: RedisQueueKeys,
     private readonly claims: ClaimTokens,
+    private readonly tenantAdmission: RedisTenantAdmission,
   ) {}
 
   async enqueue(job: ReviewJobPayload): Promise<EnqueueResult> {
@@ -70,13 +72,22 @@ export class RedisEnqueueOperations {
       const token = randomUUID();
       const raw = (await this.redis.eval(
         DEQUEUE_LUA,
-        3,
+        7,
         this.keys.queue,
         this.keys.processing,
         this.keys.priorityBurst,
+        this.keys.tenantActive,
+        this.keys.tenantClaims,
+        this.keys.tenantClaimExpiry,
+        this.tenantAdmission.capacityKey,
         token,
         PRIORITY_BURST_LIMIT,
+        Date.now(),
+        this.tenantAdmission.enabled ? '1' : '0',
+        this.tenantAdmission.capacityField,
       )) as string | null | false;
+      if (raw === 'tenant-blocked') continue;
+      if (Array.isArray(raw)) throw this.capacityError(raw);
       if (!raw) return null;
       const processingEntry = `${token}\n${raw}`;
       let job: ReviewJobPayload;
@@ -94,11 +105,17 @@ export class RedisEnqueueOperations {
       }
       const claimResult = await this.redis.eval(
         CLAIM_LUA,
-        4,
+        10,
         `${this.keys.inflightPrefix}${prKey(job)}`,
         `${this.keys.pendingPrefix}${prKey(job)}`,
         this.keys.pendingCount,
         `${this.keys.statePrefix}${idKey}`,
+        this.keys.processing,
+        this.keys.queue,
+        this.keys.tenantActive,
+        this.keys.tenantClaims,
+        this.keys.tenantClaimExpiry,
+        this.tenantAdmission.capacityKey,
         raw,
         job.kind ?? 'review',
         LEASE_TTL_SECONDS,
@@ -106,11 +123,18 @@ export class RedisEnqueueOperations {
         this.keys.seenPrefix,
         this.keys.statePrefix,
         STATE_TTL_SECONDS,
+        processingEntry,
+        job.tenantId,
+        Date.now(),
+        this.tenantAdmission.enabled ? '1' : '0',
+        this.tenantAdmission.capacityField,
       );
       if (claimResult === 'pending') {
         await this.redis.lrem(this.keys.processing, 1, processingEntry);
         continue;
       }
+      if (claimResult === 'tenant_full') continue;
+      if (Array.isArray(claimResult)) throw this.capacityError(claimResult);
       await this.redis.set(
         processingMetaKey(this.keys.processingMetaPrefix, processingEntry),
         String(Date.now()),
@@ -143,5 +167,14 @@ export class RedisEnqueueOperations {
       job.action !== 'manual' &&
       (await this.redis.exists(`${this.keys.donePrefix}${bare}`)) === 1
     );
+  }
+
+  private capacityError(response: unknown[]): Error {
+    if (response[0] === 'capacity_missing') {
+      return new Error(
+        `tenant fleet capacity ${String(response[1])} is not registered; start the scheduler before workers`,
+      );
+    }
+    return new Error('tenant fleet admission failed');
   }
 }

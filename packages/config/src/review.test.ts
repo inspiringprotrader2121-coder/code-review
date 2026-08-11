@@ -19,6 +19,9 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.codexApiKeyConcurrency, 8);
   assert.equal(config.providerConcurrency('luna'), 8);
   assert.equal(config.providerConcurrency('deepseek'), 8);
+  assert.equal(config.fleetProviderConcurrency('luna'), 8);
+  assert.equal(config.fleetProviderCapacityEpoch, 'v1');
+  assert.equal(config.fleetTenantConcurrency, 8);
   assert.equal(config.promptChangedChars, 16_000);
   assert.equal(config.promptRelatedChars, 6_000);
   assert.equal(config.promptOtherChars, 2_000);
@@ -67,6 +70,7 @@ test('review runtime preserves max reasoning, bounded timers, and pinned child e
   assert.equal(config.reviewWorkerConcurrency, 4);
   assert.equal(config.codexApiKeyConcurrency, 9);
   assert.equal(config.providerConcurrency('luna'), 7);
+  assert.equal(config.fleetProviderConcurrency('luna'), 7);
   assert.deepEqual(config.codexAllowedRepos, ['acme/widgets', 'acme/api']);
   assert.deepEqual(config.childProcessEnvironment, { PATH: '/usr/bin' });
 });
@@ -88,8 +92,34 @@ test('production capacity profile reserves one DeepSeek lane for each concurrent
   assert.equal(config.providerConcurrency('luna'), 8);
   assert.equal(config.providerConcurrency('deepseek'), 8);
   assert.equal(config.providerConcurrency('minimax'), 8);
+  assert.equal(config.fleetProviderConcurrency('minimax'), 8);
   assert.equal(config.verifyConcurrency, 1);
   assert.equal(config.execution.concurrency, 3);
+});
+
+test('fleet provider capacity is independent from per-worker capacity and snapshots its environment', () => {
+  const env: NodeJS.ProcessEnv = {
+    ORVEX_MAX_CONCURRENT_REVIEWS: '4',
+    ORVEX_PROVIDER_CONCURRENCY_LUNA: '3',
+    ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA: '64',
+    ORVEX_FLEET_TENANT_CONCURRENCY: '12',
+    ORVEX_FLEET_CAPACITY_EPOCH: 'fleet-2026-08',
+  };
+  const config = loadReviewRuntimeConfig(env);
+  assert.equal(config.providerConcurrency('luna'), 3);
+  assert.equal(config.fleetProviderConcurrency('luna'), 64);
+  assert.equal(config.fleetProviderConcurrency('deepseek'), 4);
+  assert.equal(config.fleetProviderCapacityEpoch, 'fleet-2026-08');
+  assert.equal(config.fleetTenantConcurrency, 12);
+
+  env.ORVEX_PROVIDER_CONCURRENCY_LUNA = '20';
+  env.ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA = '200';
+  assert.equal(config.providerConcurrency('luna'), 3);
+  assert.equal(config.fleetProviderConcurrency('luna'), 64);
+  assert.throws(
+    () => loadReviewRuntimeConfig({ ORVEX_FLEET_CAPACITY_EPOCH: 'unsafe epoch' }),
+    /ORVEX_FLEET_CAPACITY_EPOCH/,
+  );
 });
 
 test('production PM2 profile keeps DeepSeek at one lane per review', () => {

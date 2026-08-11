@@ -26,8 +26,12 @@ export { RedisReviewQueue } from './redis.js';
 export {
   MemoryProviderAdmission,
   providerAdmissionFor,
+  providerCapacityRegistryFor,
+  normalizeProviderName,
   type ProviderAdmission,
   type ProviderAdmissionOwner,
+  type ProviderCapacityPlan,
+  type ProviderCapacityRegistry,
   type MemoryProviderAdmissionOptions,
   type MemoryProviderAdmissionState,
 } from './provider-admission.js';
@@ -35,5 +39,10 @@ export {
   RedisProviderAdmission,
   type RedisProviderAdmissionOptions,
 } from './redis-provider-admission.js';
-export { createReviewQueue, loadReviewQueueConfig, type ReviewQueueConfig } from './factory.js';
+export {
+  createReviewQueue,
+  loadReviewQueueConfig,
+  type CreateReviewQueueOptions,
+  type ReviewQueueConfig,
+} from './factory.js';
 export { assertJobTransition, canTransitionJob, type QueueJobState } from './state-machine.js';

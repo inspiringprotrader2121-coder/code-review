@@ -8,6 +8,7 @@ test('server config preserves defaults, aliases, and immutable nested values', (
   assert.equal(config.port, 8787);
   assert.equal(config.appUrl, 'http://localhost:8787');
   assert.equal(config.worker.concurrency, 8);
+  assert.equal(config.topology.role, 'all');
   assert.equal(config.webhook.bodyDedupTtlMs, 2 * 3_600_000);
   assert.equal(config.store.databasePath, config.databasePath);
   assert.equal(config.store.checkoutRoot, process.cwd());
@@ -38,6 +39,7 @@ test('server config clamps malformed operational values and snapshots auth alias
     GITHUB_WEBHOOK_SECRET: 'webhook-fallback',
     ORVEX_MAX_CONCURRENT_REVIEWS: '1000',
     ORVEX_WORKER_ID: 'worker-a',
+    ORVEX_PROCESS_ROLE: 'worker',
     ORVEX_CHECKOUT_ROOT: '/tmp/orvex-checkout',
     ORVEX_REQUIRE_DURABLE_STORAGE: '0',
     ORVEX_DEFAULT_PLAN: 'verify',
@@ -62,6 +64,7 @@ test('server config clamps malformed operational values and snapshots auth alias
   assert.equal(config.codexStatusFile, '/tmp/codex-status');
   assert.equal(config.platformSecret, 'webhook-fallback');
   assert.equal(config.worker.concurrency, 100);
+  assert.equal(config.topology.role, 'worker');
   assert.equal(config.store.workerIdBase, 'worker-a');
   assert.equal(config.store.checkoutRoot, '/tmp/orvex-checkout');
   assert.equal(config.store.requireDurableStorage, false);
@@ -113,6 +116,30 @@ test('production and explicit public binds require an explicit high-entropy plat
     }),
   );
   assert.doesNotThrow(() => loadServerConfig({ HOST: '127.0.0.1' }));
+});
+
+test('dedicated production worker and scheduler roles require a stable identity', () => {
+  const production = {
+    NODE_ENV: 'production',
+    PLATFORM_SECRET: 'p'.repeat(32),
+    STORE_PATH: '/var/lib/orvex/app.db',
+  };
+  assert.throws(
+    () => loadServerConfig({ ...production, ORVEX_PROCESS_ROLE: 'worker' }),
+    /ORVEX_WORKER_ID is required/,
+  );
+  assert.throws(
+    () => loadServerConfig({ ...production, ORVEX_PROCESS_ROLE: 'scheduler' }),
+    /ORVEX_WORKER_ID is required/,
+  );
+  assert.equal(
+    loadServerConfig({
+      ...production,
+      ORVEX_PROCESS_ROLE: 'worker',
+      ORVEX_WORKER_ID: 'review-worker-01',
+    }).store.workerIdBase,
+    'review-worker-01',
+  );
 });
 
 test('loopback binding recognition is explicit', () => {

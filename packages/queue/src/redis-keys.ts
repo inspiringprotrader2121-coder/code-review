@@ -18,6 +18,12 @@ export interface RedisQueueKeys {
   processing: string;
   processingMetaPrefix: string;
   priorityBurst: string;
+  /** Active review claim count by tenant, maintained atomically with the PR claim. */
+  tenantActive: string;
+  /** Claim-token -> tenant mapping so completion, recovery, and expiry can release safely. */
+  tenantClaims: string;
+  /** Claim-token expiry used to recover tenant slots after a crashed worker. */
+  tenantClaimExpiry: string;
   recoveryLease: string;
   resumedPrefix: string;
   deadLetters: string;
@@ -37,6 +43,9 @@ export function createRedisQueueKeys(namespace: string): RedisQueueKeys {
     processing: `${prefix}processing`,
     processingMetaPrefix: `${prefix}processing-meta:`,
     priorityBurst: `${prefix}priority-burst`,
+    tenantActive: `${prefix}tenant-active`,
+    tenantClaims: `${prefix}tenant-claims`,
+    tenantClaimExpiry: `${prefix}tenant-claim-expiry`,
     recoveryLease: `${prefix}recovery-leader`,
     resumedPrefix: `${prefix}resumed:`,
     deadLetters: `${prefix}dead-letters`,

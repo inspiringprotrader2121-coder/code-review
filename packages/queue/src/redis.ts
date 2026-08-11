@@ -10,8 +10,9 @@ import {
   type ReviewQueue,
 } from './types.js';
 import type { QueueJobState } from './state-machine.js';
-import type { ProviderAdmission } from './provider-admission.js';
+import type { ProviderAdmission, ProviderCapacityPlan } from './provider-admission.js';
 import { RedisProviderAdmission } from './redis-provider-admission.js';
+import { createRedisTenantAdmission } from './redis-tenant-admission.js';
 import { RedisQueueTransitionRepository } from './redis-transitions.js';
 import { RedisEnqueueOperations } from './redis-enqueue.js';
 import { RedisLeaseOperations } from './redis-lease.js';
@@ -30,6 +31,8 @@ export interface RedisReviewQueueOptions {
   providerLeaseWaitMs?: number;
   /** Supply an independently constructed adapter in tests or composition roots. */
   providerAdmission?: ProviderAdmission;
+  /** Scheduler-established provider capacity used by every worker in a fleet. */
+  providerCapacityPlan?: ProviderCapacityPlan;
 }
 
 /**
@@ -50,6 +53,7 @@ export class RedisReviewQueue implements ReviewQueue {
     const namespace = validateRedisQueueNamespace(options.namespace);
     const redis = new Redis(url);
     const keys = createRedisQueueKeys(namespace);
+    const tenantAdmission = createRedisTenantAdmission(namespace, options.providerCapacityPlan);
     const transitions = new RedisQueueTransitionRepository(redis);
     const configured = options.maxResumeAfterRestart ?? 0;
     const maxResumeAfterRestart =
@@ -59,8 +63,14 @@ export class RedisReviewQueue implements ReviewQueue {
       new RedisProviderAdmission(redis, {
         namespace,
         waitMs: options.providerLeaseWaitMs,
+        capacityPlan: options.providerCapacityPlan,
       });
-    this.enqueueOperations = new RedisEnqueueOperations(redis, keys, this.lockTokens);
+    this.enqueueOperations = new RedisEnqueueOperations(
+      redis,
+      keys,
+      this.lockTokens,
+      tenantAdmission,
+    );
     const recordOperationalEvent = (event: QueueOperationalEvent): void => {
       this.operationalEvents.push(event);
     };

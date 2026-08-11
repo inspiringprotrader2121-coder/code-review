@@ -12,6 +12,17 @@
 
 Never use raw `rsync`, copy `node_modules`, edit the live source tree, or include `.env`, `.data`, database files, keys, or PEM files in a release.
 
+## Load-Balanced Deployments
+
+Use `/ready` only for the guarded deployment gate. It remains successful during
+drain so the release script can wait for active work. An external load balancer
+must instead probe `/traffic-ready`; that endpoint returns `503` as soon as the
+node drains, a dependency fails, or the process is not an API role.
+
+The current SQLite store is single-host. Do not enable multi-host API or worker
+replicas until the Postgres and fleet-admission gates in the
+[fleet deployment guide](./FLEET_DEPLOYMENT.md) are complete.
+
 ## Release Procedure
 
 1. Prepare: run `scripts/deploy-safe.sh --dry-run` from the committed checkout and inspect the exact file list.

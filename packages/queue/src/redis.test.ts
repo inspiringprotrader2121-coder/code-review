@@ -107,6 +107,136 @@ test(
 );
 
 test(
+  'Redis fleet tenant admission gives another tenant a slot and releases it through heartbeats and completion',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    const namespace = testNamespace();
+    const plan = {
+      epoch: 'tenant-fair-v1',
+      limits: { luna: 2, deepseek: 2, minimax: 2 },
+      tenantConcurrency: 1,
+    };
+    const queue = new RedisReviewQueue(redisUrl!, { namespace, providerCapacityPlan: plan });
+    const scheduler =
+      queue.providerAdmission as import('./redis-provider-admission.js').RedisProviderAdmission;
+    t.after(async () => {
+      await queue.close();
+      await clearNamespace(cleanup, namespace);
+      await cleanup.quit();
+    });
+    await scheduler.initializeProviderCapacities();
+
+    const tenantAFirst = { ...job('tenant-a-first', 501, 'opened'), tenantId: 'tenant-a' };
+    const tenantASecond = { ...job('tenant-a-second', 502, 'opened'), tenantId: 'tenant-a' };
+    const tenantB = { ...job('tenant-b', 503, 'opened'), tenantId: 'tenant-b' };
+    await queue.enqueue(tenantAFirst);
+    await queue.enqueue(tenantASecond);
+    await queue.enqueue(tenantB);
+
+    const first = await queue.dequeue();
+    assert.equal(first?.headSha, tenantAFirst.headSha);
+    const second = await queue.dequeue();
+    assert.equal(second?.headSha, tenantB.headSha, 'tenant B is not starved by tenant A');
+
+    const [firstEntry] = await cleanup.lrange(`${namespace}:processing`, 0, -1);
+    assert.ok(firstEntry);
+    const firstToken = firstEntry!.slice(0, firstEntry!.indexOf('\n'));
+    await cleanup.zadd(`${namespace}:tenant-claim-expiry`, Date.now() - 1, firstToken);
+    await queue.renewLease(first!);
+    assert.equal(
+      await queue.dequeue(),
+      null,
+      'a renewed tenant-A claim still blocks its second review',
+    );
+
+    await queue.markCompleted(first!);
+    assert.equal(await cleanup.hget(`${namespace}:tenant-active`, 'tenant-a'), null);
+    const third = await queue.dequeue();
+    assert.equal(third?.headSha, tenantASecond.headSha);
+    await queue.markCompleted(second!);
+    await queue.markCompleted(third!);
+  },
+);
+
+test(
+  'Redis fleet tenant admission bounds a mixed hundreds-of-jobs burst across many workers',
+  { skip: !redisUrl, timeout: 30_000 },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    const namespace = testNamespace();
+    const plan = {
+      epoch: 'tenant-fair-burst-v1',
+      limits: { luna: 24, deepseek: 24, minimax: 24 },
+      tenantConcurrency: 2,
+    };
+    const workers = Array.from(
+      { length: 24 },
+      () => new RedisReviewQueue(redisUrl!, { namespace, providerCapacityPlan: plan }),
+    );
+    const scheduler = workers[0]!
+      .providerAdmission as import('./redis-provider-admission.js').RedisProviderAdmission;
+    t.after(async () => {
+      await Promise.all(workers.map((worker) => worker.close()));
+      await clearNamespace(cleanup, namespace);
+      await cleanup.quit();
+    });
+    await scheduler.initializeProviderCapacities();
+
+    const jobs = Array.from({ length: 360 }, (_, index) => {
+      const tenant = `tenant-${String(index % 120).padStart(3, '0')}`;
+      return {
+        ...job(`tenant-burst-${index}`, 10_000 + index, 'opened'),
+        tenantId: tenant,
+      };
+    });
+    const queued = await Promise.all(
+      jobs.map((payload, index) => workers[index % workers.length]!.enqueue(payload)),
+    );
+    assert.equal(queued.filter((result) => result.accepted).length, jobs.length);
+
+    const activeByTenant = new Map<string, number>();
+    const peakByTenant = new Map<string, number>();
+    const completed = new Set<string>();
+    await Promise.all(
+      workers.map(async (worker) => {
+        for (;;) {
+          const claimed = await worker.dequeue();
+          if (!claimed) return;
+          const active = (activeByTenant.get(claimed.tenantId) ?? 0) + 1;
+          activeByTenant.set(claimed.tenantId, active);
+          peakByTenant.set(
+            claimed.tenantId,
+            Math.max(peakByTenant.get(claimed.tenantId) ?? 0, active),
+          );
+          try {
+            await new Promise<void>((resolve) => setTimeout(resolve, 1));
+            const id = jobIdempotencyKey(claimed);
+            assert.equal(completed.has(id), false, `duplicate claim for ${id}`);
+            completed.add(id);
+          } finally {
+            // The Redis tenant slot is released by markCompleted below. Count
+            // only the actual execution window, not local post-completion
+            // cleanup that may overlap with the next eligible claim.
+            activeByTenant.set(claimed.tenantId, active - 1);
+          }
+          await worker.markCompleted(claimed);
+          await worker.releaseLockAndDrain(prKey(claimed));
+        }
+      }),
+    );
+
+    assert.equal(completed.size, jobs.length);
+    assert.ok(
+      [...peakByTenant.values()].every((peak) => peak <= plan.tenantConcurrency),
+      'no tenant can exceed its Redis-held fleet review allocation',
+    );
+    assert.equal(await cleanup.hlen(`${namespace}:tenant-active`), 0);
+    assert.equal(await cleanup.zcard(`${namespace}:tenant-claim-expiry`), 0);
+  },
+);
+
+test(
   'Redis persistJob writes runId into PROCESSING so orphan recovery keeps it',
   { skip: !redisUrl },
   async (t) => {

@@ -5,6 +5,7 @@ import { providerCooldownForFailure, sleep } from './retry-policy.js';
 import { providerName } from './support.js';
 
 let providerCoordinator: LlmProviderCoordinator | undefined;
+let configuredProviderConcurrency: ((provider: string) => number) | undefined;
 const localProviderCooldownUntil = new Map<string, number>();
 
 interface LlmSlotWaiter {
@@ -20,13 +21,19 @@ interface ProviderGate {
 }
 const providerGates = new Map<string, ProviderGate>();
 
-export function configureLlmProviderCoordinator(coordinator?: LlmProviderCoordinator): void {
+export function configureLlmProviderCoordinator(
+  coordinator?: LlmProviderCoordinator,
+  localProviderConcurrency?: (provider: string) => number,
+): void {
   providerCoordinator = coordinator;
+  configuredProviderConcurrency = localProviderConcurrency;
 }
 export function currentProviderCoordinator(): LlmProviderCoordinator | undefined {
   return providerCoordinator;
 }
 export function providerConcurrency(provider: string, env?: NodeJS.ProcessEnv): number {
+  if (env === undefined && configuredProviderConcurrency)
+    return configuredProviderConcurrency(provider);
   return resolveProviderConcurrency(provider, env);
 }
 

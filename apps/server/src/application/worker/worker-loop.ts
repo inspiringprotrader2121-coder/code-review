@@ -105,11 +105,14 @@ export function startBoundedWorkerLoop(
   void Promise.all(Array.from({ length: capacity }, (_, index) => workerLoop(index + 1))).catch(
     (error) => console.error('[worker] worker loop error', error),
   );
-  const stopRecovery = startPeriodicRecovery({
-    queue,
-    config: dependencies.config,
-    intervalMs: dependencies.recoveryMs,
-  });
+  const stopRecovery =
+    dependencies.enablePeriodicRecovery === false
+      ? () => {}
+      : startPeriodicRecovery({
+          queue,
+          config: dependencies.config,
+          intervalMs: dependencies.recoveryMs,
+        });
 
   return async (): Promise<void> => {
     running = false;

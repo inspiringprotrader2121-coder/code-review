@@ -16,13 +16,15 @@ test('configuration schema has complete unique metadata and no secret examples',
   assert.ok(configurationSchema.sections.some((section) => section.name === 'Stripe billing'));
 });
 
-test('provider concurrency is the only configuration-name template', () => {
+test('provider concurrency templates enumerate only supported provider buckets', () => {
   const templates = configurationVariables.filter((variable) => variable.name.includes('<'));
   assert.deepEqual(
     templates.map((variable) => variable.name),
-    ['ORVEX_PROVIDER_CONCURRENCY_<PROVIDER>'],
+    ['ORVEX_PROVIDER_CONCURRENCY_<PROVIDER>', 'ORVEX_FLEET_PROVIDER_CONCURRENCY_<PROVIDER>'],
   );
   assert.equal(isConfigurationTemplateName('ORVEX_PROVIDER_CONCURRENCY_LUNA'), true);
   assert.equal(isConfigurationTemplateName('ORVEX_PROVIDER_CONCURRENCY_UNKNOWN'), false);
+  assert.equal(isConfigurationTemplateName('ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK'), true);
+  assert.equal(isConfigurationTemplateName('ORVEX_FLEET_PROVIDER_CONCURRENCY_UNKNOWN'), false);
   assert.equal(isConfigurationTemplateName('ORVEX_OTHER_DYNAMIC_VALUE'), false);
 });

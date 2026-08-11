@@ -23,6 +23,7 @@ import {
   createSandboxRuntimeBindings,
   type SandboxRuntimeBindings,
 } from '../sandbox-runtime-options.js';
+import { loadProcessRole, type ProcessRole } from './topology.js';
 
 type Environment = Readonly<NodeJS.ProcessEnv>;
 
@@ -80,6 +81,7 @@ export interface ServerConfig {
   }>;
   readonly billing: BillingConfig;
   readonly billingCatalog: PlanCatalog;
+  readonly topology: Readonly<{ role: ProcessRole }>;
   readonly worker: Readonly<{
     concurrency: number;
     maxJobRetries: number;
@@ -135,6 +137,7 @@ export function loadServerConfig(env: Environment = process.env): ServerConfig {
   const monthlyCogsCapUsd =
     Number.isFinite(monthlyCogsCap) && monthlyCogsCap > 0 ? monthlyCogsCap : 250;
   const production = env.NODE_ENV === 'production' || env.ORVEX_ENV === 'production';
+  const processRole = loadProcessRole(env.ORVEX_PROCESS_ROLE);
   if (
     (production || !isLoopbackHost(host)) &&
     Buffer.byteLength(configuredPlatformSecret ?? '', 'utf8') < 32
@@ -151,9 +154,19 @@ export function loadServerConfig(env: Environment = process.env): ServerConfig {
     storePath ??
     (!existsSync(currentDbPath) && existsSync(legacyDbPath) ? legacyDbPath : currentDbPath);
   const requireDurableStorage = production || env.ORVEX_REQUIRE_DURABLE_STORAGE === '1';
+  const configuredWorkerId = optional(env.ORVEX_WORKER_ID);
+  if (
+    production &&
+    (processRole === 'worker' || processRole === 'scheduler') &&
+    !configuredWorkerId
+  ) {
+    throw new Error(
+      'ORVEX_WORKER_ID is required for a production worker or scheduler role so fleet ownership remains stable',
+    );
+  }
   const store = Object.freeze({
     databasePath,
-    workerIdBase: optional(env.ORVEX_WORKER_ID) ?? String(process.pid),
+    workerIdBase: configuredWorkerId ?? String(process.pid),
     checkoutRoot: path.resolve(optional(env.ORVEX_CHECKOUT_ROOT) ?? process.cwd()),
     requireDurableStorage,
     defaultPlan: optional(env.ORVEX_DEFAULT_PLAN) ?? 'free',
@@ -205,6 +218,7 @@ export function loadServerConfig(env: Environment = process.env): ServerConfig {
     }),
     billing: loadBillingConfig(env),
     billingCatalog: loadPlanCatalog(env),
+    topology: Object.freeze({ role: processRole }),
     worker: Object.freeze({
       concurrency: bounded(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 1, 100),
       maxJobRetries: bounded(env.ORVEX_MAX_JOB_RETRIES, 0, 0, 1),

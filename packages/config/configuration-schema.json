@@ -1051,6 +1051,17 @@
           "deprecatedAliases": []
         },
         {
+          "name": "ORVEX_PROCESS_ROLE",
+          "example": "all",
+          "type": "enum",
+          "range": "all, api, worker, or scheduler; default all",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Process responsibility. all preserves the current single-process deployment; api serves HTTP only, worker runs reviews only, and scheduler runs maintenance/recovery only.",
+          "deprecatedAliases": []
+        },
+        {
           "name": "ORVEX_CHECKOUT_ROOT",
           "example": "",
           "type": "path",
@@ -1223,6 +1234,73 @@
           "secret": false,
           "redaction": "none",
           "description": "MiniMax provider-stage concurrency cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FLEET_CAPACITY_EPOCH",
+          "example": "v1",
+          "type": "string",
+          "range": "1..64 safe characters; default v1",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Version of the scheduler-owned Redis provider-capacity plan. Bump it only during a coordinated drained fleet capacity change.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FLEET_PROVIDER_CONCURRENCY_<PROVIDER>",
+          "example": "8",
+          "type": "integer-template",
+          "range": "provider in LUNA, DEEPSEEK, MINIMAX; 1..10000; defaults to the corresponding per-process provider limit",
+          "secret": false,
+          "redaction": "none",
+          "render": false,
+          "allowedValues": ["LUNA", "DEEPSEEK", "MINIMAX"],
+          "description": "Whole-fleet provider capacity. The scheduler registers it in Redis and every worker checks that same epoch before paid calls; it is not multiplied by replica count.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA",
+          "example": "8",
+          "type": "integer",
+          "range": "1..10000; default local Luna provider limit",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Fleet-wide Luna provider-stage capacity registered by the scheduler.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK",
+          "example": "8",
+          "type": "integer",
+          "range": "1..10000; default local DeepSeek provider limit",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Fleet-wide DeepSeek provider-stage capacity registered by the scheduler.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX",
+          "example": "8",
+          "type": "integer",
+          "range": "1..10000; default local MiniMax provider limit",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Fleet-wide MiniMax provider-stage capacity registered by the scheduler.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_FLEET_TENANT_CONCURRENCY",
+          "example": "8",
+          "type": "integer",
+          "range": "1..10000; default whole-review worker limit",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Fleet-wide concurrent review limit per tenant. Set it below total worker capacity on a multi-tenant fleet so one workspace cannot consume every worker.",
           "deprecatedAliases": []
         },
         {

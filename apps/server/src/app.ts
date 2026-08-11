@@ -16,6 +16,7 @@ import { superadminRoutes } from './routes/superadmin.js';
 import { assetRoutes } from './assets/index.js';
 import { enqueueManualReview, getActiveJobCount, isDeployDraining } from './queue-runner.js';
 import { type ServerConfig } from './bootstrap/config.js';
+import { processRoleRunsHttp } from './bootstrap/topology.js';
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -115,6 +116,40 @@ export function readReleaseId(file: string): string {
   return 'unknown';
 }
 
+interface DependencyReadiness {
+  dbOk: boolean;
+  queueOk: boolean;
+  globalInFlight: number;
+}
+
+async function probeDependencyReadiness(
+  db: AppDatabase,
+  queue: ReviewQueue,
+  includeQueueDepth: boolean,
+): Promise<DependencyReadiness> {
+  let dbOk = false;
+  let queueOk = false;
+  let globalInFlight = 0;
+  try {
+    db.pingDb();
+    dbOk = true;
+  } catch {
+    /* dbOk stays false */
+  }
+  try {
+    queueOk = await queue.ping();
+    // Redis PROCESSING is shared by all PM2 workers. Reading it here makes
+    // deploy-safe wait for work owned by another process rather than trusting
+    // only the process which happened to answer this HTTP request.
+    if (includeQueueDepth && queueOk && queue.depth) {
+      globalInFlight = (await queue.depth()).inFlight;
+    }
+  } catch {
+    queueOk = false;
+  }
+  return { dbOk, queueOk, globalInFlight };
+}
+
 export function createApp(queue: ReviewQueue, dependencies: CreateAppDependencies) {
   const app = new Hono();
   const { db, config } = dependencies;
@@ -130,26 +165,7 @@ export function createApp(queue: ReviewQueue, dependencies: CreateAppDependencie
   // can tell a half-dead instance (DB locked, Redis down) from a healthy one.
   // Returns 503 if any dependency is unreachable.
   app.get('/ready', async (c) => {
-    let dbOk = false;
-    let queueOk = false;
-    let globalInFlight = 0;
-    try {
-      db.pingDb();
-      dbOk = true;
-    } catch {
-      /* dbOk stays false */
-    }
-    try {
-      queueOk = await queue.ping();
-      // Redis PROCESSING is shared by all PM2 workers. Reading it here makes
-      // deploy-safe wait for work owned by another process rather than trusting
-      // only the process which happened to answer this HTTP request.
-      if (queueOk && queue.depth) {
-        globalInFlight = (await queue.depth()).inFlight;
-      }
-    } catch {
-      queueOk = false;
-    }
+    const { dbOk, queueOk, globalInFlight } = await probeDependencyReadiness(db, queue, true);
     const ok = dbOk && queueOk;
     // activeJobs lets deploys WAIT FOR IDLE before restarting (deploy-safe.sh):
     // restarting mid-review discards work and can kill codex mid token-refresh,
@@ -171,6 +187,27 @@ export function createApp(queue: ReviewQueue, dependencies: CreateAppDependencie
         activeJobs: Math.max(getActiveJobCount(), globalInFlight),
         draining: isDeployDraining(config),
         codexAuth,
+        releaseId: readReleaseId(dependencies.releaseFile ?? DEFAULT_RELEASE_FILE),
+      },
+      ok ? 200 : 503,
+    );
+  });
+
+  // Traffic readiness is deliberately separate from /ready. Deploy-safe keeps
+  // /ready successful while a node drains active jobs; a load balancer needs a
+  // 503 at that same point so it stops sending fresh webhooks and browser work.
+  app.get('/traffic-ready', async (c) => {
+    const { dbOk, queueOk } = await probeDependencyReadiness(db, queue, false);
+    const draining = isDeployDraining(config);
+    const servesHttp = processRoleRunsHttp(config.topology.role);
+    const ok = dbOk && queueOk && servesHttp && !draining;
+    return c.json(
+      {
+        ok,
+        role: config.topology.role,
+        db: dbOk ? 'ok' : 'down',
+        queue: queueOk ? 'ok' : 'down',
+        draining,
         releaseId: readReleaseId(dependencies.releaseFile ?? DEFAULT_RELEASE_FILE),
       },
       ok ? 200 : 503,

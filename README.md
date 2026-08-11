@@ -197,6 +197,10 @@ Never commit `.env`, `*.pem`, or database files — they are gitignored.
   then `scripts/deploy-safe.sh --restart`. Raw `rsync` is prohibited. The
   guarded release procedure and rollback conditions are in the
   [deployment runbook](./docs/DEPLOYMENT_RUNBOOK.md).
+- API, worker, and scheduler process roles plus load-balancer traffic readiness
+  are documented in the [fleet deployment guide](./docs/FLEET_DEPLOYMENT.md).
+  Do not run a multi-host fleet until its Postgres and shared-admission gates
+  are complete.
 - Set `ORVEX_ADMIN_SECRET` for admin bearer automation (do not reuse `PLATFORM_SECRET`).
 - Optional: Redis queue, Stripe keys, Codex CLI homes — see `.env.example`.
 

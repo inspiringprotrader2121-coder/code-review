@@ -130,6 +130,7 @@ export class RedisRecoveryOperations {
     } catch {
       await this.redis.lrem(this.keys.processing, 1, entry);
       await this.redis.del(processingMetaKey(this.keys.processingMetaPrefix, entry));
+      await this.transitions.releaseTenantClaim(this.keys, token);
       return 0;
     }
     const idKey = jobIdempotencyKey(job);
@@ -141,7 +142,7 @@ export class RedisRecoveryOperations {
     const recovered = String(
       await this.redis.eval(
         RECOVER_PROCESSING_LUA,
-        10,
+        13,
         this.keys.processing,
         processingMetaKey(this.keys.processingMetaPrefix, entry),
         `${this.keys.inflightPrefix}${prKey(job)}`,
@@ -152,6 +153,9 @@ export class RedisRecoveryOperations {
         this.keys.queue,
         this.keys.deadLetters,
         `${this.keys.statePrefix}${idKey}`,
+        this.keys.tenantActive,
+        this.keys.tenantClaims,
+        this.keys.tenantClaimExpiry,
         entry,
         Date.now(),
         PROCESSING_RECOVERY_GRACE_MS,

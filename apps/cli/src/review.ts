@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import 'dotenv/config';
 import { parseArgs } from 'node:util';
-import { createReviewQueue } from '@orvex-review/queue';
+import { createReviewQueue, providerAdmissionFor } from '@orvex-review/queue';
 import {
   createInstallationOctokit,
   fetchPullRequest,
@@ -13,6 +13,7 @@ import {
   bindWorkerRuntime,
   createWorkerDatabase,
   loadServerRuntimeConfig,
+  providerCapacityPlanFor,
   startWorkerLoop,
 } from '@orvex-review/server/queue-runner';
 import { loadWorkerConfig, processReviewJob } from '@orvex-review/server/worker';
@@ -50,44 +51,53 @@ const { owner, repo } = parseRepoSlug(values.repo!);
 async function main() {
   const runtime = loadServerRuntimeConfig();
   const db = createWorkerDatabase(runtime);
-  if (values.sync) {
-    const config = bindWorkerRuntime(loadWorkerConfig(db), runtime);
-    const installationId = await getInstallationIdForRepo(config.github, owner, repo);
-    const installation = config.store.getInstallation(installationId);
-    if (!installation || installation.suspendedAt) {
-      throw new Error(`GitHub installation ${installationId} is not active in Orvex`);
+  const queue = createReviewQueue(runtime.queue, {
+    providerCapacityPlan: providerCapacityPlanFor(runtime),
+  });
+  let stop: (() => Promise<void>) | undefined;
+  try {
+    if (values.sync) {
+      const config = {
+        ...bindWorkerRuntime(loadWorkerConfig(db), runtime),
+        providerAdmission: providerAdmissionFor(queue) ?? undefined,
+      };
+      const installationId = await getInstallationIdForRepo(config.github, owner, repo);
+      const installation = config.store.getInstallation(installationId);
+      if (!installation || installation.suspendedAt) {
+        throw new Error(`GitHub installation ${installationId} is not active in Orvex`);
+      }
+      const octokit = createInstallationOctokit(config.github, installationId);
+      const pr = await fetchPullRequest(octokit, { owner, repo, number: prNumber });
+
+      const job = {
+        installationId,
+        tenantId: installation.tenantId,
+        owner,
+        repo,
+        pr: prNumber,
+        headSha: pr.headSha,
+        action: 'manual' as const,
+        enqueuedAt: new Date().toISOString(),
+      };
+
+      const result = await processReviewJob(job, config);
+      console.log(JSON.stringify(result, null, 2));
+      return;
     }
-    const octokit = createInstallationOctokit(config.github, installationId);
-    const pr = await fetchPullRequest(octokit, { owner, repo, number: prNumber });
 
-    const job = {
-      installationId,
-      tenantId: installation.tenantId,
-      owner,
-      repo,
-      pr: prNumber,
-      headSha: pr.headSha,
-      action: 'manual' as const,
-      enqueuedAt: new Date().toISOString(),
-    };
+    stop = startWorkerLoop(queue, { config: runtime, db });
+    const job = await enqueueManualReview(queue, { owner, repo, pr: prNumber }, db);
+    console.log(`Enqueued ${owner}/${repo}#${prNumber} @ ${job.headSha.slice(0, 7)}`);
 
-    const result = await processReviewJob(job, config);
-    console.log(JSON.stringify(result, null, 2));
-    return;
+    const deadline = Date.now() + 180_000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  } finally {
+    await stop?.();
+    await queue.close();
+    db.close();
   }
-
-  const queue = createReviewQueue(runtime.queue);
-  const stop = startWorkerLoop(queue, { config: runtime, db });
-  const job = await enqueueManualReview(queue, { owner, repo, pr: prNumber }, db);
-  console.log(`Enqueued ${owner}/${repo}#${prNumber} @ ${job.headSha.slice(0, 7)}`);
-
-  const deadline = Date.now() + 180_000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  await stop();
-  await queue.close();
-  db.close();
 }
 
 main().catch((err) => {

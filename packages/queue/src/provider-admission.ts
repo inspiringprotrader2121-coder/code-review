@@ -12,6 +12,29 @@ export interface ProviderAdmission {
   setProviderCooldown(provider: string, durationMs: number): Promise<void>;
 }
 
+/**
+ * Immutable capacity plan established by the scheduler in Redis before worker
+ * processes accept paid provider calls. The epoch makes a planned capacity
+ * change explicit instead of allowing a rolling worker deploy to mix limits.
+ */
+export interface ProviderCapacityPlan {
+  readonly epoch: string;
+  readonly limits: Readonly<Record<string, number>>;
+  /**
+   * Whole-fleet concurrent review limit for one tenant. This is deliberately
+   * separate from provider slots: it keeps a busy workspace from taking every
+   * worker while still allowing each provider to use its own global ceiling.
+   * Omitted only for legacy/direct queue construction.
+   */
+  readonly tenantConcurrency?: number;
+}
+
+/** Optional capability implemented by distributed admission adapters. */
+export interface ProviderCapacityRegistry {
+  initializeProviderCapacities(): Promise<void>;
+  assertProviderCapacitiesReady(): Promise<void>;
+}
+
 /** A queue backend that exposes its independent provider-admission adapter. */
 export interface ProviderAdmissionOwner {
   readonly providerAdmission: ProviderAdmission;
@@ -25,6 +48,21 @@ export function providerAdmissionFor(value: unknown): ProviderAdmission | null {
     isProviderAdmission((value as { providerAdmission?: unknown }).providerAdmission)
   ) {
     return (value as ProviderAdmissionOwner).providerAdmission;
+  }
+  return null;
+}
+
+/** Discover the optional scheduler/worker fleet-capacity capability safely. */
+export function providerCapacityRegistryFor(value: unknown): ProviderCapacityRegistry | null {
+  const admission = providerAdmissionFor(value);
+  if (
+    admission &&
+    typeof (admission as Partial<ProviderCapacityRegistry>).initializeProviderCapacities ===
+      'function' &&
+    typeof (admission as Partial<ProviderCapacityRegistry>).assertProviderCapacitiesReady ===
+      'function'
+  ) {
+    return admission as ProviderAdmission & ProviderCapacityRegistry;
   }
   return null;
 }
@@ -87,7 +125,7 @@ export class MemoryProviderAdmission implements ProviderAdmission {
     limit: number,
     signal?: AbortSignal,
   ): Promise<string> {
-    const normalized = normalizeProvider(provider);
+    const normalized = normalizeProviderName(provider);
     const ceiling = Math.max(1, Math.floor(limit));
     const token = randomUUID();
     const deadline = this.waitMs === undefined ? undefined : this.now() + this.waitMs;
@@ -112,11 +150,11 @@ export class MemoryProviderAdmission implements ProviderAdmission {
 
   async releaseProviderLease(provider: string, token: string): Promise<void> {
     const current = this.state.leases.get(token);
-    if (current?.provider === normalizeProvider(provider)) this.state.leases.delete(token);
+    if (current?.provider === normalizeProviderName(provider)) this.state.leases.delete(token);
   }
 
   async getProviderCooldownMs(provider: string): Promise<number> {
-    const key = normalizeProvider(provider);
+    const key = normalizeProviderName(provider);
     const until = this.state.cooldowns.get(key) ?? 0;
     if (until <= this.now()) {
       this.state.cooldowns.delete(key);
@@ -126,7 +164,7 @@ export class MemoryProviderAdmission implements ProviderAdmission {
   }
 
   async setProviderCooldown(provider: string, durationMs: number): Promise<void> {
-    const key = normalizeProvider(provider);
+    const key = normalizeProviderName(provider);
     const until = this.now() + Math.min(300_000, Math.max(250, Math.floor(durationMs)));
     this.state.cooldowns.set(key, Math.max(this.state.cooldowns.get(key) ?? 0, until));
   }
@@ -145,7 +183,7 @@ export class MemoryProviderAdmission implements ProviderAdmission {
   }
 }
 
-function normalizeProvider(provider: string): string {
+export function normalizeProviderName(provider: string): string {
   const normalized = provider
     .toLowerCase()
     .replace(/[^a-z0-9-]+/g, '-')

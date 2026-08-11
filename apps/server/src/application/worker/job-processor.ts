@@ -1,5 +1,5 @@
 import type { ReviewJobPayload, ReviewQueue } from '@orvex-review/queue';
-import { prKey, queueFailure } from '@orvex-review/queue';
+import { prKey, providerAdmissionFor, queueFailure } from '@orvex-review/queue';
 import { isTransientLlmError } from '@orvex-review/review';
 import {
   processAskJob,
@@ -74,6 +74,7 @@ export async function processWorkerJob(
       }
       const config: WorkerConfig = {
         ...bindWorkerRuntime(input.loadConfig(), input.runtime),
+        providerAdmission: providerAdmissionFor(queue) ?? undefined,
         leaseValid: async () => {
           const valid = await heartbeat.leaseValid();
           if (!valid) leaseOwnershipValid = false;

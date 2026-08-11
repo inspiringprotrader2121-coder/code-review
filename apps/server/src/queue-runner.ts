@@ -6,6 +6,7 @@
  * now evolve independently without changing server entry points.
  */
 export { loadServerRuntimeConfig } from './bootstrap/config.js';
+export { providerCapacityPlanFor } from './bootstrap/provider-capacity.js';
 export {
   bindWorkerRuntime,
   createWorkerDatabase,
