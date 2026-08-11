@@ -43,6 +43,14 @@ export const REVIEW_ATTEMPT_DISPATCH_ARTIFACT: ExecutableMigrationArtifact = Obj
   ]),
 });
 
+export const REVIEW_ATTEMPT_ROLE_ARTIFACT: ExecutableMigrationArtifact = Object.freeze({
+  format: 'sqlite-program-v1',
+  operations: Object.freeze([
+    'add review_run_attempts.role with primary backfill',
+    'constrain attempt role to primary, retry, or continuation',
+  ]),
+});
+
 interface HistoricalMigrationArtifact {
   version: number;
   timestamp: string;
@@ -281,6 +289,12 @@ export const STORE_MIGRATIONS: readonly StoreMigrationMetadata[] = Object.freeze
     timestamp: '2026-08-11T00:00:00.000Z',
     name: 'review-attempt-dispatch-provenance',
     artifact: REVIEW_ATTEMPT_DISPATCH_ARTIFACT,
+  }),
+  defineExecutableMigration({
+    version: 21,
+    timestamp: '2026-08-11T00:00:00.000Z',
+    name: 'review-attempt-role-provenance',
+    artifact: REVIEW_ATTEMPT_ROLE_ARTIFACT,
   }),
 ]);
 

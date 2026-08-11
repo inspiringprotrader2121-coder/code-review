@@ -964,7 +964,10 @@ export class AppDatabase {
   }
 
   startReviewRunAttempt(
-    input: Omit<ReviewRunAttempt, 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'>,
+    input: Omit<
+      ReviewRunAttempt,
+      'role' | 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'
+    > & { role?: ReviewRunAttempt['role'] },
   ): boolean {
     return this.reviewState.startReviewRunAttempt(input);
   }

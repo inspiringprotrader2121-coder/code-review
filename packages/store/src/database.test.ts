@@ -427,6 +427,7 @@ test('provider attempts persist retry lineage and terminal review cleanup', () =
     runId,
     tenantId: tenant.id,
     parentAttemptId: 'attempt-1',
+    role: 'continuation',
     provider: 'openai',
     model: 'gpt-5.6-luna',
     tier: 'openai',
@@ -461,6 +462,8 @@ test('provider attempts persist retry lineage and terminal review cleanup', () =
   const attempts = db.listReviewRunAttempts(runId);
   assert.equal(attempts[0]?.outcome, 'rate_limited');
   assert.equal(attempts[1]?.parentAttemptId, 'attempt-1');
+  assert.equal(attempts[0]?.role, 'primary');
+  assert.equal(attempts[1]?.role, 'continuation');
   assert.equal(attempts[1]?.outcome, 'failed', 'terminal review closes dangling attempts');
   assert.ok(attempts[1]?.completedAt);
   assert.ok(db.listReviewRuns(tenant.id, 1)[0]?.completedAt);

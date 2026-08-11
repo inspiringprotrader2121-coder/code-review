@@ -17,7 +17,10 @@ export class SqliteReviewAttemptRepository {
   ) {}
 
   startReviewRunAttempt(
-    input: Omit<ReviewRunAttempt, 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'>,
+    input: Omit<
+      ReviewRunAttempt,
+      'role' | 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'
+    > & { role?: ReviewRunAttempt['role'] },
   ): boolean {
     const run = this.db
       .prepare(`SELECT tenant_id, status, worker_id FROM review_runs WHERE id = ?`)
@@ -36,8 +39,8 @@ export class SqliteReviewAttemptRepository {
       this.db
         .prepare(
           `INSERT INTO review_run_attempts
-       (id, run_id, tenant_id, parent_attempt_id, provider, model, tier, pass_name, transport, retry_index, key_index, outcome, error, duration_ms, started_at, completed_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, 0, ?, NULL
+       (id, run_id, tenant_id, parent_attempt_id, role, provider, model, tier, pass_name, transport, retry_index, key_index, outcome, error, duration_ms, started_at, completed_at)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, 0, ?, NULL
        WHERE EXISTS (SELECT 1 FROM review_runs WHERE id = ? AND tenant_id = ? AND status = 'running' AND worker_id = ?)`,
         )
         .run(
@@ -45,6 +48,7 @@ export class SqliteReviewAttemptRepository {
           input.runId,
           input.tenantId,
           input.parentAttemptId ?? null,
+          input.role ?? 'primary',
           input.provider,
           input.model,
           input.tier,
@@ -100,6 +104,7 @@ export class SqliteReviewAttemptRepository {
       runId: String(row.run_id),
       tenantId: String(row.tenant_id),
       parentAttemptId: row.parent_attempt_id ? String(row.parent_attempt_id) : undefined,
+      role: row.role as ReviewRunAttempt['role'],
       provider: String(row.provider),
       model: String(row.model),
       tier: String(row.tier),

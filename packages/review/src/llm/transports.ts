@@ -18,6 +18,13 @@ import { RETRYABLE_EMPTY_PROVIDER_RESPONSE } from './retry-policy.js';
 // is ever opened, rather than producing a timer that fires immediately.
 const COMPATIBLE_CHAT_INACTIVITY_MS = loadReviewRuntimeConfig().llmTimeoutMs;
 
+export class DeepSeekContinuationRequiredError extends Error {
+  constructor(readonly continuation: NonNullable<LlmClientOptions['compatibleContinuation']>) {
+    super('DeepSeek max-reasoning response requires bounded prefix continuation');
+    this.name = 'DeepSeekContinuationRequiredError';
+  }
+}
+
 function abortError(
   error: unknown,
   signal: AbortSignal | undefined,
@@ -123,7 +130,7 @@ async function openStream(
 ): Promise<void> {
   throwIfCancelled(opts.signal);
   const clock = clockFor(opts);
-  const hardLimitMs = maxTotalMs();
+  const hardLimitMs = opts.hardLimitMs ?? maxTotalMs();
   const controller = new AbortController();
   const unlinkAbort = linkAbortSignal(opts.signal, controller);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -182,6 +189,12 @@ async function openStream(
   const decoder = new TextDecoder();
   const startedAt = clock.now();
   let buffer = '';
+  const dispatchLine = (raw: string) => {
+    const line = raw.trim();
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (data && data !== '[DONE]') onEvent(data);
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -198,13 +211,10 @@ async function openStream(
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
-      for (const raw of lines) {
-        const line = raw.trim();
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (data && data !== '[DONE]') onEvent(data);
-      }
+      for (const raw of lines) dispatchLine(raw);
     }
+    buffer += decoder.decode();
+    if (buffer) dispatchLine(buffer);
   } catch (error) {
     abortError(
       error,
@@ -406,7 +416,7 @@ export async function openAiCompatStreamChat(
   const clock = clockFor(opts);
   const inactivityMs = COMPATIBLE_CHAT_INACTIVITY_MS;
   let content = '';
-  let reasoningChars = 0;
+  let reasoningContent = '';
   let finishReason: string | undefined;
   let providerUsage:
     | { inputTokens: number; cachedInputTokens: number; outputTokens: number }
@@ -415,10 +425,31 @@ export async function openAiCompatStreamChat(
     opts.json && opts.reasoningEffort === 'max' && /deepseek-v4/i.test(opts.model)
       ? `${system}\n\n## Completion contract\nReasoning effort is fixed at max by the API. Finish private reasoning within 20,000 tokens and reserve the remaining response budget for the final JSON. Emit the JSON immediately when the evidence is sufficient.`
       : system;
+  const continuation = opts.compatibleContinuation;
+  const continuationPrefix = continuation?.contentPrefix ?? '';
+  const continuationMessages = continuation
+    ? [
+        {
+          role: 'assistant',
+          content: continuationPrefix,
+          reasoning_content: continuation.reasoningContent,
+          prefix: true,
+        },
+      ]
+    : [];
+  const requestChars =
+    requestSystem.length +
+    user.length +
+    (continuation?.reasoningContent.length ?? 0) +
+    continuationPrefix.length;
+  const baseUrl = opts.baseUrl!.replace(/\/$/, '');
+  const requestUrl = continuation
+    ? `${new URL('/beta', `${baseUrl}/`).toString().replace(/\/$/, '')}/chat/completions`
+    : `${baseUrl}/chat/completions`;
   const startedAt = clock.now();
   try {
     await openStream(
-      `${opts.baseUrl!.replace(/\/$/, '')}/chat/completions`,
+      requestUrl,
       {
         model: opts.model,
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
@@ -439,6 +470,7 @@ export async function openAiCompatStreamChat(
         messages: [
           { role: 'system', content: requestSystem },
           { role: 'user', content: user },
+          ...continuationMessages,
         ],
       },
       opts,
@@ -480,9 +512,8 @@ export async function openAiCompatStreamChat(
           }
           const choice = chunk.choices?.[0];
           if (choice?.delta?.content) content += choice.delta.content;
-          if (choice?.delta?.reasoning_content)
-            reasoningChars += choice.delta.reasoning_content.length;
-          if (choice?.delta?.reasoning) reasoningChars += choice.delta.reasoning.length;
+          if (choice?.delta?.reasoning_content) reasoningContent += choice.delta.reasoning_content;
+          if (choice?.delta?.reasoning) reasoningContent += choice.delta.reasoning;
           if (choice?.finish_reason) finishReason = choice.finish_reason;
           if (choice?.native_finish_reason && choice.native_finish_reason !== 'completed')
             finishReason = choice.native_finish_reason;
@@ -492,10 +523,10 @@ export async function openAiCompatStreamChat(
       },
     );
   } catch (error) {
-    const streamedChars = reasoningChars + content.length;
+    const streamedChars = reasoningContent.length + content.length;
     if (streamedChars > 0) {
       opts.onUsage?.({
-        inputTokens: estimateTokens(requestSystem.length + user.length),
+        inputTokens: estimateTokens(requestChars),
         cachedInputTokens: 0,
         outputTokens: estimateTokens(streamedChars),
         tokenSource: 'estimate',
@@ -509,8 +540,14 @@ export async function openAiCompatStreamChat(
     (total, block) => total + block.length,
     0,
   );
-  const totalReasoning = reasoningChars + inlineThinkChars;
-  const answerChars = stripThinking(content).length;
+  const totalReasoning = reasoningContent.length + inlineThinkChars;
+  const streamedText = stripThinking(content);
+  const text = continuationPrefix
+    ? streamedText.startsWith(continuationPrefix)
+      ? streamedText
+      : `${continuationPrefix}${streamedText}`
+    : streamedText;
+  const answerChars = text.length;
   console.log(
     `[llm] model=${opts.model} thinking=${thinkingEnabled(opts) ? 'on' : 'off'} reasoning=${totalReasoning}c answer=${answerChars}c ${Math.round((clock.now() - startedAt) / 1000)}s finish=${finishReason ?? 'stop'}`,
   );
@@ -523,17 +560,29 @@ export async function openAiCompatStreamChat(
           model: opts.model,
         }
       : {
-          inputTokens: estimateTokens(requestSystem.length + user.length),
+          inputTokens: estimateTokens(requestChars),
           cachedInputTokens: 0,
-          outputTokens: estimateTokens(totalReasoning + answerChars),
+          outputTokens: estimateTokens(totalReasoning + streamedText.length),
           tokenSource: 'estimate',
           provider: providerName(opts.baseUrl, opts.api),
           model: opts.model,
         },
   );
-  const text = stripThinking(content);
-  if (finishReason === 'length')
+  if (finishReason === 'length') {
+    if (
+      supportsCompatibleUsageStream(opts.baseUrl) &&
+      opts.json &&
+      opts.reasoningEffort === 'max' &&
+      thinkingEnabled(opts) &&
+      /deepseek-v4/i.test(opts.model)
+    ) {
+      throw new DeepSeekContinuationRequiredError({
+        reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
+        contentPrefix: text || '{"findings":',
+      });
+    }
     throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
+  }
   if (!text) throw new Error('LLM returned no text content');
   return text;
 }

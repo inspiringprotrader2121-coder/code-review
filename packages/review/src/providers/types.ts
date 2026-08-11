@@ -12,11 +12,14 @@ export type ModelAttemptOutcome =
   | 'cancelled'
   | 'rate_limited';
 
+export type ModelAttemptRole = 'primary' | 'retry' | 'continuation';
+
 export type ModelAttemptEvent =
   | {
       phase: 'started';
       attemptId: string;
       parentAttemptId?: string;
+      role?: ModelAttemptRole;
       retryIndex: number;
       keyIndex: number;
       provider: string;

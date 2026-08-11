@@ -10,6 +10,7 @@ import {
   withProviderCallSlot,
 } from './provider-admission.js';
 import {
+  allocateAttemptIndex,
   recordProviderAdmissionFailure,
   trackedLlmAttempt,
   type AttemptLineage,
@@ -20,9 +21,13 @@ import {
   parseRetryAfterMs,
   sleep,
 } from './retry-policy.js';
-import { clockFor } from './support.js';
+import { clockFor, maxTotalMs } from './support.js';
+import { DeepSeekContinuationRequiredError } from './transports.js';
 
 let keyCursor = 0;
+const MAX_DEEPSEEK_PREFIX_CONTINUATIONS = 1;
+const DEEPSEEK_PREFIX_CONTINUATION_MAX_MS = 60_000;
+const DEEPSEEK_PREFIX_CONTINUATION_MAX_TOKENS = 8_000;
 
 function splitKeys(apiKey: string): string[] {
   return apiKey
@@ -35,14 +40,20 @@ async function llmChatWithKeyRotation(
   system: string,
   user: string,
   opts: LlmClientOptions,
-  attemptIndex: number,
   lineage: AttemptLineage,
 ): Promise<string> {
   const keys = splitKeys(opts.apiKey);
   const keyIndex = keys.length > 1 ? keyCursor++ % keys.length : 0;
   const apiKey = keys[keyIndex];
   if (!apiKey) throw new Error('LLM API key is required');
-  return trackedLlmAttempt(system, user, { ...opts, apiKey }, attemptIndex, keyIndex, lineage);
+  return trackedLlmAttempt(
+    system,
+    user,
+    { ...opts, apiKey },
+    allocateAttemptIndex(lineage),
+    keyIndex,
+    lineage,
+  );
 }
 
 export async function llmChat(
@@ -69,15 +80,31 @@ export async function llmChat(
   const lineage: AttemptLineage = {};
   let sleptMs = 0;
   let lastError: Error | undefined;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  let providerAttempt = 0;
+  let continuationCount = 0;
+  let continuation: LlmClientOptions['compatibleContinuation'];
+  while (providerAttempt < maxAttempts) {
     throwIfCancelled(opts.signal);
+    const attemptOpts: LlmClientOptions = {
+      ...opts,
+      compatibleContinuation: continuation,
+      hardLimitMs: continuation
+        ? Math.min(opts.hardLimitMs ?? maxTotalMs(), DEEPSEEK_PREFIX_CONTINUATION_MAX_MS)
+        : opts.hardLimitMs,
+      maxTokens: continuation
+        ? Math.min(
+            opts.maxTokens ?? DEEPSEEK_PREFIX_CONTINUATION_MAX_TOKENS,
+            DEEPSEEK_PREFIX_CONTINUATION_MAX_TOKENS,
+          )
+        : opts.maxTokens,
+    };
     let enteredProviderCall = false;
     try {
       return await withProviderCallSlot(
         provider,
         () => {
           enteredProviderCall = true;
-          return llmChatWithKeyRotation(system, user, opts, attempt, lineage);
+          return llmChatWithKeyRotation(system, user, attemptOpts, lineage);
         },
         opts.signal,
         opts.dependencies?.admission ?? currentProviderCoordinator(),
@@ -87,15 +114,38 @@ export async function llmChat(
         opts.signal?.aborted && !isReviewCancelledError(error)
           ? new ReviewCancelledError()
           : (error as Error);
-      if (!enteredProviderCall) recordProviderAdmissionFailure(opts, attempt, lineage, lastError);
+      if (!enteredProviderCall) recordProviderAdmissionFailure(attemptOpts, lineage, lastError);
       if (isReviewCancelledError(lastError) || opts.signal?.aborted)
         throw new ReviewCancelledError();
+      if (lastError instanceof DeepSeekContinuationRequiredError) {
+        if (continuationCount >= MAX_DEEPSEEK_PREFIX_CONTINUATIONS) {
+          throw new Error(
+            `DeepSeek response remained truncated after ${MAX_DEEPSEEK_PREFIX_CONTINUATIONS} bounded prefix continuation`,
+          );
+        }
+        continuation = lastError.continuation;
+        continuationCount++;
+        console.warn(
+          `[llm] DeepSeek max-reasoning output exhausted; continuing the same response (${continuationCount}/${MAX_DEEPSEEK_PREFIX_CONTINUATIONS})`,
+        );
+        continue;
+      }
       const retryableEmptyResponse = isRetryableEmptyProviderResponse(lastError.message);
-      if (
-        attempt === maxAttempts - 1 ||
-        (!isRetryableRateLimit(lastError.message) && !retryableEmptyResponse)
-      )
+      const retryable = isRetryableRateLimit(lastError.message) || retryableEmptyResponse;
+      if (continuation) {
+        if (retryable) {
+          const advertised = parseRetryAfterMs(lastError.message);
+          const cooldownMs = Math.min(advertised ?? baseMs, maxWaitMs);
+          await setProviderCooldown(
+            provider,
+            cooldownMs,
+            opts.dependencies?.admission ?? currentProviderCoordinator(),
+          ).catch(() => undefined);
+        }
         throw lastError;
+      }
+      providerAttempt++;
+      if (providerAttempt >= maxAttempts || !retryable) throw lastError;
       const advertised = parseRetryAfterMs(lastError.message);
       if (advertised !== undefined && advertised > maxWaitMs) {
         console.warn(
@@ -103,7 +153,7 @@ export async function llmChat(
         );
         throw lastError;
       }
-      const backoff = Math.min(baseMs * 2 ** attempt, maxWaitMs);
+      const backoff = Math.min(baseMs * 2 ** (providerAttempt - 1), maxWaitMs);
       const jitter = Math.floor(Math.random() * 1_000);
       const waitMs = Math.min((advertised ?? backoff) + jitter, maxWaitMs);
       if (sleptMs + waitMs > totalWaitBudgetMs) {
@@ -119,7 +169,7 @@ export async function llmChat(
         opts.dependencies?.admission ?? currentProviderCoordinator(),
       );
       console.warn(
-        `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : 'rate-limited'} — holding ${Math.round(waitMs / 1000)}s then retrying (attempt ${attempt + 1}/${maxAttempts}): ${lastError.message.slice(0, 140)}`,
+        `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : 'rate-limited'} — holding ${Math.round(waitMs / 1000)}s then retrying (attempt ${providerAttempt}/${maxAttempts}): ${lastError.message.slice(0, 140)}`,
       );
       await sleep(waitMs, opts.signal, clockFor(opts));
       await waitForProviderAvailability(

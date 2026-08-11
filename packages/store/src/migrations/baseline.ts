@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS review_run_attempts (
   run_id TEXT NOT NULL,
   tenant_id TEXT NOT NULL,
   parent_attempt_id TEXT REFERENCES review_run_attempts(id),
+  role TEXT NOT NULL DEFAULT 'primary' CHECK (role IN ('primary', 'retry', 'continuation')),
   provider TEXT NOT NULL,
   model TEXT NOT NULL,
   tier TEXT NOT NULL,

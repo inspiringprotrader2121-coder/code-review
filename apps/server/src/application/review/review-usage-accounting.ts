@@ -31,6 +31,7 @@ export interface ReviewAttemptStore {
     runId: string;
     tenantId: string;
     parentAttemptId?: string;
+    role?: 'primary' | 'retry' | 'continuation';
     provider: string;
     model: string;
     tier: PassTier;
@@ -137,6 +138,7 @@ export function createReviewUsageAccounting(
         runId: dependencies.runId,
         tenantId: dependencies.tenantId,
         parentAttemptId: event.parentAttemptId,
+        role: event.role ?? 'primary',
         provider: event.provider,
         model: event.model,
         tier,

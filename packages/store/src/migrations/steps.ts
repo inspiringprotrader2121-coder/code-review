@@ -1,6 +1,7 @@
 import type { SqliteConnection } from '../connection.js';
 import {
   REVIEW_ATTEMPT_DISPATCH_ARTIFACT,
+  REVIEW_ATTEMPT_ROLE_ARTIFACT,
   REVIEW_USAGE_CACHE_PRICING_ARTIFACT,
   REVIEW_USAGE_CACHE_WRITE_PRICING_ARTIFACT,
   STORE_MIGRATIONS,
@@ -295,6 +296,13 @@ function migrateReviewAttemptDispatchColumn(db: SqliteConnection): void {
     );
 }
 
+function migrateReviewAttemptRoleColumn(db: SqliteConnection): void {
+  if (!columns(db, 'review_run_attempts').has('role'))
+    db.exec(
+      `ALTER TABLE review_run_attempts ADD COLUMN role TEXT NOT NULL DEFAULT 'primary' CHECK (role IN ('primary', 'retry', 'continuation'))`,
+    );
+}
+
 function migrateCanonicalMigrationArtifacts(db: SqliteConnection): void {
   if (!columns(db, 'orvex_schema_migrations').has('artifact_timestamp'))
     db.exec(`ALTER TABLE orvex_schema_migrations ADD COLUMN artifact_timestamp TEXT`);
@@ -438,6 +446,11 @@ export const STORE_MIGRATION_STEPS: readonly ExecutableMigrationStep[] = Object.
       version: 20,
       artifact: REVIEW_ATTEMPT_DISPATCH_ARTIFACT,
       apply: migrateReviewAttemptDispatchColumn,
+    },
+    {
+      version: 21,
+      artifact: REVIEW_ATTEMPT_ROLE_ARTIFACT,
+      apply: migrateReviewAttemptRoleColumn,
     },
   ].map((step) => Object.freeze(step)),
 );

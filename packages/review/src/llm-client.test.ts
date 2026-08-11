@@ -71,6 +71,37 @@ function chatStream(text: string): ReadableStream<Uint8Array> {
   });
 }
 
+test('compatible streams process a final SSE event without a trailing newline', async () => {
+  const encoder = new TextEncoder();
+  const result = await llmChat('sys', 'user', {
+    apiKey: 'test-key',
+    model: 'final-buffer-model',
+    baseUrl: 'https://final-buffer.test/v1',
+    api: 'chat',
+    thinking: false,
+    dependencies: {
+      http: {
+        async fetch() {
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' }, finish_reason: 'stop' }] })}`,
+                  ),
+                );
+                controller.close();
+              },
+            }),
+            { status: 200 },
+          );
+        },
+      },
+    },
+  });
+  assert.equal(result, '{"findings":[]}');
+});
+
 function chatStreamWithUsage(
   text: string,
   usage: { prompt_tokens: number; prompt_cache_hit_tokens: number; completion_tokens: number },
@@ -353,6 +384,275 @@ test('a reasoning-only compatible response reports output exhaustion accurately'
       ),
     /truncated \(finish_reason=length\)/,
   );
+});
+
+test('official DeepSeek resumes one truncated max-reasoning response through prefix completion', async () => {
+  const encoder = new TextEncoder();
+  let call = 0;
+  let admissions = 0;
+  let releases = 0;
+  const events: LlmAttemptEvent[] = [];
+  const usage: Array<{ attemptId?: string; outputTokens: number }> = [];
+  const clock = new ManualClock();
+  const admission: LlmProviderCoordinator = {
+    async acquireProviderLease() {
+      admissions++;
+      return `lease-${admissions}`;
+    },
+    async releaseProviderLease() {
+      releases++;
+    },
+    async getProviderCooldownMs() {
+      return 0;
+    },
+    async setProviderCooldown() {},
+  };
+  const captured = await withStubbedFetch(
+    () => {
+      call++;
+      const chunks =
+        call === 1
+          ? [
+              { choices: [{ delta: { reasoning_content: 'completed analysis' } }] },
+              { choices: [{ delta: {}, finish_reason: 'length' }] },
+              {
+                choices: [],
+                usage: {
+                  prompt_tokens: 100,
+                  prompt_cache_hit_tokens: 0,
+                  completion_tokens: 28_000,
+                },
+              },
+            ]
+          : [
+              { choices: [{ delta: { content: '[],"summary":"complete"}' } }] },
+              { choices: [{ delta: {}, finish_reason: 'stop' }] },
+              {
+                choices: [],
+                usage: {
+                  prompt_tokens: 28_100,
+                  prompt_cache_hit_tokens: 28_000,
+                  completion_tokens: 40,
+                },
+              },
+            ];
+      return new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks)
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+    },
+    async () => {
+      const result = await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.com/v1',
+        api: 'chat',
+        reasoningEffort: 'max',
+        maxTokens: 28_000,
+        hardLimitMs: 30_000,
+        json: true,
+        dependencies: { admission, clock },
+        onAttempt: (event) => events.push(event),
+        onUsage: (event) => usage.push(event),
+      });
+      assert.equal(result, '{"findings":[],"summary":"complete"}');
+    },
+  );
+
+  assert.equal(captured.length, 2);
+  assert.equal(captured[0]?.url, 'https://api.deepseek.com/v1/chat/completions');
+  assert.equal(captured[1]?.url, 'https://api.deepseek.com/beta/chat/completions');
+  assert.equal(captured[1]?.body.reasoning_effort, 'max');
+  assert.equal(captured[1]?.body.max_tokens, 8_000);
+  assert.deepEqual(captured[1]?.body.thinking, { type: 'enabled' });
+  const messages = captured[1]?.body.messages as Array<Record<string, unknown>>;
+  assert.deepEqual(messages.at(-1), {
+    role: 'assistant',
+    content: '{"findings":',
+    reasoning_content: 'completed analysis',
+    prefix: true,
+  });
+  const starts = events.filter((event) => event.phase === 'started');
+  const finishes = events.filter((event) => event.phase === 'finished');
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1]?.parentAttemptId, starts[0]?.attemptId);
+  assert.deepEqual(
+    starts.map((event) => event.retryIndex),
+    [0, 1],
+  );
+  assert.deepEqual(
+    finishes.map((event) => event.outcome),
+    ['failed', 'succeeded'],
+  );
+  assert.equal(new Set(usage.map((event) => event.attemptId)).size, 2);
+  assert.equal(admissions, 2, 'each paid request gets a fresh distributed admission');
+  assert.equal(releases, 2);
+  assert.equal(
+    clock.timers.filter((timer) => timer.ms === 30_000).length,
+    2,
+    'the continuation inherits a stricter request wall cap',
+  );
+  assert.deepEqual(
+    starts.map((event) => event.role),
+    ['primary', 'continuation'],
+  );
+});
+
+test('official DeepSeek never treats schema-ambiguous JSON as complete after output exhaustion', async () => {
+  const encoder = new TextEncoder();
+  let calls = 0;
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () =>
+          new ReadableStream({
+            start(controller) {
+              calls++;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { content: '{"findings":[]}' } }] })}\n\n`,
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\n`,
+                ),
+              );
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              controller.close();
+            },
+          }),
+        async () => {
+          await llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.com/v1',
+            api: 'chat',
+            reasoningEffort: 'max',
+            maxTokens: 28_000,
+            json: true,
+          });
+        },
+      ),
+    /remained truncated after 1 bounded prefix continuation/,
+  );
+  assert.equal(calls, 2, 'length remains fail-closed even when the partial JSON parses');
+});
+
+test('a failed DeepSeek continuation never replays the expensive root request', async (t) => {
+  const encoder = new TextEncoder();
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  let admissions = 0;
+  let releases = 0;
+  const events: LlmAttemptEvent[] = [];
+  globalThis.fetch = (async () => {
+    calls++;
+    if (calls === 2) return new Response('rate limited', { status: 429 });
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'analysis' } }] })}\n\n`,
+            ),
+          );
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\n`,
+            ),
+          );
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      }),
+      { status: 200 },
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  const admission: LlmProviderCoordinator = {
+    async acquireProviderLease() {
+      admissions++;
+      return `lease-${admissions}`;
+    },
+    async releaseProviderLease() {
+      releases++;
+    },
+    async getProviderCooldownMs() {
+      return 0;
+    },
+    async setProviderCooldown() {},
+  };
+
+  await assert.rejects(
+    llmChat('sys', 'user', {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.com/v1',
+      api: 'chat',
+      reasoningEffort: 'max',
+      maxTokens: 28_000,
+      json: true,
+      dependencies: { admission },
+      onAttempt: (event) => events.push(event),
+    }),
+    /429|rate limit/i,
+  );
+  assert.equal(calls, 2);
+  assert.equal(admissions, 2);
+  assert.equal(releases, 2);
+  assert.deepEqual(
+    events.filter((event) => event.phase === 'started').map((event) => event.role),
+    ['primary', 'continuation'],
+  );
+});
+
+test('DeepSeek prefix recovery is bounded to one continuation without replaying the review', async () => {
+  const encoder = new TextEncoder();
+  let calls = 0;
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () => {
+          calls++;
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'analysis' } }] })}\n\n`,
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\n`,
+                ),
+              );
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              controller.close();
+            },
+          });
+        },
+        async () => {
+          await llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.com/v1',
+            api: 'chat',
+            reasoningEffort: 'max',
+            maxTokens: 28_000,
+            json: true,
+          });
+        },
+      ),
+    /remained truncated after 1 bounded prefix continuation/,
+  );
+  assert.equal(calls, 2);
 });
 
 test('MiniMax keeps thinking enabled without consuming its answer budget', () => {

@@ -172,6 +172,7 @@ export interface ReviewRunAttempt {
   runId: string;
   tenantId: string;
   parentAttemptId?: string;
+  role: 'primary' | 'retry' | 'continuation';
   provider: string;
   model: string;
   tier: string;

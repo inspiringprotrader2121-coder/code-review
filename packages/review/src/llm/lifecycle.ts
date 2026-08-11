@@ -7,6 +7,13 @@ import { llmChatSingle } from './transports.js';
 
 export interface AttemptLineage {
   lastAttemptId?: string;
+  nextRetryIndex?: number;
+}
+
+export function allocateAttemptIndex(lineage: AttemptLineage): number {
+  const index = lineage.nextRetryIndex ?? 0;
+  lineage.nextRetryIndex = index + 1;
+  return index;
 }
 
 export function attemptOutcome(error: unknown): LlmAttemptOutcome {
@@ -26,7 +33,6 @@ function emitAttempt(
 
 export function recordProviderAdmissionFailure(
   opts: LlmClientOptions,
-  retryIndex: number,
   lineage: AttemptLineage,
   error: Error,
 ): void {
@@ -37,7 +43,12 @@ export function recordProviderAdmissionFailure(
     phase: 'started',
     attemptId,
     parentAttemptId: lineage.lastAttemptId,
-    retryIndex,
+    role: opts.compatibleContinuation
+      ? 'continuation'
+      : lineage.lastAttemptId
+        ? 'retry'
+        : 'primary',
+    retryIndex: allocateAttemptIndex(lineage),
     keyIndex: 0,
     provider: providerName(opts.baseUrl, opts.api),
     model: opts.model,
@@ -71,6 +82,11 @@ export async function trackedLlmAttempt(
     phase: 'started',
     attemptId,
     parentAttemptId: lineage.lastAttemptId,
+    role: opts.compatibleContinuation
+      ? 'continuation'
+      : lineage.lastAttemptId
+        ? 'retry'
+        : 'primary',
     retryIndex,
     keyIndex,
     provider: providerName(opts.baseUrl, opts.api),

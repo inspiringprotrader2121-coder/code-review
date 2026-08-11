@@ -41,6 +41,13 @@ export interface LlmClientOptions {
     attemptId?: string;
   }) => void;
   onAttempt?: (event: LlmAttemptEvent) => void;
+  /** Internal state for a bounded DeepSeek thinking-mode prefix continuation. */
+  compatibleContinuation?: {
+    reasoningContent: string;
+    contentPrefix: string;
+  };
+  /** Internal per-request wall cap; public review calls use the configured 300s cap. */
+  hardLimitMs?: number;
   dependencies?: LlmClientDependencies;
 }
 

@@ -444,8 +444,24 @@ test('usage accounting records provider lifecycle through its narrow store port'
     durationMs: 2,
     completedAt: '2026-01-01T00:00:00.002Z',
   });
-  assert.equal(attempts.length, 2);
+  accounting.onAttemptFor(
+    'standard',
+    'discovery',
+  )({
+    phase: 'started',
+    attemptId: 'attempt-2',
+    parentAttemptId: 'attempt-1',
+    role: 'continuation',
+    provider: 'test',
+    model: 'model',
+    transport: 'chat',
+    retryIndex: 1,
+    keyIndex: 0,
+    startedAt: '2026-01-01T00:00:00.003Z',
+  });
+  assert.equal(attempts.length, 3);
   assert.equal(usage.length, 1);
+  assert.equal((attempts[2] as { role?: string }).role, 'continuation');
   assert.deepEqual(accounting.usage.openai, {
     in: 3,
     cachedIn: 0,
