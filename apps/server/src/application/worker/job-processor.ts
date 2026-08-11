@@ -80,10 +80,6 @@ export async function processWorkerJob(
           if (!valid) leaseOwnershipValid = false;
           return valid;
         },
-        activeReviewCount: async () => {
-          const depth = await queue.depth?.();
-          return depth?.inFlight ?? input.active();
-        },
         persistJob: queue.persistJob ? (persisted) => queue.persistJob!(persisted) : undefined,
       };
       const result = await dispatchWorkerJob(job, config, input.runtime, input.processReview);

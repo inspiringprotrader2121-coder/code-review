@@ -133,6 +133,6 @@ test('catalog refuses substitutions and incomplete reasoning contracts before a 
 });
 
 test('MiniMax has room for reasoning and a compact completed review response', () => {
-  assert.equal(MINIMAX_REVIEW_OUTPUT_TOKENS, 32_000);
-  assert.equal(maxOutputTokensForModel('MiniMax-M3'), 32_000);
+  assert.equal(MINIMAX_REVIEW_OUTPUT_TOKENS, 48_000);
+  assert.equal(maxOutputTokensForModel('MiniMax-M3'), 48_000);
 });

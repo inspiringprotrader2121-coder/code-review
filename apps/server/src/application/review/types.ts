@@ -23,7 +23,7 @@ export interface ProcessResult {
   fixedCount: number;
   reviewId?: number;
   skipReason?: string;
-  /** Completed output was published, but one or more required passes failed. */
+  /** Output was published, but one or more required passes failed the review. */
   incompleteReason?: string;
   inputTokens?: number;
   outputTokens?: number;

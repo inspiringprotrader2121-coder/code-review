@@ -296,7 +296,7 @@ export function loadReviewRuntimeConfig(
     'ORVEX_FLEET_PROVIDER_CONCURRENCY_',
   );
   const localProviderConcurrency = (provider: string): number =>
-    providerCapacity(provider, providerOverrides, sharedProviderCapacity, 32);
+    providerCapacity(provider, providerOverrides, sharedProviderCapacity, 64);
   const fleetProviderConcurrency = (provider: string): number =>
     providerCapacity(provider, fleetProviderOverrides, localProviderConcurrency(provider), 10_000);
   const fleetProviderCapacityEpoch = capacityEpoch(env.ORVEX_FLEET_CAPACITY_EPOCH);

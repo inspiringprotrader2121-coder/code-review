@@ -64,19 +64,13 @@ export interface ReviewProviderExecutionInput {
     limit: number,
     run: (item: T, index: number) => Promise<R>,
   ): Promise<R[]>;
-  /**
-   * Redis-wide snapshot of in-flight reviews. Provider capacity is shared
-   * fairly between them so one large PR can use idle capacity without starving
-   * a burst of other reviews across the worker fleet.
-   */
-  activeReviewCount: number;
   apiConcurrency: number;
 }
 
 export function groupApiCallsByProvider(calls: ReviewCall[]): ReviewCall[][] {
   // Calls retain their provider lane for capacity accounting. Individual lanes
-  // may use more than one slot when capacity is idle; see
-  // `perReviewProviderParallelism` below.
+  // may use more than one slot. Fleet capacity and cooldowns are enforced by
+  // the provider admission coordinator at the actual paid-call boundary.
   const lanes = new Map<string, ReviewCall[]>();
   for (const call of calls) {
     const key = call.target.admissionBucket;
@@ -88,18 +82,13 @@ export function groupApiCallsByProvider(calls: ReviewCall[]): ReviewCall[][] {
 }
 
 /**
- * Divide the configured provider budget between active reviews. With one
- * review, a large PR can fan out all of its bounded chunks. At the normal
- * eight-review production ceiling, each review keeps one slot so a single PR
- * cannot monopolise the provider and make its peers time out waiting.
+ * Bound one review's independent provider calls. Do not divide this by the
+ * number of active reviews: that turns every large PR into a serial chunk
+ * chain during a burst. The injected provider admission coordinator owns the
+ * process- and fleet-wide ceilings at the paid-call boundary.
  */
-export function perReviewProviderParallelism(
-  apiConcurrency: number,
-  activeReviewCount: number,
-): number {
-  const capacity = Math.max(1, Math.floor(apiConcurrency));
-  const active = Math.max(1, Math.floor(activeReviewCount));
-  return Math.max(1, Math.floor(capacity / active));
+export function reviewProviderParallelism(apiConcurrency: number): number {
+  return Math.max(1, Math.floor(apiConcurrency));
 }
 
 /**
@@ -219,13 +208,10 @@ export async function executeReviewProviderCalls(
   };
   const runApiLanes = async () => {
     const lanes = groupApiCallsByProvider(api);
-    const perProviderConcurrency = perReviewProviderParallelism(
-      input.apiConcurrency,
-      input.activeReviewCount,
-    );
+    const perProviderConcurrency = reviewProviderParallelism(input.apiConcurrency);
     console.log(
-      `[worker] API provider scheduling: activeReviews=${Math.max(1, Math.floor(input.activeReviewCount))} ` +
-        `perProviderPerReview=${perProviderConcurrency}`,
+      `[worker] API provider scheduling: perProviderPerReview=${perProviderConcurrency}; ` +
+        'fleet admission enforces aggregate capacity',
     );
     const laneOutcomes = await input.mapConcurrent(
       lanes,

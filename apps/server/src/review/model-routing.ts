@@ -20,9 +20,10 @@ export interface ReviewRoutingPolicy {
 // the independent 300s wall cap. Keep API effort=max, but bound the shared
 // completion so the prompt can reserve time and tokens for its answer.
 export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = 28_000;
-// MiniMax's reasoning tokens share this response budget. 20k can end before it
-// emits the required JSON for a complex review, despite a compact final answer.
-export const MINIMAX_REVIEW_OUTPUT_TOKENS = 32_000;
+// MiniMax's reasoning tokens share this response budget. A required production
+// chunk exhausted 32k before emitting complete JSON, so retain headroom for the
+// bounded final answer without lowering the model's thinking mode.
+export const MINIMAX_REVIEW_OUTPUT_TOKENS = 48_000;
 
 export const DEFAULT_REVIEW_ROUTING_POLICY: ReviewRoutingPolicy = Object.freeze({
   codexCliEnabled: false,

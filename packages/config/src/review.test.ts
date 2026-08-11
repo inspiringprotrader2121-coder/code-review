@@ -101,6 +101,23 @@ test('review-stage concurrency remains an explicit bounded operator override', (
   assert.equal(config.execution.concurrency, 3);
 });
 
+test('one eight-review worker can admit every independent API chunk concurrently', () => {
+  const config = loadReviewRuntimeConfig({
+    ORVEX_CODEX_CLI: '1',
+    ORVEX_MAX_CONCURRENT_REVIEWS: '8',
+    ORVEX_CODEX_APIKEY_CONCURRENCY: '8',
+    ORVEX_PROVIDER_CONCURRENCY_LUNA: '8',
+    ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: '64',
+    ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '32',
+    ORVEX_REVIEW_CONCURRENCY: '8',
+  });
+
+  assert.equal(config.providerConcurrency('luna'), 8);
+  assert.equal(config.providerConcurrency('deepseek'), 64);
+  assert.equal(config.providerConcurrency('minimax'), 32);
+  assert.equal(config.execution.concurrency, 8);
+});
+
 test('fleet provider capacity is independent from per-worker capacity and snapshots its environment', () => {
   const env: NodeJS.ProcessEnv = {
     ORVEX_MAX_CONCURRENT_REVIEWS: '4',
@@ -128,7 +145,11 @@ test('fleet provider capacity is independent from per-worker capacity and snapsh
 
 test('production PM2 profile allocates the full idle provider capacity to a review', () => {
   const ecosystem = readFileSync(new URL('../../../ecosystem.config.cjs', import.meta.url), 'utf8');
-  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=8(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=64(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_MINIMAX=32(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=64(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=32(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_FLEET_CAPACITY_EPOCH=review-burst-v2(?:\s|\\")/);
   assert.match(ecosystem, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
   assert.match(ecosystem, /ORVEX_VERIFY_CONCURRENCY=8(?:\s|\\")/);
 });

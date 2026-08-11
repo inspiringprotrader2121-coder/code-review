@@ -6,7 +6,7 @@ import {
   executeReviewProviderCalls,
   groupApiCallsByProvider,
   interleaveProviderLane,
-  perReviewProviderParallelism,
+  reviewProviderParallelism,
 } from './review-provider-execution.js';
 import { boundHighTierDiscoveryWorkloads, type ReviewCall } from './review-stage-scheduler.js';
 
@@ -132,10 +132,7 @@ test('same-provider review calls retain a provider lane and alternate reviewer l
     [minimax],
   ]);
   assert.deepEqual(interleaveProviderLane([first, third, second]), [first, second, third]);
-  assert.equal(perReviewProviderParallelism(8, 1), 8);
-  assert.equal(perReviewProviderParallelism(8, 2), 4);
-  assert.equal(perReviewProviderParallelism(8, 4), 2);
-  assert.equal(perReviewProviderParallelism(8, 8), 1);
+  assert.equal(reviewProviderParallelism(8), 8);
 });
 
 test('an idle large review fans out same-provider shards while retaining a bounded lane', async () => {
@@ -193,7 +190,6 @@ test('an idle large review fans out same-provider shards while retaining a bound
       );
       return results as never;
     },
-    activeReviewCount: 1,
     apiConcurrency: 8,
   });
 
@@ -203,67 +199,75 @@ test('an idle large review fans out same-provider shards while retaining a bound
   );
 });
 
-test('busy workers reduce a review to a fair per-provider share', async () => {
-  const first = call('deepseek-v4-flash', 1);
-  first.modelPassIndex = 1;
-  first.passTag = 'deep-dive';
-  const second = call('deepseek-v4-flash', 2);
-  second.modelPassIndex = 2;
-  second.passTag = 'removed-behavior/callers';
-  const third = call('deepseek-v4-flash', 3);
-  third.modelPassIndex = 1;
-  third.passTag = 'deep-dive';
-  const fourth = call('deepseek-v4-flash', 4);
-  fourth.modelPassIndex = 2;
-  fourth.passTag = 'removed-behavior/callers';
+test('six concurrent reviews keep independent provider chunks in parallel', async () => {
   let active = 0;
   let peak = 0;
-
-  await executeReviewProviderCalls({
-    calls: [first, third, second, fourth],
-    filesForLlm: [],
-    filesForInvestigate: [],
-    providers: {
-      async runCodexReview() {
-        throw new Error('not used');
-      },
-      async runReview() {
-        return { findings: [] };
-      },
-    },
-    contextRun: async () => {
-      active++;
-      peak = Math.max(peak, active);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      active--;
-      return { findings: [] };
-    },
-    repoDirectory: null,
-    repoId: 'acme/repo',
-    signal: new AbortController().signal,
-    isCancelled: () => false,
-    onUsageFor: () => () => {},
-    onAttemptFor: () => () => {},
-    tagFindings: () => {},
-    mapConcurrent: async (items, limit, run) => {
-      const results: unknown[] = [];
-      let index = 0;
-      await Promise.all(
-        Array.from({ length: Math.min(limit, items.length) }, async () => {
-          for (;;) {
-            const current = index++;
-            if (current >= items.length) return;
-            results[current] = await run(items[current]!, current);
-          }
-        }),
-      );
-      return results as never;
-    },
-    activeReviewCount: 4,
-    apiConcurrency: 8,
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let allStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    allStarted = resolve;
   });
 
-  assert.equal(peak, 2, 'four active reviews receive two DeepSeek slots each');
+  const reviews = Array.from({ length: 6 }, (_, reviewIndex) => {
+    const calls = Array.from({ length: 4 }, (_, callIndex) => {
+      const entry = call('deepseek-v4-flash', callIndex + 1);
+      entry.label = `review ${reviewIndex + 1} pass ${callIndex + 1}`;
+      entry.modelPassIndex = callIndex % 2 === 0 ? 1 : 2;
+      entry.passTag = callIndex % 2 === 0 ? 'deep-dive' : 'removed-behavior/callers';
+      return entry;
+    });
+    return executeReviewProviderCalls({
+      calls,
+      filesForLlm: [],
+      filesForInvestigate: [],
+      providers: {
+        async runCodexReview() {
+          throw new Error('not used');
+        },
+        async runReview() {
+          return { findings: [] };
+        },
+      },
+      contextRun: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        if (active === 24) allStarted();
+        await gate;
+        active--;
+        return { findings: [] };
+      },
+      repoDirectory: null,
+      repoId: `acme/repo-${reviewIndex + 1}`,
+      signal: new AbortController().signal,
+      isCancelled: () => false,
+      onUsageFor: () => () => {},
+      onAttemptFor: () => () => {},
+      tagFindings: () => {},
+      mapConcurrent: async (items, limit, run) => {
+        const results: unknown[] = [];
+        let index = 0;
+        await Promise.all(
+          Array.from({ length: Math.min(limit, items.length) }, async () => {
+            for (;;) {
+              const current = index++;
+              if (current >= items.length) return;
+              results[current] = await run(items[current]!, current);
+            }
+          }),
+        );
+        return results as never;
+      },
+      apiConcurrency: 8,
+    });
+  });
+
+  await started;
+  assert.equal(peak, 24, 'six reviews can each fan out four independent DeepSeek chunks');
+  release();
+  await Promise.all(reviews);
 });
 
 test('agentic reviews start a fresh Codex thread in the isolated container', async () => {
@@ -301,7 +305,6 @@ test('agentic reviews start a fresh Codex thread in the isolated container', asy
     onAttemptFor: () => () => {},
     tagFindings: () => {},
     mapConcurrent: async (items, _limit, run) => Promise.all(items.map(run)),
-    activeReviewCount: 1,
     apiConcurrency: 1,
   });
 

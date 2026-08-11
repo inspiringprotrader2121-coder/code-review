@@ -12,7 +12,7 @@ import {
   compileReviewPlan,
 } from '@orvex-review/review';
 import { planFeatures } from '@orvex-review/tenants';
-import { activeReviewSignal, getActiveReviewCount } from '../../active-reviews.js';
+import { activeReviewSignal } from '../../active-reviews.js';
 import {
   canRunAgentic,
   canRunCodexCli,
@@ -36,7 +36,7 @@ import type { ReviewExecutionPolicy } from './review-execution-policy.js';
 import { resolvePrStatePollMs } from './review-execution-policy.js';
 import {
   executeReviewProviderCalls,
-  perReviewProviderParallelism,
+  reviewProviderParallelism,
   type ReviewCallOutcome,
 } from './review-provider-execution.js';
 import { orchestrateVerification } from './verification-orchestrator.js';
@@ -337,20 +337,6 @@ export async function executeReviewCore(
       onOwnershipLoss: cancelForOwnershipLoss,
     });
     const { usage, onUsageFor, onAttemptFor } = accounting;
-    const activeReviewCountForProvider = async (): Promise<number> => {
-      let activeReviewCount = getActiveReviewCount();
-      if (config.activeReviewCount) {
-        try {
-          activeReviewCount = await config.activeReviewCount();
-        } catch (error) {
-          console.warn(
-            '[worker] could not read fleet review activity; using local active-review count:',
-            (error as Error).message,
-          );
-        }
-      }
-      return Math.max(1, activeReviewCount);
-    };
     if (filesForLlm.length > 0) {
       // Depth is enforced HERE, in the harness, and scaled BY PLAN — not left to
       // how long one model call decides to think. Higher tiers get the fixed four
@@ -464,7 +450,6 @@ export async function executeReviewCore(
           );
         }
 
-        const activeReviewCount = await activeReviewCountForProvider();
         const outcomes: ReviewCallOutcome[] = await executeReviewProviderCalls({
           calls: toRun,
           filesForLlm,
@@ -479,7 +464,6 @@ export async function executeReviewCore(
           onAttemptFor,
           tagFindings,
           mapConcurrent: services.executor.mapConcurrent.bind(services.executor),
-          activeReviewCount,
           apiConcurrency: concurrency,
         });
 
@@ -762,18 +746,14 @@ export async function executeReviewCore(
       ...merged.toPost,
       ...merged.reviewOnly.map(({ finding }) => finding),
     ];
-    const verificationActiveReviews = await activeReviewCountForProvider();
     const verificationCapacity = Math.min(
       executionPolicy.concurrency,
       services.verificationConcurrency ?? 1,
     );
-    const verificationConcurrency = perReviewProviderParallelism(
-      verificationCapacity,
-      verificationActiveReviews,
-    );
+    const verificationConcurrency = reviewProviderParallelism(verificationCapacity);
     console.log(
-      `[worker] verification scheduling: activeReviews=${verificationActiveReviews} ` +
-        `perReview=${verificationConcurrency}`,
+      `[worker] verification scheduling: perReview=${verificationConcurrency}; ` +
+        'fleet admission enforces aggregate capacity',
     );
     const verification = await orchestrateVerification({
       candidates: verificationCandidates,

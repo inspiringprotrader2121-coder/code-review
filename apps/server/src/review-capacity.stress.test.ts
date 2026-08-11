@@ -23,8 +23,8 @@ test(
       ORVEX_MAX_CONCURRENT_REVIEWS: '8',
       ORVEX_CODEX_APIKEY_CONCURRENCY: '8',
       ORVEX_PROVIDER_CONCURRENCY_LUNA: '8',
-      ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: '8',
-      ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '8',
+      ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: '64',
+      ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '32',
       ORVEX_VERIFY_CONCURRENCY: '8',
       ORVEX_REVIEW_CONCURRENCY: '8',
       ORVEX_MAX_SANDBOXES: '8',
@@ -38,7 +38,7 @@ test(
         verify: config.review.verifyConcurrency,
         sandboxes: config.sandbox.sandbox.maxConcurrentSandboxes,
       },
-      { reviews: 8, luna: 8, minimax: 8, deepseek: 8, verify: 8, sandboxes: 8 },
+      { reviews: 8, luna: 8, minimax: 32, deepseek: 64, verify: 8, sandboxes: 8 },
     );
 
     const db = new AppDatabase(':memory:');
@@ -128,8 +128,8 @@ test(
     assert.equal(reviews.peak, 8);
     assert.ok(reviews.peak <= config.worker.concurrency);
     assert.ok((providers.get('luna')?.peak ?? 0) <= 8);
-    assert.ok((providers.get('minimax')?.peak ?? 0) <= 8);
-    assert.ok((providers.get('deepseek')?.peak ?? 0) <= 8);
+    assert.ok((providers.get('minimax')?.peak ?? 0) <= 32);
+    assert.ok((providers.get('deepseek')?.peak ?? 0) <= 64);
     assert.ok(sandboxes.peak <= config.sandbox.sandbox.maxConcurrentSandboxes);
     assert.deepEqual(await queue.depth(), {
       queued: 0,
@@ -142,9 +142,9 @@ test(
       REVIEW_COUNT,
     );
 
-    await assertCanSaturate(providerAdmission, 'deepseek', 8);
+    await assertCanSaturate(providerAdmission, 'deepseek', 64);
     await assertCanSaturate(providerAdmission, 'luna', 8);
-    await assertCanSaturate(providerAdmission, 'minimax', 8);
+    await assertCanSaturate(providerAdmission, 'minimax', 32);
   },
 );
 

@@ -57,7 +57,7 @@ test('thrown provider failure refunds prepaid overage even when usage was record
   assert.equal(refunds.length, 1);
 });
 
-test('published partial output remains completed and records its limitation', async () => {
+test('published partial output is failed, records its limitation, and refunds the review', async () => {
   const { review, completed, refunds } = admittedReview();
   const service = new FinalizationService({
     now: () => 2,
@@ -74,7 +74,7 @@ test('published partial output remains completed and records its limitation', as
     published: true,
   });
   assert.deepEqual(completed[0], {
-    status: 'completed',
+    status: 'failed',
     skipReason: undefined,
     error: 'review incomplete: 1/4 required review coverage unit(s) did not complete',
     durationMs: 1,
@@ -87,5 +87,6 @@ test('published partial output remains completed and records its limitation', as
     newFindings: undefined,
     deep: false,
   });
-  assert.equal(refunds.length, 0);
+  assert.equal(refunds.length, 1);
+  assert.match(refunds[0] ?? '', /^refund: review incomplete:/);
 });

@@ -31,9 +31,6 @@ test('successful persisted work is completed after transient lease noise, not di
     async persistJob(persisted: ReviewJobPayload) {
       events.push(`persist:${persisted.runId}`);
     },
-    async depth() {
-      return { queued: 9, waitingOnPr: 0, inFlight: 5, oldestQueuedAt: null };
-    },
     async markCompleted() {
       events.push('completed');
       return true;
@@ -56,7 +53,6 @@ test('successful persisted work is completed after transient lease noise, not di
       loadConfig: () => ({ store: {} }) as WorkerConfig,
       processReview: async (running, config) => {
         running.runId = 'durable-run';
-        assert.equal(await config.activeReviewCount?.(), 5, 'uses Redis-wide in-flight depth');
         await config.persistJob?.(running);
         return { findingCount: 0, newCount: 0, fixedCount: 0 };
       },

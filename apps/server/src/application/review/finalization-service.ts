@@ -48,13 +48,14 @@ export class FinalizationService {
   async complete(review: AdmittedReview, result: ProcessResult): Promise<ProcessResult> {
     const { job, config, runId, startedAt, plan } = review;
     const deliveredDeep = Boolean(job.deep) && result.deepLensesRan === true;
+    const failureReason = result.skipReason
+      ? `review did not complete: ${result.skipReason}`
+      : result.incompleteReason;
     try {
       config.store.completeReviewRun(runId, {
-        status: result.skipReason ? 'failed' : 'completed',
+        status: failureReason ? 'failed' : 'completed',
         skipReason: result.skipReason,
-        error: result.skipReason
-          ? `review did not complete: ${result.skipReason}`
-          : result.incompleteReason,
+        error: failureReason,
         durationMs: (this.dependencies.now?.() ?? Date.now()) - startedAt,
         findingsNew: result.newCount,
         findingsFixed: result.fixedCount,
@@ -65,8 +66,8 @@ export class FinalizationService {
         newFindings: result.newFindings,
         deep: deliveredDeep,
       });
-      if (result.skipReason) {
-        config.store.refundOverageCredits(runId, `refund: ${result.skipReason}`);
+      if (failureReason) {
+        config.store.refundOverageCredits(runId, `refund: ${failureReason.slice(0, 160)}`);
       } else if (
         Boolean(job.deep) &&
         !deliveredDeep &&
