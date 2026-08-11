@@ -32,6 +32,50 @@ class SandboxCancelledError extends Error {
 }
 
 const activeWorkdirs = new Set<string>();
+const STDERR_CAPTURE_BYTES = Math.min(16_000, Math.floor(MAX_CAPTURE_BYTES / 4));
+const STDOUT_CAPTURE_BYTES = MAX_CAPTURE_BYTES - STDERR_CAPTURE_BYTES;
+const STDOUT_TAIL_CAPTURE_BYTES = Math.min(16_000, Math.floor(STDOUT_CAPTURE_BYTES / 3));
+const STDERR_TAIL_CAPTURE_BYTES = Math.min(4_000, Math.floor(STDERR_CAPTURE_BYTES / 3));
+const TRUNCATION_SEPARATOR = Buffer.from('\n[sandbox output truncated]\n');
+
+/**
+ * Keep the beginning of a tool stream for startup/error protocol and its tail
+ * for terminal protocol such as the broker's final usage record. The combined
+ * stdout/stderr memory ceiling remains MAX_CAPTURE_BYTES.
+ */
+class BoundedOutputCapture {
+  private head = Buffer.alloc(0);
+  private tail = Buffer.alloc(0);
+  private truncated = false;
+
+  constructor(
+    private readonly limit: number,
+    private readonly tailLimit: number,
+  ) {}
+
+  append(chunk: Buffer): void {
+    if (!this.truncated) {
+      const combined = Buffer.concat([this.head, chunk]);
+      if (combined.length <= this.limit) {
+        this.head = combined;
+        return;
+      }
+      this.truncated = true;
+      const headLimit = this.limit - this.tailLimit - TRUNCATION_SEPARATOR.length;
+      this.head = combined.subarray(0, headLimit);
+      this.tail = combined.subarray(Math.max(headLimit, combined.length - this.tailLimit));
+      return;
+    }
+    const combined = Buffer.concat([this.tail, chunk]);
+    this.tail = combined.subarray(Math.max(0, combined.length - this.tailLimit));
+  }
+
+  text(): string {
+    return Buffer.concat(
+      this.truncated ? [this.head, TRUNCATION_SEPARATOR, this.tail] : [this.head],
+    ).toString('utf8');
+  }
+}
 
 interface SandboxSlotLease {
   readonly ownerToken: string;
@@ -352,7 +396,8 @@ export async function runInSandboxWithSpawnForTest(
     }
     let stdout = '';
     let stderr = '';
-    let capturedBytes = 0;
+    const stdoutCapture = new BoundedOutputCapture(STDOUT_CAPTURE_BYTES, STDOUT_TAIL_CAPTURE_BYTES);
+    const stderrCapture = new BoundedOutputCapture(STDERR_CAPTURE_BYTES, STDERR_TAIL_CAPTURE_BYTES);
     let timedOut = false;
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -413,12 +458,9 @@ export async function runInSandboxWithSpawnForTest(
       if (releaseSlot) slot.release();
       resolve(result);
     };
-    const cap = (buffer: string, chunk: Buffer) => {
-      const remaining = MAX_CAPTURE_BYTES - capturedBytes;
-      if (remaining <= 0) return buffer;
-      const permitted = chunk.subarray(0, remaining);
-      capturedBytes += permitted.length;
-      return buffer + permitted.toString('utf8');
+    const cap = (capture: BoundedOutputCapture, chunk: Buffer) => {
+      capture.append(chunk);
+      return capture.text();
     };
     const failAndCleanup = (result: SandboxResult, killFirst: boolean) => {
       try {
@@ -465,11 +507,11 @@ export async function runInSandboxWithSpawnForTest(
       );
     child.stdout?.on('data', (chunk: Buffer) => {
       armInactivityTimer();
-      stdout = cap(stdout, chunk);
+      stdout = cap(stdoutCapture, chunk);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       armInactivityTimer();
-      stderr = cap(stderr, chunk);
+      stderr = cap(stderrCapture, chunk);
     });
     if (opts.stdin !== undefined && !child.stdin) {
       failAndCleanup(

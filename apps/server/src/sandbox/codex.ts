@@ -48,7 +48,7 @@ try {
           const value = JSON.parse(body);
           if (value?.type === 'orvex.usage' && Array.isArray(value.records)) {
             process.stdout.write(
-              JSON.stringify({ type: 'orvex.usage', records: value.records }) + '\\n',
+              '\\n' + JSON.stringify({ type: 'orvex.usage', records: value.records }) + '\\n',
               finish,
             );
             return;

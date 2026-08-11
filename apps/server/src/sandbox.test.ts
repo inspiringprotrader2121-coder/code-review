@@ -836,6 +836,44 @@ test('sandbox prevents concurrent reuse of the same checkout and caps combined o
   }
 });
 
+test('sandbox preserves terminal broker telemetry after chatty stdout', async () => {
+  const fake = fakeDocker();
+  const workdir = createSandboxWorkdir();
+  try {
+    const pending = runInSandboxWithSpawnForTest(
+      { workdir, image: PINNED_IMAGE, command: 'true' },
+      fake.spawn,
+    );
+    for (let attempt = 0; attempt < 100 && fake.calls.length === 0; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    }
+    (fake.run.stdout as PassThrough).write(
+      JSON.stringify({ type: 'thread.started', thread_id: 'head-protocol' }) + '\n',
+    );
+    (fake.run.stdout as PassThrough).write(Buffer.alloc(80_000, 'a'));
+    (fake.run.stdout as PassThrough).write(
+      '\n' +
+        JSON.stringify({
+          type: 'orvex.usage',
+          records: [{ input_tokens: 12_345, output_tokens: 678 }],
+        }) +
+        '\n',
+    );
+    fake.run.emit('close', 0);
+
+    const result = await pending;
+    assert.match(result.stdout, /head-protocol/);
+    const usageLine = result.stdout.split('\n').find((line) => line.includes('orvex.usage'));
+    assert.deepEqual(JSON.parse(usageLine ?? '{}'), {
+      type: 'orvex.usage',
+      records: [{ input_tokens: 12_345, output_tokens: 678 }],
+    });
+    assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= 64_000);
+  } finally {
+    fs.rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test('host-wide sandbox slots bound one hundred tasks at eight containers and reclaim dead leases', async () => {
   const slotDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-sandbox-slots-test-'));
   const staleSlot = path.join(slotDirectory, 'slot-0');
