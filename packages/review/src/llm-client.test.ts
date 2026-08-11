@@ -507,6 +507,77 @@ test('official DeepSeek resumes one truncated max-reasoning response through pre
   );
 });
 
+test('official DeepSeek resumes a partially streamed response after a provider termination', async () => {
+  const encoder = new TextEncoder();
+  let calls = 0;
+  const events: LlmAttemptEvent[] = [];
+  const captured = await withStubbedFetch(
+    () => {
+      calls++;
+      let pull = 0;
+      return new ReadableStream({
+        pull(controller) {
+          if (calls === 1) {
+            if (pull++ === 0)
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'completed analysis' } }] })}\n\n`,
+                ),
+              );
+            else controller.error(new TypeError('terminated'));
+            return;
+          }
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: { content: '[]}' } }] })}\n\n`,
+            ),
+          );
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+            ),
+          );
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+    },
+    async () => {
+      const result = await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.com/v1',
+        api: 'chat',
+        reasoningEffort: 'max',
+        maxTokens: 28_000,
+        json: true,
+        onAttempt: (event) => events.push(event),
+      });
+      assert.equal(result, '{"findings":[]}');
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(captured[1]?.url, 'https://api.deepseek.com/beta/chat/completions');
+  assert.equal('response_format' in captured[1]!.body, false);
+  const continuationMessages = captured[1]?.body.messages as Array<{
+    role: string;
+    reasoning_content?: string;
+    content: string;
+    prefix?: boolean;
+  }>;
+  assert.deepEqual(continuationMessages.at(-1), {
+    role: 'assistant',
+    content: '{"findings":',
+    reasoning_content: 'completed analysis',
+    prefix: true,
+  });
+  assert.deepEqual(
+    events.filter((event) => event.phase === 'started').map((event) => event.role),
+    ['primary', 'continuation'],
+  );
+});
+
 test('official DeepSeek never treats schema-ambiguous JSON as complete after output exhaustion', async () => {
   const encoder = new TextEncoder();
   let calls = 0;

@@ -534,6 +534,28 @@ export async function openAiCompatStreamChat(
         model: opts.model,
       });
     }
+    if (
+      streamedChars > 0 &&
+      supportsCompatibleUsageStream(opts.baseUrl) &&
+      opts.json &&
+      opts.reasoningEffort === 'max' &&
+      thinkingEnabled(opts) &&
+      /deepseek-v4/i.test(opts.model) &&
+      /terminated|premature(?:ly)? closed|other side closed/i.test(
+        (error as Error)?.message ?? String(error),
+      )
+    ) {
+      const streamedText = stripThinking(content);
+      const contentPrefix = continuationPrefix
+        ? streamedText.startsWith(continuationPrefix)
+          ? streamedText
+          : `${continuationPrefix}${streamedText}`
+        : streamedText || '{"findings":';
+      throw new DeepSeekContinuationRequiredError({
+        reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
+        contentPrefix,
+      });
+    }
     throw error;
   }
   const inlineThinkChars = (content.match(/<think>[\s\S]*?<\/think>/gi) ?? []).reduce(
