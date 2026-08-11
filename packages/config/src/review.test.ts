@@ -118,6 +118,18 @@ test('one eight-review worker can admit every independent API chunk concurrently
   assert.equal(config.execution.concurrency, 8);
 });
 
+test('local provider concurrency keeps provider-specific safety bounds', () => {
+  const config = loadReviewRuntimeConfig({
+    ORVEX_PROVIDER_CONCURRENCY_LUNA: '999',
+    ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: '999',
+    ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '999',
+  });
+
+  assert.equal(config.providerConcurrency('luna'), 32);
+  assert.equal(config.providerConcurrency('deepseek'), 64);
+  assert.equal(config.providerConcurrency('minimax'), 32);
+});
+
 test('fleet provider capacity is independent from per-worker capacity and snapshots its environment', () => {
   const env: NodeJS.ProcessEnv = {
     ORVEX_MAX_CONCURRENT_REVIEWS: '4',

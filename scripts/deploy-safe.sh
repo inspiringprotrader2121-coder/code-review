@@ -496,16 +496,11 @@ REMOTE_APPLY
     "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_RESTART'
 set -euo pipefail
 live=$1
-if [[ -f "$live/ecosystem.config.cjs" ]]; then
-  pm2 startOrRestart "$live/ecosystem.config.cjs" --only velatrix-review --update-env >/dev/null
-else
-  # The first release may predate the ecosystem file. Recreate the legacy
-  # process explicitly so a failed ecosystem rollout cannot leave PM2 using
-  # stale args or the .env port during rollback.
-  pm2 delete velatrix-review >/dev/null 2>&1 || true
-  pm2 start /usr/bin/bash --name velatrix-review --interpreter none -- \
-    -lc 'cd /home/orvex/code-review && set -a && . ./.env && set +a && NODE_ENV=production ORVEX_REQUIRE_DURABLE_STORAGE=1 PORT=8788 HOST=0.0.0.0 ORVEX_MAX_CONCURRENT_REVIEWS=8 ORVEX_CODEX_APIKEY_CONCURRENCY=8 ORVEX_PROVIDER_CONCURRENCY_LUNA=8 ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=8 ORVEX_PROVIDER_CONCURRENCY_MINIMAX=8 pnpm start' >/dev/null
-fi
+[[ -f "$live/ecosystem.config.cjs" ]] || {
+  echo "release is missing ecosystem.config.cjs" >&2
+  exit 1
+}
+pm2 startOrRestart "$live/ecosystem.config.cjs" --only velatrix-review --update-env >/dev/null
 REMOTE_RESTART
   }
 

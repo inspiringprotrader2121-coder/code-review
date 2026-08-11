@@ -215,14 +215,21 @@ for (const [variable, expected] of Object.entries({
   ORVEX_MAX_CONCURRENT_REVIEWS: 8,
   ORVEX_CODEX_APIKEY_CONCURRENCY: 8,
   ORVEX_PROVIDER_CONCURRENCY_LUNA: 8,
-  ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 8,
-  ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 8,
+  ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 64,
+  ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 32,
+  ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA: 8,
+  ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK: 64,
+  ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX: 32,
+  ORVEX_FLEET_TENANT_CONCURRENCY: 8,
   ORVEX_VERIFY_CONCURRENCY: 8,
   ORVEX_MAX_SANDBOXES: 8,
 })) {
   if (!args.includes(`${variable}=${expected}`)) {
     throw new Error(`production profile does not pin ${variable}=${expected}`);
   }
+}
+if (!args.includes('ORVEX_FLEET_CAPACITY_EPOCH=review-burst-v2')) {
+  throw new Error('production profile does not pin the review-burst-v2 capacity epoch');
 }
 if (args.indexOf('. ./.env') > args.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8')) {
   throw new Error('immutable .env would override the code-owned production profile');

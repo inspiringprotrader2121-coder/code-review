@@ -193,6 +193,10 @@ function providerCapacity(
   return boundedConcurrency(overrides[providerEnvironmentName(provider)], fallback, maximum);
 }
 
+function localProviderCapacityMaximum(provider: string): number {
+  return providerEnvironmentName(provider) === 'DEEPSEEK' ? 64 : 32;
+}
+
 function capacityEpoch(raw: string | undefined): string {
   const value = raw?.trim() || 'v1';
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(value)) {
@@ -296,7 +300,12 @@ export function loadReviewRuntimeConfig(
     'ORVEX_FLEET_PROVIDER_CONCURRENCY_',
   );
   const localProviderConcurrency = (provider: string): number =>
-    providerCapacity(provider, providerOverrides, sharedProviderCapacity, 64);
+    providerCapacity(
+      provider,
+      providerOverrides,
+      sharedProviderCapacity,
+      localProviderCapacityMaximum(provider),
+    );
   const fleetProviderConcurrency = (provider: string): number =>
     providerCapacity(provider, fleetProviderOverrides, localProviderConcurrency(provider), 10_000);
   const fleetProviderCapacityEpoch = capacityEpoch(env.ORVEX_FLEET_CAPACITY_EPOCH);
