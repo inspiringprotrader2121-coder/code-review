@@ -17,7 +17,7 @@ export class SqliteReviewAttemptRepository {
   ) {}
 
   startReviewRunAttempt(
-    input: Omit<ReviewRunAttempt, 'outcome' | 'durationMs' | 'completedAt'>,
+    input: Omit<ReviewRunAttempt, 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'>,
   ): boolean {
     const run = this.db
       .prepare(`SELECT tenant_id, status, worker_id FROM review_runs WHERE id = ?`)
@@ -63,6 +63,7 @@ export class SqliteReviewAttemptRepository {
   completeReviewRunAttempt(input: {
     id: string;
     outcome: Exclude<ReviewRunAttemptOutcome, 'running'>;
+    dispatched?: boolean;
     durationMs: number;
     completedAt: string;
     error?: string;
@@ -72,7 +73,7 @@ export class SqliteReviewAttemptRepository {
     return (
       this.db
         .prepare(
-          `UPDATE review_run_attempts SET outcome = ?, error = ?, duration_ms = ?, completed_at = ?
+          `UPDATE review_run_attempts SET outcome = ?, dispatched = ?, error = ?, duration_ms = ?, completed_at = ?
        WHERE id = ? AND outcome = 'running' AND EXISTS (
          SELECT 1 FROM review_runs WHERE review_runs.id = review_run_attempts.run_id
          AND review_runs.status = 'running' AND review_runs.worker_id = ?
@@ -80,6 +81,7 @@ export class SqliteReviewAttemptRepository {
         )
         .run(
           input.outcome,
+          input.dispatched === false ? 0 : 1,
           input.error ?? null,
           Math.floor(input.durationMs),
           input.completedAt,
@@ -106,6 +108,7 @@ export class SqliteReviewAttemptRepository {
       retryIndex: Number(row.retry_index),
       keyIndex: Number(row.key_index),
       outcome: row.outcome as ReviewRunAttemptOutcome,
+      dispatched: Number(row.dispatched) === 1,
       error: row.error ? String(row.error) : undefined,
       durationMs: Number(row.duration_ms),
       startedAt: String(row.started_at),

@@ -35,6 +35,14 @@ export const REVIEW_USAGE_CACHE_WRITE_PRICING_ARTIFACT: ExecutableMigrationArtif
   },
 );
 
+export const REVIEW_ATTEMPT_DISPATCH_ARTIFACT: ExecutableMigrationArtifact = Object.freeze({
+  format: 'sqlite-program-v1',
+  operations: Object.freeze([
+    'add review_run_attempts.dispatched with legacy true backfill',
+    'record pre-provider admission rejections separately from dispatched attempts',
+  ]),
+});
+
 interface HistoricalMigrationArtifact {
   version: number;
   timestamp: string;
@@ -267,6 +275,12 @@ export const STORE_MIGRATIONS: readonly StoreMigrationMetadata[] = Object.freeze
     timestamp: '2026-08-10T00:00:00.000Z',
     name: 'review-usage-cache-write-pricing',
     artifact: REVIEW_USAGE_CACHE_WRITE_PRICING_ARTIFACT,
+  }),
+  defineExecutableMigration({
+    version: 20,
+    timestamp: '2026-08-11T00:00:00.000Z',
+    name: 'review-attempt-dispatch-provenance',
+    artifact: REVIEW_ATTEMPT_DISPATCH_ARTIFACT,
   }),
 ]);
 

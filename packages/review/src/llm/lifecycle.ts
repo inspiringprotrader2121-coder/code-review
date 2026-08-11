@@ -49,6 +49,7 @@ export function recordProviderAdmissionFailure(
     phase: 'finished',
     attemptId,
     outcome: attemptOutcome(error),
+    dispatched: false,
     error: error.message.slice(0, 2_000),
     durationMs: 0,
     completedAt: timestamp,
@@ -87,6 +88,7 @@ export async function trackedLlmAttempt(
       phase: 'finished',
       attemptId,
       outcome: 'succeeded',
+      dispatched: true,
       durationMs: clock.now() - started,
       completedAt: new Date(clock.now()).toISOString(),
     });
@@ -96,6 +98,7 @@ export async function trackedLlmAttempt(
       phase: 'finished',
       attemptId,
       outcome: attemptOutcome(error),
+      dispatched: true,
       durationMs: clock.now() - started,
       completedAt: new Date(clock.now()).toISOString(),
       error: ((error as Error)?.message ?? String(error)).slice(0, 2_000),

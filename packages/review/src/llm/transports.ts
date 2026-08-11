@@ -411,80 +411,100 @@ export async function openAiCompatStreamChat(
   let providerUsage:
     | { inputTokens: number; cachedInputTokens: number; outputTokens: number }
     | undefined;
+  const requestSystem =
+    opts.json && opts.reasoningEffort === 'max' && /deepseek-v4/i.test(opts.model)
+      ? `${system}\n\n## Completion contract\nReasoning effort is fixed at max by the API. Finish private reasoning within 20,000 tokens and reserve the remaining response budget for the final JSON. Emit the JSON immediately when the evidence is sufficient.`
+      : system;
   const startedAt = clock.now();
-  await openStream(
-    `${opts.baseUrl!.replace(/\/$/, '')}/chat/completions`,
-    {
-      model: opts.model,
-      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-      max_tokens: resolveMaxOutputTokens(opts.maxTokens),
-      stream: true,
-      ...(supportsCompatibleUsageStream(opts.baseUrl)
-        ? { stream_options: { include_usage: true } }
-        : {}),
-      ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
-      ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
-      ...(supportsCompatibleUsageStream(opts.baseUrl)
-        ? { thinking: { type: thinkingEnabled(opts) ? 'enabled' : 'disabled' } }
-        : {
-            chat_template_kwargs: { thinking_mode: thinkingEnabled(opts) ? 'enabled' : 'disabled' },
-          }),
-      reasoning_split: true,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-    },
-    opts,
-    inactivityMs,
-    { request: `LLM request stalled (no data for ${inactivityMs}ms)`, stream: 'chat' },
-    (data) => {
-      try {
-        const chunk = JSON.parse(data) as {
-          choices?: Array<{
-            finish_reason?: string | null;
-            native_finish_reason?: string | null;
-            delta?: {
-              content?: string | null;
-              reasoning_content?: string | null;
-              reasoning?: string | null;
-            };
-          }>;
-          usage?: {
-            prompt_tokens?: number;
-            prompt_cache_hit_tokens?: number;
-            completion_tokens?: number;
-          } | null;
-        };
-        const usage = chunk.usage;
-        if (
-          usage &&
-          Number.isFinite(usage.prompt_tokens) &&
-          Number.isFinite(usage.completion_tokens)
-        ) {
-          const inputTokens = Math.max(0, usage.prompt_tokens ?? 0);
-          providerUsage = {
-            inputTokens,
-            cachedInputTokens: Math.min(
-              inputTokens,
-              Math.max(0, usage.prompt_cache_hit_tokens ?? 0),
-            ),
-            outputTokens: Math.max(0, usage.completion_tokens ?? 0),
+  try {
+    await openStream(
+      `${opts.baseUrl!.replace(/\/$/, '')}/chat/completions`,
+      {
+        model: opts.model,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        max_tokens: resolveMaxOutputTokens(opts.maxTokens),
+        stream: true,
+        ...(supportsCompatibleUsageStream(opts.baseUrl)
+          ? { stream_options: { include_usage: true } }
+          : {}),
+        ...(opts.json ? { response_format: { type: 'json_object' } } : {}),
+        ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
+        ...(supportsCompatibleUsageStream(opts.baseUrl)
+          ? { thinking: { type: thinkingEnabled(opts) ? 'enabled' : 'disabled' } }
+          : {
+              chat_template_kwargs: {
+                thinking_mode: thinkingEnabled(opts) ? 'enabled' : 'disabled',
+              },
+            }),
+        messages: [
+          { role: 'system', content: requestSystem },
+          { role: 'user', content: user },
+        ],
+      },
+      opts,
+      inactivityMs,
+      { request: `LLM request stalled (no data for ${inactivityMs}ms)`, stream: 'chat' },
+      (data) => {
+        try {
+          const chunk = JSON.parse(data) as {
+            choices?: Array<{
+              finish_reason?: string | null;
+              native_finish_reason?: string | null;
+              delta?: {
+                content?: string | null;
+                reasoning_content?: string | null;
+                reasoning?: string | null;
+              };
+            }>;
+            usage?: {
+              prompt_tokens?: number;
+              prompt_cache_hit_tokens?: number;
+              completion_tokens?: number;
+            } | null;
           };
+          const usage = chunk.usage;
+          if (
+            usage &&
+            Number.isFinite(usage.prompt_tokens) &&
+            Number.isFinite(usage.completion_tokens)
+          ) {
+            const inputTokens = Math.max(0, usage.prompt_tokens ?? 0);
+            providerUsage = {
+              inputTokens,
+              cachedInputTokens: Math.min(
+                inputTokens,
+                Math.max(0, usage.prompt_cache_hit_tokens ?? 0),
+              ),
+              outputTokens: Math.max(0, usage.completion_tokens ?? 0),
+            };
+          }
+          const choice = chunk.choices?.[0];
+          if (choice?.delta?.content) content += choice.delta.content;
+          if (choice?.delta?.reasoning_content)
+            reasoningChars += choice.delta.reasoning_content.length;
+          if (choice?.delta?.reasoning) reasoningChars += choice.delta.reasoning.length;
+          if (choice?.finish_reason) finishReason = choice.finish_reason;
+          if (choice?.native_finish_reason && choice.native_finish_reason !== 'completed')
+            finishReason = choice.native_finish_reason;
+        } catch {
+          /* partial/keepalive line */
         }
-        const choice = chunk.choices?.[0];
-        if (choice?.delta?.content) content += choice.delta.content;
-        if (choice?.delta?.reasoning_content)
-          reasoningChars += choice.delta.reasoning_content.length;
-        if (choice?.delta?.reasoning) reasoningChars += choice.delta.reasoning.length;
-        if (choice?.finish_reason) finishReason = choice.finish_reason;
-        if (choice?.native_finish_reason && choice.native_finish_reason !== 'completed')
-          finishReason = choice.native_finish_reason;
-      } catch {
-        /* partial/keepalive line */
-      }
-    },
-  );
+      },
+    );
+  } catch (error) {
+    const streamedChars = reasoningChars + content.length;
+    if (streamedChars > 0) {
+      opts.onUsage?.({
+        inputTokens: estimateTokens(requestSystem.length + user.length),
+        cachedInputTokens: 0,
+        outputTokens: estimateTokens(streamedChars),
+        tokenSource: 'estimate',
+        provider: providerName(opts.baseUrl, opts.api),
+        model: opts.model,
+      });
+    }
+    throw error;
+  }
   const inlineThinkChars = (content.match(/<think>[\s\S]*?<\/think>/gi) ?? []).reduce(
     (total, block) => total + block.length,
     0,
@@ -503,7 +523,7 @@ export async function openAiCompatStreamChat(
           model: opts.model,
         }
       : {
-          inputTokens: estimateTokens(system.length + user.length),
+          inputTokens: estimateTokens(requestSystem.length + user.length),
           cachedInputTokens: 0,
           outputTokens: estimateTokens(totalReasoning + answerChars),
           tokenSource: 'estimate',

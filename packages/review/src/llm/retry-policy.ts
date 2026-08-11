@@ -45,6 +45,10 @@ export function isRetryableEmptyProviderResponse(message: string): boolean {
 export function providerCooldownForFailure(message: string): number | undefined {
   if (isRetryableEmptyProviderResponse(message)) return 2_000;
   if (isOversizedModelRequest(message)) return undefined;
+  // An active stream reaching its per-request wall cap is prompt/model work,
+  // not evidence that the provider fleet is unavailable. Cooling the whole
+  // provider here makes the next required shard fail before any HTTP request.
+  if (/wall-clock cap/i.test(message)) return undefined;
   if (/insufficient_quota|exceeded your current quota|billing_hard_limit/i.test(message))
     return 300_000;
   const status = /\brequest failed\s*\(\s*(\d{3})\b/i.exec(message)?.[1];
@@ -53,7 +57,7 @@ export function providerCooldownForFailure(message: string): number | undefined 
   if (advertised !== undefined) return Math.min(300_000, Math.max(2_000, advertised));
   if (isRetryableRateLimit(message)) return 2_000;
   if (
-    /\b(?:408|425|5\d\d)\b|fetch failed|econn|socket hang|wall-clock cap|timed?\s*out|stalled|produced no output/i.test(
+    /\b(?:408|425|5\d\d)\b|fetch failed|econn|socket hang|timed?\s*out|stalled|produced no output/i.test(
       message,
     )
   )

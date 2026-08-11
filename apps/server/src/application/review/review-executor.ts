@@ -3,7 +3,6 @@ import {
   assertCodexRuntimeReady,
   fingerprintFinding,
   mergeFindingProvenance,
-  waitForProviderAvailability,
   summarizeModelContribution,
   tagFindingProvenance,
   formatModelContribution,
@@ -440,19 +439,6 @@ export async function executeReviewCore(
               `concurrency=${concurrency}${aggregation.enabled ? `, aggregation=${aggregation.effectiveRuns}x/${aggregation.minOccurrences}` : ''}`,
           );
         }
-
-        // Provider-specific admission happens once for the complete required stack,
-        // before any paid lane starts. If Luna is cooling, high-tier work waits but
-        // lower tiers (which require only DeepSeek + MiniMax) remain independent.
-        // This replaces the old shared review-stack circuit that stopped every plan.
-        const requiredProviders = toRun
-          .filter((call) => call.kind === 'pass' && !call.bestEffort)
-          .map((call) => call.target.admissionBucket);
-        await waitForProviderAvailability(
-          requiredProviders,
-          reviewAbortController.signal,
-          config.providerAdmission,
-        );
 
         const outcomes: ReviewCallOutcome[] = await executeReviewProviderCalls({
           calls: toRun,

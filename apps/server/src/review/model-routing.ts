@@ -15,7 +15,11 @@ export interface ReviewRoutingPolicy {
   minimaxMaxOutputTokens: number;
 }
 
-export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = 36_000;
+// DeepSeek reasoning and final JSON share max_tokens. Production measurements
+// put 36k completions at 286-300s, leaving no room for the final JSON before
+// the independent 300s wall cap. Keep API effort=max, but bound the shared
+// completion so the prompt can reserve time and tokens for its answer.
+export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = 28_000;
 // MiniMax's reasoning tokens share this response budget. 20k can end before it
 // emits the required JSON for a complex review, despite a compact final answer.
 export const MINIMAX_REVIEW_OUTPUT_TOKENS = 32_000;

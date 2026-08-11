@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createProviderCatalog } from './provider-catalog.js';
-import { MINIMAX_REVIEW_OUTPUT_TOKENS, maxOutputTokensForModel } from './model-routing.js';
+import {
+  DEEPSEEK_REVIEW_OUTPUT_TOKENS,
+  MINIMAX_REVIEW_OUTPUT_TOKENS,
+  maxOutputTokensForModel,
+} from './model-routing.js';
 import type { WorkerConfig } from './worker-types.js';
 
 function config(): WorkerConfig {
@@ -32,6 +36,7 @@ function config(): WorkerConfig {
       admissionBucket: 'deepseek',
       thinking: true,
       reasoningEffort: 'max',
+      maxTokens: DEEPSEEK_REVIEW_OUTPUT_TOKENS,
     },
     openaiModel: null,
     deepseekModel: null,
@@ -106,6 +111,14 @@ test('catalog refuses substitutions and incomplete reasoning contracts before a 
       createProviderCatalog({
         ...workerConfig,
         deepseekFlashModel: { ...workerConfig.deepseekFlashModel!, transport: 'responses' },
+      }).compilePublicPlan('dual-model', { agenticLuna: false }),
+    /DeepSeek v4 Flash at max reasoning/,
+  );
+  assert.throws(
+    () =>
+      createProviderCatalog({
+        ...workerConfig,
+        deepseekFlashModel: { ...workerConfig.deepseekFlashModel!, maxTokens: 64_000 },
       }).compilePublicPlan('dual-model', { agenticLuna: false }),
     /DeepSeek v4 Flash at max reasoning/,
   );

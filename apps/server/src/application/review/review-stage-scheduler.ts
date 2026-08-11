@@ -226,7 +226,7 @@ function compactCompleteDiffFocus(
       : call.passTag === 'removed-behavior/callers'
         ? 'Audit deleted or changed behaviour and visible caller/test contracts.'
         : 'Audit concrete performance, completeness, and API-contract regressions.';
-  return `REQUIRED COMPLETE DIFF CHUNK ${shardIndex + 1}/${shardCount}: review every supplied diff hunk in this chunk. This is one explicit coverage unit of a larger PR; do not infer a clean result for chunks you were not given. ${lens} Use the configured maximum reasoning effort, complete one evidence-led pass, and return compact JSON before the worker time limit. Report at most 3 concrete findings, each with a file:line and failure scenario. Do not narrate private reasoning.`;
+  return `REQUIRED COMPLETE DIFF CHUNK ${shardIndex + 1}/${shardCount}: review every supplied diff hunk in this chunk. This is one explicit coverage unit of a larger PR; do not infer a clean result for chunks you were not given. ${lens} Complete one evidence-led pass and return compact JSON before the worker time limit. Report at most 3 concrete findings, each with a file:line and failure scenario. Do not narrate private reasoning.`;
 }
 
 /**

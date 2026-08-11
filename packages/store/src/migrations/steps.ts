@@ -1,5 +1,6 @@
 import type { SqliteConnection } from '../connection.js';
 import {
+  REVIEW_ATTEMPT_DISPATCH_ARTIFACT,
   REVIEW_USAGE_CACHE_PRICING_ARTIFACT,
   REVIEW_USAGE_CACHE_WRITE_PRICING_ARTIFACT,
   STORE_MIGRATIONS,
@@ -287,6 +288,13 @@ function migrateReviewUsageCacheWritePricingColumns(db: SqliteConnection): void 
   db.exec(REVIEW_USAGE_CACHE_WRITE_PRICING_SQL);
 }
 
+function migrateReviewAttemptDispatchColumn(db: SqliteConnection): void {
+  if (!columns(db, 'review_run_attempts').has('dispatched'))
+    db.exec(
+      `ALTER TABLE review_run_attempts ADD COLUMN dispatched INTEGER NOT NULL DEFAULT 1 CHECK (dispatched IN (0, 1))`,
+    );
+}
+
 function migrateCanonicalMigrationArtifacts(db: SqliteConnection): void {
   if (!columns(db, 'orvex_schema_migrations').has('artifact_timestamp'))
     db.exec(`ALTER TABLE orvex_schema_migrations ADD COLUMN artifact_timestamp TEXT`);
@@ -425,6 +433,11 @@ export const STORE_MIGRATION_STEPS: readonly ExecutableMigrationStep[] = Object.
       version: 19,
       artifact: REVIEW_USAGE_CACHE_WRITE_PRICING_ARTIFACT,
       apply: migrateReviewUsageCacheWritePricingColumns,
+    },
+    {
+      version: 20,
+      artifact: REVIEW_ATTEMPT_DISPATCH_ARTIFACT,
+      apply: migrateReviewAttemptDispatchColumn,
     },
   ].map((step) => Object.freeze(step)),
 );

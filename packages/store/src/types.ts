@@ -180,6 +180,8 @@ export interface ReviewRunAttempt {
   retryIndex: number;
   keyIndex: number;
   outcome: ReviewRunAttemptOutcome;
+  /** Whether this attempt reached provider-side execution after admission. */
+  dispatched: boolean;
   error?: string;
   durationMs: number;
   startedAt: string;

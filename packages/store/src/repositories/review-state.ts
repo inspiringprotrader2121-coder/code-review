@@ -132,13 +132,14 @@ export class SqliteReviewStateRepository {
   }
 
   startReviewRunAttempt(
-    input: Omit<ReviewRunAttempt, 'outcome' | 'durationMs' | 'completedAt'>,
+    input: Omit<ReviewRunAttempt, 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'>,
   ): boolean {
     return this.attempts.startReviewRunAttempt(input);
   }
   completeReviewRunAttempt(input: {
     id: string;
     outcome: Exclude<ReviewRunAttemptOutcome, 'running'>;
+    dispatched?: boolean;
     durationMs: number;
     completedAt: string;
     error?: string;

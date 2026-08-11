@@ -165,6 +165,7 @@ CREATE TABLE IF NOT EXISTS review_run_attempts (
   retry_index INTEGER NOT NULL DEFAULT 0 CHECK (retry_index >= 0),
   key_index INTEGER NOT NULL DEFAULT 0 CHECK (key_index >= 0),
   outcome TEXT NOT NULL CHECK (outcome IN ('running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'rate_limited')),
+  dispatched INTEGER NOT NULL DEFAULT 1 CHECK (dispatched IN (0, 1)),
   error TEXT,
   duration_ms INTEGER NOT NULL DEFAULT 0 CHECK (duration_ms >= 0),
   started_at TEXT NOT NULL,

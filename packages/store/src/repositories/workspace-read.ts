@@ -46,6 +46,7 @@ export class WorkspaceReadRepository implements WorkspaceReadStore {
            ) OR EXISTS (
              SELECT 1 FROM review_run_attempts AS attempt
              WHERE attempt.run_id = review_runs.id
+               AND attempt.dispatched = 1
                AND attempt.outcome IN ('failed', 'timed_out', 'rate_limited', 'cancelled')
                AND NOT EXISTS (
                  SELECT 1 FROM review_run_usage AS usage

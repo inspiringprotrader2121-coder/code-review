@@ -133,6 +133,46 @@ test('dashboard cost is marked estimated when a terminal provider attempt omitte
   db.close();
 });
 
+test('dashboard cost is not marked estimated for a pre-provider admission rejection', () => {
+  const db = new AppDatabase(':memory:');
+  const tenant = db.createTenant('admission-rejected');
+  const runId = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'admission',
+    repo: 'rejected',
+    pr: 2,
+    headSha: 'sha',
+    action: 'manual',
+  });
+  db.startReviewRunAttempt({
+    id: 'admission-attempt',
+    runId,
+    tenantId: tenant.id,
+    provider: 'deepseek',
+    model: 'deepseek-v4-flash',
+    tier: 'deepseek-flash',
+    transport: 'chat',
+    retryIndex: 0,
+    keyIndex: 0,
+    startedAt: new Date().toISOString(),
+  });
+  db.completeReviewRunAttempt({
+    id: 'admission-attempt',
+    outcome: 'rate_limited',
+    dispatched: false,
+    durationMs: 0,
+    completedAt: new Date().toISOString(),
+    error: '429 provider deepseek cooldown active',
+  });
+  db.completeReviewRun(runId, { status: 'failed', durationMs: 1, costUsd: 0 });
+
+  const { workspaceReads } = repositories(db);
+  assert.equal(workspaceReads.listReviewRuns(tenant.id)[0]?.costEstimated, false);
+  assert.equal(db.listReviewRunAttempts(runId)[0]?.dispatched, false);
+  db.close();
+});
+
 test('repository read repository is explicitly installation-scoped and tenant list scoped', () => {
   const db = new AppDatabase(':memory:');
   const first = db.createTenant('repo-first');

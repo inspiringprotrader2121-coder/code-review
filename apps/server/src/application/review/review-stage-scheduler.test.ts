@@ -26,7 +26,12 @@ function call(model: string, index: number): ReviewCall {
       others: [{ path: 'src/other.ts', content: 'other' }],
       treePaths: ['src/file-0.ts', 'src/related.ts'],
     },
-    target: { model, apiKey: 'test', api: 'chat' },
+    target: {
+      model,
+      apiKey: 'test',
+      api: 'chat',
+      admissionBucket: model.includes('deepseek') ? 'deepseek' : 'minimax',
+    },
     tier: model.includes('deepseek') ? 'deepseek-flash' : 'standard',
     sample: 0,
   };

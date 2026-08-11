@@ -12,6 +12,7 @@ import {
   type LlmProviderCoordinator,
 } from './llm-client.js';
 import { awaitAnthropicFinalMessage, resolveAnthropicThinkingBudget } from './llm/transports.js';
+import { providerCooldownForFailure } from './llm/retry-policy.js';
 import type { Clock } from './providers/types.js';
 
 interface CapturedRequest {
@@ -301,13 +302,20 @@ test('official DeepSeek requests use its native thinking switch at max effort', 
         baseUrl: 'https://api.deepseek.com/v1',
         api: 'chat',
         reasoningEffort: 'max',
+        maxTokens: 28_000,
+        json: true,
       });
     },
   );
 
   assert.deepEqual(captured[0]?.body.thinking, { type: 'enabled' });
   assert.equal('chat_template_kwargs' in captured[0].body, false);
+  assert.equal('reasoning_split' in captured[0].body, false);
   assert.equal(captured[0].body.reasoning_effort, 'max');
+  assert.equal(captured[0].body.max_tokens, 28_000);
+  const messages = captured[0].body.messages as Array<{ role: string; content: string }>;
+  assert.match(messages[0]?.content ?? '', /finish private reasoning within 20,000 tokens/i);
+  assert.match(messages[0]?.content ?? '', /reserve the remaining response budget/i);
 });
 
 test('a reasoning-only compatible response reports output exhaustion accurately', async () => {
@@ -696,6 +704,71 @@ for (const api of ['responses', 'chat'] as const) {
   });
 }
 
+test('a timed-out compatible stream records the partial provider work as estimated usage', async (t) => {
+  const previous = {
+    short: process.env.ORVEX_TEST_SHORT_TIMEOUTS,
+    hard: process.env.ORVEX_LLM_MAX_TOTAL_MS,
+    retries: process.env.ORVEX_RATELIMIT_MAX_RETRIES,
+  };
+  process.env.ORVEX_TEST_SHORT_TIMEOUTS = '1';
+  process.env.ORVEX_LLM_MAX_TOTAL_MS = '40';
+  process.env.ORVEX_RATELIMIT_MAX_RETRIES = '1';
+  const originalFetch = globalThis.fetch;
+  const encoder = new TextEncoder();
+  let usage:
+    | {
+        inputTokens: number;
+        outputTokens: number;
+        tokenSource?: string;
+        attemptId?: string;
+      }
+    | undefined;
+  globalThis.fetch = (async (_input, init) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'x'.repeat(400) } }] })}\n\n`,
+            ),
+          );
+          const abort = () => controller.error(new DOMException('aborted', 'AbortError'));
+          init?.signal?.addEventListener('abort', abort, { once: true });
+          if (init?.signal?.aborted) abort();
+        },
+      }),
+      { status: 200 },
+    )) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries({
+      ORVEX_TEST_SHORT_TIMEOUTS: previous.short,
+      ORVEX_LLM_MAX_TOTAL_MS: previous.hard,
+      ORVEX_RATELIMIT_MAX_RETRIES: previous.retries,
+    })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  await assert.rejects(
+    llmChat('system', 'user', {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://partial-timeout.test',
+      api: 'chat',
+      onUsage: (event) => {
+        usage = event;
+      },
+    }),
+    /wall-clock cap/,
+  );
+  assert.equal(usage?.tokenSource, 'estimate');
+  assert.ok((usage?.inputTokens ?? 0) > 0);
+  assert.ok((usage?.outputTokens ?? 0) > 0);
+  assert.match(usage?.attemptId ?? '', /^[0-9a-f-]{36}$/i);
+});
+
 test('every actual provider request emits durable retry lineage and retries at most once', async (t) => {
   const previous = {
     retries: process.env.ORVEX_RATELIMIT_MAX_RETRIES,
@@ -990,7 +1063,17 @@ test('provider cooldowns delay only reviews that require that provider', async (
   assert.equal(admissionEvents[1]?.phase, 'finished');
   if (admissionEvents[1]?.phase === 'finished') {
     assert.equal(admissionEvents[1].outcome, 'rate_limited');
+    assert.equal(admissionEvents[1].dispatched, false);
   }
+});
+
+test('an active request reaching its hard cap does not cool the whole provider', () => {
+  assert.equal(
+    providerCooldownForFailure('LLM chat call exceeded 300000ms wall-clock cap'),
+    undefined,
+  );
+  assert.equal(providerCooldownForFailure('LLM chat stream stalled'), 30_000);
+  assert.equal(providerCooldownForFailure('LLM request failed (529): overloaded'), 2_000);
 });
 
 test('cancellation during a distributed lease wait is recorded as cancelled', async (t) => {

@@ -28,6 +28,8 @@ export type ModelAttemptEvent =
       phase: 'finished';
       attemptId: string;
       outcome: ModelAttemptOutcome;
+      /** True only when provider-side work was actually started. */
+      dispatched?: boolean;
       durationMs: number;
       completedAt: string;
       error?: string;

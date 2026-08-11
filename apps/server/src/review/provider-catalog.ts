@@ -5,6 +5,7 @@ import {
   type ReviewStage,
 } from '@orvex-review/review';
 import type { LlmTarget, PassTier, WorkerConfig } from './worker-types.js';
+import { DEEPSEEK_REVIEW_OUTPUT_TOKENS } from './model-routing.js';
 
 export interface ResolvedStageTarget {
   stage: ReviewStage;
@@ -64,7 +65,8 @@ export class ProviderCatalog {
           target.transport !== 'compatible-chat' ||
           target.admissionBucket !== 'deepseek' ||
           !target.thinking ||
-          target.reasoningEffort !== 'max'
+          target.reasoningEffort !== 'max' ||
+          target.maxTokens !== DEEPSEEK_REVIEW_OUTPUT_TOKENS
         ) {
           throw new Error(`DeepSeek v4 Flash at max reasoning is required for ${stage.id}`);
         }

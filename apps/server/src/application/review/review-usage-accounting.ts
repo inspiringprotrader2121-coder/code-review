@@ -43,6 +43,7 @@ export interface ReviewAttemptStore {
   completeReviewRunAttempt(input: {
     id: string;
     outcome: string;
+    dispatched?: boolean;
     durationMs: number;
     completedAt: string;
     error?: string;
@@ -151,6 +152,7 @@ export function createReviewUsageAccounting(
     const completed = dependencies.store.completeReviewRunAttempt({
       id: event.attemptId,
       outcome: event.outcome,
+      dispatched: event.dispatched ?? true,
       durationMs: event.durationMs,
       completedAt: event.completedAt,
       error: event.error,

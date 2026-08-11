@@ -81,17 +81,23 @@ async function executeAttempt(
   const parentAttemptId = state.lastAttemptId;
   const retryIndex = state.nextRetryIndex++;
   state.lastAttemptId = attemptId;
-  emitAttempt(options, {
-    phase: 'started',
-    attemptId,
-    parentAttemptId,
-    retryIndex,
-    keyIndex: homeIndex,
-    provider: 'codex-cli',
-    model: DEFAULT_CODEX_CLI_MODEL,
-    transport: 'codex-cli',
-    startedAt: new Date(started).toISOString(),
-  });
+  let startedEventEmitted = false;
+  const emitStarted = () => {
+    if (startedEventEmitted) return;
+    startedEventEmitted = true;
+    emitAttempt(options, {
+      phase: 'started',
+      attemptId,
+      parentAttemptId,
+      retryIndex,
+      keyIndex: homeIndex,
+      provider: 'codex-cli',
+      model: DEFAULT_CODEX_CLI_MODEL,
+      transport: 'codex-cli',
+      startedAt: new Date(started).toISOString(),
+    });
+  };
+  let dispatched = false;
   try {
     const result = await withCodexResumeLock(
       homeIndex,
@@ -100,8 +106,10 @@ async function executeAttempt(
       () =>
         withProviderCallSlot(
           'luna',
-          () =>
-            executeCodex(prompt, {
+          () => {
+            dispatched = true;
+            emitStarted();
+            return executeCodex(prompt, {
               model: DEFAULT_CODEX_CLI_MODEL,
               reasoningEffort: DEFAULT_CODEX_CLI_REASONING_EFFORT,
               threadId,
@@ -115,7 +123,8 @@ async function executeAttempt(
               onUsage: options.onUsage
                 ? (usage) => options.onUsage?.({ ...usage, attemptId })
                 : undefined,
-            }),
+            });
+          },
           options.signal,
           options.dependencies?.admission,
         ),
@@ -125,11 +134,15 @@ async function executeAttempt(
       phase: 'finished',
       attemptId,
       outcome: 'succeeded',
+      dispatched,
       durationMs: clock.now() - started,
       completedAt: new Date(clock.now()).toISOString(),
     });
     return result;
   } catch (error) {
+    // Admission/lock failures still get a complete durable lifecycle, but are
+    // explicitly non-dispatched and therefore cannot imply unknown provider spend.
+    emitStarted();
     const normalized = normalizeCodexAttemptError(error, options.signal);
     const message = normalized.message;
     const outcome =
@@ -144,6 +157,7 @@ async function executeAttempt(
       phase: 'finished',
       attemptId,
       outcome,
+      dispatched,
       durationMs: clock.now() - started,
       completedAt: new Date(clock.now()).toISOString(),
       error: message.slice(0, 2_000),
