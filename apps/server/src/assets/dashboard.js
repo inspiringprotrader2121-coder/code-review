@@ -88,12 +88,14 @@ const dur = (ms) => {
     ? sec + 's'
     : Math.floor(sec / 60) + 'm ' + String(sec % 60).padStart(2, '0') + 's';
 };
-const estimatedUsd = (n, estimated = false) =>
-  n == null
-    ? estimated
-      ? 'usage pending*'
-      : '—'
-    : (estimated ? '~' : '') + '$' + finiteNumber(n).toFixed(2) + (estimated ? '*' : '');
+const estimatedUsd = (n, estimated = false) => {
+  if (n == null) return estimated ? 'usage incomplete*' : '—';
+  const amount = finiteNumber(n);
+  // A zero total alongside an unreported terminal provider attempt is unknown,
+  // not a zero-cost review. Keep it distinct from a partial known total.
+  if (estimated && amount === 0) return 'usage incomplete*';
+  return (estimated ? '~' : '') + '$' + amount.toFixed(2) + (estimated ? '*' : '');
+};
 const repoShort = (fn) => String(fn || '').split('/');
 
 // —— theme toggle (persisted) ——
