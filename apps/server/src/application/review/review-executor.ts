@@ -34,7 +34,11 @@ import { createReviewUsageAccounting } from './review-usage-accounting.js';
 import { scheduleReviewStages, selectScheduledReviewCalls } from './review-stage-scheduler.js';
 import type { ReviewExecutionPolicy } from './review-execution-policy.js';
 import { resolvePrStatePollMs } from './review-execution-policy.js';
-import { executeReviewProviderCalls, type ReviewCallOutcome } from './review-provider-execution.js';
+import {
+  executeReviewProviderCalls,
+  perReviewProviderParallelism,
+  type ReviewCallOutcome,
+} from './review-provider-execution.js';
 import { orchestrateVerification } from './verification-orchestrator.js';
 import type { PreparedExecutionReview, ProcessResult } from './types.js';
 
@@ -136,6 +140,8 @@ export interface ReviewExecutionServices {
   verificationEnabled: boolean;
   publicationPolicy: PublicationPolicy;
   executionPolicy: ReviewExecutionPolicy;
+  /** Provider capacity available to verification before fleet fair-sharing. */
+  verificationConcurrency?: number;
 }
 
 export type ReviewComputation = (review: PreparedExecutionReview) => Promise<ProcessResult>;
@@ -331,6 +337,20 @@ export async function executeReviewCore(
       onOwnershipLoss: cancelForOwnershipLoss,
     });
     const { usage, onUsageFor, onAttemptFor } = accounting;
+    const activeReviewCountForProvider = async (): Promise<number> => {
+      let activeReviewCount = getActiveReviewCount();
+      if (config.activeReviewCount) {
+        try {
+          activeReviewCount = await config.activeReviewCount();
+        } catch (error) {
+          console.warn(
+            '[worker] could not read fleet review activity; using local active-review count:',
+            (error as Error).message,
+          );
+        }
+      }
+      return Math.max(1, activeReviewCount);
+    };
     if (filesForLlm.length > 0) {
       // Depth is enforced HERE, in the harness, and scaled BY PLAN — not left to
       // how long one model call decides to think. Higher tiers get the fixed four
@@ -444,17 +464,7 @@ export async function executeReviewCore(
           );
         }
 
-        let activeReviewCount = getActiveReviewCount();
-        if (config.activeReviewCount) {
-          try {
-            activeReviewCount = await config.activeReviewCount();
-          } catch (error) {
-            console.warn(
-              '[worker] could not read fleet review activity; using local active-review count:',
-              (error as Error).message,
-            );
-          }
-        }
+        const activeReviewCount = await activeReviewCountForProvider();
         const outcomes: ReviewCallOutcome[] = await executeReviewProviderCalls({
           calls: toRun,
           filesForLlm,
@@ -469,7 +479,7 @@ export async function executeReviewCore(
           onAttemptFor,
           tagFindings,
           mapConcurrent: services.executor.mapConcurrent.bind(services.executor),
-          activeReviewCount: Math.max(1, activeReviewCount),
+          activeReviewCount,
           apiConcurrency: concurrency,
         });
 
@@ -752,6 +762,19 @@ export async function executeReviewCore(
       ...merged.toPost,
       ...merged.reviewOnly.map(({ finding }) => finding),
     ];
+    const verificationActiveReviews = await activeReviewCountForProvider();
+    const verificationCapacity = Math.min(
+      executionPolicy.concurrency,
+      services.verificationConcurrency ?? 1,
+    );
+    const verificationConcurrency = perReviewProviderParallelism(
+      verificationCapacity,
+      verificationActiveReviews,
+    );
+    console.log(
+      `[worker] verification scheduling: activeReviews=${verificationActiveReviews} ` +
+        `perReview=${verificationConcurrency}`,
+    );
     const verification = await orchestrateVerification({
       candidates: verificationCandidates,
       toPost: merged.toPost,
@@ -764,6 +787,7 @@ export async function executeReviewCore(
       signal: reviewAbortController.signal,
       providers: providerRegistry,
       findings: services.findingPipeline,
+      concurrency: verificationConcurrency,
       onUsage: onUsageFor(verificationTier, llm, 'verification'),
       onAttempt: onAttemptFor(verificationTier, 'verification'),
     });

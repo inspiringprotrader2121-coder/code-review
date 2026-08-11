@@ -53,6 +53,7 @@ test('one immutable bootstrap snapshot compiles both public plan contracts exact
   );
   assert.equal(worker.reviewRuntime?.cooldownSeconds, 42);
   assert.equal(worker.reviewRuntime?.execution.maxCalls, 31);
+  assert.equal(worker.reviewRuntime?.verifyConcurrency, 3);
   assert.equal(worker.reviewRuntime?.publication.maxUnanchoredComments, 7);
   assert.ok(Object.isFrozen(server.review));
   assert.ok(Object.isFrozen(worker.reviewRuntime));

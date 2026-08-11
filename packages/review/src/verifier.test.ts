@@ -429,6 +429,43 @@ test('verification does not replay a failed paid provider call', async (t) => {
   assert.equal(calls, 1);
 });
 
+test('host-selected verifier concurrency runs independent candidate batches in parallel', async () => {
+  let active = 0;
+  let peak = 0;
+  const candidates = Array.from({ length: 4 }, (_, index) =>
+    finding({ line: index + 1, message: `candidate ${index + 1}` }),
+  );
+  const result = await verifyFindings(
+    candidates,
+    [{ path: 'a.js', content: 'function reviewed() {}' }],
+    {
+      apiKey: 'test-key',
+      model: 'test-verifier',
+      maxFindingsPerBatch: 1,
+      concurrency: 2,
+      runner: {
+        transport: 'compatible-chat',
+        async run() {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          active--;
+          return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'test-verifier',
+      },
+    },
+  );
+
+  assert.equal(result.status, 'verified');
+  assert.equal(result.kept.length, 4);
+  assert.equal(peak, 2);
+});
+
 test('verification makes one parent-linked retry when a successful response violates the JSON contract', async (t) => {
   const originalFetch = globalThis.fetch;
   const encoder = new TextEncoder();

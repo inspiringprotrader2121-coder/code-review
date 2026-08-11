@@ -164,6 +164,7 @@ function runtimeFor(config: WorkerConfig): NonNullable<WorkerConfig['reviewRunti
           enabled: false,
         }),
       }),
+      verifyConcurrency: 1,
       cooldownSeconds: 120,
       verificationEnabled: true,
     })
@@ -357,6 +358,7 @@ export function createReviewPipelineServices(config: WorkerConfig): ReviewPipeli
       verificationEnabled: runtime.verificationEnabled,
       publicationPolicy,
       executionPolicy,
+      verificationConcurrency: runtime.verifyConcurrency,
     }),
   );
   return { admission, preparation, executor, finalization };

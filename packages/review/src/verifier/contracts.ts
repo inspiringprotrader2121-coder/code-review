@@ -16,6 +16,8 @@ export interface VerifierOptions {
   verifierTier?: string;
   maxFindingsPerBatch?: number;
   maxTotalChars?: number;
+  /** Bounded verifier-batch parallelism chosen by the host scheduler. */
+  concurrency?: number;
   onUsage?: (usage: {
     inputTokens: number;
     cachedInputTokens?: number;

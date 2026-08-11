@@ -179,6 +179,7 @@ export function createWorkerConfig(config: ServerConfig, store: AppDatabase): Wo
           maxCandidates: runtime.aggregationMaxCandidates,
         }),
       }),
+      verifyConcurrency: runtime.verifyConcurrency,
       cooldownSeconds: runtime.cooldownSeconds,
       verificationEnabled: runtime.verificationEnabled,
     }),

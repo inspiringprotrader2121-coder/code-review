@@ -99,6 +99,7 @@ export interface WorkerConfig {
         disabledReason?: string;
       }>;
     }>;
+    verifyConcurrency: number;
     cooldownSeconds: number;
     verificationEnabled: boolean;
   }>;

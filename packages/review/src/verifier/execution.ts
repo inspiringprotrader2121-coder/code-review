@@ -155,7 +155,8 @@ export async function verifyFindings(
     }
   };
   let nextBatch = 0;
-  const concurrency = loadReviewRuntimeConfig().verifyConcurrency;
+  const configuredConcurrency = options.concurrency ?? loadReviewRuntimeConfig().verifyConcurrency;
+  const concurrency = Math.min(8, Math.max(1, Math.floor(configuredConcurrency)));
   await Promise.all(
     Array.from({ length: Math.min(concurrency, batches.length) }, async () => {
       for (;;) {

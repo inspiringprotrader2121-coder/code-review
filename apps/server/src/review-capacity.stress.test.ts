@@ -25,8 +25,8 @@ test(
       ORVEX_PROVIDER_CONCURRENCY_LUNA: '8',
       ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: '8',
       ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '8',
-      ORVEX_VERIFY_CONCURRENCY: '1',
-      ORVEX_REVIEW_CONCURRENCY: '3',
+      ORVEX_VERIFY_CONCURRENCY: '8',
+      ORVEX_REVIEW_CONCURRENCY: '8',
       ORVEX_MAX_SANDBOXES: '8',
     });
     assert.deepEqual(
@@ -38,7 +38,7 @@ test(
         verify: config.review.verifyConcurrency,
         sandboxes: config.sandbox.sandbox.maxConcurrentSandboxes,
       },
-      { reviews: 8, luna: 8, minimax: 8, deepseek: 8, verify: 1, sandboxes: 8 },
+      { reviews: 8, luna: 8, minimax: 8, deepseek: 8, verify: 8, sandboxes: 8 },
     );
 
     const db = new AppDatabase(':memory:');

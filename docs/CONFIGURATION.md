@@ -197,7 +197,7 @@ Limits bound time, spend, and context. Production verification remains on; max r
 | `ORVEX_VERIFY_FILE_CHARS` | integer; positive chars; default 32000 | `32000` | no / none | - | Verifier per-file context budget. |
 | `ORVEX_VERIFY_TOTAL_CHARS` | integer; positive chars; default 96000 | `96000` | no / none | - | Verifier total context budget. |
 | `ORVEX_VERIFY_BATCH_SIZE` | integer; positive; default 3 | `3` | no / none | - | Verifier candidate batch size. |
-| `ORVEX_VERIFY_CONCURRENCY` | integer; 1..8; default 3 | `1` | no / none | - | Verifier batch concurrency. The production profile uses one per review to keep total DeepSeek fan-out bounded. |
+| `ORVEX_VERIFY_CONCURRENCY` | integer; 1..8; default 3 | `8` | no / none | - | Verifier batch capacity. Idle reviews fan out independent candidate batches; the scheduler divides capacity fairly among active reviews. |
 | `ORVEX_RISK_PROBES` | integer; 0..4; unset disables | `(unset)` | no / none | - | Optional number of additional risk probes. |
 | `ORVEX_RISK_PROBE_SELECTIVITY` | number; >=1.5; default 2 | `2` | no / none | - | Risk-probe selection threshold. |
 | `ORVEX_LARGE_PR_FILES` | integer; positive; default 40 | `40` | no / none | - | Changed-file count classifying a large PR. |

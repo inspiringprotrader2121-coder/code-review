@@ -27,6 +27,7 @@ export async function orchestrateVerification(input: {
   signal: AbortSignal;
   providers: Pick<ProviderAdapterRegistry, 'textRunnerFor'>;
   findings: Pick<FindingPipeline, 'applyVerification'>;
+  concurrency?: number;
   onUsage: (usage: {
     inputTokens: number;
     cachedInputTokens?: number;
@@ -67,6 +68,7 @@ export async function orchestrateVerification(input: {
     verifierTier: input.tier,
     signal: input.signal,
     confirmedCount: input.toPost.length,
+    concurrency: input.concurrency,
     onUsage: input.onUsage,
     onAttempt: input.onAttempt,
   });

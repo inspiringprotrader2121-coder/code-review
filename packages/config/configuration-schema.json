@@ -1634,13 +1634,13 @@
         },
         {
           "name": "ORVEX_VERIFY_CONCURRENCY",
-          "example": "1",
+          "example": "8",
           "type": "integer",
           "range": "1..8; default 3",
           "secret": false,
           "redaction": "none",
           "enabled": false,
-          "description": "Verifier batch concurrency. The production profile uses one per review to keep total DeepSeek fan-out bounded.",
+          "description": "Verifier batch capacity. Idle reviews fan out independent candidate batches; the scheduler divides capacity fairly among active reviews.",
           "deprecatedAliases": []
         },
         {

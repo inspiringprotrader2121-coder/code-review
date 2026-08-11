@@ -127,6 +127,7 @@ test('production PM2 profile allocates the full idle provider capacity to a revi
   const ecosystem = readFileSync(new URL('../../../ecosystem.config.cjs', import.meta.url), 'utf8');
   assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=8(?:\s|\\")/);
   assert.match(ecosystem, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_VERIFY_CONCURRENCY=8(?:\s|\\")/);
 });
 
 test('supporting context cannot override the diff-first production ceiling', () => {
