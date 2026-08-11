@@ -6,6 +6,7 @@ import {
 import type { ReviewQueue } from '@orvex-review/queue';
 import {
   dropSelfNegatingFindings,
+  displaySeverity,
   fingerprintFinding,
   llmFindingsToReviewFindings,
   runLlmReview,
@@ -340,7 +341,7 @@ function formatScanIssue(
     const safeFile = sanitizeFileCell(f.file);
     const loc = f.line ? `\`${safeFile}:${f.line}\`` : `\`${safeFile}\``;
     const message = sanitizeFindingText(f.message).replace(/\|/g, '\\|').replace(/\n/g, ' ');
-    lines.push(`| ${f.severity} | ${loc} | ${message} |`);
+    lines.push(`| ${displaySeverity(f.severity)} | ${loc} | ${message} |`);
   }
   lines.push(
     '',

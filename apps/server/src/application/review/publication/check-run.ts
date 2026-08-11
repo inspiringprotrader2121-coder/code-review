@@ -26,11 +26,11 @@ export async function publishCheckRun(
         ? 'neutral'
         : 'success';
   const manualNote = manualAny
-    ? ` · ${input.merged.reviewOnly.length} candidate(s) need manual review${manualP1 ? ' (incl. P1)' : ''}`
+    ? ` · ${input.merged.reviewOnly.length} candidate(s) need manual review${manualP1 ? ' (incl. Critical)' : ''}`
     : '';
   const verifyNote =
     inconclusiveCount > 0
-      ? ` · ${inconclusiveCount} P1/P2 finding${inconclusiveCount === 1 ? '' : 's'} inconclusive`
+      ? ` · ${inconclusiveCount} Critical/High finding${inconclusiveCount === 1 ? '' : 's'} inconclusive`
       : input.verificationIncomplete
         ? ' · verification incomplete (NOT a full precision sign-off)'
         : '';
@@ -48,7 +48,7 @@ export async function publishCheckRun(
         ? input.skippedLenses.length > 0
           ? `${summary} — ${input.skippedLenses.length} review pass(es) did not complete; NOT a full sign-off`
           : inconclusiveCount > 0
-            ? `${summary} — ${inconclusiveCount} P1/P2 finding${
+            ? `${summary} — ${inconclusiveCount} Critical/High finding${
                 inconclusiveCount === 1 ? ' remains' : 's remain'
               } visible for manual review; remaining findings were precision-gated`
             : `${summary} — precision verification did not complete; NOT a full sign-off`

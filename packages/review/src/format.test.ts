@@ -41,6 +41,8 @@ const render = (
 
 test('inline finding renders a collapsed AI-agent prompt naming the file and line', () => {
   const out = formatInlineFinding(render());
+  assert.match(out, /^\*\*High\*\*/);
+  assert.doesNotMatch(out, /^\*\*P2\*\*/);
   assert.match(out, /🤖 Prompt for AI agents/);
   assert.match(out, /Fix this issue in `src\/a\.ts` around line 12/);
   // quad-backtick fence so the prompt can safely contain its own ``` blocks
@@ -116,11 +118,27 @@ test('a completed verifier distinguishes an inconclusive required finding from a
     verificationIncomplete: 'Verification did not complete for this review.',
     verificationInconclusiveCount: 1,
   });
-  assert.match(body, /Verification completed, but 1 P1\/P2 finding is inconclusive/);
+  assert.match(body, /Verification completed, but 1 Critical\/High finding is inconclusive/);
   assert.match(body, /remains visible for manual review/);
   assert.match(body, /remaining posted findings were precision-gated/);
   assert.doesNotMatch(body, /Verification did not complete/);
   assert.doesNotMatch(body, /Re-run `@orvex` review/);
+});
+
+test('review tables use named severities while keeping the stored priority values intact', () => {
+  const body = formatReviewBody(
+    [
+      finding({ severity: 'P1' }),
+      finding({ severity: 'P2' }),
+      finding({ severity: 'P3' }),
+      finding({ severity: 'info' }),
+    ],
+    [],
+    meta,
+  );
+  for (const label of ['Critical', 'High', 'Medium', 'Low'])
+    assert.match(body, new RegExp(`\\| ${label} \\|`));
+  assert.doesNotMatch(body, /\| P[123] \|/);
 });
 
 test('manual-review candidates remain visible without becoming inline findings or auto-fix work', () => {

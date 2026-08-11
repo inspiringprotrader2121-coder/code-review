@@ -13,6 +13,7 @@ export {
   applyCheckboxChecked,
 } from './format/apply-markers.js';
 export { formatInlineFinding } from './format/inline-finding.js';
+export { DISPLAY_SEVERITY, displaySeverity } from './severity.js';
 export {
   formatFixedReply,
   formatFixAppliedReply,

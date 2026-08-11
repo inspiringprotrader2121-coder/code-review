@@ -1,5 +1,6 @@
 import type { InlineFindingRender } from './contracts.js';
 import { applyCheckboxLine } from './apply-markers.js';
+import { displaySeverity } from '../severity.js';
 import { closeOpenFences, sanitizeFileCell, sanitizeFindingText } from './sanitize.js';
 
 export function formatInlineFinding(render: InlineFindingRender): string {
@@ -8,7 +9,11 @@ export function formatInlineFinding(render: InlineFindingRender): string {
     message: sanitizeFindingText(render.finding.message),
     suggestion: sanitizeFindingText(render.finding.suggestion),
   };
-  const parts = [`**${finding.severity}** · \`${finding.ruleId}\``, '', finding.message];
+  const parts = [
+    `**${displaySeverity(finding.severity)}** · \`${finding.ruleId}\``,
+    '',
+    finding.message,
+  ];
   const suggestedLine = nativeSuggestionLine(render, finding.originalCode, finding.fixedCode);
 
   if (suggestedLine !== undefined) {

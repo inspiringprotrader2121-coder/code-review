@@ -36,6 +36,7 @@ const finiteNumber = (value, fallback = 0) => {
 };
 const wholeNumber = (value, fallback = 0) => Math.max(0, Math.trunc(finiteNumber(value, fallback)));
 const sevCls = (s) => ({ P1: 'p1', P2: 'p2', P3: 'p3' })[s] || 'muted';
+const sevLabel = (s) => ({ P1: 'Critical', P2: 'High', P3: 'Medium', info: 'Low' })[s] || s;
 const runCls = (s) =>
   s === 'completed' ? 'done' : s === 'failed' ? 'fail' : s === 'running' ? 'run' : 'queued';
 const runReason = (r) => {
@@ -313,10 +314,10 @@ async function tiles(o) {
   const avg = s.avgDurationMs ? dur(s.avgDurationMs) : '—';
   const by = f.bySeverity || {};
   const sev = [
-    ['P1', wholeNumber(by.P1), 'var(--p1)'],
-    ['P2', wholeNumber(by.P2), 'var(--p2)'],
-    ['P3', wholeNumber(by.P3), 'var(--p3)'],
-    ['Info', wholeNumber(by.info), 'var(--info)'],
+    ['Critical', wholeNumber(by.P1), 'var(--p1)'],
+    ['High', wholeNumber(by.P2), 'var(--p2)'],
+    ['Medium', wholeNumber(by.P3), 'var(--p3)'],
+    ['Low', wholeNumber(by.info), 'var(--info)'],
   ];
   const sevTot = Math.max(
     1,
@@ -438,10 +439,10 @@ function severity(f) {
     );
   document.getElementById('sevSub').textContent = wholeNumber(f.open) + ' open across all repos';
   const rows = [
-    ['P1 · Critical', 'p1', wholeNumber(by.P1)],
-    ['P2 · High', 'p2', wholeNumber(by.P2)],
-    ['P3 · Medium', 'p3', wholeNumber(by.P3)],
-    ['Low · info', 'info', wholeNumber(by.info)],
+    ['Critical', 'p1', wholeNumber(by.P1)],
+    ['High', 'p2', wholeNumber(by.P2)],
+    ['Medium', 'p3', wholeNumber(by.P3)],
+    ['Low', 'info', wholeNumber(by.info)],
   ];
   let html = rows
     .map(
@@ -745,7 +746,7 @@ async function loadFindings() {
               '<tr><td><span class="chip ' +
               sevCls(f.severity) +
               '">' +
-              esc(f.severity) +
+              esc(sevLabel(f.severity)) +
               '</span></td><td class="mono">' +
               esc(repoShort(f.repoFullName).pop()) +
               ' #' +

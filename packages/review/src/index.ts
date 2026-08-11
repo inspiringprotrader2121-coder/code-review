@@ -98,6 +98,8 @@ export {
   type FixSummaryInput,
   sanitizeFileCell,
   sanitizeFindingText,
+  DISPLAY_SEVERITY,
+  displaySeverity,
 } from './format.js';
 export { parseOrvexCommand, commandTrigger, type OrvexCommand } from './commands.js';
 export type { OrvexCommandDoc, CommandWhere } from './commands-catalog.js';

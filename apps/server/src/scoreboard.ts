@@ -68,8 +68,9 @@ function severityOf(body: string): string | null {
   const p = /\b(P[0-3])\b/.exec(body);
   if (p) return p[1];
   if (/critical/i.test(body)) return 'P1';
-  if (/\bmajor\b/i.test(body)) return 'P2';
-  if (/\bminor\b|\bnitpick\b/i.test(body)) return 'P3';
+  if (/\b(?:high|major)\b/i.test(body)) return 'P2';
+  if (/\b(?:medium|minor|nitpick)\b/i.test(body)) return 'P3';
+  if (/\b(?:low|info)\b/i.test(body)) return 'info';
   if (/potential issue/i.test(body)) return 'P2';
   return null;
 }
@@ -123,7 +124,7 @@ export async function buildScoreboard(
       });
       counts[bot] = (counts[bot] ?? 0) + 1;
     }
-    // PR-level comments: Orvex's unanchored findings (start with **P1**/**P2**/…)
+    // PR-level comments: Orvex's unanchored findings use named severity labels.
     const issueComments = await octokit.paginate(octokit.rest.issues.listComments, {
       owner,
       repo,
@@ -134,7 +135,7 @@ export async function buildScoreboard(
       const bot = KNOWN_BOTS[c.user?.login ?? ''];
       if (!bot) continue;
       const body = c.body ?? '';
-      if (!/^\*\*(P[0-3]|info)\*\*/.test(body.trim())) continue; // findings only, not summaries
+      if (!/^\*\*(?:P[0-3]|info|Critical|High|Medium|Low)\*\*/i.test(body.trim())) continue;
       const fileMatch = /`([^`]+?)(?::(\d+))?`/.exec(body);
       findings.push({
         pr: pr.number,

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { publishCheckRun } from './check-run.js';
 import type { ArtifactPublisher, PublicationInput } from './contracts.js';
 
-test('a completed verifier with an inconclusive P1/P2 finding has an accurate neutral check', async () => {
+test('a completed verifier with an inconclusive Critical/High finding has an accurate neutral check', async () => {
   let request: Record<string, unknown> | undefined;
   const publisher: ArtifactPublisher = {
     publishArtifact: async (_scope, _key, write) => write(),
@@ -36,7 +36,7 @@ test('a completed verifier with an inconclusive P1/P2 finding has an accurate ne
   assert.equal(request?.output?.title, 'Orvex Review (inconclusive finding)');
   assert.match(
     String(request?.output?.summary),
-    /1 P1\/P2 finding remains visible for manual review/,
+    /1 Critical\/High finding remains visible for manual review/,
   );
   assert.doesNotMatch(String(request?.output?.summary), /did not complete/);
 });

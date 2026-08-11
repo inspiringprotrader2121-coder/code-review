@@ -12,6 +12,7 @@ function esc(s) {
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
   );
 }
+const sevLabel = (s) => ({ P1: 'Critical', P2: 'High', P3: 'Medium', info: 'Low' })[s] || s;
 function number(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -643,7 +644,7 @@ function render(b) {
       ':' +
       (m.line ?? '?') +
       '</td><td>' +
-      esc(m.severity || '—') +
+      esc(sevLabel(m.severity || '—')) +
       '</td><td>' +
       m.bots.map(esc).join(', ') +
       '</td><td class="mono">' +
@@ -664,7 +665,7 @@ function render(b) {
       ':' +
       (m.line ?? '?') +
       '</td><td>' +
-      esc(m.severity || '—') +
+      esc(sevLabel(m.severity || '—')) +
       '</td><td class="mono">' +
       esc(m.excerpt) +
       '</td></tr>';
@@ -753,7 +754,7 @@ function renderDeep(d) {
   h +=
     '<div class="panel">A/B pairs (normal first, then deep, same commit): <strong>' +
     d.pairs.length +
-    '</strong> · deep added a P1/P2 beyond normal on <strong class="' +
+    '</strong> · deep added a Critical/High finding beyond normal on <strong class="' +
     (d.pairs.length && d.pairsWhereDeepAddedSevere / d.pairs.length >= 0.5 ? 'unique' : 'miss') +
     '">' +
     d.pairsWhereDeepAddedSevere +
@@ -764,7 +765,7 @@ function renderDeep(d) {
     '</div>';
   if (d.pairs.length) {
     h +=
-      '<div class="panel"><table><tr><th>PR@commit</th><th>Normal found (P1/P2/P3/info)</th><th>Deep ADDED (P1/P2/P3/info)</th><th>Normal $</th><th>Deep $</th></tr>';
+      '<div class="panel"><table><tr><th>PR@commit</th><th>Normal found (Critical/High/Medium/Low)</th><th>Deep ADDED (Critical/High/Medium/Low)</th><th>Normal $</th><th>Deep $</th></tr>';
     const f = (x) => x.P1 + '/' + x.P2 + '/' + x.P3 + '/' + x.info;
     for (const p of d.pairs) {
       h +=

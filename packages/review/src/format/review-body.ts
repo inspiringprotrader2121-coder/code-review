@@ -1,5 +1,6 @@
 import type { ReviewFinding } from '../finding.js';
 import { formatReviewCommandsFooter } from '../commands-catalog.js';
+import { displaySeverity } from '../severity.js';
 import type { ReviewCommentMeta } from './contracts.js';
 import { sanitizeFileCell, sanitizeFindingText } from './sanitize.js';
 
@@ -71,7 +72,7 @@ export function formatReviewBody(
   }
   if ((meta.verificationInconclusiveCount ?? 0) > 0) {
     const count = meta.verificationInconclusiveCount!;
-    const subject = `${count} P1/P2 finding${count === 1 ? '' : 's'}`;
+    const subject = `${count} Critical/High finding${count === 1 ? '' : 's'}`;
     lines.push(
       '',
       `> ⚠️ **Verification completed, but ${subject} ${count === 1 ? 'is' : 'are'} inconclusive.** ${
@@ -145,7 +146,7 @@ export function formatReviewBody(
       const message = sanitizeFindingText(finding.message)
         .replace(/\|/g, '\\|')
         .replace(/\n/g, ' ');
-      lines.push(`| ${finding.severity} | ${file} | ${message} |`);
+      lines.push(`| ${displaySeverity(finding.severity)} | ${file} | ${message} |`);
     }
     const withSuggestions = tableFindings.filter((finding) => finding.suggestion);
     if (withSuggestions.length > 0) {
@@ -195,7 +196,7 @@ export function formatReviewBody(
         .replace(/\|/g, '\\|')
         .replace(/\n/g, ' ')
         .slice(0, 300);
-      lines.push(`| ${finding.severity} | ${file} | ${message} |`);
+      lines.push(`| ${displaySeverity(finding.severity)} | ${file} | ${message} |`);
     }
     lines.push('', '</details>');
   }
@@ -235,7 +236,7 @@ export function formatReviewBody(
         .replace(/\|/g, '\\|')
         .replace(/\n/g, ' ')
         .slice(0, 220);
-      lines.push(`| ${finding.severity} | ${file} | ${message} | ${why} |`);
+      lines.push(`| ${displaySeverity(finding.severity)} | ${file} | ${message} | ${why} |`);
     }
     if (hidden > 0)
       lines.push(`| … | | **${hidden} more candidate(s) not shown** | body size limit |`);
@@ -258,7 +259,7 @@ export function formatReviewBody(
         .replace(/\|/g, '\\|')
         .replace(/\n/g, ' ')
         .slice(0, 200);
-      lines.push(`| ${finding.severity} | ${file} | ${message} |`);
+      lines.push(`| ${displaySeverity(finding.severity)} | ${file} | ${message} |`);
     }
   }
 

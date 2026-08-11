@@ -1,6 +1,7 @@
 import {
   applyCheckboxLine,
   commandTrigger,
+  displaySeverity,
   fingerprintFinding,
   formatReviewBody,
 } from '@orvex-review/review';
@@ -98,7 +99,7 @@ async function publishUnanchoredFinding(
 ): Promise<void> {
   const fingerprint = fingerprintFinding(finding);
   const parts = [
-    `**${finding.severity}** · \`${finding.file}${finding.line ? `:${finding.line}` : ''}\` · \`${finding.ruleId}\``,
+    `**${displaySeverity(finding.severity)}** · \`${finding.file}${finding.line ? `:${finding.line}` : ''}\` · \`${finding.ruleId}\``,
     '',
     finding.message,
   ];
