@@ -95,6 +95,7 @@ export async function awaitAnthropicFinalMessage<T>(
   const startedAt = clock.now();
   const absoluteDeadlineAt = startedAt + absoluteCapMs;
   let deadlineAt = startedAt + hardLimitMs;
+  let sawStreamProgress = false;
 
   const clearTimers = () => {
     if (inactivityTimer) clock.clearTimeout(inactivityTimer);
@@ -116,7 +117,7 @@ export async function awaitAnthropicFinalMessage<T>(
     const remaining = Math.max(1, deadlineAt - clock.now());
     hardTimer = clock.setTimeout(() => {
       const sinceProgress = clock.now() - lastProgressAt;
-      if (sinceProgress < inactivityMs && deadlineAt < absoluteDeadlineAt) {
+      if (sawStreamProgress && sinceProgress < inactivityMs && deadlineAt < absoluteDeadlineAt) {
         deadlineAt = Math.min(absoluteDeadlineAt, deadlineAt + PROGRESS_GRACE_MS);
         console.warn(
           `[llm] anthropic stream still progressing; extending hard wall to ${Math.round((deadlineAt - clock.now()) / 1000)}s remaining (cap ${Math.round(absoluteCapMs / 1000)}s)`,
@@ -129,6 +130,7 @@ export async function awaitAnthropicFinalMessage<T>(
     }, remaining);
   };
   const onActivity = () => {
+    sawStreamProgress = true;
     lastProgressAt = clock.now();
     armInactivity();
   };
@@ -186,6 +188,7 @@ async function openStream(
   const startedAt = clock.now();
   const absoluteDeadlineAt = startedAt + absoluteCapMs;
   let deadlineAt = startedAt + hardLimitMs;
+  let sawStreamProgress = false;
   const armTimer = () => {
     lastProgressAt = clock.now();
     if (timer) clock.clearTimeout(timer);
@@ -203,7 +206,7 @@ async function openStream(
     const remaining = Math.max(1, deadlineAt - clock.now());
     hardTimer = clock.setTimeout(() => {
       const sinceProgress = clock.now() - lastProgressAt;
-      if (sinceProgress < inactivityMs && deadlineAt < absoluteDeadlineAt) {
+      if (sawStreamProgress && sinceProgress < inactivityMs && deadlineAt < absoluteDeadlineAt) {
         deadlineAt = Math.min(absoluteDeadlineAt, deadlineAt + PROGRESS_GRACE_MS);
         console.warn(
           `[llm] ${labels.stream} stream still progressing; extending hard wall (${Math.round((deadlineAt - clock.now()) / 1000)}s remaining, cap ${Math.round(absoluteCapMs / 1000)}s)`,
@@ -263,6 +266,7 @@ async function openStream(
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      sawStreamProgress = true;
       armTimer();
       if (clock.now() > deadlineAt) {
         if (deadlineAt < absoluteDeadlineAt && clock.now() - lastProgressAt < inactivityMs) {
