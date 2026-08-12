@@ -194,7 +194,8 @@ function providerCapacity(
 }
 
 function localProviderCapacityMaximum(provider: string): number {
-  return providerEnvironmentName(provider) === 'DEEPSEEK' ? 64 : 32;
+  // Allow one worker to run a large concurrent enterprise burst at full strength.
+  return providerEnvironmentName(provider) === 'DEEPSEEK' ? 128 : 100;
 }
 
 function capacityEpoch(raw: string | undefined): string {
@@ -287,13 +288,13 @@ export function loadReviewRuntimeConfig(
   const reviewWorkerConcurrency = boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 100);
   const codexApiKeyConcurrency = boundedConcurrency(
     env.ORVEX_CODEX_APIKEY_CONCURRENCY,
-    boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 32),
-    32,
+    boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 100),
+    100,
   );
   const sharedProviderCapacity =
     env.ORVEX_CODEX_CLI === '1'
       ? codexApiKeyConcurrency
-      : boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 32);
+      : boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 100);
   const providerOverrides = snapshotProviderOverrides(env, 'ORVEX_PROVIDER_CONCURRENCY_');
   const fleetProviderOverrides = snapshotProviderOverrides(
     env,

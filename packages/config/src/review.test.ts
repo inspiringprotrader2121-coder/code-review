@@ -125,9 +125,9 @@ test('local provider concurrency keeps provider-specific safety bounds', () => {
     ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '999',
   });
 
-  assert.equal(config.providerConcurrency('luna'), 32);
-  assert.equal(config.providerConcurrency('deepseek'), 64);
-  assert.equal(config.providerConcurrency('minimax'), 32);
+  assert.equal(config.providerConcurrency('luna'), 100);
+  assert.equal(config.providerConcurrency('deepseek'), 128);
+  assert.equal(config.providerConcurrency('minimax'), 100);
 });
 
 test('fleet provider capacity is independent from per-worker capacity and snapshots its environment', () => {
@@ -157,13 +157,18 @@ test('fleet provider capacity is independent from per-worker capacity and snapsh
 
 test('production PM2 profile allocates the full idle provider capacity to a review', () => {
   const ecosystem = readFileSync(new URL('../../../ecosystem.config.cjs', import.meta.url), 'utf8');
-  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=64(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_MINIMAX=32(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=64(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=32(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_FLEET_CAPACITY_EPOCH=review-burst-v2(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_MAX_CONCURRENT_REVIEWS=100(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_LUNA=100(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=128(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_MINIMAX=100(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA=100(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=128(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=100(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_FLEET_TENANT_CONCURRENCY=100(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_PROVIDER_LEASE_WAIT_MS=600000(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v1(?:\s|\\")/);
   assert.match(ecosystem, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_VERIFY_CONCURRENCY=8(?:\s|\\")/);
+  assert.match(ecosystem, /ORVEX_VERIFY_CONCURRENCY=32(?:\s|\\")/);
 });
 
 test('supporting context cannot override the diff-first production ceiling', () => {

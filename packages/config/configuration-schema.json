@@ -1115,12 +1115,12 @@
         },
         {
           "name": "ORVEX_PROVIDER_LEASE_WAIT_MS",
-          "example": "30000",
+          "example": "600000",
           "type": "integer",
-          "range": "1000..3600000 ms; default 30000",
+          "range": "1000..3600000 ms; default 600000",
           "secret": false,
           "redaction": "none",
-          "description": "Bounded provider-slot wait. Saturation fails transiently after this interval instead of holding every worker indefinitely.",
+          "description": "Bounded provider-slot wait. Reviews wait for a full-quality paid slot up to this interval instead of failing incomplete on short bursts.",
           "deprecatedAliases": []
         },
         {

@@ -190,6 +190,20 @@ export class RedisProviderAdmission implements ProviderAdmission, ProviderCapaci
     await this.redis.eval(EXTEND_COOLDOWN, 1, this.key(this.cooldownPrefix, provider), until);
   }
 
+  async getProviderLoad(provider: string): Promise<{ active: number; limit: number }> {
+    const normalized = normalizeProviderName(provider);
+    const key = this.key(this.leasePrefix, normalized);
+    await this.redis.zremrangebyscore(key, '-inf', this.now());
+    const active = await this.redis.zcard(key);
+    let limit = this.capacityPlan?.limits[normalized] ?? 0;
+    if (this.capacityKey) {
+      const configured = await this.redis.hget(this.capacityKey, normalized);
+      const parsed = Number(configured);
+      if (Number.isFinite(parsed) && parsed > 0) limit = parsed;
+    }
+    return { active, limit: Math.max(1, Math.floor(limit || 1)) };
+  }
+
   private key(prefix: string, provider: string): string {
     return `${prefix}${normalizeProviderName(provider)}`;
   }

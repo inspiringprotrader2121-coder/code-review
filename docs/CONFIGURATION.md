@@ -142,7 +142,7 @@ Production uses durable storage outside the checkout and Redis with a namespaced
 | `ORVEX_QUEUE_MAX_DEDUP` | integer; 1..1000000; default 20000 | `20000` | no / none | - | In-memory development queue deduplication bound. |
 | `ORVEX_MAX_RESUME_AFTER_RESTART` | integer; 0..10; default 0 | `0` | no / none | - | Orphan review resume cap. Keep zero until durable per-stage checkpoints exist. |
 | `ORVEX_MAX_JOB_RETRIES` | integer; 0..1; default 0 | `0` | no / none | - | Automatic whole-review retry count. Keep zero because a failed ensemble can already have incurred most of its cost. |
-| `ORVEX_PROVIDER_LEASE_WAIT_MS` | integer; 1000..3600000 ms; default 30000 | `30000` | no / none | - | Bounded provider-slot wait. Saturation fails transiently after this interval instead of holding every worker indefinitely. |
+| `ORVEX_PROVIDER_LEASE_WAIT_MS` | integer; 1000..3600000 ms; default 600000 | `600000` | no / none | - | Bounded provider-slot wait. Reviews wait for a full-quality paid slot up to this interval instead of failing incomplete on short bursts. |
 | `ORVEX_SHUTDOWN_DRAIN_MS` | integer; 1000..86400000 ms; default 240000 | `960000` | no / none | - | Graceful shutdown drain. It must exceed ORVEX_LLM_MAX_TOTAL_MS to avoid mid-flight requeues. |
 | `ORVEX_SHUTDOWN_CANCEL_MS` | integer; 100..60000 ms; default 10000 | `10000` | no / none | - | Graceful shutdown cancellation grace period. |
 | `ORVEX_MAX_CONCURRENT_REVIEWS` | integer; 1..100; default 8 | `8` | no / none | - | Authoritative whole-review concurrency ceiling. |

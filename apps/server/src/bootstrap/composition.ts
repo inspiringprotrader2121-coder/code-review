@@ -21,6 +21,7 @@ export interface CompositionFactories {
   configureProviderCoordinator?: (
     coordinator?: LlmProviderCoordinator,
     localProviderConcurrency?: (provider: string) => number,
+    admissionWaitMs?: number,
   ) => void;
 }
 
@@ -36,6 +37,7 @@ export function composeApplication(
   (factories.configureProviderCoordinator ?? configureLlmProviderCoordinator)(
     coordinator,
     config.review.providerConcurrency,
+    config.queue.providerLeaseWaitMs,
   );
   const githubConfig = githubAppConfig(config);
   const app = createApp(queue, { db, config, githubConfig });

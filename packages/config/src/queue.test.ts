@@ -10,7 +10,7 @@ test('production queue configuration requires an explicit Redis URL downstream',
     redisUrl: null,
     redisNamespace: 'orvex-review',
     maxResumeAfterRestart: 0,
-    providerLeaseWaitMs: 30_000,
+    providerLeaseWaitMs: 600_000,
     maxMemoryDedupEntries: 20_000,
   });
 });

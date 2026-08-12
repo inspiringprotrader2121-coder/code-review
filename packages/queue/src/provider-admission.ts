@@ -10,6 +10,8 @@ export interface ProviderAdmission {
   releaseProviderLease(provider: string, token: string): Promise<void>;
   getProviderCooldownMs(provider: string): Promise<number>;
   setProviderCooldown(provider: string, durationMs: number): Promise<void>;
+  /** Optional occupancy peek for adaptive per-review fanout under load. */
+  getProviderLoad?(provider: string): Promise<{ active: number; limit: number }>;
 }
 
 /**
@@ -86,6 +88,7 @@ interface MemoryLease {
 export interface MemoryProviderAdmissionState {
   leases: Map<string, MemoryLease>;
   cooldowns: Map<string, number>;
+  limits?: Map<string, number>;
 }
 
 export interface MemoryProviderAdmissionOptions {
@@ -113,7 +116,8 @@ export class MemoryProviderAdmission implements ProviderAdmission {
   private readonly leaseTtlMs: number;
 
   constructor(options: MemoryProviderAdmissionOptions = {}) {
-    this.state = options.state ?? { leases: new Map(), cooldowns: new Map() };
+    this.state = options.state ?? { leases: new Map(), cooldowns: new Map(), limits: new Map() };
+    if (!this.state.limits) this.state.limits = new Map();
     this.now = options.now ?? Date.now;
     this.retryDelayMs = Math.max(1, Math.floor(options.retryDelayMs ?? 5));
     this.waitMs = Math.max(1_000, Math.floor(options.waitMs ?? 30_000));
@@ -127,6 +131,7 @@ export class MemoryProviderAdmission implements ProviderAdmission {
   ): Promise<string> {
     const normalized = normalizeProviderName(provider);
     const ceiling = Math.max(1, Math.floor(limit));
+    this.state.limits?.set(normalized, ceiling);
     const token = randomUUID();
     const deadline = this.waitMs === undefined ? undefined : this.now() + this.waitMs;
     for (;;) {
@@ -167,6 +172,17 @@ export class MemoryProviderAdmission implements ProviderAdmission {
     const key = normalizeProviderName(provider);
     const until = this.now() + Math.min(300_000, Math.max(250, Math.floor(durationMs)));
     this.state.cooldowns.set(key, Math.max(this.state.cooldowns.get(key) ?? 0, until));
+  }
+
+  async getProviderLoad(provider: string): Promise<{ active: number; limit: number }> {
+    const normalized = normalizeProviderName(provider);
+    this.removeExpiredLeases(normalized);
+    const active = this.activeLeaseCount(normalized);
+    const configured = this.state.limits?.get(normalized);
+    return {
+      active,
+      limit: Math.max(1, configured ?? active),
+    };
   }
 
   private activeLeaseCount(provider: string): number {

@@ -53,6 +53,8 @@ export interface ProviderAdmission {
   releaseProviderLease(provider: string, token: string): Promise<void>;
   getProviderCooldownMs(provider: string): Promise<number>;
   setProviderCooldown(provider: string, durationMs: number): Promise<void>;
+  /** Optional occupancy peek for adaptive per-review fanout under load. */
+  getProviderLoad?(provider: string): Promise<{ active: number; limit: number }>;
 }
 
 export interface RetryPolicy {

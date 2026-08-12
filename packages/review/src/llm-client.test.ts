@@ -1430,17 +1430,10 @@ test('provider cooldowns delay only reviews that require that provider', async (
   assert.equal(calls, 1, 'an independent provider remains available');
 
   await setProviderCooldown('provider-a-test', 250);
-  const eventCountBeforeAdmissionFailure = events.length;
-  await assert.rejects(llmChat('sys', 'user', target), /provider-a-test cooldown active/i);
-  assert.equal(calls, 1, 'the provider-specific cooldown still blocks its own network call');
-  const admissionEvents = events.slice(eventCountBeforeAdmissionFailure);
-  assert.equal(admissionEvents.length, 2, 'pre-network rejection still has a durable lifecycle');
-  assert.equal(admissionEvents[0]?.phase, 'started');
-  assert.equal(admissionEvents[1]?.phase, 'finished');
-  if (admissionEvents[1]?.phase === 'finished') {
-    assert.equal(admissionEvents[1].outcome, 'rate_limited');
-    assert.equal(admissionEvents[1].dispatched, false);
-  }
+  const waitedFrom = Date.now();
+  await llmChat('sys', 'user', target);
+  assert.ok(Date.now() - waitedFrom >= 200, 'waits out the provider-specific cooldown');
+  assert.equal(calls, 2, 'the call proceeds after the cooldown clears without weakening the review');
 });
 
 test('an active request reaching its hard cap does not cool the whole provider', () => {
