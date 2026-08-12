@@ -104,7 +104,7 @@ Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenti
 | `ORVEX_OPENAI_MODEL` | string; pinned Luna model ID | `gpt-5.6-luna` | no / none | - | Pinned Luna model identifier. |
 | `ORVEX_OPENAI_API` | enum; responses | `responses` | no / none | - | OpenAI API shape used by explicit diagnostics/evaluation. |
 | `ORVEX_OPENAI_REASONING_EFFORT` | enum; max | `max` | no / none | - | Luna reasoning effort. Production must remain maximum. |
-| `ORVEX_LLM_MAX_TOTAL_MS` | integer; 30000..300000 ms; default 300000 | `300000` | no / none | - | Hard budget for a provider attempt. Hard timeouts are not retried. |
+| `ORVEX_LLM_MAX_TOTAL_MS` | integer; 30000..900000 ms; default 480000 | `480000` | no / none | - | Hard budget for a provider attempt. Hard timeouts are not retried. |
 | `ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS` | integer; positive tokens; unset disables | `20000` | no / none | - | Anthropic-compatible provider thinking-token budget. |
 | `ORVEX_OPENAI_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.2` | no / none | - | Legacy generic OpenAI input fallback. The pinned Luna stage uses its published fixed rate instead. |
 | `ORVEX_OPENAI_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.02` | no / none | - | Legacy generic OpenAI cached-input fallback. The pinned Luna stage uses its published fixed rate instead. |

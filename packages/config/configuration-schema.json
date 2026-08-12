@@ -792,9 +792,9 @@
         },
         {
           "name": "ORVEX_LLM_MAX_TOTAL_MS",
-          "example": "300000",
+          "example": "480000",
           "type": "integer",
-          "range": "30000..300000 ms; default 300000",
+          "range": "30000..900000 ms; default 480000",
           "secret": false,
           "redaction": "none",
           "description": "Hard budget for a provider attempt. Hard timeouts are not retried.",
