@@ -182,7 +182,7 @@ test('production PM2 profile splits api/scheduler/workers with fleet Redis caps'
   assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=100(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_FLEET_TENANT_CONCURRENCY=40(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_PROVIDER_LEASE_WAIT_MS=600000(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v1(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v2(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_VERIFY_CONCURRENCY=32(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_MAX_SANDBOXES=32(?:\s|\\")/);

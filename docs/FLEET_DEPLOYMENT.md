@@ -31,7 +31,7 @@ machine while isolating HTTP from review work:
 | `velatrix-worker-01..13` | `worker`    | Stable `ORVEX_WORKER_ID=review-worker-NN`; **8** reviews each.       |
 
 Fleet provider ceilings remain Redis-owned (`ORVEX_FLEET_PROVIDER_CONCURRENCY_*`
-= 100/128/100, epoch `review-scale-v1`). Per-worker
+= 100/128/100, epoch `review-scale-v2`). Per-worker
 `ORVEX_MAX_CONCURRENT_REVIEWS=8` is a local slot count only.
 `ORVEX_FLEET_TENANT_CONCURRENCY=40` caps one tenant's concurrent claims for
 fairness. Worker `kill_timeout` stays above `ORVEX_SHUTDOWN_DRAIN_MS`.

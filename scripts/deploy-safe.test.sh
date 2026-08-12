@@ -243,8 +243,8 @@ for (const [variable, expected] of Object.entries({
 if (!schedulerArgs.includes('ORVEX_WORKER_ID=scheduler-01')) {
   throw new Error('production scheduler profile does not pin ORVEX_WORKER_ID');
 }
-if (!workerArgs.includes('ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v1')) {
-  throw new Error('production profile does not pin the review-scale-v1 capacity epoch');
+if (!workerArgs.includes('ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v2')) {
+  throw new Error('production profile does not pin the review-scale-v2 capacity epoch');
 }
 if (workerArgs.indexOf('. ./.env') > workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8')) {
   throw new Error('immutable .env would override the code-owned production profile');
