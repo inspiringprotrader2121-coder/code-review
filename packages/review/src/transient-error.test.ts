@@ -36,17 +36,17 @@ test('detects rate-limit / token-plan / transport errors as transient (retryable
   assert.ok(isTransientLlmError('LLM request failed (402): requires more credits'));
 });
 
-test('uses a funded-provider-friendly 64k output ceiling by default', (t) => {
+test('uses a 128k output ceiling by default', (t) => {
   const previous = process.env.ORVEX_MAX_OUTPUT_TOKENS;
   t.after(() => {
     if (previous === undefined) delete process.env.ORVEX_MAX_OUTPUT_TOKENS;
     else process.env.ORVEX_MAX_OUTPUT_TOKENS = previous;
   });
   delete process.env.ORVEX_MAX_OUTPUT_TOKENS;
-  assert.equal(resolveMaxOutputTokens(), 64_000);
+  assert.equal(resolveMaxOutputTokens(), 128_000);
   assert.equal(resolveMaxOutputTokens(12_345.9), 12_345);
   process.env.ORVEX_MAX_OUTPUT_TOKENS = 'not-a-number';
-  assert.equal(resolveMaxOutputTokens(), 64_000);
+  assert.equal(resolveMaxOutputTokens(), 128_000);
 });
 
 test('parseRetryAfterMs extracts the provider retry-after hint', () => {
@@ -109,17 +109,18 @@ test('clamps an oversized ceiling to the safe cap (the 200k prod misconfig)', (t
     else process.env.ORVEX_MAX_OUTPUT_TOKENS_CAP = prevCap;
   });
   delete process.env.ORVEX_MAX_OUTPUT_TOKENS_CAP;
-  // The exact live misconfig that reserved 128k credit and 402'd every call.
+  // Values above the 128k per-model cap still clamp. 200k was a live misconfig
+  // that reserved more credit than intended.
   process.env.ORVEX_MAX_OUTPUT_TOKENS = '200000';
-  assert.equal(resolveMaxOutputTokens(), 64_000, 'env 200k must clamp to 64k');
-  assert.equal(resolveMaxOutputTokens(200_000), 64_000, 'explicit 200k must clamp to 64k');
+  assert.equal(resolveMaxOutputTokens(), 128_000, 'env 200k must clamp to 128k');
+  assert.equal(resolveMaxOutputTokens(200_000), 128_000, 'explicit 200k must clamp to 128k');
   // A value at/under the cap passes through untouched.
   process.env.ORVEX_MAX_OUTPUT_TOKENS = '48000';
   assert.equal(resolveMaxOutputTokens(), 48_000);
   // The cap is a deliberate escape hatch — raising it lifts the ceiling.
-  process.env.ORVEX_MAX_OUTPUT_TOKENS_CAP = '120000';
-  process.env.ORVEX_MAX_OUTPUT_TOKENS = '100000';
-  assert.equal(resolveMaxOutputTokens(), 100_000, 'raising the cap lets a larger value through');
+  process.env.ORVEX_MAX_OUTPUT_TOKENS_CAP = '200000';
+  process.env.ORVEX_MAX_OUTPUT_TOKENS = '180000';
+  assert.equal(resolveMaxOutputTokens(), 180_000, 'raising the cap lets a larger value through');
 });
 
 test('all permanent 4xx statuses are non-transient; retry-later statuses remain transient', () => {
@@ -145,8 +146,11 @@ test('all permanent 4xx statuses are non-transient; retry-later statuses remain 
   );
 });
 
-test('does NOT treat a genuine parse/model failure as transient (those degrade to empty)', () => {
+test('does NOT treat a genuine parse/model failure as a whole-review retry', () => {
   assert.ok(!isTransientLlmError('LLM response contained no parseable JSON'));
+  assert.ok(
+    !isTransientLlmError('LLM response truncated (stop_reason=max_tokens); increase max tokens'),
+  );
   assert.ok(!isTransientLlmError('Unexpected token in JSON'));
   assert.ok(!isTransientLlmError('LLM returned no text content'));
   assert.ok(isTransientLlmError('LLM provider returned empty response with zero usage'));

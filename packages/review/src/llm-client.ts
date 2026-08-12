@@ -30,7 +30,7 @@ export {
 } from './llm/retry-policy.js';
 export { llmChat } from './llm/client.js';
 export { estimateTokens, resolveMaxOutputTokens } from './llm/support.js';
-export { extractJsonLoose, stripThinking } from './llm/parsing.js';
+export { extractJsonLoose, jsonFinishPrefix, stripThinking } from './llm/parsing.js';
 export type {
   LlmAttemptEvent,
   LlmAttemptOutcome,

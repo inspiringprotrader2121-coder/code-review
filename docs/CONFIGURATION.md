@@ -184,8 +184,8 @@ Limits bound time, spend, and context. Production verification remains on; max r
 | `ORVEX_LLM_TIMEOUT_MS` | integer; 1000..900000 ms; default 240000 | `240000` | no / none | - | Per-call timeout protecting the per-PR lock from hung calls. |
 | `ORVEX_RESPONSES_TIMEOUT_MS` | integer; 1000..900000 ms; default 900000 | `900000` | no / none | - | Responses API hard timeout. |
 | `ORVEX_TEST_SHORT_TIMEOUTS` | boolean; test-only flag | `1` | no / none | - | Shorten timeout bounds only in tests. |
-| `ORVEX_MAX_OUTPUT_TOKENS` | integer; positive tokens; default 64000 | `64000` | no / none | - | Maximum LLM output token request. |
-| `ORVEX_MAX_OUTPUT_TOKENS_CAP` | integer; 1..1000000; default 64000 | `64000` | no / none | - | Hard cap for maximum LLM output tokens. |
+| `ORVEX_MAX_OUTPUT_TOKENS` | integer; positive tokens; default 128000 | `128000` | no / none | - | Maximum LLM output token request. |
+| `ORVEX_MAX_OUTPUT_TOKENS_CAP` | integer; 1..1000000; default 128000 | `128000` | no / none | - | Hard cap for maximum LLM output tokens. |
 | `ORVEX_MAX_FINDINGS` | integer; 1..1000; default 25 | `25` | no / none | - | Maximum findings retained per review pass. |
 | `ORVEX_AGENT_CTX_CHARS` | integer; 1..2000000 chars; default 240000 | `240000` | no / none | - | Agent review context budget. |
 | `ORVEX_TRIGGER` | string; GitHub comment trigger; default @orvex | `@orvex` | no / none | - | Manual review command trigger. |

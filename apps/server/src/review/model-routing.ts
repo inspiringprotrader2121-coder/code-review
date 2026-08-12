@@ -17,15 +17,13 @@ export interface ReviewRoutingPolicy {
   minimaxMaxOutputTokens: number;
 }
 
-// DeepSeek reasoning and final JSON share max_tokens. Keep API effort=max, but
-// bound the shared completion so a single call cannot burn forever before the
-// answer-only prefix continuation writes JSON. 24k leaves headroom under the
-// default 480s wall; empty-answer finish=length still resumes via continuation.
-export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = 24_000;
-// MiniMax's reasoning tokens share this response budget. A required production
-// chunk exhausted 32k before emitting complete JSON, so retain headroom for the
-// bounded final answer without lowering the model's thinking mode.
-export const MINIMAX_REVIEW_OUTPUT_TOKENS = 48_000;
+// Per-call output cap shared by Luna, DeepSeek, and MiniMax. Below each
+// model's documented maximum (Luna 128k, MiniMax recommended 131k, DeepSeek
+// Flash 384k). Reasoning and JSON still share this budget; answer-only
+// continuation finishes JSON if thinking fills it.
+export const REVIEW_OUTPUT_TOKENS = 128_000;
+export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = REVIEW_OUTPUT_TOKENS;
+export const MINIMAX_REVIEW_OUTPUT_TOKENS = REVIEW_OUTPUT_TOKENS;
 
 export const DEFAULT_REVIEW_ROUTING_POLICY: ReviewRoutingPolicy = Object.freeze({
   codexCliEnabled: false,

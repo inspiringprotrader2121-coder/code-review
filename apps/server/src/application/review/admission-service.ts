@@ -183,6 +183,12 @@ export class AdmissionService {
           }),
       );
       if (!reserved.ok) {
+        if (reserved.reason === 'concurrency_limited') {
+          console.log(
+            `[worker] concurrency deferred ${job.owner}/${job.repo}#${job.pr}: tenant at cap; preserving queue age`,
+          );
+          return { kind: 'deferred', reason: 'concurrency_limited' };
+        }
         if (reserved.reason !== 'free_tier_capped') {
           await this.dependencies.postLimitNudge(
             config,

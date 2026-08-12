@@ -87,6 +87,40 @@ test('processWorkerJob defers when provider fleet is saturated', async () => {
   await admission.releaseProviderLease('minimax', minimax);
 });
 
+test('processWorkerJob requeues tenant concurrency overflow instead of completing a skip', async () => {
+  const queue = new MemoryReviewQueue();
+  await queue.enqueue(job);
+  const claimed = await queue.dequeue();
+  assert.ok(claimed);
+  const logs: string[] = [];
+
+  await processWorkerJob(claimed!, {
+    queue,
+    runtime: testServerConfig(),
+    loadConfig: () => ({ store: {} }) as WorkerConfig,
+    processReview: async () => ({
+      findingCount: 0,
+      newCount: 0,
+      fixedCount: 0,
+      skipReason: 'concurrency_deferred',
+    }),
+    active: () => 1,
+    capacity: 8,
+    onSettled: () => {},
+    log: {
+      log: (message) => logs.push(String(message)),
+      warn: () => {},
+      error: () => {},
+    },
+  });
+
+  assert.ok(logs.some((line) => /tenant concurrency full/i.test(line)));
+  const again = await queue.dequeue();
+  assert.equal(again?.headSha, job.headSha);
+  assert.equal(again?.enqueuedAt, job.enqueuedAt);
+  await queue.markCompleted(again!);
+});
+
 test('processWorkerJob marks mid-review calls as straggler priority', async () => {
   const queue = {
     async markRunning() {

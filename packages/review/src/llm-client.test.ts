@@ -469,7 +469,7 @@ test('official DeepSeek resumes one truncated max-reasoning response through pre
   assert.equal(captured[0]?.url, 'https://api.deepseek.com/v1/chat/completions');
   assert.equal(captured[1]?.url, 'https://api.deepseek.com/beta/chat/completions');
   assert.equal(captured[1]?.body.reasoning_effort, 'max');
-  assert.equal(captured[1]?.body.max_tokens, 16_000);
+  assert.equal(captured[1]?.body.max_tokens, 24_000);
   assert.equal(
     'response_format' in captured[1]!.body,
     false,
@@ -739,6 +739,55 @@ test('DeepSeek prefix recovery is bounded without replaying the review', async (
     /remained truncated after 2 bounded prefix continuation/,
   );
   assert.equal(calls, 3);
+});
+
+test('a prose-only JSON contract is finished by one answer-only continuation', async () => {
+  const encoder = new TextEncoder();
+  let call = 0;
+  const captured = await withStubbedFetch(
+    () => {
+      call++;
+      const content =
+        call === 1 ? 'I reviewed the diff and found nothing.' : '{"findings":[],"summary":"clean"}';
+      return new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`),
+          );
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+            ),
+          );
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+    },
+    async () => {
+      const result = await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'MiniMax-M3',
+        baseUrl: 'https://minimax.test/v1',
+        api: 'chat',
+        json: true,
+        maxTokens: 16_000,
+      });
+      assert.equal(result, '{"findings":[],"summary":"clean"}');
+    },
+  );
+
+  assert.equal(captured.length, 2);
+  assert.equal(captured[1]?.url, 'https://minimax.test/v1/chat/completions');
+  assert.deepEqual(
+    (captured[1]?.body.chat_template_kwargs as { thinking_mode?: string } | undefined)
+      ?.thinking_mode,
+    'disabled',
+  );
+  const messages = captured[1]?.body.messages as Array<{ role: string; content: string }>;
+  assert.equal(messages.at(-2)?.role, 'assistant');
+  assert.equal(messages.at(-2)?.content, '{"findings":');
+  assert.match(messages.at(-1)?.content ?? '', /complete the json object/i);
 });
 
 test('MiniMax keeps thinking enabled without consuming its answer budget', () => {
@@ -1394,6 +1443,48 @@ test('Anthropic cancellation wins a timeout/close race and clears watchdog resou
   assert.equal(stream.aborts, 1);
   assert.equal(stream.listeners, 0);
   assert.equal(clock.activeTimers, 0);
+});
+
+test('MiniMax max_tokens continues as answer-only JSON instead of marking the lens incomplete', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  let call = 0;
+  const replies = [
+    { text: '{"findings":[', stop: 'max_tokens' },
+    { text: '],"summary":"complete"}', stop: 'end_turn' },
+  ];
+  const anthropic = {
+    messages: {
+      stream(params: Record<string, unknown>) {
+        requests.push(params);
+        const reply = replies[call++]!;
+        const message = {
+          content: [{ type: 'text' as const, text: reply.text }],
+          stop_reason: reply.stop,
+          usage: { input_tokens: 12, output_tokens: 40 },
+        };
+        const stream = new FakeAnthropicStream(message);
+        queueMicrotask(() => stream.resolve(message));
+        return stream;
+      },
+    },
+  };
+
+  const result = await llmChat('sys', 'user', {
+    apiKey: 'test-key',
+    model: 'MiniMax-M3',
+    api: 'anthropic',
+    json: true,
+    maxTokens: 48_000,
+    dependencies: { anthropic },
+  });
+
+  assert.equal(result, '{"findings":[],"summary":"complete"}');
+  assert.equal(requests.length, 2);
+  assert.ok(requests[0]?.thinking, 'primary MiniMax call keeps thinking enabled');
+  assert.equal(requests[1]?.thinking, undefined, 'continuation is answer-only');
+  const continuationMessages = requests[1]?.messages as Array<{ role: string; content: string }>;
+  assert.equal(continuationMessages.at(-1)?.role, 'assistant');
+  assert.equal(continuationMessages.at(-1)?.content, '{"findings":[');
 });
 
 test('provider cooldowns delay only reviews that require that provider', async (t) => {

@@ -374,6 +374,9 @@ export async function processReviewJob(
 ): Promise<ProcessResult> {
   const admitted = await services.admission.admit(job, config);
   if (admitted.kind === 'skipped') return admitted.result;
+  if (admitted.kind === 'deferred') {
+    return { findingCount: 0, newCount: 0, fixedCount: 0, skipReason: 'concurrency_deferred' };
+  }
 
   let review = admitted.review;
 

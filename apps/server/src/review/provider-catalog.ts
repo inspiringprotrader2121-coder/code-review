@@ -5,7 +5,7 @@ import {
   type ReviewStage,
 } from '@orvex-review/review';
 import type { LlmTarget, PassTier, WorkerConfig } from './worker-types.js';
-import { DEEPSEEK_REVIEW_OUTPUT_TOKENS } from './model-routing.js';
+import { DEEPSEEK_REVIEW_OUTPUT_TOKENS, MINIMAX_REVIEW_OUTPUT_TOKENS } from './model-routing.js';
 
 export interface ResolvedStageTarget {
   stage: ReviewStage;
@@ -78,7 +78,8 @@ export class ProviderCatalog {
           !/^minimax(?:-|$)/i.test(target.model) ||
           !['compatible-chat', 'anthropic'].includes(target.transport) ||
           target.admissionBucket !== 'minimax' ||
-          !target.thinking
+          !target.thinking ||
+          target.maxTokens !== MINIMAX_REVIEW_OUTPUT_TOKENS
         ) {
           throw new Error(`MiniMax thinking is required for ${stage.id}`);
         }

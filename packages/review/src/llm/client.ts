@@ -25,22 +25,23 @@ import {
   sleep,
 } from './retry-policy.js';
 import { clockFor, maxTotalMs } from './support.js';
+import { jsonContractMissing, jsonFinishPrefix } from './parsing.js';
 import { DeepSeekContinuationRequiredError } from './transports.js';
 
 let keyCursor = 0;
 // Primary max-reasoning can exhaust the shared completion budget with zero JSON.
 // Continuations must finish the answer under load; keep them answer-only (thinking
-// off) with enough wall/token headroom that a 3-PR burst does not mark required
-// DeepSeek lenses incomplete after Luna already succeeded.
-const MAX_DEEPSEEK_PREFIX_CONTINUATIONS = 2;
-const DEEPSEEK_PREFIX_CONTINUATION_MAX_MS = 180_000;
-const DEEPSEEK_PREFIX_CONTINUATION_MAX_TOKENS = 16_000;
+// off) with enough wall/token headroom that a queued multi-tenant burst still
+// completes in minutes instead of marking required lenses incomplete.
+const MAX_PREFIX_CONTINUATIONS = 2;
+const PREFIX_CONTINUATION_MAX_MS = 180_000;
+const PREFIX_CONTINUATION_MAX_TOKENS = 24_000;
 const MAX_CONTINUATION_RATE_LIMIT_RETRIES = 2;
 
 /**
- * One paid-call slot covers the primary attempt plus bounded DeepSeek
- * answer-only continuations so continuations never rejoin the back of a
- * multi-minute fleet wait queue after Luna already succeeded.
+ * One paid-call slot covers the primary attempt plus bounded answer-only
+ * continuations so continuations never rejoin the back of a multi-minute fleet
+ * wait queue after Luna already succeeded.
  * Key identity is fixed for the held slot (including continuations).
  */
 async function llmChatHoldingProviderSlot(
@@ -63,17 +64,17 @@ async function llmChatHoldingProviderSlot(
       compatibleContinuation: continuation,
       ...(continuation ? { thinking: false } : {}),
       hardLimitMs: continuation
-        ? Math.min(opts.hardLimitMs ?? maxTotalMs(), DEEPSEEK_PREFIX_CONTINUATION_MAX_MS)
+        ? Math.min(opts.hardLimitMs ?? maxTotalMs(), PREFIX_CONTINUATION_MAX_MS)
         : opts.hardLimitMs,
       maxTokens: continuation
         ? Math.min(
-            opts.maxTokens ?? DEEPSEEK_PREFIX_CONTINUATION_MAX_TOKENS,
-            DEEPSEEK_PREFIX_CONTINUATION_MAX_TOKENS,
+            opts.maxTokens ?? PREFIX_CONTINUATION_MAX_TOKENS,
+            PREFIX_CONTINUATION_MAX_TOKENS,
           )
         : opts.maxTokens,
     };
     try {
-      return await trackedLlmAttempt(
+      const text = await trackedLlmAttempt(
         system,
         user,
         attemptOpts,
@@ -81,6 +82,22 @@ async function llmChatHoldingProviderSlot(
         keyIndex,
         lineage,
       );
+      if (opts.json && jsonContractMissing(text)) {
+        if (continuationCount >= MAX_PREFIX_CONTINUATIONS) {
+          throw new Error('LLM response contained no parseable JSON');
+        }
+        continuation = {
+          reasoningContent: continuation?.reasoningContent ?? '',
+          contentPrefix: jsonFinishPrefix(text),
+        };
+        continuationCount++;
+        continuationRateLimitAttempt = 0;
+        console.warn(
+          `[llm] JSON contract missing; continuing the same response (${continuationCount}/${MAX_PREFIX_CONTINUATIONS})`,
+        );
+        continue;
+      }
+      return text;
     } catch (error) {
       const lastError =
         opts.signal?.aborted && !isReviewCancelledError(error)
@@ -89,16 +106,16 @@ async function llmChatHoldingProviderSlot(
       if (isReviewCancelledError(lastError) || opts.signal?.aborted)
         throw new ReviewCancelledError();
       if (lastError instanceof DeepSeekContinuationRequiredError) {
-        if (continuationCount >= MAX_DEEPSEEK_PREFIX_CONTINUATIONS) {
+        if (continuationCount >= MAX_PREFIX_CONTINUATIONS) {
           throw new Error(
-            `DeepSeek response remained truncated after ${MAX_DEEPSEEK_PREFIX_CONTINUATIONS} bounded prefix continuation`,
+            `LLM response remained truncated after ${MAX_PREFIX_CONTINUATIONS} bounded prefix continuation`,
           );
         }
         continuation = lastError.continuation;
         continuationCount++;
         continuationRateLimitAttempt = 0;
         console.warn(
-          `[llm] DeepSeek max-reasoning output exhausted; continuing the same response (${continuationCount}/${MAX_DEEPSEEK_PREFIX_CONTINUATIONS})`,
+          `[llm] max-reasoning output exhausted; continuing the same response (${continuationCount}/${MAX_PREFIX_CONTINUATIONS})`,
         );
         continue;
       }
@@ -195,7 +212,7 @@ export async function llmChat(
       // Errors that already consumed the held-slot continuation path must not
       // restart the expensive primary attempt under a fresh admission.
       if (
-        /continuation rate-limited|DeepSeek response remained truncated|bounded prefix continuation/i.test(
+        /continuation rate-limited|response remained truncated|bounded prefix continuation/i.test(
           lastError.message,
         )
       ) {

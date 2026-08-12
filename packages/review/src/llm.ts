@@ -17,7 +17,9 @@ import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } 
  * A rate-limit / transport failure (429, token-plan quota, network, timeout) —
  * retryable, and crucially NOT a clean review. Callers should FAIL the review on
  * these (so it retries when quota recovers) rather than posting an empty result.
- * A model returning unparseable text is a different case (degrade to empty).
+ * Truncation and missing JSON are finished in-request with a cheap answer-only
+ * continuation. They must not trigger another max-reasoning pass or a whole
+ * review replay — that is how spend explodes under load.
  */
 export function isTransientLlmError(message: string): boolean {
   if (isRetryableEmptyProviderResponse(message)) return true;
@@ -168,10 +170,11 @@ export async function runLlmReview(
   const parseReview = (text: string) =>
     LlmReviewResponseSchema.parse(normalizeLlmResponse(extractJsonLoose(text)));
 
-  // One discovery request only. llmChat owns its one bounded same-provider
-  // rate-limit retry; replaying a complete max-reasoning call for malformed JSON
-  // doubled spend without adding evidence. Invalid output degrades visibly and
-  // the required-lens gate prevents it from being reported as a clean review.
+  // One discovery request only. llmChat owns bounded same-provider rate-limit
+  // retries and answer-only JSON/prefix continuations; replaying a complete
+  // max-reasoning call for malformed JSON doubled spend without adding evidence.
+  // Invalid output after those bounded continuations degrades visibly and the
+  // required-lens gate prevents it from being reported as a clean review.
   let parsed: LlmReviewResponse;
   try {
     parsed = parseReview(await call(reviewThinking));

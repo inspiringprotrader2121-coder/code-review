@@ -31,3 +31,22 @@ export function extractJsonLoose(text: string): unknown {
   if (bare !== undefined) return bare;
   throw new Error('LLM response contained no parseable JSON');
 }
+
+/** Assistant prefix used to finish a truncated or prose-only JSON contract. */
+export function jsonFinishPrefix(text: string): string {
+  const stripped = stripThinking(text);
+  const start = stripped.indexOf('{');
+  if (start === -1) return '{"findings":';
+  const slice = stripped.slice(start);
+  if (tryParse(slice) !== undefined) return '{"findings":';
+  return slice || '{"findings":';
+}
+
+export function jsonContractMissing(text: string): boolean {
+  try {
+    extractJsonLoose(text);
+    return false;
+  } catch {
+    return true;
+  }
+}

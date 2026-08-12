@@ -69,6 +69,7 @@ export interface AdmittedReview extends PreparedReview {
 
 export type AdmissionResult =
   | { kind: 'skipped'; result: ProcessResult }
+  | { kind: 'deferred'; reason: 'concurrency_limited' }
   | { kind: 'admitted'; review: AdmittedReview };
 
 export interface ReviewPipelineServices {

@@ -1493,9 +1493,9 @@
         },
         {
           "name": "ORVEX_MAX_OUTPUT_TOKENS",
-          "example": "64000",
+          "example": "128000",
           "type": "integer",
-          "range": "positive tokens; default 64000",
+          "range": "positive tokens; default 128000",
           "secret": false,
           "redaction": "none",
           "enabled": false,
@@ -1504,9 +1504,9 @@
         },
         {
           "name": "ORVEX_MAX_OUTPUT_TOKENS_CAP",
-          "example": "64000",
+          "example": "128000",
           "type": "integer",
-          "range": "1..1000000; default 64000",
+          "range": "1..1000000; default 128000",
           "secret": false,
           "redaction": "none",
           "enabled": false,

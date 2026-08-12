@@ -129,6 +129,47 @@ test('a successful unsharded agentic lens satisfies its fallback coverage key', 
   assert.equal(degradation, null);
 });
 
+test('admission defers tenant concurrency instead of skipping the review', async () => {
+  let nudged = 0;
+  const admission = new AdmissionService({
+    providerIssue: () => null,
+    accountLimitReason: () => 'concurrency_limited',
+    prepaidOverageDebitCents: () => 0,
+    postLimitNudge: async () => {
+      nudged += 1;
+    },
+    postFailureNotice: async () => assert.fail('concurrency deferral is not a failure notice'),
+    postCooldownNotice: async () => assert.fail('concurrency deferral is not a cooldown notice'),
+  });
+  const result = await admission.admit(
+    {
+      tenantId: 'tenant-1',
+      installationId: 1,
+      owner: 'acme',
+      repo: 'api',
+      pr: 9,
+      headSha: 'abc',
+      action: 'opened',
+    } as never,
+    {
+      store: {
+        getTenantPlan: () => 'enterprise',
+        tryReserveReviewRun: (
+          _input: unknown,
+          limitReason: () => string | null,
+        ): { ok: false; reason: string } => ({
+          ok: false,
+          reason: limitReason() ?? 'concurrency_limited',
+        }),
+      },
+    } as never,
+  );
+
+  assert.equal(result.kind, 'deferred');
+  if (result.kind === 'deferred') assert.equal(result.reason, 'concurrency_limited');
+  assert.equal(nudged, 0);
+});
+
 test('admission can reject an unavailable provider before review computation', async () => {
   const recorded: unknown[] = [];
   const admission = new AdmissionService({

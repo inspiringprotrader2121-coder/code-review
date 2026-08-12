@@ -79,11 +79,13 @@ test('normalizeLlmResponse defaults unknown severity to info (fail toward nitpic
   assert.equal(parsed.findings[0].category, 'general');
 });
 
-test('an invalid discovery response is not replayed as another paid call', async (t) => {
+test('an invalid discovery response uses one bounded JSON-finish continuation, not a max-reasoning replay', async (t) => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
-  globalThis.fetch = (async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (_input, init) => {
     calls++;
+    bodies.push(JSON.parse(String(init?.body ?? '{}')));
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -118,9 +120,14 @@ test('an invalid discovery response is not replayed as another paid call', async
     },
   );
 
-  assert.equal(calls, 1);
+  assert.equal(calls, 3, 'primary plus two bounded JSON-finish continuations');
   assert.equal(result.summary, REVIEW_INCOMPLETE_SUMMARY);
   assert.deepEqual(result.findings, []);
+  const thinkingMode = (body: Record<string, unknown>) =>
+    (body.chat_template_kwargs as { thinking_mode?: string } | undefined)?.thinking_mode;
+  assert.equal(thinkingMode(bodies[0]!), 'enabled');
+  assert.equal(thinkingMode(bodies[1]!), 'disabled');
+  assert.equal(thinkingMode(bodies[2]!), 'disabled');
 });
 
 test('required complete-diff context reaches the provider prompt unchanged', async () => {

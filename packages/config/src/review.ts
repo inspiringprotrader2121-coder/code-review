@@ -334,8 +334,8 @@ export function loadReviewRuntimeConfig(
       900_000,
     ),
     testShortTimeouts: env.ORVEX_TEST_SHORT_TIMEOUTS === '1',
-    maxOutputTokens: positive(env.ORVEX_MAX_OUTPUT_TOKENS, 64_000),
-    maxOutputTokensCap: Math.min(positive(env.ORVEX_MAX_OUTPUT_TOKENS_CAP, 64_000), 1_000_000),
+    maxOutputTokens: positive(env.ORVEX_MAX_OUTPUT_TOKENS, 128_000),
+    maxOutputTokensCap: Math.min(positive(env.ORVEX_MAX_OUTPUT_TOKENS_CAP, 128_000), 1_000_000),
     rateLimitMaxRetries: finite(env.ORVEX_RATELIMIT_MAX_RETRIES, 2),
     // Defaults cover common TPM windows (up to ~2 minutes) without cutting passes.
     rateLimitMaxWaitMs: finite(env.ORVEX_RATELIMIT_MAX_WAIT_MS, 120_000),

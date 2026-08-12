@@ -98,6 +98,12 @@ export async function processWorkerJob(
       const result = await runWithProviderAdmissionPriority('straggler', () =>
         dispatchWorkerJob(job, config, input.runtime, input.processReview),
       );
+      if (result?.skipReason === 'concurrency_deferred') {
+        log.log(`[worker] defer ${key}: tenant concurrency full; preserving queue age`);
+        await returnJobForProviderHeadroom(queue, job);
+        finalizedOwned = true;
+        return;
+      }
       const draftSkipped = result?.skipReason === 'draft PR';
       const prClosedMidRun = result?.skipReason === 'pr_closed_mid_run';
       await enqueueAutoApply(job, config, queue, result, log);

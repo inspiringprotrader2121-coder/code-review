@@ -267,6 +267,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     trialReviewLimit: null,
     // Safety defaults for the custom-contract tier — raise per customer via
     // plan-admin; never ship a null monthly/hourly path that can burn uncapped.
+    // 8 in-flight per tenant covers a 6-review client burst. Overflow waits in
+    // the queue instead of skipping or failing the review.
     reviewsPerHour: 50,
     maxConcurrentReviews: 8,
     reviewsPerMonth: 2000,

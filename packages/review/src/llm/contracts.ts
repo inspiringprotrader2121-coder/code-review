@@ -18,7 +18,28 @@ export interface LlmClientDependencies
   extends Pick<
     ProviderDependencies,
     'admission' | 'retryPolicy' | 'clock' | 'http' | 'attemptObserver'
-  > {}
+  > {
+  /** Test seam for Anthropic/MiniMax streams; production constructs the SDK client. */
+  anthropic?: {
+    messages: {
+      stream(params: Record<string, unknown>): {
+        finalMessage(): Promise<{
+          content: Array<{ type: string; text?: string; thinking?: string }>;
+          stop_reason?: string | null;
+          usage?: {
+            input_tokens: number;
+            output_tokens: number;
+            cache_read_input_tokens?: number;
+            cache_creation_input_tokens?: number;
+          };
+        }>;
+        abort(): void;
+        on(event: 'streamEvent', listener: () => void): unknown;
+        off?(event: 'streamEvent', listener: () => void): unknown;
+      };
+    };
+  };
+}
 
 export interface LlmClientOptions {
   apiKey: string;
@@ -44,7 +65,7 @@ export interface LlmClientOptions {
   onAttempt?: (event: LlmAttemptEvent) => void;
   /** Shared only by explicit semantic retries so durable attempts retain lineage. */
   attemptLineage?: ModelAttemptLineage;
-  /** Internal state for a bounded DeepSeek thinking-mode prefix continuation. */
+  /** Internal state for a bounded answer-only prefix continuation. */
   compatibleContinuation?: {
     reasoningContent: string;
     contentPrefix: string;

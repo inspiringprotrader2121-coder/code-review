@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractJsonLoose } from './llm-client.js';
+import { extractJsonLoose, jsonFinishPrefix } from './llm-client.js';
 
 test('extracts a plain JSON object', () => {
   assert.deepEqual(extractJsonLoose('{"findings":[],"summary":"ok"}'), {
@@ -46,4 +46,10 @@ test('strips <think> reasoning before parsing', () => {
 
 test('throws (does not return garbage) when nothing parses', () => {
   assert.throws(() => extractJsonLoose('```bash\nNGINX -s reload\n```'), /no parseable JSON/);
+});
+
+test('jsonFinishPrefix continues from a truncated object or starts a findings contract', () => {
+  assert.equal(jsonFinishPrefix('no json here'), '{"findings":');
+  assert.equal(jsonFinishPrefix('<think>x</think>{"findings":[{"file":'), '{"findings":[{"file":');
+  assert.equal(jsonFinishPrefix('{"findings":[],"summary":"ok"}'), '{"findings":');
 });

@@ -10,7 +10,7 @@ import {
   resolveMaxOutputTokens,
   thinkingEnabled,
 } from './support.js';
-import { extractJsonLoose, stripThinking } from './parsing.js';
+import { extractJsonLoose, jsonFinishPrefix, stripThinking } from './parsing.js';
 import { RETRYABLE_EMPTY_PROVIDER_RESPONSE } from './retry-policy.js';
 
 // Retain the original initialization behaviour for compatible-chat providers:
@@ -29,7 +29,7 @@ function resolveHardLimitMs(opts: LlmClientOptions): number {
 
 export class DeepSeekContinuationRequiredError extends Error {
   constructor(readonly continuation: NonNullable<LlmClientOptions['compatibleContinuation']>) {
-    super('DeepSeek max-reasoning response requires bounded prefix continuation');
+    super('LLM max-reasoning response requires bounded prefix continuation');
     this.name = 'DeepSeekContinuationRequiredError';
   }
 }
@@ -305,16 +305,24 @@ export async function anthropicChat(
 ): Promise<string> {
   throwIfCancelled(opts.signal);
   const hardLimitMs = resolveHardLimitMs(opts);
-  const client = new Anthropic({
-    apiKey: opts.apiKey,
-    baseURL: opts.baseUrl,
-    timeout: hardLimitMs,
-  });
+  const client = (opts.dependencies?.anthropic ??
+    new Anthropic({
+      apiKey: opts.apiKey,
+      baseURL: opts.baseUrl,
+      timeout: hardLimitMs,
+    })) as {
+    messages: {
+      stream(params: Record<string, unknown>): Parameters<typeof awaitAnthropicFinalMessage>[0];
+    };
+  };
   const maxTokens = resolveMaxOutputTokens(opts.maxTokens);
-  const think = thinkingEnabled(opts) && maxTokens >= 16_000;
+  const continuation = opts.compatibleContinuation;
+  const continuationPrefix = continuation?.contentPrefix ?? '';
+  const think = thinkingEnabled(opts) && maxTokens >= 16_000 && !continuation;
   const messages: Anthropic.MessageParam[] = [{ role: 'user', content: user }];
-  const prefill = opts.json && !think;
-  if (prefill) messages.push({ role: 'assistant', content: '{' });
+  const prefillBareObject = opts.json && !think && !continuationPrefix;
+  if (continuationPrefix) messages.push({ role: 'assistant', content: continuationPrefix });
+  else if (prefillBareObject) messages.push({ role: 'assistant', content: '{' });
   const configuredThinkingBudget = loadReviewRuntimeConfig().anthropicThinkingBudgetTokens;
   const thinkingBudget = resolveAnthropicThinkingBudget(
     opts.model,
@@ -328,7 +336,7 @@ export async function anthropicChat(
     messages,
     ...(think ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget } } : {}),
     ...(!think && opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-  });
+  }) as Parameters<typeof awaitAnthropicFinalMessage>[0];
   const startedAt = Date.now();
   const response = await awaitAnthropicFinalMessage(stream, opts);
   if (response.usage)
@@ -341,22 +349,35 @@ export async function anthropicChat(
       provider: providerName(opts.baseUrl, opts.api),
       model: opts.model,
     });
-  if (response.stop_reason === 'max_tokens')
-    throw new Error('LLM response truncated (stop_reason=max_tokens); increase max tokens');
   const textBlock = response.content.find((block) => block.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
+  const rawText = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  const text = continuationPrefix
+    ? combineContinuationText(continuationPrefix, rawText)
+    : prefillBareObject
+      ? `{${rawText}`
+      : rawText;
+  const reasoningChars = response.content.reduce((total, block) => {
+    if (block.type !== 'thinking') return total;
+    const thinking = 'thinking' in block ? String(block.thinking ?? '') : '';
+    return total + thinking.length;
+  }, 0);
+  console.log(
+    `[llm] model=${opts.model} api=anthropic thinking=${think ? 'on' : 'off'} reasoning=${reasoningChars}c answer=${text.length}c ${Math.round((Date.now() - startedAt) / 1000)}s stop=${response.stop_reason ?? 'end_turn'}`,
+  );
+  if (response.stop_reason === 'max_tokens') {
+    if (opts.json) {
+      throw new DeepSeekContinuationRequiredError({
+        reasoningContent: continuation?.reasoningContent ?? '',
+        contentPrefix: text || jsonFinishPrefix(rawText),
+      });
+    }
+    throw new Error('LLM response truncated (stop_reason=max_tokens); increase max tokens');
+  }
+  if (!text) {
     if (response.usage?.input_tokens === 0 && response.usage.output_tokens === 0)
       throw new Error(RETRYABLE_EMPTY_PROVIDER_RESPONSE);
     throw new Error('LLM returned no text content');
   }
-  const reasoningChars = response.content.reduce(
-    (total, block) => total + (block.type === 'thinking' ? block.thinking.length : 0),
-    0,
-  );
-  const text = prefill ? `{${textBlock.text}` : textBlock.text;
-  console.log(
-    `[llm] model=${opts.model} api=anthropic thinking=${think ? 'on' : 'off'} reasoning=${reasoningChars}c answer=${text.length}c ${Math.round((Date.now() - startedAt) / 1000)}s`,
-  );
   return text;
 }
 
@@ -492,23 +513,33 @@ export async function openAiCompatStreamChat(
       : system;
   const continuation = opts.compatibleContinuation;
   const continuationPrefix = continuation?.contentPrefix ?? '';
-  const continuationMessages = continuation
-    ? [
-        {
-          role: 'assistant',
-          content: continuationPrefix,
-          reasoning_content: continuation.reasoningContent,
-          prefix: true,
-        },
-      ]
-    : [];
+  const deepseekPrefix = Boolean(continuation && supportsCompatibleUsageStream(opts.baseUrl));
+  const continuationMessages = !continuation
+    ? []
+    : deepseekPrefix
+      ? [
+          {
+            role: 'assistant',
+            content: continuationPrefix,
+            reasoning_content: continuation.reasoningContent,
+            prefix: true,
+          },
+        ]
+      : [
+          { role: 'assistant', content: continuationPrefix },
+          {
+            role: 'user',
+            content:
+              'Complete the JSON object now. Return only valid JSON for the review contract. No markdown or reasoning.',
+          },
+        ];
   const requestChars =
     requestSystem.length +
     user.length +
     (continuation?.reasoningContent.length ?? 0) +
     continuationPrefix.length;
   const baseUrl = opts.baseUrl!.replace(/\/$/, '');
-  const requestUrl = continuation
+  const requestUrl = deepseekPrefix
     ? `${new URL('/beta', `${baseUrl}/`).toString().replace(/\/$/, '')}/chat/completions`
     : `${baseUrl}/chat/completions`;
   const startedAt = clock.now();
@@ -523,7 +554,7 @@ export async function openAiCompatStreamChat(
         ...(supportsCompatibleUsageStream(opts.baseUrl)
           ? { stream_options: { include_usage: true } }
           : {}),
-        ...(opts.json && !continuation ? { response_format: { type: 'json_object' } } : {}),
+        ...(opts.json && !deepseekPrefix ? { response_format: { type: 'json_object' } } : {}),
         ...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
         ...(supportsCompatibleUsageStream(opts.baseUrl)
           ? { thinking: { type: thinkingEnabled(opts) ? 'enabled' : 'disabled' } }
@@ -652,16 +683,10 @@ export async function openAiCompatStreamChat(
         },
   );
   if (finishReason === 'length') {
-    if (
-      supportsCompatibleUsageStream(opts.baseUrl) &&
-      opts.json &&
-      opts.reasoningEffort === 'max' &&
-      /deepseek-v4/i.test(opts.model) &&
-      (thinkingEnabled(opts) || Boolean(continuation))
-    ) {
+    if (opts.json && (thinkingEnabled(opts) || Boolean(continuation))) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
-        contentPrefix: text || '{"findings":',
+        contentPrefix: text || jsonFinishPrefix(streamedText),
       });
     }
     throw new Error('LLM response truncated (finish_reason=length); increase max tokens');

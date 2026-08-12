@@ -3,7 +3,7 @@ import type { AttemptObserver, Clock } from '../providers/types.js';
 import type { LlmClientOptions } from './contracts.js';
 import { systemClock } from './contracts.js';
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 64_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 128_000;
 const ABSOLUTE_MAX_OUTPUT_TOKENS = 1_000_000;
 
 export function clockFor(opts: Pick<LlmClientOptions, 'dependencies'>): Clock {

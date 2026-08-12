@@ -18,6 +18,7 @@ function config(): WorkerConfig {
       transport: 'anthropic',
       admissionBucket: 'minimax',
       thinking: true,
+      maxTokens: MINIMAX_REVIEW_OUTPUT_TOKENS,
     },
     codexCliModel: {
       apiKey: '',
@@ -129,9 +130,17 @@ test('catalog refuses substitutions and incomplete reasoning contracts before a 
       }).compilePublicPlan('dual-model', { agenticLuna: false }),
     /MiniMax thinking/,
   );
+  assert.throws(
+    () =>
+      createProviderCatalog({
+        ...workerConfig,
+        standardModel: { ...workerConfig.standardModel, maxTokens: 48_000 },
+      }).compilePublicPlan('dual-model', { agenticLuna: false }),
+    /MiniMax thinking/,
+  );
 });
 
-test('MiniMax has room for reasoning and a compact completed review response', () => {
-  assert.equal(MINIMAX_REVIEW_OUTPUT_TOKENS, 48_000);
-  assert.equal(maxOutputTokensForModel('MiniMax-M3'), 48_000);
+test('MiniMax has room for reasoning and a completed review response', () => {
+  assert.equal(MINIMAX_REVIEW_OUTPUT_TOKENS, 128_000);
+  assert.equal(maxOutputTokensForModel('MiniMax-M3'), 128_000);
 });
