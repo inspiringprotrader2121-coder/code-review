@@ -191,8 +191,11 @@ test('production PM2 profile splits api/scheduler/workers with fleet Redis caps'
   assert.match(workerArgs, /ORVEX_SHUTDOWN_DRAIN_MS=960000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_LEASE_RENEW_MS=60000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_MONTHLY_COGS_CAP_USD=5000(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_MAX_OUTPUT_TOKENS=128000(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_MAX_OUTPUT_TOKENS_CAP=128000(?:\s|\\")/);
   assert.ok(config.apps.every((app) => app.kill_timeout === 1_020_000));
   assert.ok(workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8'));
+  assert.ok(workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_OUTPUT_TOKENS=128000'));
 });
 
 test('verify and sandbox concurrency honor the production scale ceilings', () => {

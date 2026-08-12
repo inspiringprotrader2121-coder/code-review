@@ -34,6 +34,10 @@ const SHARED_FLEET = [
   'ORVEX_SHUTDOWN_DRAIN_MS=960000',
   'ORVEX_LEASE_RENEW_MS=60000',
   'ORVEX_MONTHLY_COGS_CAP_USD=5000',
+  // Immutable live .env still has 64k; these must follow `. ./.env` so Luna,
+  // DeepSeek, and MiniMax actually request 128k output tokens.
+  'ORVEX_MAX_OUTPUT_TOKENS=128000',
+  'ORVEX_MAX_OUTPUT_TOKENS_CAP=128000',
 ].join(' ');
 
 const WORKER_LOCAL = [
