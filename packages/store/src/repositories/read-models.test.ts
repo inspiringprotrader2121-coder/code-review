@@ -204,5 +204,11 @@ test('repository read repository is explicitly installation-scoped and tenant li
   assert.equal(repositoryReads.getByGitHubId(20, firstRepo.githubRepoId)?.tenantId, second.id);
   assert.equal(repositoryReads.getByFullName(10, 'second/api'), null);
   assert.equal(repositoryReads.listForTenant(second.id).length, 1);
+  assert.equal(repositoryReads.hasEnabledRepo('first/api'), true);
+  assert.equal(repositoryReads.hasEnabledRepo('FIRST/API'), true);
+  assert.equal(db.hasEnabledRepo('second/api'), true);
+  db.setRepoEnabled(firstRepo.id, false);
+  assert.equal(db.hasEnabledRepo('first/api'), false);
+  assert.equal(db.hasEnabledRepo('missing/repo'), false);
   db.close();
 });

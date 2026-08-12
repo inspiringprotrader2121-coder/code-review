@@ -88,3 +88,17 @@ test('provider targets and policies do not observe environment changes after boo
     else process.env.ORVEX_CODEX_CLI_REPOS = originalRepos;
   }
 });
+
+test('a dashboard-enabled synced repo can run Luna even when it is not in ORVEX_CODEX_CLI_REPOS', () => {
+  const server = loadServerConfig(fixedEnvironment);
+  const store = {
+    hasEnabledRepo: (fullName: string) =>
+      fullName.toLowerCase() === 'inspiringprotrader2121-coder/code-review',
+  } as AppDatabase;
+  const worker = createWorkerConfig(server, store);
+  const allowed = worker.reviewRuntime?.routingPolicy.codexRepoAllowed;
+  assert.equal(allowed?.('inspiringprotrader2121-coder/code-review'), true);
+  assert.equal(allowed?.('INSPIRINGPROTRADER2121-CODER/CODE-REVIEW'), true);
+  assert.equal(allowed?.('acme/widgets'), true, 'env allowlist still grants Luna');
+  assert.equal(allowed?.('evil/repo'), false);
+});

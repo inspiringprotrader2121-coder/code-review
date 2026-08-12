@@ -6,6 +6,7 @@ export interface RepositoryReadStore {
   getByGitHubId(installationId: number, githubRepoId: number): Repo | null;
   getByFullName(installationId: number, fullName: string): Repo | null;
   listForTenant(tenantId: string): Repo[];
+  hasEnabledRepo(fullName: string): boolean;
 }
 
 export class RepositoryReadRepository implements RepositoryReadStore {
@@ -30,6 +31,15 @@ export class RepositoryReadRepository implements RepositoryReadStore {
       .prepare(`SELECT * FROM repos WHERE tenant_id = ? ORDER BY full_name`)
       .all(tenantId) as RepoRow[];
     return rows.map(mapRepo);
+  }
+
+  hasEnabledRepo(fullName: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS ok FROM repos WHERE lower(full_name) = lower(?) AND enabled = 1 LIMIT 1`,
+      )
+      .get(fullName) as { ok: number } | undefined;
+    return Boolean(row);
   }
 }
 

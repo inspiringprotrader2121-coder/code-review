@@ -1105,6 +1105,10 @@ export class AppDatabase {
     return this.repositoryReads.listForTenant(tenantId);
   }
 
+  hasEnabledRepo(fullName: string): boolean {
+    return this.repositoryReads.hasEnabledRepo(fullName);
+  }
+
   /** Enabled repos across ALL active installations, each tagged with its tenant's
    *  plan. The nightly-scan scheduler filters these by planFeatures(plan) so only
    *  eligible (Verify+) tenants are scanned. */

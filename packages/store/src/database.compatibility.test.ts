@@ -46,6 +46,7 @@ test('all AppDatabase public methods are thin declared repository delegates', ()
     ['getRepoByGitHubId', 'repositoryReads'],
     ['getRepoByFullName', 'repositoryReads'],
     ['listRepos', 'repositoryReads'],
+    ['hasEnabledRepo', 'repositoryReads'],
     ['createTenant', 'tenancy'],
     ['getTenantBySlug', 'tenancy'],
     ['getOrCreateTenant', 'tenancy'],

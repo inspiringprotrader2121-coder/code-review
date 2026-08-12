@@ -143,6 +143,7 @@ export const APP_DATABASE_COMPATIBILITY_METHODS = [
   'getRepoByGitHubId',
   'getRepoByFullName',
   'listRepos',
+  'hasEnabledRepo',
   'listScanTargets',
   'setRepoEnabled',
   'disableRepoByGitHubId',
