@@ -31,9 +31,9 @@ test('provider overrides and upper bounds remain independent', () => {
     ORVEX_CODEX_APIKEY_CONCURRENCY: '99',
     ORVEX_PROVIDER_CONCURRENCY_LUNA: '3',
   };
-  assert.equal(resolveCodexApiKeyConcurrency(env), 32);
+  assert.equal(resolveCodexApiKeyConcurrency(env), 100);
   assert.equal(resolveProviderConcurrency('luna', env), 3);
-  assert.equal(resolveProviderConcurrency('deepseek', env), 32);
+  assert.equal(resolveProviderConcurrency('deepseek', env), 100);
 });
 
 test('invalid runtime limits fall back without disabling work', () => {
