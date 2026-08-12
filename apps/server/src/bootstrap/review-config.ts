@@ -36,13 +36,11 @@ export function createWorkerConfig(config: ServerConfig, store: AppDatabase): Wo
   }
   const routingPolicy = createReviewRoutingPolicy({
     codexCliEnabled: runtime.codexCliEnabled,
-    codexRepoAllowed: (repoId) => {
-      const id = repoId.toLowerCase();
-      if (runtime.codexAllowedRepos.includes('*')) return false;
-      if (runtime.codexAllowedRepos.includes(id)) return true;
-      // Dashboard-enabled, GitHub-synced repos are admitted for Luna. The env
-      // allowlist is an extra explicit grant, not a veto of the account.
-      return store.hasEnabledRepo?.(id) === true;
+    codexRepoAllowed: (repoId, installationId) => {
+      if (typeof store.isRepoEnabled === 'function' && typeof installationId === 'number') {
+        return store.isRepoEnabled(installationId, repoId);
+      }
+      return store.hasEnabledRepo?.(repoId) === true;
     },
     investigateEnabled: runtime.routing.investigateEnabled,
     riskHuntEnabled: runtime.routing.riskHuntEnabled,

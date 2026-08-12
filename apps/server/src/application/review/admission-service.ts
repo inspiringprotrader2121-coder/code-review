@@ -7,6 +7,7 @@ export type ProviderIssue = (
   plan: PlanFeatures,
   config: WorkerConfig,
   repoId: string,
+  installationId?: number,
 ) => string | null;
 export type LimitNudge = (
   config: WorkerConfig,
@@ -103,7 +104,12 @@ export class AdmissionService {
     }
 
     const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
-    const providerIssue = this.dependencies.providerIssue(plan, config, `${job.owner}/${job.repo}`);
+    const providerIssue = this.dependencies.providerIssue(
+      plan,
+      config,
+      `${job.owner}/${job.repo}`,
+      job.installationId,
+    );
     if (providerIssue) {
       config.store.recordReviewRun({
         ...runBase,

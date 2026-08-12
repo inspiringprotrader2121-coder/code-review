@@ -93,10 +93,8 @@ export { mayPublishRuntimeEvidence } from './application/review/publication-serv
  *  1. the feature flag is on;
  *  2. the plan designates an OpenAI-model pass 1 (other tiers were never
  *     designed for it, and shouldn't get CLI-routed by accident);
- *  3. the repo is explicitly allowlisted, OR the internal sandbox has been
- *     enabled and explicitly verified. The latter additionally requires the
- *     CLI allowlist wildcard, which is rejected before that verification gate.
- *     This is a security boundary, not a preference. Unset = no repo.
+ *  3. the repository is enabled in the customer's Orvex account (GitHub-synced
+ *     dashboard enablement). Auto-review-on-open/push toggles do not apply.
  */
 /**
  * Re-export pass-budget helpers so existing `from './pipeline.js'` test imports keep working.
@@ -182,6 +180,7 @@ export function providerConfigurationIssue(
   config: WorkerConfig,
   repoId?: string,
   routingPolicy: ReviewRoutingPolicy = runtimeFor(config).routingPolicy,
+  installationId?: number,
 ): string | null {
   const publicPlan = compileReviewPlan(plan.modelTier);
   if (publicPlan) {
@@ -189,7 +188,7 @@ export function providerConfigurationIssue(
     // external messages stable while refusing every substitution before spend.
     try {
       createProviderCatalog(config).compilePublicPlan(plan.modelTier, {
-        agenticLuna: Boolean(repoId && canRunAgentic(plan, repoId, routingPolicy)),
+        agenticLuna: Boolean(repoId && canRunAgentic(plan, repoId, routingPolicy, installationId)),
       });
     } catch (err) {
       const message = (err as Error).message;
@@ -210,7 +209,7 @@ export function providerConfigurationIssue(
   // old persisted workspace settings are migrated. They never route a public plan.
   if (
     plan.modelTier === 'codex-hybrid' &&
-    !hasPinnedCodexLuna(config, plan, repoId, routingPolicy)
+    !hasPinnedCodexLuna(config, plan, repoId, routingPolicy, installationId)
   ) {
     return 'The Luna review provider is not configured for this plan. This review was not run; contact support to restore provider capacity.';
   }
@@ -330,8 +329,8 @@ export function createReviewPipelineServices(config: WorkerConfig): ReviewPipeli
   const accountPolicy = createAccountLimitPolicy(runtime.accountLimits);
   const usagePolicy = createUsageCostPolicy(runtime.usageCosts);
   const admission = new AdmissionService({
-    providerIssue: (plan, worker, repoId) =>
-      providerConfigurationIssue(plan, worker, repoId, routingPolicy),
+    providerIssue: (plan, worker, repoId, installationId) =>
+      providerConfigurationIssue(plan, worker, repoId, routingPolicy, installationId),
     accountLimitReason: (store, owner, plan, pending, excluded, options) =>
       accountLimitReason(store, owner, plan, pending, excluded, options, accountPolicy),
     prepaidOverageDebitCents,

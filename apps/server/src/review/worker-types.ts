@@ -52,7 +52,7 @@ export interface WorkerConfig {
   reviewRuntime?: Readonly<{
     routingPolicy: Readonly<{
       codexCliEnabled: boolean;
-      codexRepoAllowed: (repoId: string) => boolean;
+      codexRepoAllowed: (repoId: string, installationId?: number) => boolean;
       investigateEnabled: boolean;
       riskHuntEnabled: boolean;
       investigateTier: 'deepseek-flash' | 'deepseek' | 'openai' | 'standard';

@@ -239,12 +239,12 @@ Limits bound time, spend, and context. Production verification remains on; max r
 
 ## Codex CLI and sandbox
 
-Agentic Luna execution is restricted to named trusted repositories, API-key authentication, and the internal runtime boundary. The code pins model and maximum reasoning effort.
+Agentic Luna runs on every dashboard-enabled, GitHub-synced repository. The internal sandbox is the runtime boundary. The code pins model and maximum reasoning effort.
 
 | Variable | Type and range | Safe default | Secret / redaction | Compatibility aliases | Description |
 | --- | --- | --- | --- | --- | --- |
 | `ORVEX_CODEX_CLI` | boolean; 1 enables; default disabled | `0` | no / none | - | Enable the restricted Codex CLI agentic pass. |
-| `ORVEX_CODEX_CLI_REPOS` | csv; explicit owner/repo names | `(unset)` | no / none | - | Trusted repositories allowed to run the Codex CLI. Wildcards are refused. |
+| `ORVEX_CODEX_CLI_REPOS` | csv; explicit owner/repo names | `(unset)` | no / none | - | Legacy optional owner/repo list. Luna admission uses dashboard enablement for every customer, not this list. Wildcards are refused. |
 | `ORVEX_CODEX_HOME` | path; API-key-authenticated home | `/home/orvex/.codex-apikey` | no / path | - | Dedicated API-key Codex home. OAuth homes are refused in production. |
 | `ORVEX_CODEX_HOMES` | csv-paths; dedicated Codex homes | `(unset)` | yes / path | - | Optional bounded set of dedicated Codex homes. |
 | `ORVEX_CODEX_PROXIES` | csv-URLs; approved proxies | `(unset)` | yes / connection | - | Optional bounded set of approved Codex proxies. |

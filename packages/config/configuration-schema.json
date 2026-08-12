@@ -2060,7 +2060,7 @@
     },
     {
       "name": "Codex CLI and sandbox",
-      "description": "Agentic Luna execution is restricted to named trusted repositories, API-key authentication, and the internal runtime boundary. The code pins model and maximum reasoning effort.",
+      "description": "Agentic Luna runs on every dashboard-enabled, GitHub-synced repository. The internal sandbox is the runtime boundary. The code pins model and maximum reasoning effort.",
       "variables": [
         {
           "name": "ORVEX_CODEX_CLI",
@@ -2079,7 +2079,7 @@
           "range": "explicit owner/repo names",
           "secret": false,
           "redaction": "none",
-          "description": "Trusted repositories allowed to run the Codex CLI. Wildcards are refused.",
+          "description": "Legacy optional owner/repo list. Luna admission uses dashboard enablement for every customer, not this list. Wildcards are refused.",
           "deprecatedAliases": []
         },
         {

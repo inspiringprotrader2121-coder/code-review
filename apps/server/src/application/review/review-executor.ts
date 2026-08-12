@@ -242,7 +242,7 @@ export async function executeReviewCore(
       },
     });
   const resolvedPublicPlan = providerCatalog.compilePublicPlan(plan.modelTier, {
-    agenticLuna: canRunAgentic(plan, `${owner}/${repo}`, routingPolicy),
+    agenticLuna: canRunAgentic(plan, `${owner}/${repo}`, routingPolicy, installationId),
   });
   // The review passes use modelForPass (may be codex on the Verify test); the
   // single verification pass uses a plan-aware target; retain its cost tier so
@@ -388,15 +388,18 @@ export async function executeReviewCore(
       const tagFindings = (findings: ReviewFinding[], tier: PassTier, passTag?: string) => {
         for (const finding of findings) tagFindingProvenance(finding, tier, passTag);
       };
-      const requestedCodexCli = canRunAgentic(plan, `${owner}/${repo}`, routingPolicy);
+      const requestedCodexCli = canRunAgentic(
+        plan,
+        `${owner}/${repo}`,
+        routingPolicy,
+        installationId,
+      );
       const allowCodexCheckout = requestedCodexCli;
       if (
         (plan.modelTier === 'multi-model' || plan.modelTier === 'codex-hybrid') &&
         !requestedCodexCli
       ) {
-        throw new Error(
-          'high-tier review requires pinned Codex CLI Luna and a checkout-allowlisted repository',
-        );
+        throw new Error('high-tier review requires pinned Codex CLI Luna on an enabled repository');
       }
       if (requestedCodexCli) {
         assertCodexRuntimeReady();

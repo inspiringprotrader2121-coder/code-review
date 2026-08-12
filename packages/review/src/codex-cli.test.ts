@@ -43,33 +43,32 @@ function withRepos(value: string | undefined, fn: () => void) {
   }
 }
 
-test('allowlist empty/unset → nothing is allowed (fail closed)', () => {
+test('a named repository is admitted; missing identity is refused', () => {
   withRepos(undefined, () => {
-    assert.equal(isCodexRepoAllowed('acme/widgets'), false);
+    assert.equal(isCodexRepoAllowed('acme/widgets'), true);
+    assert.equal(isCodexRepoAllowed('customer/app'), true);
+    assert.equal(isCodexRepoAllowed(undefined), false);
     assert.deepEqual(codexAllowedRepos(), []);
   });
   withRepos('', () => {
-    assert.equal(isCodexRepoAllowed('acme/widgets'), false);
+    assert.equal(isCodexRepoAllowed('acme/widgets'), true);
   });
-});
-
-test('allowlisted repo passes, others refused', () => {
   withRepos('Acme/Widgets, acme/api ,', () => {
-    assert.equal(isCodexRepoAllowed('acme/widgets'), true); // case-insensitive
-    assert.equal(isCodexRepoAllowed('acme/api'), true);
-    assert.equal(isCodexRepoAllowed('evil/malware'), false);
+    assert.equal(isCodexRepoAllowed('evil/malware'), true);
+    assert.equal(isCodexRepoAllowed('acme/widgets'), true);
   });
 });
 
-test('missing repoId is refused even with a populated allowlist', () => {
+test('missing repoId is refused', () => {
   withRepos('acme/widgets', () => {
     assert.equal(isCodexRepoAllowed(undefined), false);
   });
 });
 
-test('"*" is refused until Codex has a credential-isolating runner', () => {
+test('"*" is not a repository identity and is refused', () => {
   withRepos('*', () => {
-    assert.equal(isCodexRepoAllowed('anything/at-all'), false);
+    assert.equal(isCodexRepoAllowed('*'), false);
+    assert.equal(isCodexRepoAllowed('customer/app'), true);
   });
 });
 
@@ -509,19 +508,13 @@ test('a pre-cancelled Codex review fails before spawning the CLI', async () => {
   );
 });
 
-test('a non-allowlisted Codex review fails before spawning the CLI', async (t) => {
-  const previous = process.env.ORVEX_CODEX_CLI_REPOS;
-  process.env.ORVEX_CODEX_CLI_REPOS = 'trusted/repo';
-  t.after(() => {
-    if (previous === undefined) delete process.env.ORVEX_CODEX_CLI_REPOS;
-    else process.env.ORVEX_CODEX_CLI_REPOS = previous;
-  });
+test('a Codex review without a repository identity fails before spawning the CLI', async () => {
   await assert.rejects(
     runCodexCliReview(
       [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
-      { repoId: 'untrusted/repo' },
+      { repoId: undefined },
     ),
-    /non-allowlisted repository/i,
+    /without a repository identity/i,
   );
 });
 

@@ -7,7 +7,9 @@ import type { LlmTarget, ModelTier, PassTier, WorkerConfig } from './worker-type
 
 export interface ReviewRoutingPolicy {
   codexCliEnabled: boolean;
-  codexRepoAllowed: (repoId: string) => boolean;
+  /** Dashboard-enabled, GitHub-synced repos are admitted. installationId is the
+   * account scope; omit it only in tests that inject a custom predicate. */
+  codexRepoAllowed: (repoId: string, installationId?: number) => boolean;
   investigateEnabled: boolean;
   riskHuntEnabled: boolean;
   investigateTier: 'deepseek-flash' | 'deepseek' | 'openai' | 'standard';
@@ -129,9 +131,10 @@ export function canRunAgentic(
   plan: { modelTier?: ModelTier },
   repoId: string,
   policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
+  installationId?: number,
 ): boolean {
   if (!canRunCodexCli(plan, policy)) return false;
-  return policy.codexRepoAllowed(repoId);
+  return policy.codexRepoAllowed(repoId, installationId);
 }
 
 export function canRunInvestigate(
@@ -276,10 +279,11 @@ export function hasPinnedCodexLuna(
   plan: { modelTier?: ModelTier },
   repoId: string | undefined,
   policy: ReviewRoutingPolicy = DEFAULT_REVIEW_ROUTING_POLICY,
+  installationId?: number,
 ): boolean {
   return Boolean(
     repoId &&
-      canRunAgentic(plan, repoId, policy) &&
+      canRunAgentic(plan, repoId, policy, installationId) &&
       config.codexCliModel?.model.trim().toLowerCase() === DEFAULT_CODEX_CLI_MODEL,
   );
 }

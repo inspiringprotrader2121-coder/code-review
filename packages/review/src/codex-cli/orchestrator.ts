@@ -261,7 +261,7 @@ export async function runCodexCliReview(
   if (options.signal?.aborted) throw new ReviewCancelledError('codex-cli review cancelled');
   if (!isCodexRepoAllowed(options.repoId))
     throw new Error(
-      `Codex CLI review refused for non-allowlisted repository ${options.repoId ?? '(unknown repo)'}`,
+      `Codex CLI review refused without a repository identity ${options.repoId ?? '(unknown repo)'}`,
     );
   const container = options.dependencies?.codexContainer;
   if (!container)

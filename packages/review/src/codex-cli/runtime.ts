@@ -17,9 +17,8 @@ export function codexAllowedRepos(env?: NodeJS.ProcessEnv): string[] {
   return [...loadReviewRuntimeConfig(env).codexAllowedRepos];
 }
 
-export function isCodexRepoAllowed(repoId: string | undefined, env?: NodeJS.ProcessEnv): boolean {
-  const allowed = codexAllowedRepos(env);
-  return Boolean(repoId) && !allowed.includes('*') && allowed.includes(repoId!.toLowerCase());
+export function isCodexRepoAllowed(repoId: string | undefined, _env?: NodeJS.ProcessEnv): boolean {
+  return typeof repoId === 'string' && /^[^/\s]+\/[^/\s]+$/.test(repoId);
 }
 
 export function resolveCodexTimeouts(env?: NodeJS.ProcessEnv): {

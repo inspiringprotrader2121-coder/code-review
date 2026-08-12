@@ -131,7 +131,7 @@ test('required paid model stacks fail closed when a provider is missing', () => 
   );
 });
 
-test('high-tier preflight requires allowlisted pinned Codex CLI and never accepts direct Luna', () => {
+test('high-tier preflight requires Codex CLI and an admitted repository, never direct Luna', () => {
   const config = modelRoutingConfig();
   const disabled = createReviewRoutingPolicy({
     codexRepoAllowed: (repoId) => repoId.toLowerCase() === 'allowlisted/repo',
@@ -491,26 +491,20 @@ test('canRunAgentic is driven by an injected fail-closed repository policy', () 
     'allowlist is case-insensitive',
   );
 
-  // A third-party tenant cannot reach Codex before the internal sandbox has
-  // been enabled and explicitly verified.
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'evil/repo', allowlisted), false);
-  // 2. wrong tier
   assert.equal(canRunAgentic({ modelTier: 'standard' }, 'acme/api', allowlisted), false);
-  // 1. flag off
   const disabled = createReviewRoutingPolicy({
     codexCliEnabled: false,
     codexRepoAllowed: () => true,
   });
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'acme/api', disabled), false);
-  // Fail closed when the allowlist is unset entirely.
   const noAllowlist = createReviewRoutingPolicy({ codexCliEnabled: true });
   assert.equal(
     canRunAgentic({ modelTier: 'multi-model' }, 'acme/api', noAllowlist),
     false,
-    'unset allowlist = never',
+    'unset policy predicate = never',
   );
 
-  // An environment attestation is not a machine-enforced credential boundary.
   assert.equal(canRunAgentic({ modelTier: 'multi-model' }, 'tenant/repo', noAllowlist), false);
 });
 

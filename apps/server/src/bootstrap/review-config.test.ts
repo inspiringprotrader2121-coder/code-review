@@ -79,7 +79,7 @@ test('provider targets and policies do not observe environment changes after boo
       after.discovery.map((stage) => stage.target.model),
       before.discovery.map((stage) => stage.target.model),
     );
-    assert.equal(worker.reviewRuntime?.routingPolicy.codexRepoAllowed('acme/widgets'), true);
+    assert.equal(worker.reviewRuntime?.routingPolicy.codexRepoAllowed('acme/widgets'), false);
     assert.equal(worker.reviewRuntime?.routingPolicy.codexRepoAllowed('other/repository'), false);
   } finally {
     if (originalFlash === undefined) delete process.env.ORVEX_DEEPSEEK_FLASH_MODEL;
@@ -89,16 +89,23 @@ test('provider targets and policies do not observe environment changes after boo
   }
 });
 
-test('a dashboard-enabled synced repo can run Luna even when it is not in ORVEX_CODEX_CLI_REPOS', () => {
+test('any dashboard-enabled synced repo can run Luna for every customer account', () => {
   const server = loadServerConfig(fixedEnvironment);
   const store = {
-    hasEnabledRepo: (fullName: string) =>
-      fullName.toLowerCase() === 'inspiringprotrader2121-coder/code-review',
+    isRepoEnabled: (installationId: number, fullName: string) =>
+      installationId === 99 && fullName.toLowerCase() === 'customer/app',
+    hasEnabledRepo: (fullName: string) => fullName.toLowerCase() === 'customer/app',
   } as AppDatabase;
   const worker = createWorkerConfig(server, store);
   const allowed = worker.reviewRuntime?.routingPolicy.codexRepoAllowed;
-  assert.equal(allowed?.('inspiringprotrader2121-coder/code-review'), true);
-  assert.equal(allowed?.('INSPIRINGPROTRADER2121-CODER/CODE-REVIEW'), true);
-  assert.equal(allowed?.('acme/widgets'), true, 'env allowlist still grants Luna');
-  assert.equal(allowed?.('evil/repo'), false);
+  assert.equal(allowed?.('customer/app', 99), true);
+  assert.equal(allowed?.('CUSTOMER/APP', 99), true);
+  assert.equal(allowed?.('customer/other', 99), false);
+  assert.equal(
+    allowed?.('acme/widgets', 99),
+    false,
+    'env allowlist is not a substitute for enablement',
+  );
+  assert.equal(allowed?.('customer/app', 1), false, 'enablement is installation-scoped');
+  assert.equal(allowed?.('customer/app'), true, 'full-name fallback still admits an enabled repo');
 });

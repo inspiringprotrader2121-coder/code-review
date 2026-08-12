@@ -56,7 +56,7 @@ and MiniMax each use their separately configured capacities:
 
 - **Passes** — the review runs N times over the change + neighborhood + top-K
   index files; findings accumulate and dedupe by fingerprint.
-- **Agentic repository inspection** (higher tiers, allowlisted repositories) —
+- **Agentic repository inspection** (higher tiers, enabled repositories) —
   Luna may inspect relevant call sites and tests from a read-only checkout. The
   older expensive whole-repo sweep is disabled on every plan.
 - **Adversarial verification** — a second skeptical model pass tries to _refute_
