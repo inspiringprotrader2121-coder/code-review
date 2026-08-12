@@ -181,9 +181,11 @@ export class MemoryProviderAdmission implements ProviderAdmission {
         if (signal?.aborted) throw new Error('review cancelled while waiting for provider lease');
         this.removeExpiredLeases(normalized);
         const free = ceiling - this.activeLeaseCount(normalized);
-        const ordered = this.state.waiters!.filter((entry) => entry.provider === normalized).sort(
-          (left, right) => left.enqueuedAt - right.enqueuedAt || left.id.localeCompare(right.id),
-        );
+        const ordered = this.state
+          .waiters!.filter((entry) => entry.provider === normalized)
+          .sort(
+            (left, right) => left.enqueuedAt - right.enqueuedAt || left.id.localeCompare(right.id),
+          );
         const rank = ordered.findIndex((entry) => entry.id === waiterId);
         if (free > 0 && rank >= 0 && rank < free) {
           this.state.leases.set(token, {

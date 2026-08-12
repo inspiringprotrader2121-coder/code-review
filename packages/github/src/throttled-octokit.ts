@@ -2,10 +2,7 @@ import { createAppAuth } from '@octokit/auth-app';
 import { Octokit } from '@octokit/rest';
 import { throttling } from '@octokit/plugin-throttling';
 import type { GitHubAppConfig } from './types.js';
-import {
-  currentGitHubRequestPacer,
-  type GitHubInstallationPacer,
-} from './pacer.js';
+import { currentGitHubRequestPacer, type GitHubInstallationPacer } from './pacer.js';
 import { parseGitHubRetryAfterMs } from './retry.js';
 
 const ThrottledOctokit = Octokit.plugin(throttling);

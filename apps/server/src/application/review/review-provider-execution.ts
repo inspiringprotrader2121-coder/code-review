@@ -216,9 +216,8 @@ export async function executeReviewProviderCalls(
       const message = (error as Error).message;
       console.warn(`[worker] ${call.label} failed:`, message);
       const admissionBlocked =
-        /concurrency saturated|admission timed out|provider lease|cooldown active/i.test(
-          message,
-        ) && isTransientLlmError(message);
+        /concurrency saturated|admission timed out|provider lease|cooldown active/i.test(message) &&
+        isTransientLlmError(message);
       return outcome(
         call,
         false,

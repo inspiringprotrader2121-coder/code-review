@@ -196,10 +196,7 @@ test('production PM2 profile splits api/scheduler/workers with fleet Redis caps'
 test('verify and sandbox concurrency honor the production scale ceilings', () => {
   const config = loadReviewRuntimeConfig({ ORVEX_VERIFY_CONCURRENCY: '32' });
   assert.equal(config.verifyConcurrency, 32);
-  assert.equal(
-    loadReviewRuntimeConfig({ ORVEX_VERIFY_CONCURRENCY: '999' }).verifyConcurrency,
-    100,
-  );
+  assert.equal(loadReviewRuntimeConfig({ ORVEX_VERIFY_CONCURRENCY: '999' }).verifyConcurrency, 100);
   assert.equal(
     loadReviewRuntimeConfig({ ORVEX_MONTHLY_COGS_CAP_USD: '5000' }).accountLimits.monthlyCogsCapUsd,
     5_000,

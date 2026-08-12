@@ -653,7 +653,9 @@ export async function executeReviewCore(
         // review "(incomplete)" or list five duplicate per-sample labels.
         const sampleBase = (label: string | undefined): string =>
           (label ?? 'unnamed pass').replace(/ sample \d+\/\d+$/, '');
-        const failedBestEffort = finalOutcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort);
+        const failedBestEffort = finalOutcomes.filter(
+          (o) => o.kind === 'pass' && !o.ok && o.bestEffort,
+        );
         const okBestEffortBases = new Set(
           finalOutcomes
             .filter((o) => o.kind === 'pass' && o.ok && o.bestEffort)

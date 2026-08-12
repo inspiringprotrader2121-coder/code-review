@@ -143,7 +143,10 @@ export class RedisProviderAdmission implements ProviderAdmission, ProviderCapaci
       ? fleetCapacityRegistryKey(options.namespace, this.capacityPlan.epoch)
       : undefined;
     this.waitMs = Math.min(3_600_000, Math.max(1_000, Math.floor(options.waitMs ?? 30_000)));
-    this.leaseTtlMs = Math.max(PROVIDER_LEASE_TTL_MS, Math.floor(options.leaseTtlMs ?? PROVIDER_LEASE_TTL_MS));
+    this.leaseTtlMs = Math.max(
+      PROVIDER_LEASE_TTL_MS,
+      Math.floor(options.leaseTtlMs ?? PROVIDER_LEASE_TTL_MS),
+    );
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
   }
@@ -156,10 +159,7 @@ export class RedisProviderAdmission implements ProviderAdmission, ProviderCapaci
   ): Promise<string> {
     const token = randomUUID();
     const waiterId = randomUUID();
-    const waitMs = Math.min(
-      3_600_000,
-      Math.max(1, Math.floor(options?.waitMs ?? this.waitMs)),
-    );
+    const waitMs = Math.min(3_600_000, Math.max(1, Math.floor(options?.waitMs ?? this.waitMs)));
     const deadline = this.now() + waitMs;
     const normalized = normalizeProviderName(provider);
     const configuredLimit = this.capacityPlan?.limits[normalized];
@@ -194,7 +194,10 @@ export class RedisProviderAdmission implements ProviderAdmission, ProviderCapaci
         if (Array.isArray(acquired) && acquired[0] === 'acquired' && acquired[1] === token) {
           return token;
         }
-        if (Array.isArray(acquired) && (acquired[0] === 'capacity_missing' || acquired[0] === 'capacity_mismatch')) {
+        if (
+          Array.isArray(acquired) &&
+          (acquired[0] === 'capacity_missing' || acquired[0] === 'capacity_mismatch')
+        ) {
           throw capacityLeaseError(acquired, normalized, this.capacityPlan);
         }
         if (Array.isArray(acquired) && acquired[0] === 'wait') {

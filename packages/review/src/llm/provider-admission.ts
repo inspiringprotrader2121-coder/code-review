@@ -305,12 +305,14 @@ function startLeaseHeartbeat(
 ): () => void {
   if (typeof coordinator.renewProviderLease !== 'function') return () => {};
   const timer = setInterval(() => {
-    void coordinator.renewProviderLease?.(provider, token).catch((error) =>
-      console.warn(
-        `[llm] failed to renew distributed ${provider} lease:`,
-        (error as Error).message?.slice(0, 120),
-      ),
-    );
+    void coordinator
+      .renewProviderLease?.(provider, token)
+      .catch((error) =>
+        console.warn(
+          `[llm] failed to renew distributed ${provider} lease:`,
+          (error as Error).message?.slice(0, 120),
+        ),
+      );
   }, PROVIDER_LEASE_HEARTBEAT_MS);
   timer.unref?.();
   return () => clearInterval(timer);

@@ -24,11 +24,11 @@ starting a dedicated worker or scheduler.
 `ecosystem.config.cjs` defines a same-host role split that keeps SQLite on one
 machine while isolating HTTP from review work:
 
-| PM2 app                 | Role        | Notes                                                                 |
-| ----------------------- | ----------- | --------------------------------------------------------------------- |
-| `velatrix-api`          | `api`       | Port 8788; webhooks and dashboard stay responsive under review load.  |
-| `velatrix-scheduler`    | `scheduler` | Stable `ORVEX_WORKER_ID=scheduler-01`; registers fleet capacity.      |
-| `velatrix-worker-01..13`| `worker`    | Stable `ORVEX_WORKER_ID=review-worker-NN`; **8** reviews each.        |
+| PM2 app                  | Role        | Notes                                                                |
+| ------------------------ | ----------- | -------------------------------------------------------------------- |
+| `velatrix-api`           | `api`       | Port 8788; webhooks and dashboard stay responsive under review load. |
+| `velatrix-scheduler`     | `scheduler` | Stable `ORVEX_WORKER_ID=scheduler-01`; registers fleet capacity.     |
+| `velatrix-worker-01..13` | `worker`    | Stable `ORVEX_WORKER_ID=review-worker-NN`; **8** reviews each.       |
 
 Fleet provider ceilings remain Redis-owned (`ORVEX_FLEET_PROVIDER_CONCURRENCY_*`
 = 100/128/100, epoch `review-scale-v1`). Per-worker

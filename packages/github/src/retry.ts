@@ -66,7 +66,10 @@ export async function withGitHubRetry<T>(
       attempt++;
       if (attempt >= maxAttempts || !isGitHubRateLimitError(error)) throw error;
       const advertised = parseGitHubRetryAfterMs(error);
-      const waitMs = Math.min(advertised ?? Math.min(1_000 * 2 ** (attempt - 1), maxWaitMs), maxWaitMs);
+      const waitMs = Math.min(
+        advertised ?? Math.min(1_000 * 2 ** (attempt - 1), maxWaitMs),
+        maxWaitMs,
+      );
       options.onRetry?.(waitMs, attempt, error);
       await sleep(waitMs, options.signal);
     }

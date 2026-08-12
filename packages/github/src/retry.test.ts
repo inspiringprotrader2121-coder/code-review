@@ -1,10 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {
-  isGitHubRateLimitError,
-  parseGitHubRetryAfterMs,
-  withGitHubRetry,
-} from './retry.js';
+import { isGitHubRateLimitError, parseGitHubRetryAfterMs, withGitHubRetry } from './retry.js';
 import { MemoryGitHubInstallationPacer } from './pacer.js';
 
 test('parseGitHubRetryAfterMs reads header seconds and message hints', () => {

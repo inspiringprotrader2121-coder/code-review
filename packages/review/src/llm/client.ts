@@ -110,7 +110,10 @@ async function llmChatHoldingProviderSlot(
           );
         }
         const advertised = parseRetryAfterMs(lastError.message);
-        const waitMs = Math.min((advertised ?? baseMs) + Math.floor(Math.random() * 1_000), maxWaitMs);
+        const waitMs = Math.min(
+          (advertised ?? baseMs) + Math.floor(Math.random() * 1_000),
+          maxWaitMs,
+        );
         console.warn(
           `[llm] DeepSeek continuation rate-limited — holding provider slot ${Math.round(waitMs / 1000)}s then retrying (${continuationRateLimitAttempt}/${MAX_CONTINUATION_RATE_LIMIT_RETRIES})`,
         );

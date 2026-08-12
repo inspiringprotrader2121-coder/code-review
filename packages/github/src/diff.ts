@@ -11,15 +11,12 @@ export async function fetchCompareDiff(
   headSha: string,
   opts: { maxFileBytes: number; maxFiles: number; ignoreGlobs?: string[] },
 ): Promise<{ files: ChangedFile[]; coverage: DiffCoverage }> {
-  return withGitHubRetry(
-    () => fetchCompareDiffOnce(octokit, owner, repo, baseSha, headSha, opts),
-    {
-      onRetry: (waitMs, attempt) =>
-        console.warn(
-          `[diff] compare rate-limited — waiting ${Math.round(waitMs / 1000)}s then retrying (${attempt})`,
-        ),
-    },
-  );
+  return withGitHubRetry(() => fetchCompareDiffOnce(octokit, owner, repo, baseSha, headSha, opts), {
+    onRetry: (waitMs, attempt) =>
+      console.warn(
+        `[diff] compare rate-limited — waiting ${Math.round(waitMs / 1000)}s then retrying (${attempt})`,
+      ),
+  });
 }
 
 async function fetchCompareDiffOnce(

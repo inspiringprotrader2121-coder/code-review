@@ -398,7 +398,9 @@ test(
     await queue.renewLease!(claimed!);
     assert.equal(await cleanup.hget(`${namespace}:tenant-claims`, token), 'tenant-rebind');
     assert.equal(await cleanup.hget(`${namespace}:tenant-active`, 'tenant-rebind'), '1');
-    const expiryAfterRenew = Number(await cleanup.zscore(`${namespace}:tenant-claim-expiry`, token));
+    const expiryAfterRenew = Number(
+      await cleanup.zscore(`${namespace}:tenant-claim-expiry`, token),
+    );
     assert.ok(expiryAfterRenew > Date.now());
 
     const inflightTtlBefore = await cleanup.ttl(`${namespace}:inflight:${prKey(claimed!)}`);

@@ -93,7 +93,11 @@ test(
 );
 
 test('memory fair waiters prefer oldest and renew in-flight leases', async () => {
-  const admission = new MemoryProviderAdmission({ retryDelayMs: 1, waitMs: 2_000, leaseTtlMs: 5_000 });
+  const admission = new MemoryProviderAdmission({
+    retryDelayMs: 1,
+    waitMs: 2_000,
+    leaseTtlMs: 5_000,
+  });
   const first = await admission.acquireProviderLease('deepseek', 1);
   const order: string[] = [];
   const older = admission

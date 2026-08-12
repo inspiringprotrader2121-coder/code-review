@@ -48,9 +48,7 @@ export function composeApplication(
     config.review.providerConcurrency,
     config.queue.providerLeaseWaitMs,
   );
-  const githubPacer =
-    factories.githubPacer ??
-    createGitHubPacer(config);
+  const githubPacer = factories.githubPacer ?? createGitHubPacer(config);
   (factories.configureGitHubPacer ?? configureGitHubRequestPacer)(githubPacer);
   const githubConfig = githubAppConfig(config);
   const app = createApp(queue, { db, config, githubConfig });

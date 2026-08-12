@@ -114,13 +114,7 @@ export class RedisGitHubInstallationPacer implements GitHubInstallationPacer {
   async noteRetryAfter(installationId: number, retryAfterMs: number): Promise<void> {
     const now = this.now();
     const until = now + Math.min(300_000, Math.max(250, Math.floor(retryAfterMs)));
-    await this.redis.eval(
-      FREEZE,
-      1,
-      `${this.prefix}${Math.floor(installationId)}`,
-      until,
-      now,
-    );
+    await this.redis.eval(FREEZE, 1, `${this.prefix}${Math.floor(installationId)}`, until, now);
   }
 
   async close(): Promise<void> {

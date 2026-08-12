@@ -78,13 +78,9 @@ function app(name, envInline, extras = {}) {
   };
 }
 
-const api = app(
-  'velatrix-api',
-  `ORVEX_PROCESS_ROLE=api PORT=8788 HOST=0.0.0.0 ${SHARED_FLEET}`,
-  {
-    env: { HOST: '0.0.0.0', PORT: '8788', ORVEX_PROCESS_ROLE: 'api' },
-  },
-);
+const api = app('velatrix-api', `ORVEX_PROCESS_ROLE=api PORT=8788 HOST=0.0.0.0 ${SHARED_FLEET}`, {
+  env: { HOST: '0.0.0.0', PORT: '8788', ORVEX_PROCESS_ROLE: 'api' },
+});
 
 const scheduler = app(
   'velatrix-scheduler',

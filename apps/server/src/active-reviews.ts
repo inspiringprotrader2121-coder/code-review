@@ -273,7 +273,9 @@ function diskForPath(target: string): HostResourceSample['disk'] {
 }
 
 /** Sample host memory and disk for admission and the live monitor. */
-export function sampleHostResources(diskPath?: string): Pick<HostResourceSample, 'memory' | 'disk'> {
+export function sampleHostResources(
+  diskPath?: string,
+): Pick<HostResourceSample, 'memory' | 'disk'> {
   const totalBytes = os.totalmem();
   const freeBytes = os.freemem();
   const meminfo = parseMeminfo();

@@ -94,11 +94,7 @@ export async function returnJobForProviderHeadroom(
   const owned =
     (await queue.markFailed(
       job,
-      queueFailure(
-        'provider_transient',
-        'provider headroom unavailable before review start',
-        true,
-      ),
+      queueFailure('provider_transient', 'provider headroom unavailable before review start', true),
     )) !== false;
   if (!owned)
     throw new Error(`review lease lost before returning headroom-deferred job for ${prKey(job)}`);
