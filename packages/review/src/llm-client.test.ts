@@ -345,7 +345,7 @@ test('official DeepSeek requests use its native thinking switch at max effort', 
   assert.equal(captured[0].body.reasoning_effort, 'max');
   assert.equal(captured[0].body.max_tokens, 28_000);
   const messages = captured[0].body.messages as Array<{ role: string; content: string }>;
-  assert.match(messages[0]?.content ?? '', /finish private reasoning within 20,000 tokens/i);
+  assert.match(messages[0]?.content ?? '', /finish private reasoning within 18,000 tokens/i);
   assert.match(messages[0]?.content ?? '', /reserve the remaining response budget/i);
 });
 
@@ -467,13 +467,13 @@ test('official DeepSeek resumes one truncated max-reasoning response through pre
   assert.equal(captured[0]?.url, 'https://api.deepseek.com/v1/chat/completions');
   assert.equal(captured[1]?.url, 'https://api.deepseek.com/beta/chat/completions');
   assert.equal(captured[1]?.body.reasoning_effort, 'max');
-  assert.equal(captured[1]?.body.max_tokens, 8_000);
+  assert.equal(captured[1]?.body.max_tokens, 16_000);
   assert.equal(
     'response_format' in captured[1]!.body,
     false,
     'DeepSeek prefix completion rejects response_format',
   );
-  assert.deepEqual(captured[1]?.body.thinking, { type: 'enabled' });
+  assert.deepEqual(captured[1]?.body.thinking, { type: 'disabled' });
   const messages = captured[1]?.body.messages as Array<Record<string, unknown>>;
   assert.deepEqual(messages.at(-1), {
     role: 'assistant',
@@ -614,9 +614,9 @@ test('official DeepSeek never treats schema-ambiguous JSON as complete after out
           });
         },
       ),
-    /remained truncated after 1 bounded prefix continuation/,
+    /remained truncated after 2 bounded prefix continuation/,
   );
-  assert.equal(calls, 2, 'length remains fail-closed even when the partial JSON parses');
+  assert.equal(calls, 3, 'length remains fail-closed even when the partial JSON parses');
 });
 
 test('a failed DeepSeek continuation never replays the expensive root request', async (t) => {
@@ -689,7 +689,7 @@ test('a failed DeepSeek continuation never replays the expensive root request', 
   );
 });
 
-test('DeepSeek prefix recovery is bounded to one continuation without replaying the review', async () => {
+test('DeepSeek prefix recovery is bounded without replaying the review', async () => {
   const encoder = new TextEncoder();
   let calls = 0;
   await assert.rejects(
@@ -726,9 +726,9 @@ test('DeepSeek prefix recovery is bounded to one continuation without replaying 
           });
         },
       ),
-    /remained truncated after 1 bounded prefix continuation/,
+    /remained truncated after 2 bounded prefix continuation/,
   );
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
 });
 
 test('MiniMax keeps thinking enabled without consuming its answer budget', () => {

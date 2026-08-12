@@ -49,7 +49,7 @@ export interface LlmClientOptions {
     reasoningContent: string;
     contentPrefix: string;
   };
-  /** Internal per-request wall cap; public review calls use the configured 300s cap. */
+  /** Internal per-request wall cap; public review calls use the configured LLM max-total cap. */
   hardLimitMs?: number;
   dependencies?: LlmClientDependencies;
 }

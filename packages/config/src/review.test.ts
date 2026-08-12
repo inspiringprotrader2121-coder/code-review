@@ -11,7 +11,7 @@ test('review runtime defaults preserve production safety limits', () => {
   const config = loadReviewRuntimeConfig({});
   assert.equal(config.openAiReasoningEffort, 'high');
   assert.equal(config.llmTimeoutMs, 240_000);
-  assert.equal(config.llmMaxTotalMs, 300_000);
+  assert.equal(config.llmMaxTotalMs, 480_000);
   assert.equal(config.codexTimeoutMs, 480_000);
   assert.equal(config.codexInactivityTimeoutMs, 300_000);
   assert.equal(config.maxFindings, 25);
@@ -188,6 +188,11 @@ test('review runtime preserves legacy empty-string and invalid-value fallbacks',
   assert.equal(config.aggregationRuns, 1);
   assert.equal(config.verifyConcurrency, 1);
   assert.equal(config.llmMaxTotalMs, 30_000);
+});
+
+test('review runtime allows multi-minute LLM walls up to 15 minutes', () => {
+  assert.equal(loadReviewRuntimeConfig({ ORVEX_LLM_MAX_TOTAL_MS: '600000' }).llmMaxTotalMs, 600_000);
+  assert.equal(loadReviewRuntimeConfig({ ORVEX_LLM_MAX_TOTAL_MS: '9999999' }).llmMaxTotalMs, 900_000);
 });
 
 test("large-PR intake reaches GitHub's file boundary without exceeding it", () => {

@@ -433,7 +433,7 @@ export async function openAiCompatStreamChat(
     | undefined;
   const requestSystem =
     opts.json && opts.reasoningEffort === 'max' && /deepseek-v4/i.test(opts.model)
-      ? `${system}\n\n## Completion contract\nReasoning effort is fixed at max by the API. Finish private reasoning within 20,000 tokens and reserve the remaining response budget for the final JSON. Emit the JSON immediately when the evidence is sufficient.`
+      ? `${system}\n\n## Completion contract\nReasoning effort is fixed at max by the API. Finish private reasoning within 18,000 tokens and reserve the remaining response budget for the final JSON. Emit the JSON immediately when the evidence is sufficient.`
       : system;
   const continuation = opts.compatibleContinuation;
   const continuationPrefix = continuation?.contentPrefix ?? '';
@@ -549,8 +549,8 @@ export async function openAiCompatStreamChat(
       supportsCompatibleUsageStream(opts.baseUrl) &&
       opts.json &&
       opts.reasoningEffort === 'max' &&
-      thinkingEnabled(opts) &&
       /deepseek-v4/i.test(opts.model) &&
+      (thinkingEnabled(opts) || Boolean(continuation)) &&
       /terminated|premature(?:ly)? closed|other side closed/i.test(
         (error as Error)?.message ?? String(error),
       )
@@ -601,8 +601,8 @@ export async function openAiCompatStreamChat(
       supportsCompatibleUsageStream(opts.baseUrl) &&
       opts.json &&
       opts.reasoningEffort === 'max' &&
-      thinkingEnabled(opts) &&
-      /deepseek-v4/i.test(opts.model)
+      /deepseek-v4/i.test(opts.model) &&
+      (thinkingEnabled(opts) || Boolean(continuation))
     ) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,

@@ -15,11 +15,11 @@ export interface ReviewRoutingPolicy {
   minimaxMaxOutputTokens: number;
 }
 
-// DeepSeek reasoning and final JSON share max_tokens. Production measurements
-// put 36k completions at 286-300s, leaving no room for the final JSON before
-// the independent 300s wall cap. Keep API effort=max, but bound the shared
-// completion so the prompt can reserve time and tokens for its answer.
-export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = 28_000;
+// DeepSeek reasoning and final JSON share max_tokens. Keep API effort=max, but
+// bound the shared completion so a single call cannot burn forever before the
+// answer-only prefix continuation writes JSON. 24k leaves headroom under the
+// default 480s wall; empty-answer finish=length still resumes via continuation.
+export const DEEPSEEK_REVIEW_OUTPUT_TOKENS = 24_000;
 // MiniMax's reasoning tokens share this response budget. A required production
 // chunk exhausted 32k before emitting complete JSON, so retain headroom for the
 // bounded final answer without lowering the model's thinking mode.

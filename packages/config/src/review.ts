@@ -319,14 +319,17 @@ export function loadReviewRuntimeConfig(
   );
   const config: ReviewRuntimeConfig = {
     llmTimeoutMs: Math.min(Math.max(positive(env.ORVEX_LLM_TIMEOUT_MS, 240_000), 1_000), 900_000),
+    // DeepSeek/MiniMax review chunks regularly need 4–8 minutes under concurrent
+    // enterprise load. The old 300s hard clamp made required lenses fail as
+    // "incomplete" even when Luna had already finished and findings existed.
     llmMaxTotalMs: Math.min(
       Math.max(
-        Number.isFinite(Number(env.ORVEX_LLM_MAX_TOTAL_MS ?? 300_000))
-          ? Number(env.ORVEX_LLM_MAX_TOTAL_MS ?? 300_000)
-          : 300_000,
+        Number.isFinite(Number(env.ORVEX_LLM_MAX_TOTAL_MS ?? 480_000))
+          ? Number(env.ORVEX_LLM_MAX_TOTAL_MS ?? 480_000)
+          : 480_000,
         env.ORVEX_TEST_SHORT_TIMEOUTS === '1' ? 10 : 30_000,
       ),
-      300_000,
+      900_000,
     ),
     testShortTimeouts: env.ORVEX_TEST_SHORT_TIMEOUTS === '1',
     maxOutputTokens: positive(env.ORVEX_MAX_OUTPUT_TOKENS, 64_000),

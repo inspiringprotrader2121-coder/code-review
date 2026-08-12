@@ -25,9 +25,13 @@ import { clockFor, maxTotalMs } from './support.js';
 import { DeepSeekContinuationRequiredError } from './transports.js';
 
 let keyCursor = 0;
-const MAX_DEEPSEEK_PREFIX_CONTINUATIONS = 1;
-const DEEPSEEK_PREFIX_CONTINUATION_MAX_MS = 60_000;
-const DEEPSEEK_PREFIX_CONTINUATION_MAX_TOKENS = 8_000;
+// Primary max-reasoning can exhaust the shared completion budget with zero JSON.
+// Continuations must finish the answer under load; keep them answer-only (thinking
+// off) with enough wall/token headroom that a 3-PR burst does not mark required
+// DeepSeek lenses incomplete after Luna already succeeded.
+const MAX_DEEPSEEK_PREFIX_CONTINUATIONS = 2;
+const DEEPSEEK_PREFIX_CONTINUATION_MAX_MS = 180_000;
+const DEEPSEEK_PREFIX_CONTINUATION_MAX_TOKENS = 16_000;
 
 function splitKeys(apiKey: string): string[] {
   return apiKey
@@ -88,6 +92,9 @@ export async function llmChat(
     const attemptOpts: LlmClientOptions = {
       ...opts,
       compatibleContinuation: continuation,
+      // Reasoning already landed in the assistant prefix. Forcing thinking off
+      // stops a second max-reasoning burn and leaves the budget for JSON.
+      ...(continuation ? { thinking: false } : {}),
       hardLimitMs: continuation
         ? Math.min(opts.hardLimitMs ?? maxTotalMs(), DEEPSEEK_PREFIX_CONTINUATION_MAX_MS)
         : opts.hardLimitMs,
