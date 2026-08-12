@@ -466,7 +466,7 @@ test('host-selected verifier concurrency runs independent candidate batches in p
   assert.equal(peak, 2);
 });
 
-test('verification makes one parent-linked retry when a successful response violates the JSON contract', async (t) => {
+test('verification finishes a JSON-contract miss with one parent-linked continuation', async (t) => {
   const originalFetch = globalThis.fetch;
   const encoder = new TextEncoder();
   const events: LlmAttemptEvent[] = [];
@@ -520,7 +520,7 @@ test('verification makes one parent-linked retry when a successful response viol
   const starts = events.filter((event) => event.phase === 'started');
   assert.deepEqual(
     starts.map((event) => event.role),
-    ['primary', 'retry'],
+    ['primary', 'continuation'],
   );
   assert.equal(starts[1]?.parentAttemptId, starts[0]?.attemptId);
   assert.deepEqual(

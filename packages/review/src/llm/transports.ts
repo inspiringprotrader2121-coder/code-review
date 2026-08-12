@@ -117,7 +117,12 @@ export async function awaitAnthropicFinalMessage<T>(
     const remaining = Math.max(1, deadlineAt - clock.now());
     hardTimer = clock.setTimeout(() => {
       const sinceProgress = clock.now() - lastProgressAt;
-      if (sawStreamProgress && sinceProgress < inactivityMs && deadlineAt < absoluteDeadlineAt) {
+      if (
+        sawStreamProgress &&
+        hardLimitMs >= 30_000 &&
+        sinceProgress < inactivityMs &&
+        deadlineAt < absoluteDeadlineAt
+      ) {
         deadlineAt = Math.min(absoluteDeadlineAt, deadlineAt + PROGRESS_GRACE_MS);
         console.warn(
           `[llm] anthropic stream still progressing; extending hard wall to ${Math.round((deadlineAt - clock.now()) / 1000)}s remaining (cap ${Math.round(absoluteCapMs / 1000)}s)`,
@@ -206,7 +211,12 @@ async function openStream(
     const remaining = Math.max(1, deadlineAt - clock.now());
     hardTimer = clock.setTimeout(() => {
       const sinceProgress = clock.now() - lastProgressAt;
-      if (sawStreamProgress && sinceProgress < inactivityMs && deadlineAt < absoluteDeadlineAt) {
+      if (
+        sawStreamProgress &&
+        hardLimitMs >= 30_000 &&
+        sinceProgress < inactivityMs &&
+        deadlineAt < absoluteDeadlineAt
+      ) {
         deadlineAt = Math.min(absoluteDeadlineAt, deadlineAt + PROGRESS_GRACE_MS);
         console.warn(
           `[llm] ${labels.stream} stream still progressing; extending hard wall (${Math.round((deadlineAt - clock.now()) / 1000)}s remaining, cap ${Math.round(absoluteCapMs / 1000)}s)`,
@@ -269,7 +279,11 @@ async function openStream(
       sawStreamProgress = true;
       armTimer();
       if (clock.now() > deadlineAt) {
-        if (deadlineAt < absoluteDeadlineAt && clock.now() - lastProgressAt < inactivityMs) {
+        if (
+          hardLimitMs >= 30_000 &&
+          deadlineAt < absoluteDeadlineAt &&
+          clock.now() - lastProgressAt < inactivityMs
+        ) {
           deadlineAt = Math.min(absoluteDeadlineAt, deadlineAt + PROGRESS_GRACE_MS);
           armHardDeadline();
         } else {

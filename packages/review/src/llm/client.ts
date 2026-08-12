@@ -215,9 +215,6 @@ export async function llmChat(
       ) {
         throw lastError;
       }
-      if (enteredProviderCall && isRetryableEmptyProviderResponse(lastError.message)) {
-        throw lastError;
-      }
       const retryableEmptyResponse = isRetryableEmptyProviderResponse(lastError.message);
       const retryable = isRetryableRateLimit(lastError.message) || retryableEmptyResponse;
       providerAttempt++;
