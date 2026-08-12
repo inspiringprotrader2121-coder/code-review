@@ -86,6 +86,8 @@ export interface RequiredCoverageDegradation {
   skippedLenses: string[];
   reason: string;
   transient: boolean;
+  /** True when missing coverage failed because provider admission refused capacity. */
+  admissionBlocked: boolean;
 }
 
 /**
@@ -96,7 +98,11 @@ export interface RequiredCoverageDegradation {
  */
 export function describeRequiredCoverageDegradation(
   coverageKeys: readonly string[],
-  outcomes: readonly (RequiredLensOutcome & { label?: string; transient?: boolean })[],
+  outcomes: readonly (RequiredLensOutcome & {
+    label?: string;
+    transient?: boolean;
+    admissionBlocked?: boolean;
+  })[],
   requiredSuccesses: number,
 ): RequiredCoverageDegradation | null {
   const missingCoverageKeys = failedRequiredCoverageKeys(coverageKeys, outcomes, requiredSuccesses);
@@ -112,14 +118,18 @@ export function describeRequiredCoverageDegradation(
       failed.map((outcome) => outcome.label ?? outcome.requiredCoverageKey ?? 'required pass'),
     ),
   ];
+  const admissionBlocked = failed.some((outcome) => outcome.admissionBlocked === true);
   const transient = failed.some((outcome) => outcome.transient === true);
-  const cause = transient
-    ? 'a provider timed out or was temporarily unavailable'
-    : 'a required provider pass did not complete';
+  const cause = admissionBlocked
+    ? 'provider admission was saturated or timed out while waiting for capacity'
+    : transient
+      ? 'a provider timed out or was temporarily unavailable'
+      : 'a required provider pass did not complete';
   return {
     missingCoverageKeys,
     skippedLenses,
     transient,
+    admissionBlocked,
     reason:
       `review incomplete: ${missingCoverageKeys.length}/${coverageKeys.length} required review ` +
       `coverage unit(s) did not complete because ${cause}`,
@@ -337,6 +347,17 @@ export async function executeReviewCore(
       onOwnershipLoss: cancelForOwnershipLoss,
     });
     const { usage, onUsageFor, onAttemptFor } = accounting;
+    // Overlap deep-verify manifest fetches with discovery (including late
+    // investigate/risk/sweep work). Findings are not required for this prep.
+    const verifyFilesPromise = services.findingPipeline.buildVerificationFiles({
+      contextFiles: reviewContextFiles,
+      changedFiles: filesForLlm,
+      treePaths: repoTreePaths,
+      deepVerify: plan.deepVerify,
+      readFile: (filePath) => fetchFileContent(octokit, owner, repo, filePath, effectiveSha),
+    });
+    // Keep a rejection observer so a discovery failure cannot leave prep unhandled.
+    void verifyFilesPromise.catch(() => undefined);
     if (filesForLlm.length > 0) {
       // Depth is enforced HERE, in the harness, and scaled BY PLAN — not left to
       // how long one model call decides to think. Higher tiers get the fixed three
@@ -467,6 +488,79 @@ export async function executeReviewCore(
           apiConcurrency: concurrency,
         });
 
+        const mergeOutcomes = (
+          base: ReviewCallOutcome[],
+          retry: ReviewCallOutcome[],
+        ): ReviewCallOutcome[] => {
+          const retryKeys = new Set(
+            retry.map(
+              (outcome) =>
+                outcome.requiredCoverageKey ??
+                `lens:${outcome.modelPassIndex ?? -1}:${outcome.sample}`,
+            ),
+          );
+          const kept = base.filter((outcome) => {
+            const key =
+              outcome.requiredCoverageKey ??
+              `lens:${outcome.modelPassIndex ?? -1}:${outcome.sample}`;
+            // Only replace outcomes that were surgically retried; keep sweeps
+            // and unrelated passes by identity so label collisions cannot drop them.
+            return !outcome.requiredCoverageKey || !retryKeys.has(key);
+          });
+          return [...kept, ...retry];
+        };
+
+        let finalOutcomes = outcomes;
+        {
+          const requiredCalls = toRun.filter((call) => call.kind === 'pass' && !call.bestEffort);
+          const requiredCoverageKeys = [
+            ...new Set(
+              requiredCalls.map(
+                (call) => call.requiredCoverageKey ?? `lens:${call.modelPassIndex ?? -1}`,
+              ),
+            ),
+          ];
+          const firstDegradation = describeRequiredCoverageDegradation(
+            requiredCoverageKeys,
+            finalOutcomes,
+            1,
+          );
+          if (
+            firstDegradation &&
+            !firstDegradation.admissionBlocked &&
+            firstDegradation.transient &&
+            finalOutcomes.some((outcome) => outcome.ok && !outcome.bestEffort)
+          ) {
+            const retryCalls = requiredCalls.filter((call) =>
+              firstDegradation.missingCoverageKeys.includes(
+                call.requiredCoverageKey ?? `lens:${call.modelPassIndex ?? -1}`,
+              ),
+            );
+            if (retryCalls.length > 0) {
+              console.warn(
+                `[worker] surgically retrying ${retryCalls.length} missing required coverage unit(s) once at full quality`,
+              );
+              const retryOutcomes = await executeReviewProviderCalls({
+                calls: retryCalls,
+                filesForLlm,
+                filesForInvestigate,
+                providers: providerRegistry,
+                contextRun: runReview,
+                repoDirectory: agentRepoDir,
+                repoId: `${owner}/${repo}`,
+                signal: reviewAbortController.signal,
+                isCancelled: () => prClosedMidRun,
+                onUsageFor,
+                onAttemptFor,
+                tagFindings,
+                mapConcurrent: services.executor.mapConcurrent.bind(services.executor),
+                apiConcurrency: concurrency,
+              });
+              finalOutcomes = mergeOutcomes(finalOutcomes, retryOutcomes);
+            }
+          }
+        }
+
         if (prClosedMidRun) {
           console.log(
             `[worker] PR #${number} closed during review — discarding partial results, not posting`,
@@ -485,16 +579,16 @@ export async function executeReviewCore(
         // the review so it retries, rather than posting an empty "0 findings" that
         // reads as a clean pass. A genuinely clean review has ok:true calls, so it's
         // correctly distinguished.
-        const okCount = outcomes.filter((o) => o.ok).length;
-        const transientCount = outcomes.filter((o) => o.transient).length;
-        const degradedCount = outcomes.filter((o) => o.degraded).length;
+        const okCount = finalOutcomes.filter((o) => o.ok).length;
+        const transientCount = finalOutcomes.filter((o) => o.transient).length;
+        const degradedCount = finalOutcomes.filter((o) => o.degraded).length;
         // If NO pass succeeded, NEVER post — regardless of how it failed. A systematic
         // error thrown before runLlmReview's own try (bad prompt build, an unmatched
         // provider error) surfaces as ok:false/transient:false/degraded:false on every
         // call; the old guard skipped those and posted a false "0 findings — clean"
         // review on a PR that was never actually reviewed. A real clean review has
         // ok:true calls, so it is still correctly distinguished.
-        if (outcomes.length > 0 && okCount === 0) {
+        if (finalOutcomes.length > 0 && okCount === 0) {
           const why =
             transientCount > 0
               ? 'rate-limit/transport errors (likely token-plan quota)'
@@ -502,7 +596,7 @@ export async function executeReviewCore(
                 ? 'unparseable model responses'
                 : 'model calls errored before completing';
           throw new Error(
-            `review aborted: all ${outcomes.length} model calls failed — ${why}. Will retry on the next push or \`@orvex review\`.`,
+            `review aborted: all ${finalOutcomes.length} model calls failed — ${why}. Will retry on the next push or \`@orvex review\`.`,
           );
         }
 
@@ -525,9 +619,14 @@ export async function executeReviewCore(
         const requiredSuccesses = 1;
         const requiredCoverageDegradation = describeRequiredCoverageDegradation(
           requiredCoverageKeys,
-          outcomes,
+          finalOutcomes,
           requiredSuccesses,
         );
+        if (requiredCoverageDegradation?.admissionBlocked) {
+          throw new Error(
+            `review aborted: ${requiredCoverageDegradation.reason}; requeueing instead of publishing an incomplete review`,
+          );
+        }
         if (requiredCoverageDegradation) {
           reviewIncompleteReason = requiredCoverageDegradation.reason;
           skippedLenses = [
@@ -537,7 +636,8 @@ export async function executeReviewCore(
             `[worker] ${requiredCoverageDegradation.reason}; publishing completed pass results with disclosure`,
           );
         }
-        const degradedRequired = outcomes
+        const outcomesForMerge = finalOutcomes;
+        const degradedRequired = outcomesForMerge
           .filter((o) => o.kind === 'pass' && !o.bestEffort && o.ok && o.degraded)
           .map((o) => `${o.label ?? 'required pass'} (degraded)`);
         if (degradedRequired.length > 0) {
@@ -547,15 +647,15 @@ export async function executeReviewCore(
           );
         }
         // `deep:` labels come from DEEP_EXTRA_ANGLES — the lenses the 2x charge buys.
-        deepLensesRan = outcomes.some((o) => o.ok && (o.label ?? '').includes('deep:'));
+        deepLensesRan = finalOutcomes.some((o) => o.ok && (o.label ?? '').includes('deep:'));
         // Under aggregation a best-effort LENS is only "skipped" when EVERY sample
         // of it failed — one failed sample out of five must not brand a satisfied
         // review "(incomplete)" or list five duplicate per-sample labels.
         const sampleBase = (label: string | undefined): string =>
           (label ?? 'unnamed pass').replace(/ sample \d+\/\d+$/, '');
-        const failedBestEffort = outcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort);
+        const failedBestEffort = finalOutcomes.filter((o) => o.kind === 'pass' && !o.ok && o.bestEffort);
         const okBestEffortBases = new Set(
-          outcomes
+          finalOutcomes
             .filter((o) => o.kind === 'pass' && o.ok && o.bestEffort)
             .map((o) => sampleBase(o.label)),
         );
@@ -576,7 +676,7 @@ export async function executeReviewCore(
           // with some but < minOccurrences successes can't reach the recurrence
           // gate on its own samples — disclose it rather than abort.
           const underSampled = requiredCoverageKeys.filter((coverageKey) => {
-            const okCount = outcomes.filter(
+            const okCount = finalOutcomes.filter(
               (o) =>
                 (o.requiredCoverageKey ?? `lens:${o.modelPassIndex ?? -1}`) === coverageKey &&
                 o.kind === 'pass' &&
@@ -587,7 +687,7 @@ export async function executeReviewCore(
           });
           if (underSampled.length > 0) {
             const labels = underSampled.map((coverageKey) => {
-              const ok = outcomes.filter(
+              const ok = finalOutcomes.filter(
                 (o) =>
                   (o.requiredCoverageKey ?? `lens:${o.modelPassIndex ?? -1}`) === coverageKey &&
                   o.kind === 'pass' &&
@@ -607,10 +707,10 @@ export async function executeReviewCore(
         // Summary from the first successful REQUIRED pass — best-effort lenses
         // (investigate, deep extras, breadth) must not steal the PR headline.
         llmSummary =
-          outcomes.find((o) => o.kind === 'pass' && o.ok && !o.bestEffort)?.summary ??
-          outcomes.find((o) => o.kind === 'pass' && o.ok)?.summary ??
+          finalOutcomes.find((o) => o.kind === 'pass' && o.ok && !o.bestEffort)?.summary ??
+          finalOutcomes.find((o) => o.kind === 'pass' && o.ok)?.summary ??
           llmSummary;
-        for (const o of outcomes) accumulated.push(...o.findings);
+        for (const o of finalOutcomes) accumulated.push(...o.findings);
 
         const dedupeFindings = (findings: ReviewFinding[]): ReviewFinding[] => {
           const severityRank: Record<string, number> = { P1: 3, P2: 2, P3: 1, info: 0 };
@@ -646,7 +746,7 @@ export async function executeReviewCore(
         if (aggregation.enabled) {
           const isInvestigatePass = (idx: number | undefined) => idx === 100;
           const isRiskHuntPass = (idx: number | undefined) => typeof idx === 'number' && idx >= 101;
-          const repeated = outcomes
+          const repeated = finalOutcomes
             .filter(
               (outcome) =>
                 outcome.kind === 'pass' &&
@@ -675,13 +775,13 @@ export async function executeReviewCore(
           // Sweep, investigate, and risk-hunt are single-shot (not repeated) —
           // union them like sweep, otherwise unique tool-loop/risk evidence dies at
           // the recurrence threshold before the verifier can inspect it.
-          const sweepFindings = outcomes
+          const sweepFindings = finalOutcomes
             .filter((outcome) => outcome.kind === 'sweep' && outcome.ok)
             .flatMap((outcome) => outcome.findings);
-          const investigateFindings = outcomes
+          const investigateFindings = finalOutcomes
             .filter((outcome) => outcome.ok && isInvestigatePass(outcome.modelPassIndex))
             .flatMap((outcome) => outcome.findings);
-          const riskHuntFindings = outcomes
+          const riskHuntFindings = finalOutcomes
             .filter((outcome) => outcome.ok && isRiskHuntPass(outcome.modelPassIndex))
             .flatMap((outcome) => outcome.findings);
           llmFindings = dedupeFindings([
@@ -735,21 +835,12 @@ export async function executeReviewCore(
       suppressedFingerprints: config.store.getSuppressedFingerprints(installationId, owner, repo),
     });
 
-    const verifyFiles = await services.findingPipeline.buildVerificationFiles({
-      contextFiles: reviewContextFiles,
-      changedFiles: filesForLlm,
-      treePaths: repoTreePaths,
-      deepVerify: plan.deepVerify,
-      readFile: (filePath) => fetchFileContent(octokit, owner, repo, filePath, effectiveSha),
-    });
+    const verifyFiles = await verifyFilesPromise;
     const verificationCandidates = [
       ...merged.toPost,
       ...merged.reviewOnly.map(({ finding }) => finding),
     ];
-    const verificationCapacity = Math.min(
-      executionPolicy.concurrency,
-      services.verificationConcurrency ?? 1,
-    );
+    const verificationCapacity = Math.max(1, Math.floor(services.verificationConcurrency ?? 1));
     const verificationConcurrency = reviewProviderParallelism(verificationCapacity);
     console.log(
       `[worker] verification scheduling: perReview=${verificationConcurrency}; ` +

@@ -8,6 +8,8 @@ test('server config preserves defaults, aliases, and immutable nested values', (
   assert.equal(config.port, 8787);
   assert.equal(config.appUrl, 'http://localhost:8787');
   assert.equal(config.worker.concurrency, 8);
+  assert.equal(config.hostAdmission.minAvailableMemoryBytes, 1_073_741_824);
+  assert.equal(config.hostAdmission.minAvailableDiskBytes, 2_147_483_648);
   assert.equal(config.topology.role, 'all');
   assert.equal(config.webhook.bodyDedupTtlMs, 2 * 3_600_000);
   assert.equal(config.store.databasePath, config.databasePath);
@@ -21,6 +23,7 @@ test('server config preserves defaults, aliases, and immutable nested values', (
   assert.equal(config.verificationEnabled, true);
   assert.ok(Object.isFrozen(config));
   assert.ok(Object.isFrozen(config.worker));
+  assert.ok(Object.isFrozen(config.hostAdmission));
   assert.ok(Object.isFrozen(config.oauth));
   assert.ok(Object.isFrozen(config.store));
   assert.ok(Object.isFrozen(config.sandbox));

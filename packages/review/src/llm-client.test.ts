@@ -4,7 +4,9 @@ import {
   configureLlmProviderCoordinator,
   llmChat,
   providerConcurrency,
+  providerKeyLane,
   ReviewCancelledError,
+  selectProviderKey,
   setProviderCooldown,
   withProviderCallSlot,
   waitForProviderAvailability,
@@ -494,8 +496,8 @@ test('official DeepSeek resumes one truncated max-reasoning response through pre
     ['failed', 'succeeded'],
   );
   assert.equal(new Set(usage.map((event) => event.attemptId)).size, 2);
-  assert.equal(admissions, 2, 'each paid request gets a fresh distributed admission');
-  assert.equal(releases, 2);
+  assert.equal(admissions, 1, 'primary and continuation share one distributed admission');
+  assert.equal(releases, 1);
   assert.equal(
     clock.timers.filter((timer) => timer.ms === 30_000).length,
     2,
@@ -628,7 +630,7 @@ test('a failed DeepSeek continuation never replays the expensive root request', 
   const events: LlmAttemptEvent[] = [];
   globalThis.fetch = (async () => {
     calls++;
-    if (calls === 2) return new Response('rate limited', { status: 429 });
+    if (calls >= 2) return new Response('rate limited', { status: 429 });
     return new Response(
       new ReadableStream({
         start(controller) {
@@ -680,12 +682,20 @@ test('a failed DeepSeek continuation never replays the expensive root request', 
     }),
     /429|rate limit/i,
   );
-  assert.equal(calls, 2);
-  assert.equal(admissions, 2);
-  assert.equal(releases, 2);
-  assert.deepEqual(
-    events.filter((event) => event.phase === 'started').map((event) => event.role),
-    ['primary', 'continuation'],
+  assert.ok(calls >= 4 && calls <= 5, 'continuation retries rate limits inside the held slot');
+  assert.equal(admissions, 1, 'continuation must not rejoin the fleet wait queue');
+  assert.equal(releases, 1);
+  const startedRoles = events
+    .filter((event) => event.phase === 'started')
+    .map((event) => event.role);
+  assert.equal(startedRoles[0], 'primary');
+  assert.ok(
+    startedRoles.filter((role) => role === 'continuation').length >= 1,
+    'continuation attempts stay under the held provider slot',
+  );
+  assert.ok(
+    !startedRoles.slice(1).includes('primary'),
+    'must not replay the expensive root request',
   );
 });
 
@@ -1632,4 +1642,165 @@ test('provider cooldown admission has an independent bounded wait', async () => 
     Date.now() - started < 250,
     'cooldown admission does not occupy a worker slot long-term',
   );
+});
+
+test('admission saturation does not burn the short rate-limit wait budget', async () => {
+  let acquires = 0;
+  const coordinator: LlmProviderCoordinator = {
+    async acquireProviderLease() {
+      acquires++;
+      throw new Error('429 provider luna distributed concurrency saturated; retry-after: 42');
+    },
+    async releaseProviderLease() {},
+    async getProviderCooldownMs() {
+      return 0;
+    },
+    async setProviderCooldown() {},
+  };
+  configureLlmProviderCoordinator(coordinator, () => 1, 1_000);
+  try {
+    await assert.rejects(
+      llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'gpt-test',
+        baseUrl: 'https://api.openai.com/v1',
+        api: 'responses',
+        dependencies: {
+          admission: coordinator,
+          retryPolicy: { maxAttempts: 5, baseMs: 250, maxWaitMs: 1_000, totalWaitBudgetMs: 5_000 },
+          http: {
+            async fetch() {
+              throw new Error('paid call must not start while admission is saturated');
+            },
+          },
+        },
+      }),
+      /concurrency saturated; retry-after: 42/,
+    );
+    assert.equal(acquires, 1, 'admission miss fails once without rate-limit retries');
+  } finally {
+    configureLlmProviderCoordinator();
+  }
+});
+
+test('two-phase admission releases Redis while blocked on the local gate', async () => {
+  const events: string[] = [];
+  let holdLocal = true;
+  const coordinator: LlmProviderCoordinator = {
+    async acquireProviderLease() {
+      events.push('redis-acquire');
+      return `lease-${events.length}`;
+    },
+    async releaseProviderLease() {
+      events.push('redis-release');
+    },
+    async renewProviderLease() {
+      events.push('redis-renew');
+      return true;
+    },
+    async getProviderCooldownMs() {
+      return 0;
+    },
+    async setProviderCooldown() {},
+  };
+  configureLlmProviderCoordinator(coordinator, () => 1, 5_000);
+  try {
+    const blocker = withProviderCallSlot('two-phase', async () => {
+      events.push('local-held');
+      while (holdLocal) await new Promise((resolve) => setTimeout(resolve, 5));
+      return 'ok';
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const contender = withProviderCallSlot('two-phase', async () => {
+      events.push('contender-ran');
+      return 'done';
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.ok(events.includes('redis-release'), 'Redis lease must drop while waiting on local');
+    holdLocal = false;
+    assert.equal(await blocker, 'ok');
+    assert.equal(await contender, 'done');
+    assert.ok(events.includes('contender-ran'));
+  } finally {
+    configureLlmProviderCoordinator();
+  }
+});
+
+test('providerKeyLane isolates multi-key cooldown identities', () => {
+  assert.equal(providerKeyLane('luna', 0, 1), 'luna');
+  assert.equal(providerKeyLane('luna', 0, 2), 'luna:k0');
+  assert.equal(providerKeyLane('luna', 1, 2), 'luna:k1');
+});
+
+test('selectProviderKey prefers a cool sibling when one key is TPM-cooling', async () => {
+  const cooldowns = new Map<string, number>([['luna:k0', Date.now() + 60_000]]);
+  const coordinator: LlmProviderCoordinator = {
+    async acquireProviderLease() {
+      return 'lease';
+    },
+    async releaseProviderLease() {},
+    async getProviderCooldownMs(provider) {
+      return Math.max(0, (cooldowns.get(provider) ?? 0) - Date.now());
+    },
+    async setProviderCooldown(provider, durationMs) {
+      cooldowns.set(provider, Date.now() + durationMs);
+    },
+  };
+  const selected = await selectProviderKey('luna', ['key-a', 'key-b'], 0, coordinator);
+  assert.equal(selected.keyIndex, 1);
+  assert.equal(selected.lane, 'luna:k1');
+  assert.equal(selected.cooldownMs, 0);
+});
+
+test('a TPM 429 cools only the key lane so a sibling key can still admit', async (t) => {
+  const cooldowns = new Map<string, number>();
+  const leased: string[] = [];
+  const coordinator: LlmProviderCoordinator = {
+    async acquireProviderLease(provider) {
+      leased.push(provider);
+      return `lease-${provider}-${leased.length}`;
+    },
+    async releaseProviderLease() {},
+    async getProviderCooldownMs(provider) {
+      return Math.max(0, (cooldowns.get(provider) ?? 0) - Date.now());
+    },
+    async setProviderCooldown(provider, durationMs) {
+      cooldowns.set(provider, Date.now() + durationMs);
+    },
+  };
+  configureLlmProviderCoordinator(coordinator);
+  t.after(() => configureLlmProviderCoordinator());
+
+  let calls = 0;
+  const auths: string[] = [];
+  await llmChat('sys', 'user', {
+    apiKey: 'first-key, second-key',
+    model: 'gpt-multi-key',
+    baseUrl: 'https://api.openai.com/v1',
+    api: 'chat',
+    dependencies: {
+      admission: coordinator,
+      retryPolicy: { maxAttempts: 2, baseMs: 250, maxWaitMs: 1_000, totalWaitBudgetMs: 5_000 },
+      http: {
+        async fetch(_input, init) {
+          calls++;
+          const auth = String(new Headers(init?.headers).get('Authorization'));
+          auths.push(auth);
+          if (calls === 1) {
+            return new Response('Rate limit reached TPM; retry-after: 90', { status: 429 });
+          }
+          return new Response(chatStream('{"findings":[]}'), { status: 200 });
+        },
+      },
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(new Set(auths).size, 2, 'retry rotates to the sibling API key');
+  assert.ok(
+    (cooldowns.get('luna:k0') ?? 0) > Date.now() || (cooldowns.get('luna:k1') ?? 0) > Date.now(),
+    'exactly one key lane is cooled',
+  );
+  assert.equal(cooldowns.has('luna'), false, 'provider-wide cooldown must not defeat multi-key');
+  assert.deepEqual(leased, ['luna', 'luna'], 'fleet leases remain on the base provider');
 });

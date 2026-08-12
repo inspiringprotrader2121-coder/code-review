@@ -18,6 +18,15 @@ import { RETRYABLE_EMPTY_PROVIDER_RESPONSE } from './retry-policy.js';
 // is ever opened, rather than producing a timer that fires immediately.
 const COMPATIBLE_CHAT_INACTIVITY_MS = loadReviewRuntimeConfig().llmTimeoutMs;
 
+/** Absolute paid-call ceiling; progress grace cannot exceed this. */
+const ABSOLUTE_LLM_WALL_CAP_MS = 900_000;
+/** Extra wall time granted while a live stream keeps emitting bytes/events. */
+const PROGRESS_GRACE_MS = 180_000;
+
+function resolveHardLimitMs(opts: LlmClientOptions): number {
+  return Math.min(opts.hardLimitMs ?? maxTotalMs(), ABSOLUTE_LLM_WALL_CAP_MS);
+}
+
 export class DeepSeekContinuationRequiredError extends Error {
   constructor(readonly continuation: NonNullable<LlmClientOptions['compatibleContinuation']>) {
     super('DeepSeek max-reasoning response requires bounded prefix continuation');
@@ -70,13 +79,18 @@ export async function awaitAnthropicFinalMessage<T>(
   opts: LlmClientOptions,
 ): Promise<T> {
   const clock = clockFor(opts);
-  const hardLimitMs = maxTotalMs();
+  const hardLimitMs = resolveHardLimitMs(opts);
+  const absoluteCapMs = ABSOLUTE_LLM_WALL_CAP_MS;
   const inactivityMs = loadReviewRuntimeConfig().llmTimeoutMs;
   let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
   let hardTimer: ReturnType<typeof setTimeout> | undefined;
   let timeoutReason: 'inactivity' | 'hard' | undefined;
   let cancelled = false;
   let settled = false;
+  let lastProgressAt = clock.now();
+  const startedAt = clock.now();
+  const absoluteDeadlineAt = startedAt + absoluteCapMs;
+  let deadlineAt = startedAt + hardLimitMs;
 
   const clearTimers = () => {
     if (inactivityTimer) clock.clearTimeout(inactivityTimer);
@@ -93,7 +107,27 @@ export async function awaitAnthropicFinalMessage<T>(
       abortStream();
     }, inactivityMs);
   };
-  const onActivity = () => armInactivity();
+  const armHardDeadline = () => {
+    if (hardTimer) clock.clearTimeout(hardTimer);
+    const remaining = Math.max(1, deadlineAt - clock.now());
+    hardTimer = clock.setTimeout(() => {
+      const sinceProgress = clock.now() - lastProgressAt;
+      if (sinceProgress < inactivityMs && deadlineAt < absoluteDeadlineAt) {
+        deadlineAt = Math.min(absoluteDeadlineAt, deadlineAt + PROGRESS_GRACE_MS);
+        console.warn(
+          `[llm] anthropic stream still progressing; extending hard wall to ${Math.round((deadlineAt - clock.now()) / 1000)}s remaining (cap ${Math.round(absoluteCapMs / 1000)}s)`,
+        );
+        armHardDeadline();
+        return;
+      }
+      timeoutReason = 'hard';
+      abortStream();
+    }, remaining);
+  };
+  const onActivity = () => {
+    lastProgressAt = clock.now();
+    armInactivity();
+  };
   const cancelStream = () => {
     cancelled = true;
     abortStream();
@@ -103,10 +137,7 @@ export async function awaitAnthropicFinalMessage<T>(
   opts.signal?.addEventListener('abort', cancelStream, { once: true });
   if (opts.signal?.aborted) cancelStream();
   armInactivity();
-  hardTimer = clock.setTimeout(() => {
-    timeoutReason = 'hard';
-    abortStream();
-  }, hardLimitMs);
+  armHardDeadline();
   try {
     const response = await stream.finalMessage();
     if (cancelled || opts.signal?.aborted) throw new ReviewCancelledError();
@@ -140,13 +171,19 @@ async function openStream(
 ): Promise<void> {
   throwIfCancelled(opts.signal);
   const clock = clockFor(opts);
-  const hardLimitMs = opts.hardLimitMs ?? maxTotalMs();
+  const hardLimitMs = resolveHardLimitMs(opts);
+  const absoluteCapMs = ABSOLUTE_LLM_WALL_CAP_MS;
   const controller = new AbortController();
   const unlinkAbort = linkAbortSignal(opts.signal, controller);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let hardTimer: ReturnType<typeof setTimeout> | undefined;
   let timeoutReason: 'inactivity' | 'hard' | undefined;
+  let lastProgressAt = clock.now();
+  const startedAt = clock.now();
+  const absoluteDeadlineAt = startedAt + absoluteCapMs;
+  let deadlineAt = startedAt + hardLimitMs;
   const armTimer = () => {
+    lastProgressAt = clock.now();
     if (timer) clock.clearTimeout(timer);
     timer = clock.setTimeout(() => {
       timeoutReason = 'inactivity';
@@ -157,11 +194,25 @@ async function openStream(
     if (timer) clock.clearTimeout(timer);
     if (hardTimer) clock.clearTimeout(hardTimer);
   };
+  const armHardDeadline = () => {
+    if (hardTimer) clock.clearTimeout(hardTimer);
+    const remaining = Math.max(1, deadlineAt - clock.now());
+    hardTimer = clock.setTimeout(() => {
+      const sinceProgress = clock.now() - lastProgressAt;
+      if (sinceProgress < inactivityMs && deadlineAt < absoluteDeadlineAt) {
+        deadlineAt = Math.min(absoluteDeadlineAt, deadlineAt + PROGRESS_GRACE_MS);
+        console.warn(
+          `[llm] ${labels.stream} stream still progressing; extending hard wall (${Math.round((deadlineAt - clock.now()) / 1000)}s remaining, cap ${Math.round(absoluteCapMs / 1000)}s)`,
+        );
+        armHardDeadline();
+        return;
+      }
+      timeoutReason = 'hard';
+      controller.abort();
+    }, remaining);
+  };
   armTimer();
-  hardTimer = clock.setTimeout(() => {
-    timeoutReason = 'hard';
-    controller.abort();
-  }, hardLimitMs);
+  armHardDeadline();
   let response: Response;
   try {
     response = await (opts.dependencies?.http?.fetch ?? globalThis.fetch)(url, {
@@ -197,7 +248,6 @@ async function openStream(
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  const startedAt = clock.now();
   let buffer = '';
   const dispatchLine = (raw: string) => {
     const line = raw.trim();
@@ -210,13 +260,18 @@ async function openStream(
       const { done, value } = await reader.read();
       if (done) break;
       armTimer();
-      if (clock.now() - startedAt > hardLimitMs) {
-        try {
-          await reader.cancel();
-        } catch {
-          /* best effort */
+      if (clock.now() > deadlineAt) {
+        if (deadlineAt < absoluteDeadlineAt && clock.now() - lastProgressAt < inactivityMs) {
+          deadlineAt = Math.min(absoluteDeadlineAt, deadlineAt + PROGRESS_GRACE_MS);
+          armHardDeadline();
+        } else {
+          try {
+            await reader.cancel();
+          } catch {
+            /* best effort */
+          }
+          throw new Error(`LLM ${labels.stream} call exceeded ${hardLimitMs}ms wall-clock cap`);
         }
-        throw new Error(`LLM ${labels.stream} call exceeded ${hardLimitMs}ms wall-clock cap`);
       }
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
@@ -249,7 +304,7 @@ export async function anthropicChat(
   opts: LlmClientOptions,
 ): Promise<string> {
   throwIfCancelled(opts.signal);
-  const hardLimitMs = maxTotalMs();
+  const hardLimitMs = resolveHardLimitMs(opts);
   const client = new Anthropic({
     apiKey: opts.apiKey,
     baseURL: opts.baseUrl,

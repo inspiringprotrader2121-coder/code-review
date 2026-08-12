@@ -14,7 +14,12 @@ export const MS_PER_30_DAYS = 30 * 24 * MS_PER_HOUR;
 /** Monthly provider-cost circuit breaker. This is an operator safety ceiling,
  * not a customer-facing review allowance; set it after measuring real COGS.
  * Applies to every plan including enterprise — custom contracts still need a
- * spend backstop so a runaway cannot burn uncapped provider dollars. */
+ * spend backstop so a runaway cannot burn uncapped provider dollars.
+ *
+ * Prefer injecting `config.quota` (or account-limit policy). The string/plan-id
+ * overload is legacy compatibility only and always returns the historical
+ * default 250 — callers that need the live ORVEX_MONTHLY_COGS_CAP_USD must
+ * pass the server config object. */
 export function monthlyCogsCapUsd(configOrPlan?: Pick<ServerConfig, 'quota'> | string): number {
   // Review-pipeline migration owns the final caller. Its compatibility path
   // uses the historical default until it receives the injected server config.

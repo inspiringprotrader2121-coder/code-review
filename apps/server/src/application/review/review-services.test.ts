@@ -78,9 +78,33 @@ test('missing required coverage is publishable only with an explicit incomplete 
     missingCoverageKeys: ['required:deep-dive:1:chunk:1/1'],
     skippedLenses: ['pass 2/4 (deep-dive)'],
     transient: true,
+    admissionBlocked: false,
     reason:
       'review incomplete: 1/2 required review coverage unit(s) did not complete because a provider timed out or was temporarily unavailable',
   });
+});
+
+test('admission saturation is disclosed as admissionBlocked so the executor can requeue', () => {
+  const degradation = describeRequiredCoverageDegradation(
+    ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1'],
+    [
+      {
+        requiredCoverageKey: 'required:general:0:chunk:1/1',
+        label: 'pass 1/4 (general)',
+        ok: true,
+      },
+      {
+        requiredCoverageKey: 'required:deep-dive:1:chunk:1/1',
+        label: 'pass 2/4 (deep-dive)',
+        ok: false,
+        transient: true,
+        admissionBlocked: true,
+      },
+    ],
+    1,
+  );
+  assert.equal(degradation?.admissionBlocked, true);
+  assert.match(degradation?.reason ?? '', /admission was saturated/);
 });
 
 test('a successful unsharded agentic lens satisfies its fallback coverage key', () => {

@@ -1,6 +1,5 @@
 import { planFeatures } from '@orvex-review/tenants';
 import { BillingPeriod } from '@orvex-review/billing';
-import { monthlyCogsCapUsd } from '../quota-status.js';
 import type { WorkerConfig } from './worker-types.js';
 
 const MS_PER_30_DAYS = 30 * 24 * 3_600_000;
@@ -12,17 +11,23 @@ function tenantQuotaPeriodStart(store: WorkerConfig['store'], tenantId: string):
 export interface AccountLimitPolicy {
   freeTierDailyCap: number;
   cogsReservationUsd: number;
+  /** Operator monthly provider-cost ceiling from ORVEX_MONTHLY_COGS_CAP_USD. */
+  monthlyCogsCapUsd: number;
 }
 
 export const DEFAULT_ACCOUNT_LIMIT_POLICY: AccountLimitPolicy = {
   freeTierDailyCap: 300,
   cogsReservationUsd: 5,
+  monthlyCogsCapUsd: 250,
 };
 
 export function createAccountLimitPolicy(values: Partial<AccountLimitPolicy>): AccountLimitPolicy {
   const daily = Number(values.freeTierDailyCap ?? DEFAULT_ACCOUNT_LIMIT_POLICY.freeTierDailyCap);
   const reservation = Number(
     values.cogsReservationUsd ?? DEFAULT_ACCOUNT_LIMIT_POLICY.cogsReservationUsd,
+  );
+  const monthlyCap = Number(
+    values.monthlyCogsCapUsd ?? DEFAULT_ACCOUNT_LIMIT_POLICY.monthlyCogsCapUsd,
   );
   return {
     freeTierDailyCap:
@@ -33,6 +38,10 @@ export function createAccountLimitPolicy(values: Partial<AccountLimitPolicy>): A
       Number.isFinite(reservation) && reservation > 0
         ? Math.min(Math.max(reservation, 0.01), 1_000)
         : DEFAULT_ACCOUNT_LIMIT_POLICY.cogsReservationUsd,
+    monthlyCogsCapUsd:
+      Number.isFinite(monthlyCap) && monthlyCap > 0
+        ? Math.min(Math.max(monthlyCap, 1), 1_000_000)
+        : DEFAULT_ACCOUNT_LIMIT_POLICY.monthlyCogsCapUsd,
   };
 }
 
@@ -130,16 +139,15 @@ export function accountLimitReason(
     if (projected > plan.maxConcurrentReviews) return 'concurrency_limited';
   }
 
-  const costLimit = monthlyCogsCapUsd(plan.id);
-  const accountCost = costLimit !== null ? store.sumAccountCost(owner, MS_PER_30_DAYS).costUsd : 0;
-  const runningReviews =
-    costLimit !== null ? store.countRunningCogsReservations(owner, MS_PER_30_DAYS) : 0;
-  const reservation = costLimit !== null ? policy.cogsReservationUsd : 0;
+  const costLimit = policy.monthlyCogsCapUsd;
+  const accountCost = store.sumAccountCost(owner, MS_PER_30_DAYS).costUsd;
+  const runningReviews = store.countRunningCogsReservations(owner, MS_PER_30_DAYS);
+  const reservation = policy.cogsReservationUsd;
   const projectedReservations =
     Math.max(0, runningReviews - Math.max(0, excludedRunningReservations)) +
     Math.max(0, pendingReservations);
   const projectedCost = accountCost + reservation * projectedReservations;
-  if (costLimit !== null && projectedCost >= costLimit) {
+  if (projectedCost >= costLimit) {
     console.error(
       `[billing] monthly COGS safety ceiling reached for ${owner}: ` +
         `$${projectedCost.toFixed(2)} projected (${Math.max(0, runningReviews - Math.max(0, excludedRunningReservations))} running + ${Math.max(0, pendingReservations)} pending) >= $${costLimit.toFixed(2)}`,

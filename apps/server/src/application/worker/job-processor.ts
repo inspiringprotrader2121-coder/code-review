@@ -1,6 +1,6 @@
 import type { ReviewJobPayload, ReviewQueue } from '@orvex-review/queue';
 import { prKey, providerAdmissionFor, queueFailure } from '@orvex-review/queue';
-import { isTransientLlmError } from '@orvex-review/review';
+import { isTransientLlmError, runWithProviderAdmissionPriority } from '@orvex-review/review';
 import {
   processAskJob,
   processExplainJob,
@@ -15,7 +15,12 @@ import { runWithActiveReview } from '../../active-reviews.js';
 import { sendOperationalAlert } from '../../alerts.js';
 import { bindWorkerRuntime } from './runtime.js';
 import { startLeaseHeartbeat } from './lease-heartbeat.js';
-import { finalizeQueueJob, resolveMaxJobRetries } from './queue-policy.js';
+import {
+  finalizeQueueJob,
+  fleetProvidersSaturated,
+  resolveMaxJobRetries,
+  returnJobForProviderHeadroom,
+} from './queue-policy.js';
 import { alertQueueOperationalEvents } from './queue-alerts.js';
 
 export interface JobProcessorDependencies {
@@ -68,13 +73,20 @@ export async function processWorkerJob(
 
   await runWithActiveReview(job, async () => {
     try {
+      const admission = providerAdmissionFor(queue);
+      if (await fleetProvidersSaturated(admission)) {
+        log.log(`[worker] defer ${key}: provider fleet saturated; preserving queue age`);
+        await returnJobForProviderHeadroom(queue, job);
+        finalizedOwned = true;
+        return;
+      }
       if (!(await queue.markRunning(job))) {
         leaseOwnershipValid = false;
         throw new Error(`review lease lost before execution for ${key}`);
       }
       const config: WorkerConfig = {
         ...bindWorkerRuntime(input.loadConfig(), input.runtime),
-        providerAdmission: providerAdmissionFor(queue) ?? undefined,
+        providerAdmission: admission ?? undefined,
         leaseValid: async () => {
           const valid = await heartbeat.leaseValid();
           if (!valid) leaseOwnershipValid = false;
@@ -82,7 +94,10 @@ export async function processWorkerJob(
         },
         persistJob: queue.persistJob ? (persisted) => queue.persistJob!(persisted) : undefined,
       };
-      const result = await dispatchWorkerJob(job, config, input.runtime, input.processReview);
+      // Already-running reviews win fair provider waiters over brand-new claims.
+      const result = await runWithProviderAdmissionPriority('straggler', () =>
+        dispatchWorkerJob(job, config, input.runtime, input.processReview),
+      );
       const draftSkipped = result?.skipReason === 'draft PR';
       const prClosedMidRun = result?.skipReason === 'pr_closed_mid_run';
       await enqueueAutoApply(job, config, queue, result, log);

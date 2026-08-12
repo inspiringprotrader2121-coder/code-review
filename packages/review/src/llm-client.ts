@@ -9,9 +9,15 @@ export { ReviewCancelledError, isReviewCancelledError } from './llm/cancellation
 export {
   configureLlmProviderCoordinator,
   getProviderCooldownMs,
+  getProviderLoad,
+  isProviderAdmissionError,
   providerBucketForTarget,
   providerConcurrency,
+  providerKeyLane,
+  runWithProviderAdmissionPriority,
+  selectProviderKey,
   setProviderCooldown,
+  splitApiKeys,
   waitForProviderAvailability,
   withProviderCallSlot,
 } from './llm/provider-admission.js';

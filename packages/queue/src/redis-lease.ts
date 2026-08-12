@@ -56,6 +56,7 @@ export class RedisLeaseOperations {
       claimToken(claim),
       LEASE_TTL_SECONDS,
       this.keys,
+      job.tenantId,
     );
     if (!renewed) throw new Error(`review lease lost for ${prKey(job)}`);
   }
@@ -80,30 +81,56 @@ export class RedisLeaseOperations {
     const token = claim.slice(0, separator);
     const oldRaw = claim.slice(separator + 1);
     const newRaw = JSON.stringify(job);
-    if (newRaw === oldRaw) return;
-    const newClaim = `${token}\n${newRaw}`;
-    const replaced = await this.transitions.replaceClaimPayload({
-      processingKey: this.keys.processing,
-      inflightKey: `${this.keys.inflightPrefix}${prKey(job)}`,
-      token,
-      oldEntry: claim,
-      newEntry: newClaim,
-      leaseTtlSeconds: LEASE_TTL_SECONDS,
-    });
-    if (!replaced) {
-      this.claims.delete(job);
-      throw new Error(`review lease lost before job persistence for ${prKey(job)}`);
-    }
-    const oldMeta = processingMetaKey(this.keys.processingMetaPrefix, claim);
-    const newMeta = processingMetaKey(this.keys.processingMetaPrefix, newClaim);
-    const startedAt = await this.redis.get(oldMeta);
-    if (startedAt !== null) {
-      await this.redis.set(newMeta, startedAt, 'EX', PROCESSING_META_TTL_SECONDS);
-      await this.redis.del(oldMeta);
+    const inflightKey = `${this.keys.inflightPrefix}${prKey(job)}`;
+    let activeClaim = claim;
+    if (newRaw !== oldRaw) {
+      const newClaim = `${token}\n${newRaw}`;
+      const replaced = await this.transitions.replaceClaimPayload({
+        processingKey: this.keys.processing,
+        inflightKey,
+        token,
+        oldEntry: claim,
+        newEntry: newClaim,
+        leaseTtlSeconds: LEASE_TTL_SECONDS,
+        tenantLeaseKeys: this.keys,
+        tenantId: job.tenantId,
+      });
+      if (!replaced) {
+        this.claims.delete(job);
+        throw new Error(`review lease lost before job persistence for ${prKey(job)}`);
+      }
+      const oldMeta = processingMetaKey(this.keys.processingMetaPrefix, claim);
+      const newMeta = processingMetaKey(this.keys.processingMetaPrefix, newClaim);
+      const startedAt = await this.redis.get(oldMeta);
+      if (startedAt !== null) {
+        await this.redis.set(newMeta, startedAt, 'EX', PROCESSING_META_TTL_SECONDS);
+        await this.redis.del(oldMeta);
+      } else {
+        await this.redis.set(newMeta, String(Date.now()), 'EX', PROCESSING_META_TTL_SECONDS, 'NX');
+      }
+      this.claims.set(job, newClaim);
+      activeClaim = newClaim;
     } else {
-      await this.redis.set(newMeta, String(Date.now()), 'EX', PROCESSING_META_TTL_SECONDS, 'NX');
+      const refreshed = await this.transitions.refreshOwnedLease({
+        inflightKey,
+        token,
+        leaseTtlSeconds: LEASE_TTL_SECONDS,
+        tenantLeaseKeys: this.keys,
+        tenantId: job.tenantId,
+      });
+      if (!refreshed) {
+        this.claims.delete(job);
+        throw new Error(`review lease lost before job persistence for ${prKey(job)}`);
+      }
+      const meta = processingMetaKey(this.keys.processingMetaPrefix, activeClaim);
+      const startedAt = await this.redis.get(meta);
+      await this.redis.set(
+        meta,
+        startedAt ?? String(Date.now()),
+        'EX',
+        PROCESSING_META_TTL_SECONDS,
+      );
     }
-    this.claims.set(job, newClaim);
   }
 
   async markFailed(job: ReviewJobPayload, failure: QueueFailure): Promise<boolean> {

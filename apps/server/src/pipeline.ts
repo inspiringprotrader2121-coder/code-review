@@ -121,7 +121,11 @@ function runtimeFor(config: WorkerConfig): NonNullable<WorkerConfig['reviewRunti
     config.reviewRuntime ??
     Object.freeze({
       routingPolicy: DEFAULT_REVIEW_ROUTING_POLICY,
-      accountLimits: Object.freeze({ freeTierDailyCap: 300, cogsReservationUsd: 5 }),
+      accountLimits: Object.freeze({
+        freeTierDailyCap: 300,
+        cogsReservationUsd: 5,
+        monthlyCogsCapUsd: 250,
+      }),
       usageCosts: Object.freeze({
         premium: Object.freeze({ input: 1.4, cachedInput: 1.4, output: 4.4 }),
         standard: Object.freeze({ input: 0.3, cachedInput: 0.06, output: 1.2 }),

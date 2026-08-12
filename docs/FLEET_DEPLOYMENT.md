@@ -19,6 +19,32 @@ The server package exposes `start:api`, `start:worker`, and `start:scheduler`
 commands. Set `ORVEX_WORKER_ID` in the protected service environment before
 starting a dedicated worker or scheduler.
 
+## Same-host PM2 multi-app profile
+
+`ecosystem.config.cjs` defines a same-host role split that keeps SQLite on one
+machine while isolating HTTP from review work:
+
+| PM2 app                 | Role        | Notes                                                                 |
+| ----------------------- | ----------- | --------------------------------------------------------------------- |
+| `velatrix-api`          | `api`       | Port 8788; webhooks and dashboard stay responsive under review load.  |
+| `velatrix-scheduler`    | `scheduler` | Stable `ORVEX_WORKER_ID=scheduler-01`; registers fleet capacity.      |
+| `velatrix-worker-01..13`| `worker`    | Stable `ORVEX_WORKER_ID=review-worker-NN`; **8** reviews each.        |
+
+Fleet provider ceilings remain Redis-owned (`ORVEX_FLEET_PROVIDER_CONCURRENCY_*`
+= 100/128/100, epoch `review-scale-v1`). Per-worker
+`ORVEX_MAX_CONCURRENT_REVIEWS=8` is a local slot count only.
+`ORVEX_FLEET_TENANT_CONCURRENCY=40` caps one tenant's concurrent claims for
+fairness. Worker `kill_timeout` stays above `ORVEX_SHUTDOWN_DRAIN_MS`.
+
+Workers also gate dequeue on host memory/disk headroom
+(`ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES` / `ORVEX_HOST_MIN_AVAILABLE_DISK_BYTES`)
+so a saturated host does not claim more archive/sandbox work.
+
+**Deploy:** `scripts/deploy-safe.sh --restart` startOrRestarts the full multi-app
+ecosystem (api + scheduler + workers), stops every Orvex PM2 process before
+file apply, deletes the legacy `velatrix-review` process on cutover, and refuses
+to clear drain until api/scheduler plus at least one worker are online.
+
 ## Fleet Provider Capacity
 
 `ORVEX_PROVIDER_CONCURRENCY_LUNA`, `_DEEPSEEK`, and `_MINIMAX` are **local**
@@ -97,10 +123,23 @@ Before a multi-host rollout, all of these gates must be complete:
    tenant backlog, worker saturation, provider cooldowns, job lifecycle
    failures, and review latency percentiles.
 
-Until those gates pass, the correct production topology is one host and the
-existing `all` process. This is deliberate: the role and traffic-routing code
-creates a safe migration path without falsely claiming that the current SQLite
-deployment can absorb hundreds of simultaneous reviews.
+Until those gates pass, the correct production topology is **one host**. The
+same-host PM2 role split (`api` + `scheduler` + workers) is the intended SQLite
+shape; do not place workers or API replicas on additional machines. Multi-host
+still requires the Postgres and transactional gates above.
+
+## Phase 5 status (Postgres / multi-host)
+
+Not implemented in this scale upgrade. Remaining work to match Greptile/CodeRabbit
+replica fleets:
+
+1. Postgres store migration for `packages/store` (tenants, billing, runs, claims).
+2. Transactional reservation/publication under concurrent writers.
+3. Multi-host deploy + LB on `/traffic-ready`; per-host sandbox slot dirs.
+4. Durable stage checkpoints so `ORVEX_MAX_RESUME_AFTER_RESTART` can be > 0 safely.
+5. Fleet metrics/alerts listed in the gates above.
+
+Same-host scale (Phases 0–4) is the production path until those land.
 
 ## Intended Multi-Host Topology
 

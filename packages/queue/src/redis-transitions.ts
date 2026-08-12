@@ -7,15 +7,21 @@ local cur = redis.call('GET', KEYS[1])
 if not cur then return 0 end
 local sep = string.find(cur, '\\n', 1, true)
 local curToken = sep and string.sub(cur, 1, sep - 1) or cur
-if curToken == ARGV[1] then
-  local extended = redis.call('EXPIRE', KEYS[1], ARGV[2])
-  if extended == 1 then
-    local tenant = redis.call('HGET', KEYS[3], ARGV[1])
-    if tenant then redis.call('ZADD', KEYS[4], tonumber(ARGV[3]) + tonumber(ARGV[2]) * 1000, ARGV[1]) end
-  end
-  return extended
+if curToken ~= ARGV[1] then return 0 end
+local extended = redis.call('EXPIRE', KEYS[1], ARGV[2])
+if extended ~= 1 then return 0 end
+local tenant = redis.call('HGET', KEYS[3], ARGV[1])
+-- Inflight ownership can outlive a swept tenant claim (expiry race). Rebind from
+-- the job tenant so renewals neither over-admit nor silently drop fairness.
+if (not tenant or tenant == '') and ARGV[4] and ARGV[4] ~= '' then
+  tenant = ARGV[4]
+  redis.call('HSET', KEYS[3], ARGV[1], tenant)
+  redis.call('HINCRBY', KEYS[2], tenant, 1)
 end
-return 0`;
+if tenant and tenant ~= '' then
+  redis.call('ZADD', KEYS[4], tonumber(ARGV[3]) + tonumber(ARGV[2]) * 1000, ARGV[1])
+end
+return 1`;
 
 const MARK_RUNNING = `
 local cur = redis.call('GET', KEYS[1])
@@ -100,11 +106,15 @@ if curToken ~= ARGV[1] then return 0 end
 local removed = redis.call('LREM', KEYS[1], 1, ARGV[2])
 if removed == 0 then return 0 end
 redis.call('RPUSH', KEYS[1], ARGV[3])
-local ttl = redis.call('TTL', KEYS[2])
-if ttl ~= false and ttl > 0 then
-  redis.call('SET', KEYS[2], ARGV[4], 'EX', ttl)
-else
-  redis.call('SET', KEYS[2], ARGV[4], 'EX', tonumber(ARGV[5]))
+redis.call('SET', KEYS[2], ARGV[4], 'EX', tonumber(ARGV[5]))
+local tenant = redis.call('HGET', KEYS[3], ARGV[1])
+if (not tenant or tenant == '') and ARGV[7] and ARGV[7] ~= '' then
+  tenant = ARGV[7]
+  redis.call('HSET', KEYS[3], ARGV[1], tenant)
+  redis.call('HINCRBY', KEYS[5], tenant, 1)
+end
+if tenant and tenant ~= '' then
+  redis.call('ZADD', KEYS[4], tonumber(ARGV[6]) + tonumber(ARGV[5]) * 1000, ARGV[1])
 end
 return 1`;
 
@@ -166,6 +176,7 @@ export class RedisQueueTransitionRepository {
     token: string,
     ttlSeconds: number,
     tenantLeaseKeys: TenantLeaseKeys,
+    tenantId?: string,
   ): Promise<boolean> {
     return (
       Number(
@@ -179,6 +190,7 @@ export class RedisQueueTransitionRepository {
           token,
           ttlSeconds,
           Date.now(),
+          tenantId ?? '',
         ),
       ) === 1
     );
@@ -253,21 +265,44 @@ export class RedisQueueTransitionRepository {
     oldEntry: string;
     newEntry: string;
     leaseTtlSeconds: number;
+    tenantLeaseKeys: TenantLeaseKeys;
+    tenantId?: string;
   }): Promise<boolean> {
     return (
       Number(
         await this.redis.eval(
           REPLACE_CLAIM_PAYLOAD,
-          2,
+          5,
           input.processingKey,
           input.inflightKey,
+          input.tenantLeaseKeys.tenantClaims,
+          input.tenantLeaseKeys.tenantClaimExpiry,
+          input.tenantLeaseKeys.tenantActive,
           input.token,
           input.oldEntry,
           input.newEntry,
           input.newEntry,
           input.leaseTtlSeconds,
+          Date.now(),
+          input.tenantId ?? '',
         ),
       ) === 1
+    );
+  }
+
+  async refreshOwnedLease(input: {
+    inflightKey: string;
+    token: string;
+    leaseTtlSeconds: number;
+    tenantLeaseKeys: TenantLeaseKeys;
+    tenantId?: string;
+  }): Promise<boolean> {
+    return this.renewLease(
+      input.inflightKey,
+      input.token,
+      input.leaseTtlSeconds,
+      input.tenantLeaseKeys,
+      input.tenantId,
     );
   }
 

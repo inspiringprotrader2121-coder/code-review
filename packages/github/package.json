@@ -18,13 +18,14 @@
   },
   "dependencies": {
     "@octokit/auth-app": "^7.2.1",
+    "@octokit/plugin-throttling": "^9.6.1",
     "@octokit/rest": "^21.1.1",
     "@orvex-review/config": "workspace:*",
     "minimatch": "^10.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
-    "typescript": "^5.8.3",
-    "tsx": "^4.19.4"
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
   }
 }

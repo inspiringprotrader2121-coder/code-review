@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolveProviderConcurrency } from '../runtime-limits.js';
 import type { LlmClientOptions, LlmProviderCoordinator } from './contracts.js';
 import { ReviewCancelledError, throwIfCancelled } from './cancellation.js';
@@ -10,6 +11,11 @@ let configuredProviderConcurrency: ((provider: string) => number) | undefined;
  *  injects ORVEX_PROVIDER_LEASE_WAIT_MS via composeApplication. */
 let configuredAdmissionWaitMs = 30_000;
 const localProviderCooldownUntil = new Map<string, number>();
+const PROVIDER_LEASE_HEARTBEAT_MS = 60_000;
+/** Prefer mid-review callers ahead of brand-new waiters by up to one hour. */
+const STRAGGLER_PRIORITY_BIAS_MS = -60_000;
+
+const admissionPriority = new AsyncLocalStorage<{ priorityBiasMs: number }>();
 
 interface LlmSlotWaiter {
   resolve: () => void;
@@ -49,6 +55,17 @@ export function providerConcurrency(provider: string, env?: NodeJS.ProcessEnv): 
   return resolveProviderConcurrency(provider, env);
 }
 
+/** Mid-review paid calls get fair-queue priority over brand-new admissions. */
+export function runWithProviderAdmissionPriority<T>(
+  priority: 'normal' | 'straggler',
+  fn: () => Promise<T>,
+): Promise<T> {
+  return admissionPriority.run(
+    { priorityBiasMs: priority === 'straggler' ? STRAGGLER_PRIORITY_BIAS_MS : 0 },
+    fn,
+  );
+}
+
 export function providerBucketForTarget(
   opts: Pick<LlmClientOptions, 'model' | 'baseUrl' | 'api'>,
 ): string {
@@ -59,6 +76,79 @@ export function providerBucketForTarget(
   return providerName(opts.baseUrl, opts.api)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-');
+}
+
+/** Split comma-separated API keys. Empty segments are dropped. */
+export function splitApiKeys(apiKey: string): string[] {
+  return apiKey
+    .split(',')
+    .map((key) => key.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Per-key cooldown + local-gate lane. Fleet Redis leases stay on `provider` so
+ * fair waiters and capacity epochs remain correct; TPM 429s cool only this lane.
+ */
+export function providerKeyLane(provider: string, keyIndex: number, keyCount: number): string {
+  if (keyCount <= 1) return provider;
+  const index = Math.max(0, Math.floor(keyIndex));
+  return `${provider}:k${index}`;
+}
+
+export interface ProviderKeySelection {
+  apiKey: string;
+  keyIndex: number;
+  lane: string;
+  cooldownMs: number;
+}
+
+/**
+ * Prefer a cool key (round-robin from cursor); if every key is cooling, pick
+ * the soonest Retry-After lane so admission waits the minimum TPM window.
+ */
+export async function selectProviderKey(
+  provider: string,
+  keys: readonly string[],
+  cursor: number,
+  coordinator: LlmProviderCoordinator | undefined = providerCoordinator,
+): Promise<ProviderKeySelection> {
+  if (keys.length === 0) throw new Error('LLM API key is required');
+  if (keys.length === 1) {
+    const lane = provider;
+    return {
+      apiKey: keys[0]!,
+      keyIndex: 0,
+      lane,
+      cooldownMs: await getProviderCooldownMs(lane, coordinator),
+    };
+  }
+  const lanes = keys.map((_, index) => providerKeyLane(provider, index, keys.length));
+  const cooldowns = await Promise.all(
+    lanes.map((lane) => getProviderCooldownMs(lane, coordinator)),
+  );
+  const start = ((cursor % keys.length) + keys.length) % keys.length;
+  for (let offset = 0; offset < keys.length; offset++) {
+    const keyIndex = (start + offset) % keys.length;
+    if ((cooldowns[keyIndex] ?? 0) <= 0) {
+      return {
+        apiKey: keys[keyIndex]!,
+        keyIndex,
+        lane: lanes[keyIndex]!,
+        cooldownMs: 0,
+      };
+    }
+  }
+  let best = 0;
+  for (let index = 1; index < cooldowns.length; index++) {
+    if ((cooldowns[index] ?? 0) < (cooldowns[best] ?? 0)) best = index;
+  }
+  return {
+    apiKey: keys[best]!,
+    keyIndex: best,
+    lane: lanes[best]!,
+    cooldownMs: cooldowns[best] ?? 0,
+  };
 }
 
 function gateFor(provider: string): ProviderGate {
@@ -73,18 +163,25 @@ function detach(waiter: LlmSlotWaiter): void {
   if (waiter.timer) clearTimeout(waiter.timer);
   if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
 }
+
+function tryAcquireLocal(gateName: string, concurrencyProvider: string = gateName): boolean {
+  const gate = gateFor(gateName);
+  if (gate.active >= providerConcurrency(concurrencyProvider)) return false;
+  gate.active++;
+  return true;
+}
+
 async function acquire(
-  provider: string,
+  gateName: string,
   signal?: AbortSignal,
   waitMs = configuredAdmissionWaitMs,
+  concurrencyProvider: string = gateName,
 ): Promise<void> {
   throwIfCancelled(signal);
-  const gate = gateFor(provider);
-  if (gate.active < providerConcurrency(provider)) {
-    gate.active++;
-    return;
-  }
+  if (tryAcquireLocal(gateName, concurrencyProvider)) return;
+  const retryAfterSec = Math.max(1, Math.ceil(waitMs / 1000));
   await new Promise<void>((resolve, reject) => {
+    const gate = gateFor(gateName);
     const waiter: LlmSlotWaiter = { resolve, reject, signal };
     if (signal) {
       waiter.onAbort = () => {
@@ -101,7 +198,11 @@ async function acquire(
       if (index < 0) return;
       gate.waiters.splice(index, 1);
       detach(waiter);
-      reject(new Error(`429 provider ${provider} local concurrency saturated; retry-after: 1`));
+      reject(
+        new Error(
+          `429 provider ${gateName} local concurrency saturated; retry-after: ${retryAfterSec}`,
+        ),
+      );
     }, waitMs);
     waiter.timer.unref?.();
     if (signal?.aborted) waiter.onAbort?.();
@@ -176,42 +277,118 @@ async function waitOutProviderCooldown(
   }
 }
 
+function admissionPriorityBiasMs(): number {
+  return admissionPriority.getStore()?.priorityBiasMs ?? 0;
+}
+
+function saturationRetryAfterSeconds(deadlineMs: number): number {
+  return Math.max(1, Math.ceil(Math.max(0, deadlineMs - Date.now()) / 1000) || 1);
+}
+
+async function acquireDistributedLease(
+  provider: string,
+  coordinator: LlmProviderCoordinator,
+  signal: AbortSignal | undefined,
+  deadlineMs: number,
+): Promise<string> {
+  const remainingMs = Math.max(1, deadlineMs - Date.now());
+  return coordinator.acquireProviderLease(provider, providerConcurrency(provider), signal, {
+    waitMs: remainingMs,
+    priorityBiasMs: admissionPriorityBiasMs(),
+  });
+}
+
+function startLeaseHeartbeat(
+  provider: string,
+  token: string,
+  coordinator: LlmProviderCoordinator,
+): () => void {
+  if (typeof coordinator.renewProviderLease !== 'function') return () => {};
+  const timer = setInterval(() => {
+    void coordinator.renewProviderLease?.(provider, token).catch((error) =>
+      console.warn(
+        `[llm] failed to renew distributed ${provider} lease:`,
+        (error as Error).message?.slice(0, 120),
+      ),
+    );
+  }, PROVIDER_LEASE_HEARTBEAT_MS);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
+export interface ProviderCallSlotOptions {
+  /**
+   * Per-key cooldown + local-gate lane (`provider:kN`). Fleet Redis leases stay
+   * on the base `provider` so fair waiters and capacity epochs remain correct.
+   */
+  keyLane?: string;
+}
+
 /**
- * Paid-call boundary. Fleet Redis lease is acquired BEFORE the process-local
- * gate so waiters do not fill local slots while blocked on distributed
- * capacity — that was starving peers into short saturated failures under burst.
- * Cooldown is waited out before taking a lease; a cooldown that appears after
- * lease acquisition fails fast and releases so the slot is not held idle.
+ * Paid-call boundary with a single admission deadline across cooldown, Redis,
+ * and local gates. Redis leases are not held while blocked on the process-local
+ * gate (two-phase), and mid-review callers can claim fair-queue priority.
+ *
+ * When `keyLane` is set (multi-key), cooldown + local gate isolate that key —
+ * sibling keys remain admissible while one key's TPM window recovers.
  */
 export async function withProviderCallSlot<T>(
   provider: string,
   fn: () => Promise<T>,
   signal?: AbortSignal,
   coordinator: LlmProviderCoordinator | undefined = providerCoordinator,
+  options?: ProviderCallSlotOptions,
 ): Promise<T> {
+  const keyLane = options?.keyLane?.trim() || provider;
   const deadlineMs = Date.now() + configuredAdmissionWaitMs;
   let leaseToken: string | undefined;
   let localHeld = false;
+  let stopHeartbeat = () => {};
   try {
-    await waitOutProviderCooldown(provider, signal, coordinator, deadlineMs);
-
-    if (coordinator) {
-      leaseToken = await coordinator.acquireProviderLease(
-        provider,
-        providerConcurrency(provider),
-        signal,
-      );
-      const postLeaseCooldownMs = await getProviderCooldownMs(provider, coordinator);
-      if (postLeaseCooldownMs > 0) {
+    for (;;) {
+      throwIfCancelled(signal);
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs <= 0) {
         throw new Error(
-          `429 provider ${provider} cooldown active; retry-after: ${Math.ceil(postLeaseCooldownMs / 1000)}`,
+          `429 provider ${keyLane} admission timed out; retry-after: ${saturationRetryAfterSeconds(deadlineMs)}`,
         );
       }
+
+      await waitOutProviderCooldown(keyLane, signal, coordinator, deadlineMs);
+
+      if (!coordinator) {
+        await acquire(keyLane, signal, Math.max(1, deadlineMs - Date.now()), provider);
+        localHeld = true;
+        break;
+      }
+
+      leaseToken = await acquireDistributedLease(provider, coordinator, signal, deadlineMs);
+      const postLeaseCooldownMs = await getProviderCooldownMs(keyLane, coordinator);
+      if (postLeaseCooldownMs > 0) {
+        await coordinator.releaseProviderLease(provider, leaseToken).catch(() => undefined);
+        leaseToken = undefined;
+        // Sibling TPM can land between cooldown wait and lease grant — keep
+        // waiting inside the shared admission deadline instead of aborting.
+        continue;
+      }
+      if (tryAcquireLocal(keyLane, provider)) {
+        localHeld = true;
+        break;
+      }
+      // Two-phase: never hold an active Redis lease while parked on local.
+      await coordinator.releaseProviderLease(provider, leaseToken).catch(() => undefined);
+      leaseToken = undefined;
+
+      const localWaitMs = Math.max(1, deadlineMs - Date.now());
+      await acquire(keyLane, signal, localWaitMs, provider);
+      // Speculative local slot proves capacity; drop it before re-entering Redis
+      // wait so peers are not starved while we queue fairly for a fleet lease.
+      release(keyLane);
     }
 
-    const localWaitMs = Math.max(1_000, deadlineMs - Date.now());
-    await acquire(provider, signal, localWaitMs);
-    localHeld = true;
+    if (leaseToken && coordinator) {
+      stopHeartbeat = startLeaseHeartbeat(provider, leaseToken, coordinator);
+    }
 
     try {
       return await fn();
@@ -220,16 +397,17 @@ export async function withProviderCallSlot<T>(
         ? undefined
         : providerCooldownForFailure((error as Error)?.message ?? String(error));
       if (durationMs !== undefined)
-        await setProviderCooldown(provider, durationMs, coordinator).catch((cooldownError) =>
+        await setProviderCooldown(keyLane, durationMs, coordinator).catch((cooldownError) =>
           console.error(
-            `[llm] failed to publish distributed ${provider} cooldown:`,
+            `[llm] failed to publish distributed ${keyLane} cooldown:`,
             (cooldownError as Error).message,
           ),
         );
       throw error;
     }
   } finally {
-    if (localHeld) release(provider);
+    stopHeartbeat();
+    if (localHeld) release(keyLane);
     if (leaseToken && coordinator)
       await coordinator
         .releaseProviderLease(provider, leaseToken)
@@ -265,7 +443,7 @@ export async function waitForProviderAvailability(
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
       throw new Error(
-        `429 required provider cooldown admission timed out (${required.join(', ')}); retry-after: 1`,
+        `429 required provider cooldown admission timed out (${required.join(', ')}); retry-after: ${Math.max(1, Math.ceil(waitMs / 1000))}`,
       );
     }
     if (!announced) {
@@ -293,4 +471,10 @@ export async function getProviderLoad(
     );
     return null;
   }
+}
+
+export function isProviderAdmissionError(message: string): boolean {
+  return /concurrency saturated|admission timed out|cancelled while waiting for provider lease|cooldown active/i.test(
+    message,
+  );
 }

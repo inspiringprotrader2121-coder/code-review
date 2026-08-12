@@ -59,7 +59,11 @@ export interface WorkerConfig {
       deepseekMaxOutputTokens: number;
       minimaxMaxOutputTokens: number;
     }>;
-    accountLimits: Readonly<{ freeTierDailyCap: number; cogsReservationUsd: number }>;
+    accountLimits: Readonly<{
+      freeTierDailyCap: number;
+      cogsReservationUsd: number;
+      monthlyCogsCapUsd: number;
+    }>;
     usageCosts: Readonly<
       Record<PassTier, Readonly<{ input: number; cachedInput?: number; output: number }>> & {
         modelRates?: Readonly<

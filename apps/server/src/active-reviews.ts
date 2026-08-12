@@ -272,24 +272,16 @@ function diskForPath(target: string): HostResourceSample['disk'] {
   }
 }
 
-function sampleHost(
-  activeCount: number,
-  maxConcurrent: number,
-  diskPath?: string,
-): HostResourceSample {
+/** Sample host memory and disk for admission and the live monitor. */
+export function sampleHostResources(diskPath?: string): Pick<HostResourceSample, 'memory' | 'disk'> {
   const totalBytes = os.totalmem();
   const freeBytes = os.freemem();
   const meminfo = parseMeminfo();
   const availableBytes = meminfo?.availableBytes ?? freeBytes;
   const swapTotalBytes = meminfo?.swapTotalBytes ?? 0;
   const swapUsedBytes = meminfo ? meminfo.swapTotalBytes - meminfo.swapFreeBytes : 0;
-  const mu = process.memoryUsage();
-  const load = os.loadavg() as [number, number, number];
   const diskRoot = diskPath ?? os.tmpdir();
   return {
-    sampledAt: new Date().toISOString(),
-    cpuCount: os.cpus().length,
-    loadAverage: load,
     memory: {
       totalBytes,
       freeBytes,
@@ -299,6 +291,23 @@ function sampleHost(
       swapUsedBytes,
     },
     disk: diskForPath(existsSync(diskRoot) ? diskRoot : '/'),
+  };
+}
+
+function sampleHost(
+  activeCount: number,
+  maxConcurrent: number,
+  diskPath?: string,
+): HostResourceSample {
+  const resources = sampleHostResources(diskPath);
+  const mu = process.memoryUsage();
+  const load = os.loadavg() as [number, number, number];
+  return {
+    sampledAt: new Date().toISOString(),
+    cpuCount: os.cpus().length,
+    loadAverage: load,
+    memory: resources.memory,
+    disk: resources.disk,
     worker: {
       pid: process.pid,
       rssBytes: mu.rss,

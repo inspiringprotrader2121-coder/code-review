@@ -1,9 +1,12 @@
 import type { ReviewJobPayload, ReviewQueue } from '@orvex-review/queue';
+import { providerAdmissionFor } from '@orvex-review/queue';
 import { killAllCodexChildren } from '@orvex-review/review';
 import { cancelAllActiveReviews } from '../../active-reviews.js';
 import { loadWorkerConfig } from '../../pipeline.js';
+import { assessHostAdmission } from './host-admission.js';
 import {
   failInterruptedJobs,
+  fleetProvidersSaturated,
   returnLateDequeuedJob,
   resolveWorkerConcurrency,
   shouldReturnDequeuedJob,
@@ -15,6 +18,7 @@ import { processWorkerJob } from './job-processor.js';
 import type { WorkerLoopDependencies } from './contracts.js';
 
 const DEFAULT_POLL_MS = 500;
+const HOST_ADMISSION_LOG_EVERY_MS = 30_000;
 
 /**
  * Starts a fixed number of long-lived worker loops. A claimed job occupies one
@@ -28,9 +32,23 @@ export function startBoundedWorkerLoop(
 ): () => Promise<void> {
   let running = true;
   let active = 0;
+  let lastHostAdmissionLogMs = 0;
   const capacity = dependencies.maxConcurrent ?? resolveWorkerConcurrency(dependencies.config);
   const pollMs = dependencies.pollMs ?? DEFAULT_POLL_MS;
   const draining = dependencies.isDraining ?? (() => isDeployDraining(dependencies.config));
+  const canAdmitHost =
+    dependencies.canAdmitHost ??
+    (() => {
+      const decision = assessHostAdmission(dependencies.config.hostAdmission);
+      if (!decision.ok) {
+        const now = Date.now();
+        if (now - lastHostAdmissionLogMs >= HOST_ADMISSION_LOG_EVERY_MS) {
+          lastHostAdmissionLogMs = now;
+          console.warn(`[worker] host admission deferred dequeue: ${decision.reason}`);
+        }
+      }
+      return decision.ok;
+    });
   const loadConfig = dependencies.loadConfig ?? (() => loadWorkerConfig(dependencies.db));
   const inFlight = new Set<ReviewJobPayload>();
   const waitForPoll = () =>
@@ -67,6 +85,16 @@ export function startBoundedWorkerLoop(
   const workerLoop = async (workerIndex: number): Promise<void> => {
     while (running) {
       if (draining()) {
+        await waitForPoll();
+        continue;
+      }
+      if (!canAdmitHost()) {
+        await waitForPoll();
+        continue;
+      }
+      // Avoid filling every worker slot with long provider-lease waiters when the
+      // fleet already has no free Luna/DeepSeek/MiniMax capacity.
+      if (await fleetProvidersSaturated(providerAdmissionFor(queue))) {
         await waitForPoll();
         continue;
       }

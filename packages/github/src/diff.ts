@@ -1,8 +1,28 @@
 import type { Octokit } from '@octokit/rest';
 import type { ChangedFile, DiffCoverage, PrRef } from './types.js';
 import { filterChangedFiles } from './diff-filter.js';
+import { withGitHubRetry } from './retry.js';
 
 export async function fetchCompareDiff(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  baseSha: string,
+  headSha: string,
+  opts: { maxFileBytes: number; maxFiles: number; ignoreGlobs?: string[] },
+): Promise<{ files: ChangedFile[]; coverage: DiffCoverage }> {
+  return withGitHubRetry(
+    () => fetchCompareDiffOnce(octokit, owner, repo, baseSha, headSha, opts),
+    {
+      onRetry: (waitMs, attempt) =>
+        console.warn(
+          `[diff] compare rate-limited — waiting ${Math.round(waitMs / 1000)}s then retrying (${attempt})`,
+        ),
+    },
+  );
+}
+
+async function fetchCompareDiffOnce(
   octokit: Octokit,
   owner: string,
   repo: string,
@@ -82,30 +102,40 @@ export async function fetchPrDiffWithCoverage(
     return fetchCompareDiff(octokit, ref.owner, ref.repo, opts.sinceSha, opts.headSha, opts);
   }
 
-  // PAGINATE — a single per_page:100 call silently dropped every file past the
-  // first 100 on a large PR (they never reached the model or even the maxFiles
-  // cap). Fetch all changed files (GitHub caps listFiles at 3000).
-  const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
-    owner: ref.owner,
-    repo: ref.repo,
-    pull_number: ref.number,
-    per_page: 100,
-  });
+  return withGitHubRetry(
+    async () => {
+      // PAGINATE — a single per_page:100 call silently dropped every file past the
+      // first 100 on a large PR (they never reached the model or even the maxFiles
+      // cap). Fetch all changed files (GitHub caps listFiles at 3000).
+      const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
+        owner: ref.owner,
+        repo: ref.repo,
+        pull_number: ref.number,
+        per_page: 100,
+      });
 
-  const mapped = files.map((file) => ({
-    filename: file.filename,
-    status: file.status as ChangedFile['status'],
-    patch: file.patch,
-    previousFilename: file.previous_filename,
-    truncated: false,
-  }));
+      const mapped = files.map((file) => ({
+        filename: file.filename,
+        status: file.status as ChangedFile['status'],
+        patch: file.patch,
+        previousFilename: file.previous_filename,
+        truncated: false,
+      }));
 
-  const filtered = filterChangedFiles(mapped, opts);
-  if (files.length >= 3000) {
-    filtered.coverage.complete = false;
-    filtered.coverage.githubCapHit = true;
-  }
-  return filtered;
+      const filtered = filterChangedFiles(mapped, opts);
+      if (files.length >= 3000) {
+        filtered.coverage.complete = false;
+        filtered.coverage.githubCapHit = true;
+      }
+      return filtered;
+    },
+    {
+      onRetry: (waitMs, attempt) =>
+        console.warn(
+          `[diff] listFiles rate-limited — waiting ${Math.round(waitMs / 1000)}s then retrying (${attempt})`,
+        ),
+    },
+  );
 }
 
 /** Back-compat: returns just the files. Callers that don't need coverage. */

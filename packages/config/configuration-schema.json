@@ -101,6 +101,28 @@
           "deprecatedAliases": []
         },
         {
+          "name": "ORVEX_GITHUB_PACE_RPS",
+          "example": "8",
+          "type": "number",
+          "range": "tokens/sec; default 8",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Per-installation GitHub API steady request rate for Redis/memory token-bucket pacing.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_GITHUB_PACE_BURST",
+          "example": "20",
+          "type": "integer",
+          "range": "burst tokens; default 20",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Per-installation GitHub API burst capacity for Redis/memory token-bucket pacing.",
+          "deprecatedAliases": []
+        },
+        {
           "name": "PLATFORM_SECRET",
           "example": "",
           "type": "string",
@@ -1369,6 +1391,28 @@
           "deprecatedAliases": []
         },
         {
+          "name": "ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES",
+          "example": "1073741824",
+          "type": "integer",
+          "range": "0..64GiB bytes; default 1GiB; 0 disables",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Worker pre-dequeue gate: require at least this much MemAvailable before claiming another review. Protects archive extract and sandbox startup under host pressure.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_HOST_MIN_AVAILABLE_DISK_BYTES",
+          "example": "2147483648",
+          "type": "integer",
+          "range": "0..256GiB bytes; default 2GiB; 0 disables",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Worker pre-dequeue gate: require at least this much free disk on ORVEX_MONITOR_DISK_PATH (else sandbox slot dir / checkout root) before claiming another review.",
+          "deprecatedAliases": []
+        },
+        {
           "name": "ORVEX_ALERT_WEBHOOK_URL",
           "example": "",
           "type": "URL",
@@ -1604,13 +1648,13 @@
         },
         {
           "name": "ORVEX_VERIFY_CONCURRENCY",
-          "example": "8",
+          "example": "32",
           "type": "integer",
-          "range": "1..8; default 3",
+          "range": "1..100; default 3",
           "secret": false,
           "redaction": "none",
           "enabled": false,
-          "description": "Verifier batch capacity. Idle reviews fan out independent candidate batches; the scheduler divides capacity fairly among active reviews.",
+          "description": "Verifier batch capacity. Idle reviews fan out independent candidate batches; under load the scheduler should share capacity fairly among active reviews.",
           "deprecatedAliases": []
         },
         {
@@ -2301,13 +2345,13 @@
         },
         {
           "name": "ORVEX_MAX_SANDBOXES",
-          "example": "8",
+          "example": "32",
           "type": "integer",
-          "range": "positive; default 8; maximum 8",
+          "range": "positive; default 8; maximum 100",
           "secret": false,
           "redaction": "none",
           "enabled": false,
-          "description": "Host-wide maximum concurrent internal sandbox containers.",
+          "description": "Host-wide maximum concurrent internal sandbox containers. Must stay within host Docker/RAM budget.",
           "deprecatedAliases": []
         },
         {
@@ -2372,12 +2416,12 @@
         },
         {
           "name": "ORVEX_RATELIMIT_MAX_WAIT_MS",
-          "example": "60000",
+          "example": "120000",
           "type": "integer",
-          "range": "milliseconds; default 60000",
+          "range": "milliseconds; default 120000",
           "secret": false,
           "redaction": "none",
-          "description": "Maximum per-rate-limit retry sleep.",
+          "description": "Maximum per-rate-limit retry sleep (covers multi-minute TPM windows).",
           "deprecatedAliases": []
         },
         {
@@ -2393,12 +2437,12 @@
         },
         {
           "name": "ORVEX_RATELIMIT_TOTAL_WAIT_MS",
-          "example": "60000",
+          "example": "180000",
           "type": "integer",
-          "range": "milliseconds; default 60000",
+          "range": "milliseconds; default 180000",
           "secret": false,
           "redaction": "none",
-          "description": "Total retry sleep budget per provider call.",
+          "description": "Total retry sleep budget per provider call (covers multi-minute TPM windows).",
           "deprecatedAliases": []
         },
         {

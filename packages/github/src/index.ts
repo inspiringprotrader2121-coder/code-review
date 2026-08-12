@@ -10,6 +10,19 @@ export {
   createInstallationOctokit,
   getInstallationIdForRepo,
 } from './config.js';
+export {
+  configureGitHubRequestPacer,
+  currentGitHubRequestPacer,
+  MemoryGitHubInstallationPacer,
+  type GitHubInstallationPacer,
+  type MemoryGitHubPacerOptions,
+} from './pacer.js';
+export {
+  withGitHubRetry,
+  parseGitHubRetryAfterMs,
+  isGitHubRateLimitError,
+  type GitHubRetryOptions,
+} from './retry.js';
 export { verifyWebhookSignature } from './webhook.js';
 export {
   parseRepoSlug,

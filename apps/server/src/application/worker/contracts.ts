@@ -17,6 +17,8 @@ export interface WorkerLoopDependencies {
   /** Lifecycle-owned schedulers run recovery once per fleet instead of per worker process. */
   enablePeriodicRecovery?: boolean;
   isDraining?: () => boolean;
+  /** Return false to skip dequeue when the host is short on memory/disk. */
+  canAdmitHost?: () => boolean;
   loadConfig?: () => ReturnType<typeof loadWorkerConfig>;
   processReview?: typeof processReviewJob;
   shutdownDrainMs?: number;

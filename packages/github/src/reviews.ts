@@ -1,5 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { PrRef } from './types.js';
+import { isGitHubRateLimitError, withGitHubRetry } from './retry.js';
 
 export interface InlineReviewComment {
   path: string;
@@ -15,6 +16,25 @@ export interface PullRequestReviewResult {
 }
 
 export async function postPullRequestReview(
+  octokit: Octokit,
+  ref: PrRef,
+  commitSha: string,
+  body: string,
+  inline: InlineReviewComment[],
+  event: 'COMMENT' | 'REQUEST_CHANGES' = 'COMMENT',
+): Promise<PullRequestReviewResult> {
+  return withGitHubRetry(
+    () => postPullRequestReviewOnce(octokit, ref, commitSha, body, inline, event),
+    {
+      onRetry: (waitMs, attempt) =>
+        console.warn(
+          `[reviews] publish rate-limited — waiting ${Math.round(waitMs / 1000)}s then retrying (${attempt})`,
+        ),
+    },
+  );
+}
+
+async function postPullRequestReviewOnce(
   octokit: Octokit,
   ref: PrRef,
   commitSha: string,
@@ -42,6 +62,9 @@ export async function postPullRequestReview(
       })),
     }));
   } catch (err) {
+    // Rate limits must surface to withGitHubRetry — do not enter the resilient
+    // path which could partially publish then retry the whole review.
+    if (isGitHubRateLimitError(err)) throw err;
     // A single finding on a line GitHub can't map to the diff ("Line could not
     // be resolved", 422) fails the WHOLE atomic review — losing the summary and
     // every other finding. Fall back: post the summary on its own, then add the

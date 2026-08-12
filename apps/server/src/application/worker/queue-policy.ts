@@ -1,5 +1,6 @@
-import type { ReviewJobPayload, ReviewQueue } from '@orvex-review/queue';
-import { prKey, queueFailure } from '@orvex-review/queue';
+import { FLEET_PROVIDER_BUCKETS } from '@orvex-review/config';
+import type { ProviderAdmission, ReviewJobPayload, ReviewQueue } from '@orvex-review/queue';
+import { prKey, providersSaturated, queueFailure } from '@orvex-review/queue';
 import type { ServerConfig } from '../../bootstrap/config.js';
 
 /** The worker ceiling is a composition policy, independent from provider lanes. */
@@ -71,4 +72,38 @@ export async function returnLateDequeuedJob(
 
 export function shouldReturnDequeuedJob(running: boolean, draining: boolean): boolean {
   return !running || draining;
+}
+
+/** True when every fleet provider lane is at its active lease ceiling. */
+export async function fleetProvidersSaturated(
+  admission: ProviderAdmission | null | undefined,
+  providers: readonly string[] = FLEET_PROVIDER_BUCKETS,
+): Promise<boolean> {
+  if (!admission) return false;
+  return providersSaturated(admission, providers);
+}
+
+/**
+ * Return a claimed job to the ready queue without advancing its age so oldest /
+ * straggler work keeps FIFO priority once provider headroom returns.
+ */
+export async function returnJobForProviderHeadroom(
+  queue: Pick<ReviewQueue, 'markFailed' | 'releaseLockAndDrain' | 'enqueue'>,
+  job: ReviewJobPayload,
+): Promise<'newer-pending' | 'requeued'> {
+  const owned =
+    (await queue.markFailed(
+      job,
+      queueFailure(
+        'provider_transient',
+        'provider headroom unavailable before review start',
+        true,
+      ),
+    )) !== false;
+  if (!owned)
+    throw new Error(`review lease lost before returning headroom-deferred job for ${prKey(job)}`);
+  const pending = await queue.releaseLockAndDrain(prKey(job));
+  if (pending) return 'newer-pending';
+  await queue.enqueue({ ...job, enqueuedAt: job.enqueuedAt });
+  return 'requeued';
 }

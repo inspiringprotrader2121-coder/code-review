@@ -5,9 +5,26 @@ import { randomUUID } from 'node:crypto';
  * separate from durable review-job state: provider saturation must never alter
  * queue ownership, deduplication, or recovery semantics.
  */
+export interface AcquireProviderLeaseOptions {
+  /** Cap wait for this attempt; defaults to the adapter's configured wait. */
+  waitMs?: number;
+  /**
+   * Added to the waiter enqueue score. Negative values prefer stragglers /
+   * already-running reviews ahead of brand-new waiters.
+   */
+  priorityBiasMs?: number;
+}
+
 export interface ProviderAdmission {
-  acquireProviderLease(provider: string, limit: number, signal?: AbortSignal): Promise<string>;
+  acquireProviderLease(
+    provider: string,
+    limit: number,
+    signal?: AbortSignal,
+    options?: AcquireProviderLeaseOptions,
+  ): Promise<string>;
   releaseProviderLease(provider: string, token: string): Promise<void>;
+  /** Refresh an in-use lease TTL so long paid calls outlive the base lease. */
+  renewProviderLease?(provider: string, token: string): Promise<boolean>;
   getProviderCooldownMs(provider: string): Promise<number>;
   setProviderCooldown(provider: string, durationMs: number): Promise<void>;
   /** Optional occupancy peek for adaptive per-review fanout under load. */
@@ -85,10 +102,18 @@ interface MemoryLease {
   expiresAt: number;
 }
 
+interface MemoryWaiter {
+  id: string;
+  provider: string;
+  enqueuedAt: number;
+  wake: () => void;
+}
+
 export interface MemoryProviderAdmissionState {
   leases: Map<string, MemoryLease>;
   cooldowns: Map<string, number>;
   limits?: Map<string, number>;
+  waiters?: MemoryWaiter[];
 }
 
 export interface MemoryProviderAdmissionOptions {
@@ -112,12 +137,18 @@ export class MemoryProviderAdmission implements ProviderAdmission {
   private readonly state: MemoryProviderAdmissionState;
   private readonly now: () => number;
   private readonly retryDelayMs: number;
-  private readonly waitMs: number | undefined;
+  private readonly waitMs: number;
   private readonly leaseTtlMs: number;
 
   constructor(options: MemoryProviderAdmissionOptions = {}) {
-    this.state = options.state ?? { leases: new Map(), cooldowns: new Map(), limits: new Map() };
+    this.state = options.state ?? {
+      leases: new Map(),
+      cooldowns: new Map(),
+      limits: new Map(),
+      waiters: [],
+    };
     if (!this.state.limits) this.state.limits = new Map();
+    if (!this.state.waiters) this.state.waiters = [];
     this.now = options.now ?? Date.now;
     this.retryDelayMs = Math.max(1, Math.floor(options.retryDelayMs ?? 5));
     this.waitMs = Math.max(1_000, Math.floor(options.waitMs ?? 30_000));
@@ -128,34 +159,70 @@ export class MemoryProviderAdmission implements ProviderAdmission {
     provider: string,
     limit: number,
     signal?: AbortSignal,
+    options?: AcquireProviderLeaseOptions,
   ): Promise<string> {
     const normalized = normalizeProviderName(provider);
     const ceiling = Math.max(1, Math.floor(limit));
     this.state.limits?.set(normalized, ceiling);
     const token = randomUUID();
-    const deadline = this.waitMs === undefined ? undefined : this.now() + this.waitMs;
-    for (;;) {
-      if (signal?.aborted) throw new Error('review cancelled while waiting for provider lease');
-      this.removeExpiredLeases(normalized);
-      if (this.activeLeaseCount(normalized) < ceiling) {
-        this.state.leases.set(token, {
-          provider: normalized,
-          expiresAt: this.now() + this.leaseTtlMs,
-        });
-        return token;
-      }
-      if (deadline !== undefined && this.now() >= deadline) {
-        throw new Error(
-          `429 provider ${normalized} distributed concurrency saturated; retry-after: 1`,
+    const waiterId = randomUUID();
+    const waitMs = Math.min(3_600_000, Math.max(1, Math.floor(options?.waitMs ?? this.waitMs)));
+    const deadline = this.now() + waitMs;
+    const priorityBiasMs = Math.floor(options?.priorityBiasMs ?? 0);
+    const waiter: MemoryWaiter = {
+      id: waiterId,
+      provider: normalized,
+      enqueuedAt: this.now() + priorityBiasMs,
+      wake: () => {},
+    };
+    this.state.waiters!.push(waiter);
+    try {
+      for (;;) {
+        if (signal?.aborted) throw new Error('review cancelled while waiting for provider lease');
+        this.removeExpiredLeases(normalized);
+        const free = ceiling - this.activeLeaseCount(normalized);
+        const ordered = this.state.waiters!.filter((entry) => entry.provider === normalized).sort(
+          (left, right) => left.enqueuedAt - right.enqueuedAt || left.id.localeCompare(right.id),
         );
+        const rank = ordered.findIndex((entry) => entry.id === waiterId);
+        if (free > 0 && rank >= 0 && rank < free) {
+          this.state.leases.set(token, {
+            provider: normalized,
+            expiresAt: this.now() + this.leaseTtlMs,
+          });
+          return token;
+        }
+        const remaining = deadline - this.now();
+        if (remaining <= 0) {
+          throw new Error(
+            `429 provider ${normalized} distributed concurrency saturated; retry-after: ${this.retryAfterSeconds(normalized)}`,
+          );
+        }
+        await this.waitForAdmissionWake(waiter, Math.min(this.retryDelayMs, remaining), signal);
       }
-      await waitForAdmission(this.retryDelayMs, signal);
+    } finally {
+      this.state.waiters = this.state.waiters!.filter((entry) => entry.id !== waiterId);
     }
+  }
+
+  async renewProviderLease(provider: string, token: string): Promise<boolean> {
+    const current = this.state.leases.get(token);
+    if (!current || current.provider !== normalizeProviderName(provider)) return false;
+    if (current.expiresAt <= this.now()) {
+      this.state.leases.delete(token);
+      return false;
+    }
+    current.expiresAt = this.now() + this.leaseTtlMs;
+    return true;
   }
 
   async releaseProviderLease(provider: string, token: string): Promise<void> {
     const current = this.state.leases.get(token);
     if (current?.provider === normalizeProviderName(provider)) this.state.leases.delete(token);
+    const normalized = normalizeProviderName(provider);
+    for (const waiter of this.state.waiters!) {
+      if (waiter.provider === normalized) waiter.wake();
+    }
   }
 
   async getProviderCooldownMs(provider: string): Promise<number> {
@@ -185,6 +252,15 @@ export class MemoryProviderAdmission implements ProviderAdmission {
     };
   }
 
+  private retryAfterSeconds(provider: string): number {
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const lease of this.state.leases.values()) {
+      if (lease.provider === provider) oldest = Math.min(oldest, lease.expiresAt);
+    }
+    if (!Number.isFinite(oldest)) return 1;
+    return Math.max(1, Math.ceil((oldest - this.now()) / 1000));
+  }
+
   private activeLeaseCount(provider: string): number {
     let count = 0;
     for (const lease of this.state.leases.values()) if (lease.provider === provider) count += 1;
@@ -197,6 +273,32 @@ export class MemoryProviderAdmission implements ProviderAdmission {
       if (lease.provider === provider && lease.expiresAt <= now) this.state.leases.delete(token);
     }
   }
+
+  private waitForAdmissionWake(
+    waiter: MemoryWaiter,
+    durationMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(done, durationMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        reject(new Error('review cancelled while waiting for provider lease'));
+      };
+      waiter.wake = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      };
+      function done(): void {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+  }
 }
 
 export function normalizeProviderName(provider: string): string {
@@ -207,19 +309,27 @@ export function normalizeProviderName(provider: string): string {
   return normalized || 'unknown';
 }
 
-function waitForAdmission(durationMs: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(done, durationMs);
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-      reject(new Error('review cancelled while waiting for provider lease'));
-    };
-    function done(): void {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }
-    signal?.addEventListener('abort', onAbort, { once: true });
-    if (signal?.aborted) onAbort();
-  });
+/** Strip per-key lane suffix (`luna-k0` → `luna`) for fleet capacity lookups. */
+export function baseProviderName(provider: string): string {
+  return normalizeProviderName(provider).replace(/-k\d+$/, '') || 'unknown';
+}
+
+/** True when every named provider is at its active lease ceiling. */
+export async function providersSaturated(
+  admission: ProviderAdmission,
+  providers: readonly string[],
+): Promise<boolean> {
+  if (!admission.getProviderLoad || providers.length === 0) return false;
+  const loads = await Promise.all(
+    providers.map(async (provider) => {
+      try {
+        return await admission.getProviderLoad!(provider);
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const known = loads.filter((load): load is { active: number; limit: number } => load !== null);
+  if (known.length === 0) return false;
+  return known.every((load) => load.active >= load.limit);
 }

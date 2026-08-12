@@ -418,15 +418,43 @@ REMOTE_CHECK
     exit 3
   fi
 
-  echo "[deploy] gracefully stopping the drained app"
-  if ! "${SSH[@]}" 'pm2 stop velatrix-review >/dev/null'; then
-    echo "[deploy] PM2 stop failed; attempting to bring the unchanged app back" >&2
-    if ! "${SSH[@]}" 'pm2 restart velatrix-review --update-env >/dev/null'; then
-      echo "[deploy] CRITICAL: could not restart the unchanged app" >&2
+  echo "[deploy] gracefully stopping drained Orvex PM2 apps"
+  if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_STOP_APPS'
+set -euo pipefail
+live=$1
+pm2 stop velatrix-api >/dev/null 2>&1 || true
+pm2 stop velatrix-scheduler >/dev/null 2>&1 || true
+pm2 stop /velatrix-worker-/ >/dev/null 2>&1 || true
+pm2 stop velatrix-review >/dev/null 2>&1 || true
+node -e '
+const { execSync } = require("node:child_process");
+const apps = JSON.parse(execSync("pm2 jlist", { encoding: "utf8" }) || "[]");
+const re = /^velatrix-(api|scheduler|review|worker-\d+)$/;
+const live = new Set(["online", "launching", "stopping", "waiting_restart"]);
+const bad = apps.filter((app) => re.test(app.name) && live.has(app.pm2_env && app.pm2_env.status));
+if (bad.length) {
+  console.error(bad.map((app) => app.name + ":" + app.pm2_env.status).join(", "));
+  process.exit(1);
+}
+'
+REMOTE_STOP_APPS
+  then
+    echo "[deploy] PM2 stop failed; attempting to bring the unchanged apps back" >&2
+    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_RESTART_UNCHANGED'
+set -euo pipefail
+live=$1
+if [[ -f "$live/ecosystem.config.cjs" ]]; then
+  pm2 startOrRestart "$live/ecosystem.config.cjs" --update-env >/dev/null
+else
+  pm2 restart velatrix-review --update-env >/dev/null
+fi
+REMOTE_RESTART_UNCHANGED
+    then
+      echo "[deploy] CRITICAL: could not restart the unchanged apps" >&2
       exit 20
     fi
     if ! ready_json "${DEPLOY_READY_ATTEMPTS:-30}" "${DEPLOY_READY_SLEEP_S:-2}" 0 1 >/dev/null; then
-      echo "[deploy] CRITICAL: unchanged app did not become ready" >&2
+      echo "[deploy] CRITICAL: unchanged apps did not become ready" >&2
       exit 20
     fi
     exit 5
@@ -447,13 +475,22 @@ rsync -a --checksum --delete \
   --exclude '*.sqlite' --exclude '*.sqlite3' "$live/" "$backup/"
 REMOTE_BACKUP
   then
-    echo "[deploy] backup failed; restarting the unchanged live app" >&2
-    if ! "${SSH[@]}" 'pm2 restart velatrix-review --update-env >/dev/null'; then
-      echo "[deploy] CRITICAL: could not restart the unchanged live app" >&2
+    echo "[deploy] backup failed; restarting the unchanged live apps" >&2
+    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_RESTART_UNCHANGED'
+set -euo pipefail
+live=$1
+if [[ -f "$live/ecosystem.config.cjs" ]]; then
+  pm2 startOrRestart "$live/ecosystem.config.cjs" --update-env >/dev/null
+else
+  pm2 restart velatrix-review --update-env >/dev/null
+fi
+REMOTE_RESTART_UNCHANGED
+    then
+      echo "[deploy] CRITICAL: could not restart the unchanged live apps" >&2
       exit 20
     fi
     if ! ready_json "${DEPLOY_READY_ATTEMPTS:-30}" "${DEPLOY_READY_SLEEP_S:-2}" 0 1 >/dev/null; then
-      echo "[deploy] CRITICAL: unchanged app did not become ready" >&2
+      echo "[deploy] CRITICAL: unchanged apps did not become ready" >&2
       exit 20
     fi
     exit 5
@@ -500,7 +537,22 @@ live=$1
   echo "release is missing ecosystem.config.cjs" >&2
   exit 1
 }
-pm2 startOrRestart "$live/ecosystem.config.cjs" --only velatrix-review --update-env >/dev/null
+pm2 startOrRestart "$live/ecosystem.config.cjs" --update-env >/dev/null
+# Drop the legacy single-process app name if it still exists after the role split.
+pm2 delete velatrix-review >/dev/null 2>&1 || true
+# API /ready alone is not enough — require scheduler + at least one worker online.
+node -e '
+const { execSync } = require("node:child_process");
+const apps = JSON.parse(execSync("pm2 jlist", { encoding: "utf8" }) || "[]");
+const byName = new Map(apps.map((app) => [app.name, app.pm2_env && app.pm2_env.status]));
+const need = ["velatrix-api", "velatrix-scheduler"];
+const missing = need.filter((name) => byName.get(name) !== "online");
+const workers = [...byName.entries()].filter(([name, status]) => /^velatrix-worker-\d+$/.test(name) && status === "online");
+if (missing.length || workers.length < 1) {
+  console.error("fleet incomplete after restart: missing=" + missing.join(",") + " workersOnline=" + workers.length);
+  process.exit(1);
+}
+'
 REMOTE_RESTART
   }
 
@@ -525,7 +577,26 @@ REMOTE_BACKUP_SCHEDULE
       echo "[deploy] CRITICAL: could not re-enable the drain before rollback" >&2
       return 1
     fi
-    if ! "${SSH[@]}" 'pm2 stop velatrix-review >/dev/null'; then
+    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_STOP_APPS'
+set -euo pipefail
+live=$1
+pm2 stop velatrix-api >/dev/null 2>&1 || true
+pm2 stop velatrix-scheduler >/dev/null 2>&1 || true
+pm2 stop /velatrix-worker-/ >/dev/null 2>&1 || true
+pm2 stop velatrix-review >/dev/null 2>&1 || true
+node -e '
+const { execSync } = require("node:child_process");
+const apps = JSON.parse(execSync("pm2 jlist", { encoding: "utf8" }) || "[]");
+const re = /^velatrix-(api|scheduler|review|worker-\d+)$/;
+const live = new Set(["online", "launching", "stopping", "waiting_restart"]);
+const bad = apps.filter((app) => re.test(app.name) && live.has(app.pm2_env && app.pm2_env.status));
+if (bad.length) {
+  console.error(bad.map((app) => app.name + ":" + app.pm2_env.status).join(", "));
+  process.exit(1);
+}
+'
+REMOTE_STOP_APPS
+    then
       echo "[deploy] CRITICAL: rollback PM2 stop failed; refusing to restore files under a running app" >&2
       return 1
     fi

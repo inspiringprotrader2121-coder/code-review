@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import test from 'node:test';
 import {
   loadGitHubRuntimeConfig,
   loadReviewRuntimeConfig,
   loadRulesRuntimeConfig,
 } from './index.js';
+
+const require = createRequire(import.meta.url);
 
 test('review runtime defaults preserve production safety limits', () => {
   const config = loadReviewRuntimeConfig({});
@@ -155,20 +158,52 @@ test('fleet provider capacity is independent from per-worker capacity and snapsh
   );
 });
 
-test('production PM2 profile allocates the full idle provider capacity to a review', () => {
+test('production PM2 profile splits api/scheduler/workers with fleet Redis caps', () => {
   const ecosystem = readFileSync(new URL('../../../ecosystem.config.cjs', import.meta.url), 'utf8');
-  assert.match(ecosystem, /ORVEX_MAX_CONCURRENT_REVIEWS=100(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_LUNA=100(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=128(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_PROVIDER_CONCURRENCY_MINIMAX=100(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA=100(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=128(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=100(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_FLEET_TENANT_CONCURRENCY=100(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_PROVIDER_LEASE_WAIT_MS=600000(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v1(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
-  assert.match(ecosystem, /ORVEX_VERIFY_CONCURRENCY=32(?:\s|\\")/);
+  const config = require('../../../ecosystem.config.cjs') as {
+    apps: Array<{ name: string; args: string; kill_timeout?: number }>;
+  };
+  const names = config.apps.map((app) => app.name);
+  assert.ok(names.includes('velatrix-api'));
+  assert.ok(names.includes('velatrix-scheduler'));
+  assert.equal(names.filter((name) => name.startsWith('velatrix-worker-')).length, 13);
+  assert.match(ecosystem, /deploy-safe/);
+  const apiArgs = config.apps.find((app) => app.name === 'velatrix-api')?.args ?? '';
+  const schedulerArgs = config.apps.find((app) => app.name === 'velatrix-scheduler')?.args ?? '';
+  const workerArgs = config.apps.find((app) => app.name === 'velatrix-worker-01')?.args ?? '';
+  assert.match(apiArgs, /ORVEX_PROCESS_ROLE=api/);
+  assert.match(schedulerArgs, /ORVEX_PROCESS_ROLE=scheduler/);
+  assert.match(schedulerArgs, /ORVEX_WORKER_ID=scheduler-01/);
+  assert.match(workerArgs, /ORVEX_PROCESS_ROLE=worker/);
+  assert.match(workerArgs, /ORVEX_WORKER_ID=review-worker-01/);
+  assert.match(workerArgs, /ORVEX_MAX_CONCURRENT_REVIEWS=8(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA=100(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=128(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=100(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_TENANT_CONCURRENCY=40(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_PROVIDER_LEASE_WAIT_MS=600000(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v1(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_VERIFY_CONCURRENCY=32(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_MAX_SANDBOXES=32(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_SHUTDOWN_DRAIN_MS=960000(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_LEASE_RENEW_MS=60000(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_MONTHLY_COGS_CAP_USD=5000(?:\s|\\")/);
+  assert.ok(config.apps.every((app) => app.kill_timeout === 1_020_000));
+  assert.ok(workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8'));
+});
+
+test('verify and sandbox concurrency honor the production scale ceilings', () => {
+  const config = loadReviewRuntimeConfig({ ORVEX_VERIFY_CONCURRENCY: '32' });
+  assert.equal(config.verifyConcurrency, 32);
+  assert.equal(
+    loadReviewRuntimeConfig({ ORVEX_VERIFY_CONCURRENCY: '999' }).verifyConcurrency,
+    100,
+  );
+  assert.equal(
+    loadReviewRuntimeConfig({ ORVEX_MONTHLY_COGS_CAP_USD: '5000' }).accountLimits.monthlyCogsCapUsd,
+    5_000,
+  );
 });
 
 test('supporting context cannot override the diff-first production ceiling', () => {
@@ -193,6 +228,16 @@ test('review runtime preserves legacy empty-string and invalid-value fallbacks',
   assert.equal(config.aggregationRuns, 1);
   assert.equal(config.verifyConcurrency, 1);
   assert.equal(config.llmMaxTotalMs, 30_000);
+});
+
+test('rate-limit wait defaults cover multi-minute TPM windows', () => {
+  const defaults = loadReviewRuntimeConfig({});
+  assert.equal(defaults.rateLimitMaxWaitMs, 120_000);
+  assert.equal(defaults.rateLimitTotalWaitMs, 180_000);
+  assert.equal(
+    loadReviewRuntimeConfig({ ORVEX_RATELIMIT_TOTAL_WAIT_MS: '300000' }).rateLimitTotalWaitMs,
+    300_000,
+  );
 });
 
 test('review runtime allows multi-minute LLM walls up to 15 minutes', () => {
@@ -223,6 +268,8 @@ test('GitHub and rules runtime loaders preserve secure defaults', () => {
   assert.equal(github.webhookSecret, '');
   assert.equal(github.botLogin, 'orvex-review[bot]');
   assert.equal(github.allowUnsignedWebhooks, false);
+  assert.equal(github.paceTokensPerSecond, 8);
+  assert.equal(github.paceBurst, 20);
   assert.equal(
     loadGitHubRuntimeConfig({ ORVEX_ALLOW_UNSIGNED_WEBHOOKS: '1' }).allowUnsignedWebhooks,
     true,

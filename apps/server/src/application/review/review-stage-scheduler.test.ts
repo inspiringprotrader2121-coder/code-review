@@ -74,7 +74,7 @@ test('required API stages each cover every complete bounded diff shard', () => {
     for (const index of [0, 4, 8, 11]) assert.match(combined, new RegExp(`NEW_MARKER_${index}`));
     for (const entry of stageCalls) {
       assert.equal(entry.ctx.promptProfile, 'focused');
-      assert.equal(entry.ctx.diffBudgetChars, 14_000);
+      assert.equal(entry.ctx.diffBudgetChars, 24_000);
       assert.equal(entry.ctx.diffCoverage, 'require-complete');
       assert.equal(entry.ctx.changedContents, undefined);
       assert.equal(entry.ctx.related, undefined);
@@ -91,6 +91,27 @@ test('required API stages each cover every complete bounded diff shard', () => {
       }
     }
   }
+});
+
+test('denser focused packing covers every hunk with fewer shards', () => {
+  const first = call('deepseek-v4-flash', 1);
+  first.modelPassIndex = 1;
+  first.passTag = 'deep-dive';
+  const files = Array.from({ length: 6 }, (_, index) => ({
+    filename: `src/pack-${index}.ts`,
+    status: 'modified',
+    patch: `@@ -1 +1 @@\n-OLD_${index}\n+NEW_${index}\n${'+y'.repeat(2_000)}`,
+  })) as ChangedFile[];
+  const scheduled = boundHighTierDiscoveryWorkloads([first], files);
+  const chunks = scheduled.filter((entry) => entry.passTag === 'deep-dive');
+  assert.ok(chunks.length >= 1);
+  assert.ok(chunks.length <= 3, `expected denser packing into <=3 shards, got ${chunks.length}`);
+  const combined = chunks
+    .flatMap((entry) => entry.files ?? [])
+    .map((file) => file.patch)
+    .join('\n');
+  for (const index of [0, 2, 5]) assert.match(combined, new RegExp(`NEW_${index}`));
+  assert.ok(chunks.every((entry) => entry.ctx.diffBudgetChars === 24_000));
 });
 
 test('lower-tier required DeepSeek and MiniMax calls also fan out without sampling', () => {
@@ -133,6 +154,9 @@ test('same-provider review calls retain a provider lane and alternate reviewer l
   ]);
   assert.deepEqual(interleaveProviderLane([first, third, second]), [first, second, third]);
   assert.equal(reviewProviderParallelism(8), 8);
+  assert.equal(reviewProviderParallelism(8, { active: 10, limit: 128 }), 8);
+  assert.equal(reviewProviderParallelism(8, { active: 120, limit: 128 }), 1);
+  assert.ok(reviewProviderParallelism(8, { active: 100, limit: 128 }) <= 4);
 });
 
 test('an idle large review fans out same-provider shards while retaining a bounded lane', async () => {

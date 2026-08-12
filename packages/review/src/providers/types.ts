@@ -48,9 +48,20 @@ export interface AttemptObserver {
   record(event: ModelAttemptEvent): void;
 }
 
+export interface AcquireProviderLeaseOptions {
+  waitMs?: number;
+  priorityBiasMs?: number;
+}
+
 export interface ProviderAdmission {
-  acquireProviderLease(provider: string, limit: number, signal?: AbortSignal): Promise<string>;
+  acquireProviderLease(
+    provider: string,
+    limit: number,
+    signal?: AbortSignal,
+    options?: AcquireProviderLeaseOptions,
+  ): Promise<string>;
   releaseProviderLease(provider: string, token: string): Promise<void>;
+  renewProviderLease?(provider: string, token: string): Promise<boolean>;
   getProviderCooldownMs(provider: string): Promise<number>;
   setProviderCooldown(provider: string, durationMs: number): Promise<void>;
   /** Optional occupancy peek for adaptive per-review fanout under load. */

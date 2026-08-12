@@ -53,8 +53,9 @@ export interface ScheduledReviewCalls {
   aggregation: ReturnType<typeof fitReviewAggregationToBudget>;
 }
 
-const FOCUSED_REVIEW_DIFF_BUDGET_CHARS = 14_000;
-const FOCUSED_REVIEW_HUNK_CHUNK_CHARS = 6_000;
+/** Denser packing: more complete hunks per HTTP call without omitting coverage. */
+const FOCUSED_REVIEW_DIFF_BUDGET_CHARS = 24_000;
+const FOCUSED_REVIEW_HUNK_CHUNK_CHARS = 10_000;
 
 function withFileShard(
   call: ReviewCall,

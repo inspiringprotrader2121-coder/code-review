@@ -33,6 +33,7 @@ if [[ "${DEPLOY_SAFE_TEST_FIXTURE:-0}" != "1" ]]; then
     scripts/build-internal-sandbox-image.test.sh \
     "$FIXTURE/scripts/"
   cp \
+    ecosystem.config.cjs \
     tsconfig.json \
     .node-version \
     .prettierignore \
@@ -210,30 +211,46 @@ fi
 
 node <<'NODE'
 const config = require('./ecosystem.config.cjs');
-const args = config.apps?.find((app) => app.name === 'velatrix-review')?.args ?? '';
+const names = (config.apps ?? []).map((app) => app.name);
+for (const required of ['velatrix-api', 'velatrix-scheduler', 'velatrix-worker-01']) {
+  if (!names.includes(required)) {
+    throw new Error(`production profile is missing PM2 app ${required}`);
+  }
+}
+if (names.filter((name) => name.startsWith('velatrix-worker-')).length !== 13) {
+  throw new Error('production profile must define 13 worker apps');
+}
+const workerArgs = config.apps?.find((app) => app.name === 'velatrix-worker-01')?.args ?? '';
+const schedulerArgs = config.apps?.find((app) => app.name === 'velatrix-scheduler')?.args ?? '';
 for (const [variable, expected] of Object.entries({
-  ORVEX_MAX_CONCURRENT_REVIEWS: 100,
-  ORVEX_CODEX_APIKEY_CONCURRENCY: 100,
-  ORVEX_PROVIDER_CONCURRENCY_LUNA: 100,
-  ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 128,
-  ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 100,
+  ORVEX_MAX_CONCURRENT_REVIEWS: 8,
+  ORVEX_CODEX_APIKEY_CONCURRENCY: 8,
+  ORVEX_PROVIDER_CONCURRENCY_LUNA: 8,
+  ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 16,
+  ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 12,
   ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA: 100,
   ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK: 128,
   ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX: 100,
-  ORVEX_FLEET_TENANT_CONCURRENCY: 100,
+  ORVEX_FLEET_TENANT_CONCURRENCY: 40,
   ORVEX_PROVIDER_LEASE_WAIT_MS: 600000,
   ORVEX_VERIFY_CONCURRENCY: 32,
   ORVEX_MAX_SANDBOXES: 32,
 })) {
-  if (!args.includes(`${variable}=${expected}`)) {
-    throw new Error(`production profile does not pin ${variable}=${expected}`);
+  if (!workerArgs.includes(`${variable}=${expected}`)) {
+    throw new Error(`production worker profile does not pin ${variable}=${expected}`);
   }
 }
-if (!args.includes('ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v1')) {
+if (!schedulerArgs.includes('ORVEX_WORKER_ID=scheduler-01')) {
+  throw new Error('production scheduler profile does not pin ORVEX_WORKER_ID');
+}
+if (!workerArgs.includes('ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v1')) {
   throw new Error('production profile does not pin the review-scale-v1 capacity epoch');
 }
-if (args.indexOf('. ./.env') > args.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=100')) {
+if (workerArgs.indexOf('. ./.env') > workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8')) {
   throw new Error('immutable .env would override the code-owned production profile');
+}
+if (!String(require('fs').readFileSync('ecosystem.config.cjs', 'utf8')).includes('deploy-safe')) {
+  throw new Error('ecosystem multi-app profile must document the deploy-safe follow-up');
 }
 NODE
 
@@ -283,6 +300,7 @@ printf '%s\n' \
   '  : >"$DEPLOY_TEST_STATE/restarted"' \
   'elif [[ "$*" == *"bash -s"* ]]; then' \
   '  SCRIPT=$(cat)' \
+  '  if [[ "$SCRIPT" == *"pm2 stop"* ]]; then : >"$DEPLOY_TEST_STATE/stopped"; fi' \
   '  if [[ "$*" == *.lock* ]]; then' \
   '    if [[ "$SCRIPT" == *rmdir* ]]; then rm -f "$DEPLOY_TEST_STATE/lock" "$DEPLOY_TEST_STATE/lock-stale"; elif [[ -e "$DEPLOY_TEST_STATE/lock" && ! -e "$DEPLOY_TEST_STATE/lock-stale" ]]; then exit 75; else : >"$DEPLOY_TEST_STATE/lock"; rm -f "$DEPLOY_TEST_STATE/lock-stale"; fi' \
   '  fi' \

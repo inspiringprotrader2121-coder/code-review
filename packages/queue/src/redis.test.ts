@@ -364,6 +364,63 @@ test(
 );
 
 test(
+  'Redis renewLease rebinds a missing tenant claim and persistJob refreshes TTLs',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    const namespace = testNamespace();
+    const plan = {
+      epoch: 'tenant-rebind-v1',
+      limits: { luna: 2, deepseek: 2, minimax: 2 },
+      tenantConcurrency: 2,
+    };
+    const queue = new RedisReviewQueue(redisUrl!, { namespace, providerCapacityPlan: plan });
+    const scheduler =
+      queue.providerAdmission as import('./redis-provider-admission.js').RedisProviderAdmission;
+    t.after(async () => {
+      await queue.close();
+      await clearNamespace(cleanup, namespace);
+      await cleanup.quit();
+    });
+    await scheduler.initializeProviderCapacities();
+
+    const payload = { ...job('sha-rebind', 88, 'opened'), tenantId: 'tenant-rebind' };
+    assert.equal((await queue.enqueue(payload)).accepted, true);
+    const claimed = await queue.dequeue();
+    assert.ok(claimed);
+    const [entry] = await cleanup.lrange(`${namespace}:processing`, 0, -1);
+    assert.ok(entry);
+    const token = entry!.slice(0, entry!.indexOf('\n'));
+    await cleanup.hdel(`${namespace}:tenant-claims`, token);
+    await cleanup.hdel(`${namespace}:tenant-active`, 'tenant-rebind');
+    await cleanup.zrem(`${namespace}:tenant-claim-expiry`, token);
+
+    await queue.renewLease!(claimed!);
+    assert.equal(await cleanup.hget(`${namespace}:tenant-claims`, token), 'tenant-rebind');
+    assert.equal(await cleanup.hget(`${namespace}:tenant-active`, 'tenant-rebind'), '1');
+    const expiryAfterRenew = Number(await cleanup.zscore(`${namespace}:tenant-claim-expiry`, token));
+    assert.ok(expiryAfterRenew > Date.now());
+
+    const inflightTtlBefore = await cleanup.ttl(`${namespace}:inflight:${prKey(claimed!)}`);
+    claimed!.runId = 'run-persist-refresh';
+    await queue.persistJob!(claimed!);
+    const inflightTtlAfter = await cleanup.ttl(`${namespace}:inflight:${prKey(claimed!)}`);
+    assert.ok(inflightTtlAfter >= inflightTtlBefore - 1);
+    const [persistedEntry] = await cleanup.lrange(`${namespace}:processing`, 0, -1);
+    assert.ok(persistedEntry);
+    const metaTtl = await cleanup.ttl(
+      `${namespace}:processing-meta:${createHash('sha256').update(persistedEntry!).digest('hex')}`,
+    );
+    assert.ok(metaTtl > 0);
+    const expiryAfterPersist = Number(
+      await cleanup.zscore(`${namespace}:tenant-claim-expiry`, token),
+    );
+    assert.ok(expiryAfterPersist >= expiryAfterRenew - 1_000);
+    await queue.markCompleted(claimed!);
+  },
+);
+
+test(
   'Redis renewLease still succeeds after persistJob rewrites the job payload',
   { skip: !redisUrl },
   async (t) => {

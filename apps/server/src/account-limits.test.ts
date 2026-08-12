@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AppDatabase } from '@orvex-review/store';
 import { planFeatures } from '@orvex-review/tenants';
 import { accountLimitReason } from './pipeline.js';
+import { createAccountLimitPolicy } from './review/account-limits.js';
 
 function db(): AppDatabase {
   const d = new AppDatabase(':memory:');
@@ -393,4 +394,95 @@ test('small plans allow fewer concurrent reviews than Verify', () => {
   assert.equal(planFeatures('verify-lite').maxConcurrentReviews, 2);
   assert.equal(planFeatures('review-plus').maxConcurrentReviews, 3);
   assert.equal(planFeatures('enterprise').maxConcurrentReviews, 8);
+});
+
+test('COGS admission uses the injected monthly cap, not the legacy plan-id default', () => {
+  const d = db();
+  const tenantId = defaultTenant(d);
+  const highCap = createAccountLimitPolicy({
+    monthlyCogsCapUsd: 5_000,
+    cogsReservationUsd: 5,
+  });
+  const lowCap = createAccountLimitPolicy({
+    monthlyCogsCapUsd: 250,
+    cogsReservationUsd: 5,
+  });
+  const prior = d.startReviewRun({
+    tenantId,
+    installationId: 1,
+    owner: 'burst-owner',
+    repo: 'r',
+    pr: 1,
+    headSha: 'prior-spend',
+    action: 'opened',
+  });
+  d.completeReviewRun(prior, { status: 'completed', durationMs: 1, costUsd: 250 });
+  assert.equal(
+    accountLimitReason(
+      d,
+      'burst-owner',
+      planFeatures('enterprise'),
+      1,
+      0,
+      { cogsOnly: true },
+      lowCap,
+    ),
+    'cost_capped',
+    'legacy $250 ceiling still blocks after $250 spend',
+  );
+  assert.equal(
+    accountLimitReason(
+      d,
+      'burst-owner',
+      planFeatures('enterprise'),
+      1,
+      0,
+      { cogsOnly: true },
+      highCap,
+    ),
+    null,
+    'operator ORVEX_MONTHLY_COGS_CAP_USD must allow scale bursts past the legacy default',
+  );
+
+  // Reservation projection alone: 49 running × $5 + 1 pending = $250 under low cap.
+  const scaleTenant = defaultTenant(d);
+  for (let i = 0; i < 49; i++) {
+    d.startReviewRun({
+      tenantId: scaleTenant,
+      installationId: 1,
+      owner: 'scale-owner',
+      repo: 'r',
+      pr: i + 10,
+      headSha: `scale${i}`,
+      action: 'opened',
+    });
+  }
+  const unlimitedConcurrency = {
+    ...planFeatures('enterprise'),
+    maxConcurrentReviews: null,
+  };
+  assert.equal(
+    accountLimitReason(d, 'scale-owner', unlimitedConcurrency, 1, 0, { cogsOnly: true }, lowCap),
+    'cost_capped',
+  );
+  assert.equal(
+    accountLimitReason(d, 'scale-owner', unlimitedConcurrency, 1, 0, { cogsOnly: true }, highCap),
+    null,
+  );
+  // 999 running × $5 would exceed the production $5000 ceiling.
+  for (let i = 49; i < 999; i++) {
+    d.startReviewRun({
+      tenantId: scaleTenant,
+      installationId: 1,
+      owner: 'scale-owner',
+      repo: 'r',
+      pr: i + 10,
+      headSha: `scale${i}`,
+      action: 'opened',
+    });
+  }
+  assert.equal(
+    accountLimitReason(d, 'scale-owner', unlimitedConcurrency, 1, 0, { cogsOnly: true }, highCap),
+    'cost_capped',
+  );
 });

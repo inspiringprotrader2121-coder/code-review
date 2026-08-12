@@ -3,22 +3,19 @@ import { createAppAuth } from '@octokit/auth-app';
 import { Octokit } from '@octokit/rest';
 import { loadGitHubRuntimeConfig } from '@orvex-review/config';
 import type { GitHubAppConfig } from './types.js';
+import {
+  createThrottledInstallationOctokit,
+  type CreateInstallationOctokitOptions,
+} from './throttled-octokit.js';
 
 export function createInstallationOctokit(
   config: GitHubAppConfig,
   installationId: number,
+  options?: CreateInstallationOctokitOptions,
 ): Octokit {
-  // Octokit's default auth strategy treats `auth` as a token string; app auth
-  // must be wired via `authStrategy` + an options object, or it throws
-  // "Token passed to createTokenAuth is not a string".
-  return new Octokit({
-    authStrategy: createAppAuth,
-    auth: {
-      appId: config.appId,
-      privateKey: config.privateKey,
-      installationId,
-    },
-  });
+  // Throttling plugin + optional per-installation pacer. App auth must use
+  // authStrategy + options object (plain token auth rejects the object form).
+  return createThrottledInstallationOctokit(config, installationId, options);
 }
 
 export async function getInstallationIdForRepo(

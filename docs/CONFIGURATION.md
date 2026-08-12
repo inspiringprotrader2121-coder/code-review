@@ -19,6 +19,8 @@ One GitHub App serves all customers; each customer installs it on its organisati
 | `GITHUB_APP_BOT_LOGIN` | string; GitHub login; default orvex-review[bot] | `orvex-review[bot]` | no / none | - | GitHub bot login used to identify Orvex comments. |
 | `ORVEX_ALLOW_UNSIGNED_WEBHOOKS` | boolean; 1 enables; default disabled | `1` | no / none | - | Allow unsigned GitHub webhooks only for controlled local development. |
 | `GITHUB_ALLOWED_REPO` | owner/repository; optional single repository | `Velatrixcloud/Velatrix-Cloud` | no / none | - | Legacy single-repository development mode. Do not set for SaaS. |
+| `ORVEX_GITHUB_PACE_RPS` | number; tokens/sec; default 8 | `8` | no / none | - | Per-installation GitHub API steady request rate for Redis/memory token-bucket pacing. |
+| `ORVEX_GITHUB_PACE_BURST` | integer; burst tokens; default 20 | `20` | no / none | - | Per-installation GitHub API burst capacity for Redis/memory token-bucket pacing. |
 | `PLATFORM_SECRET` | string; at least 32 UTF-8 bytes in production or public binds | `(unset)` | yes / secret | `GITHUB_WEBHOOK_SECRET` | High-entropy signing key for sessions, OAuth state, CSRF, and MFA. It is mandatory for production and explicit public binds; GITHUB_WEBHOOK_SECRET is only a local compatibility fallback. |
 | `APP_URL` | URL; absolute public URL | `http://localhost:8787` | no / none | - | Public service URL for callbacks and the connect UI. |
 | `PORT` | integer; 1..65535; default 8787 | `8787` | no / none | - | HTTP listening port. |
@@ -166,6 +168,8 @@ Production uses durable storage outside the checkout and Redis with a namespaced
 | `ORVEX_CODEX_STATUS_FILE` | path; status path | `/home/orvex/orvex-data/codex-auth-status` | no / path | - | Codex authentication status file used by readiness reporting. |
 | `ORVEX_DEPLOY_DRAIN_PATH` | path; drain marker path | `/home/orvex/orvex-data/deploy-drain` | no / path | - | Deployment drain-marker file outside the checkout. |
 | `ORVEX_MONITOR_DISK_PATH` | path; optional monitored path | `(unset)` | no / path | - | Optional disk path for operational monitoring. |
+| `ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES` | integer; 0..64GiB bytes; default 1GiB; 0 disables | `1073741824` | no / none | - | Worker pre-dequeue gate: require at least this much MemAvailable before claiming another review. Protects archive extract and sandbox startup under host pressure. |
+| `ORVEX_HOST_MIN_AVAILABLE_DISK_BYTES` | integer; 0..256GiB bytes; default 2GiB; 0 disables | `2147483648` | no / none | - | Worker pre-dequeue gate: require at least this much free disk on ORVEX_MONITOR_DISK_PATH (else sandbox slot dir / checkout root) before claiming another review. |
 | `ORVEX_ALERT_WEBHOOK_URL` | URL; operator webhook URL | `(unset)` | yes / connection | - | Operator-owned alert webhook for queue, billing, and database failures. |
 
 ## Review execution and prompt budgets
@@ -194,7 +198,7 @@ Limits bound time, spend, and context. Production verification remains on; max r
 | `ORVEX_VERIFY_FILE_CHARS` | integer; positive chars; default 32000 | `32000` | no / none | - | Verifier per-file context budget. |
 | `ORVEX_VERIFY_TOTAL_CHARS` | integer; positive chars; default 96000 | `96000` | no / none | - | Verifier total context budget. |
 | `ORVEX_VERIFY_BATCH_SIZE` | integer; positive; default 3 | `3` | no / none | - | Verifier candidate batch size. |
-| `ORVEX_VERIFY_CONCURRENCY` | integer; 1..8; default 3 | `8` | no / none | - | Verifier batch capacity. Idle reviews fan out independent candidate batches; the scheduler divides capacity fairly among active reviews. |
+| `ORVEX_VERIFY_CONCURRENCY` | integer; 1..100; default 3 | `32` | no / none | - | Verifier batch capacity. Idle reviews fan out independent candidate batches; under load the scheduler should share capacity fairly among active reviews. |
 | `ORVEX_RISK_PROBES` | integer; 0..4; unset disables | `(unset)` | no / none | - | Optional number of additional risk probes. |
 | `ORVEX_RISK_PROBE_SELECTIVITY` | number; >=1.5; default 2 | `2` | no / none | - | Risk-probe selection threshold. |
 | `ORVEX_LARGE_PR_FILES` | integer; positive; default 40 | `40` | no / none | - | Changed-file count classifying a large PR. |
@@ -265,7 +269,7 @@ Agentic Luna execution is restricted to named trusted repositories, API-key auth
 | `DOCKER_CONTEXT` | string; local rootless Docker context only; default unset | `(unset)` | no / connection | - | Optional Docker context for the internal sandbox. Keep it unset unless the rootless local context is explicitly required. |
 | `ORVEX_CODE_EXECUTION` | boolean; 1 enables after preflight; default disabled | `0` | no / none | - | Enable runtime execution only after the rootless-host preflight passes. |
 | `ORVEX_CODEX_CONTAINER_RUNTIME` | boolean; 1 enables after internal egress preflight; default disabled | `0` | no / none | - | Run agentic Codex only inside the rootless internal sandbox with the dedicated egress broker. |
-| `ORVEX_MAX_SANDBOXES` | integer; positive; default 8; maximum 8 | `8` | no / none | - | Host-wide maximum concurrent internal sandbox containers. |
+| `ORVEX_MAX_SANDBOXES` | integer; positive; default 8; maximum 100 | `32` | no / none | - | Host-wide maximum concurrent internal sandbox containers. Must stay within host Docker/RAM budget. |
 | `ORVEX_SANDBOX_SLOT_DIR` | path; absolute private service-owned directory; default system temporary directory | `/home/orvex/orvex-data/sandbox-slots` | no / path | - | Host-wide atomic sandbox-slot lease directory. Keep it outside the deployed checkout. |
 | `ORVEX_SANDBOX_SLOT_STALE_MS` | integer; positive milliseconds; default 600000; maximum 3600000 | `600000` | no / none | - | Grace period used when reclaiming a sandbox slot whose owning process is no longer alive. |
 | `ORVEX_SANDBOX_IMAGE` | image digest; locally loaded immutable digest | `sha256:<64-hex-local-image-id>` | no / none | - | Mandatory immutable internal sandbox image. It must be preloaded into the rootless daemon. |
@@ -278,9 +282,9 @@ These values bound retry delays and supporting context. The diff remains first a
 | Variable | Type and range | Safe default | Secret / redaction | Compatibility aliases | Description |
 | --- | --- | --- | --- | --- | --- |
 | `ORVEX_RATELIMIT_MAX_RETRIES` | integer; non-negative; default 2 | `2` | no / none | - | Maximum recoverable provider rate-limit retry rounds. |
-| `ORVEX_RATELIMIT_MAX_WAIT_MS` | integer; milliseconds; default 60000 | `60000` | no / none | - | Maximum per-rate-limit retry sleep. |
+| `ORVEX_RATELIMIT_MAX_WAIT_MS` | integer; milliseconds; default 120000 | `120000` | no / none | - | Maximum per-rate-limit retry sleep (covers multi-minute TPM windows). |
 | `ORVEX_RATELIMIT_BASE_MS` | integer; milliseconds; default 2000 | `2000` | no / none | - | Base retry-backoff duration. |
-| `ORVEX_RATELIMIT_TOTAL_WAIT_MS` | integer; milliseconds; default 60000 | `60000` | no / none | - | Total retry sleep budget per provider call. |
+| `ORVEX_RATELIMIT_TOTAL_WAIT_MS` | integer; milliseconds; default 180000 | `180000` | no / none | - | Total retry sleep budget per provider call (covers multi-minute TPM windows). |
 | `ORVEX_MAX_DIFF_CHARS` | integer; positive chars; default 96000 | `96000` | no / none | - | Primary diff context budget. |
 | `ORVEX_MAX_CHANGED_CHARS` | integer; positive chars; default and maximum 16000 | `16000` | no / none | - | Changed-file supporting context budget. |
 | `ORVEX_MAX_RELATED_CHARS` | integer; positive chars; default and maximum 6000 | `6000` | no / none | - | Related-file context budget. |

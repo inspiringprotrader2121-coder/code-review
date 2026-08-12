@@ -27,7 +27,10 @@ export {
   MemoryProviderAdmission,
   providerAdmissionFor,
   providerCapacityRegistryFor,
+  providersSaturated,
   normalizeProviderName,
+  baseProviderName,
+  type AcquireProviderLeaseOptions,
   type ProviderAdmission,
   type ProviderAdmissionOwner,
   type ProviderCapacityPlan,
@@ -37,8 +40,14 @@ export {
 } from './provider-admission.js';
 export {
   RedisProviderAdmission,
+  PROVIDER_LEASE_TTL_MS,
   type RedisProviderAdmissionOptions,
 } from './redis-provider-admission.js';
+export {
+  RedisGitHubInstallationPacer,
+  type RedisGitHubPacerOptions,
+  type GitHubInstallationPacer as QueueGitHubInstallationPacer,
+} from './redis-github-pacer.js';
 export {
   createReviewQueue,
   loadReviewQueueConfig,

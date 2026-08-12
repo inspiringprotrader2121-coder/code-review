@@ -3,6 +3,7 @@ import {
   llmFindingsToReviewFindings,
   REVIEW_INCOMPLETE_SUMMARY,
   runInvestigateReview,
+  getProviderLoad,
   type LlmAttemptEvent,
   type LlmReviewResponse,
   type ReviewFinding,
@@ -15,6 +16,8 @@ import type { ReviewCall } from './review-stage-scheduler.js';
 export interface ReviewCallOutcome {
   ok: boolean;
   transient: boolean;
+  /** True when fleet/local admission refused the call (saturated / wait timed out). */
+  admissionBlocked?: boolean;
   degraded: boolean;
   summary?: string;
   findings: ReviewFinding[];
@@ -82,13 +85,30 @@ export function groupApiCallsByProvider(calls: ReviewCall[]): ReviewCall[][] {
 }
 
 /**
- * Bound one review's independent provider calls. Do not divide this by the
- * number of active reviews: that turns every large PR into a serial chunk
- * chain during a burst. The injected provider admission coordinator owns the
- * process- and fleet-wide ceilings at the paid-call boundary.
+ * Bound one review's independent provider calls. Under fleet load, shrink
+ * per-review fanout from getProviderLoad so each in-flight call finishes
+ * under the LLM wall — same lenses/chunks, fewer simultaneous streams.
+ * Do not divide blindly by active reviews when idle: that serializes large
+ * PRs for no gain. Fleet admission still owns absolute capacity at the
+ * paid-call boundary.
  */
-export function reviewProviderParallelism(apiConcurrency: number): number {
-  return Math.max(1, Math.floor(apiConcurrency));
+export function reviewProviderParallelism(
+  apiConcurrency: number,
+  load?: { active: number; limit: number } | null,
+): number {
+  const configured = Math.max(1, Math.floor(apiConcurrency));
+  if (!load || !Number.isFinite(load.limit) || load.limit <= 0) return configured;
+  const active = Math.max(0, Math.floor(load.active));
+  const limit = Math.max(1, Math.floor(load.limit));
+  const free = Math.max(0, limit - active);
+  const utilization = active / limit;
+  // Idle / lightly loaded fleet: keep full per-review fanout.
+  if (utilization < 0.5 && free >= configured) return configured;
+  // Estimate how many reviews already share this provider, then fair-share
+  // remaining slots without dropping any required coverage units.
+  const estimatedPeers = Math.max(1, Math.ceil(active / configured) + 1);
+  const fairShare = Math.max(1, Math.floor(Math.max(free, 1) / estimatedPeers));
+  return Math.max(1, Math.min(configured, fairShare));
 }
 
 /**
@@ -195,7 +215,19 @@ export async function executeReviewProviderCalls(
     } catch (error) {
       const message = (error as Error).message;
       console.warn(`[worker] ${call.label} failed:`, message);
-      return outcome(call, false, isTransientLlmError(message), false, undefined, []);
+      const admissionBlocked =
+        /concurrency saturated|admission timed out|provider lease|cooldown active/i.test(
+          message,
+        ) && isTransientLlmError(message);
+      return outcome(
+        call,
+        false,
+        isTransientLlmError(message),
+        false,
+        undefined,
+        [],
+        admissionBlocked,
+      );
     }
   };
   const cli = input.calls.filter((call) => call.mode === 'agentic');
@@ -208,15 +240,19 @@ export async function executeReviewProviderCalls(
   };
   const runApiLanes = async () => {
     const lanes = groupApiCallsByProvider(api);
-    const perProviderConcurrency = reviewProviderParallelism(input.apiConcurrency);
-    console.log(
-      `[worker] API provider scheduling: perProviderPerReview=${perProviderConcurrency}; ` +
-        'fleet admission enforces aggregate capacity',
-    );
     const laneOutcomes = await input.mapConcurrent(
       lanes,
       Math.min(input.apiConcurrency, lanes.length),
       async (lane) => {
+        const provider = lane[0]?.target.admissionBucket ?? 'unknown';
+        const load = await getProviderLoad(provider);
+        const perProviderConcurrency = reviewProviderParallelism(input.apiConcurrency, load);
+        console.log(
+          `[worker] API provider scheduling: provider=${provider} ` +
+            `perProviderPerReview=${perProviderConcurrency}` +
+            (load ? ` load=${load.active}/${load.limit}` : '') +
+            '; fleet admission enforces aggregate capacity',
+        );
         return input.mapConcurrent(interleaveProviderLane(lane), perProviderConcurrency, runOne);
       },
     );
@@ -237,10 +273,12 @@ function outcome(
   degraded: boolean,
   summary: string | undefined,
   findings: ReviewFinding[],
+  admissionBlocked = false,
 ): ReviewCallOutcome {
   return {
     ok,
     transient,
+    admissionBlocked,
     degraded,
     summary,
     findings,

@@ -89,6 +89,12 @@ export interface ServerConfig {
     shutdownDrainMs: number;
     shutdownCancelMs: number;
   }>;
+  /** Pre-dequeue host gates so archives/sandboxes do not OOM or fill the disk. */
+  readonly hostAdmission: Readonly<{
+    minAvailableMemoryBytes: number;
+    minAvailableDiskBytes: number;
+    diskPath: string | undefined;
+  }>;
   readonly webhook: Readonly<{ bodyDedupTtlMs: number }>;
   readonly quota: Readonly<{ monthlyCogsCapUsd: number }>;
   readonly costVisibilityTenants: readonly string[];
@@ -225,6 +231,26 @@ export function loadServerConfig(env: Environment = process.env): ServerConfig {
       leaseRenewMs: bounded(env.ORVEX_LEASE_RENEW_MS, 300_000, 10_000, 300_000),
       shutdownDrainMs: bounded(env.ORVEX_SHUTDOWN_DRAIN_MS, 240_000, 1_000, 86_400_000),
       shutdownCancelMs: bounded(env.ORVEX_SHUTDOWN_CANCEL_MS, 10_000, 100, 60_000),
+    }),
+    hostAdmission: Object.freeze({
+      // Default ~1 GiB MemAvailable headroom for the next archive/sandbox claim.
+      minAvailableMemoryBytes: bounded(
+        env.ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES,
+        1_073_741_824,
+        0,
+        64 * 1_073_741_824,
+      ),
+      // Default ~2 GiB free on the sandbox/checkout disk path.
+      minAvailableDiskBytes: bounded(
+        env.ORVEX_HOST_MIN_AVAILABLE_DISK_BYTES,
+        2_147_483_648,
+        0,
+        256 * 1_073_741_824,
+      ),
+      diskPath:
+        optional(env.ORVEX_MONITOR_DISK_PATH) ??
+        optional(env.ORVEX_SANDBOX_SLOT_DIR) ??
+        optional(env.ORVEX_CHECKOUT_ROOT),
     }),
     webhook: Object.freeze({
       bodyDedupTtlMs: bounded(

@@ -109,6 +109,7 @@ export interface ReviewRuntimeConfig {
   readonly accountLimits: Readonly<{
     freeTierDailyCap: number;
     cogsReservationUsd: number;
+    monthlyCogsCapUsd: number;
   }>;
   readonly pricing: Readonly<{
     premium: Readonly<{ input: number; cachedInput: number; output: number }>;
@@ -336,9 +337,10 @@ export function loadReviewRuntimeConfig(
     maxOutputTokens: positive(env.ORVEX_MAX_OUTPUT_TOKENS, 64_000),
     maxOutputTokensCap: Math.min(positive(env.ORVEX_MAX_OUTPUT_TOKENS_CAP, 64_000), 1_000_000),
     rateLimitMaxRetries: finite(env.ORVEX_RATELIMIT_MAX_RETRIES, 2),
-    rateLimitMaxWaitMs: finite(env.ORVEX_RATELIMIT_MAX_WAIT_MS, 60_000),
+    // Defaults cover common TPM windows (up to ~2 minutes) without cutting passes.
+    rateLimitMaxWaitMs: finite(env.ORVEX_RATELIMIT_MAX_WAIT_MS, 120_000),
     rateLimitBaseMs: finite(env.ORVEX_RATELIMIT_BASE_MS, 2_000),
-    rateLimitTotalWaitMs: finite(env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 60_000),
+    rateLimitTotalWaitMs: finite(env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 180_000),
     anthropicThinkingBudgetTokens: optionalPositive(env.ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS),
     responsesTimeoutMs: Math.min(
       Math.max(positive(env.ORVEX_RESPONSES_TIMEOUT_MS, 900_000), 1_000),
@@ -354,7 +356,7 @@ export function loadReviewRuntimeConfig(
     verifyBatchSize: positive(env.ORVEX_VERIFY_BATCH_SIZE, 3),
     verifyConcurrency: (() => {
       const raw = Number(env.ORVEX_VERIFY_CONCURRENCY ?? 3);
-      return Number.isFinite(raw) ? Math.min(8, Math.max(1, Math.floor(raw))) : 3;
+      return Number.isFinite(raw) ? Math.min(100, Math.max(1, Math.floor(raw))) : 3;
     })(),
     riskProbes:
       Number.isFinite(Number(env.ORVEX_RISK_PROBES)) && Number(env.ORVEX_RISK_PROBES) >= 0
@@ -472,6 +474,7 @@ export function loadReviewRuntimeConfig(
     accountLimits: Object.freeze({
       freeTierDailyCap: nonNegativeBounded(env.ORVEX_FREE_TIER_DAILY_CAP, 300, 1_000_000),
       cogsReservationUsd: positiveNumber(env.ORVEX_COGS_RESERVATION_USD, 5),
+      monthlyCogsCapUsd: positiveNumber(env.ORVEX_MONTHLY_COGS_CAP_USD, 250),
     }),
     pricing: Object.freeze({
       premium: Object.freeze({

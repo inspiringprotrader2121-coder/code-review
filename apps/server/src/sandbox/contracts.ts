@@ -132,7 +132,8 @@ export const SANDBOX_READINESS_TIMEOUT_MS = 10_000;
 export const SANDBOX_DOCKER_COMMAND_TIMEOUT_MS = 10_000;
 export const CONTAINER_CLEANUP_TIMEOUT_MS = 10_000;
 export const CONTAINER_CLEANUP_RETRY_MS = 50;
-export const MAX_HOST_SANDBOX_SLOTS = 8;
+/** Host-wide sandbox slot ceiling. Must stay >= production ORVEX_MAX_SANDBOXES. */
+export const MAX_HOST_SANDBOX_SLOTS = 100;
 export const ORVEX_MANAGED_LABEL = 'orvex.managed=true';
 export const ORVEX_RUNTIME_LABEL = 'orvex.runtime-verify=true';
 export const ORVEX_CODEX_LABEL = 'orvex.agentic-codex=true';
