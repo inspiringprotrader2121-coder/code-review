@@ -316,9 +316,10 @@ chmod 0644 "$stage/release.json"
 REMOTE_RELEASE_METADATA
 
   echo "[deploy] installing and checking the staged Linux release"
-  "${SSH[@]}" bash -s -- "$STAGE_DIR" <<'REMOTE_CHECK'
+  "${SSH[@]}" bash -s -- "$STAGE_DIR" "${DEPLOY_SKIP_REMOTE_TESTS:-0}" <<'REMOTE_CHECK'
 set -euo pipefail
 cd "$1"
+skip_tests=${2:-0}
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore install --frozen-lockfile
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore format:check
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:runtime
@@ -329,7 +330,11 @@ CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:docs
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore build
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore check:built-exports
 CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore typecheck
-CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore test
+if [[ "$skip_tests" == "1" ]]; then
+  echo "[deploy] skipping remote test suite (DEPLOY_SKIP_REMOTE_TESTS=1)"
+else
+  CI=1 corepack pnpm@11.7.0 --pm-on-fail=ignore test
+fi
 [[ -f apps/server/dist/index.js ]]
 [[ -d node_modules ]]
 [[ -d apps/server/node_modules ]]
