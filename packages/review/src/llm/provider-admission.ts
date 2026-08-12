@@ -32,10 +32,7 @@ export function configureLlmProviderCoordinator(
   providerCoordinator = coordinator;
   configuredProviderConcurrency = localProviderConcurrency;
   if (admissionWaitMs !== undefined) {
-    configuredAdmissionWaitMs = Math.min(
-      3_600_000,
-      Math.max(1_000, Math.floor(admissionWaitMs)),
-    );
+    configuredAdmissionWaitMs = Math.min(3_600_000, Math.max(1_000, Math.floor(admissionWaitMs)));
   } else {
     configuredAdmissionWaitMs = 30_000;
   }
@@ -76,7 +73,11 @@ function detach(waiter: LlmSlotWaiter): void {
   if (waiter.timer) clearTimeout(waiter.timer);
   if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
 }
-async function acquire(provider: string, signal?: AbortSignal, waitMs = configuredAdmissionWaitMs): Promise<void> {
+async function acquire(
+  provider: string,
+  signal?: AbortSignal,
+  waitMs = configuredAdmissionWaitMs,
+): Promise<void> {
   throwIfCancelled(signal);
   const gate = gateFor(provider);
   if (gate.active < providerConcurrency(provider)) {

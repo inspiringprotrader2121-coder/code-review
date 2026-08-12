@@ -1433,7 +1433,11 @@ test('provider cooldowns delay only reviews that require that provider', async (
   const waitedFrom = Date.now();
   await llmChat('sys', 'user', target);
   assert.ok(Date.now() - waitedFrom >= 200, 'waits out the provider-specific cooldown');
-  assert.equal(calls, 2, 'the call proceeds after the cooldown clears without weakening the review');
+  assert.equal(
+    calls,
+    2,
+    'the call proceeds after the cooldown clears without weakening the review',
+  );
 });
 
 test('an active request reaching its hard cap does not cool the whole provider', () => {

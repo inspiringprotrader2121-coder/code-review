@@ -24,7 +24,12 @@ export function loadQueueConfig(env: NodeJS.ProcessEnv = process.env): QueueConf
     redisUrl: optionalString(env.REDIS_URL) ?? (production ? null : 'redis://127.0.0.1:6379'),
     redisNamespace: optionalString(env.ORVEX_QUEUE_NAMESPACE) ?? 'orvex-review',
     maxResumeAfterRestart: boundedInteger(env.ORVEX_MAX_RESUME_AFTER_RESTART, 0, 0, 10),
-    providerLeaseWaitMs: boundedInteger(env.ORVEX_PROVIDER_LEASE_WAIT_MS, 600_000, 1_000, 3_600_000),
+    providerLeaseWaitMs: boundedInteger(
+      env.ORVEX_PROVIDER_LEASE_WAIT_MS,
+      600_000,
+      1_000,
+      3_600_000,
+    ),
     maxMemoryDedupEntries: boundedInteger(env.ORVEX_QUEUE_MAX_DEDUP, 20_000, 1, 1_000_000),
   });
 }
