@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { loadReviewRuntimeConfig } from '@orvex-review/config';
-import type { LlmClientOptions } from './contracts.js';
+import type { LlmClientDependencies, LlmClientOptions } from './contracts.js';
 import { ReviewCancelledError, linkAbortSignal, throwIfCancelled } from './cancellation.js';
 import {
   clockFor,
@@ -67,6 +67,10 @@ interface WatchableAnthropicStream<T> {
   on(event: 'streamEvent', listener: () => void): unknown;
   off?(event: 'streamEvent', listener: () => void): unknown;
 }
+
+type AnthropicStream = ReturnType<
+  NonNullable<LlmClientDependencies['anthropic']>['messages']['stream']
+>;
 
 /**
  * The Anthropic SDK owns its fetch controller, so its inactivity watchdog must
@@ -312,7 +316,7 @@ export async function anthropicChat(
       timeout: hardLimitMs,
     })) as {
     messages: {
-      stream(params: Record<string, unknown>): Parameters<typeof awaitAnthropicFinalMessage>[0];
+      stream(params: Record<string, unknown>): AnthropicStream;
     };
   };
   const maxTokens = resolveMaxOutputTokens(opts.maxTokens);
@@ -336,7 +340,7 @@ export async function anthropicChat(
     messages,
     ...(think ? { thinking: { type: 'enabled' as const, budget_tokens: thinkingBudget } } : {}),
     ...(!think && opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-  }) as Parameters<typeof awaitAnthropicFinalMessage>[0];
+  });
   const startedAt = Date.now();
   const response = await awaitAnthropicFinalMessage(stream, opts);
   if (response.usage)
@@ -350,7 +354,7 @@ export async function anthropicChat(
       model: opts.model,
     });
   const textBlock = response.content.find((block) => block.type === 'text');
-  const rawText = textBlock && textBlock.type === 'text' ? textBlock.text : '';
+  const rawText = textBlock && textBlock.type === 'text' ? (textBlock.text ?? '') : '';
   const text = continuationPrefix
     ? combineContinuationText(continuationPrefix, rawText)
     : prefillBareObject
