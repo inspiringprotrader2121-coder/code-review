@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@orvex-review/config": "workspace:*",
-    "minimatch": "^10.0.1",
+    "minimatch": "^10.2.6",
     "yaml": "^2.8.0",
     "zod": "^3.25.28"
   },
