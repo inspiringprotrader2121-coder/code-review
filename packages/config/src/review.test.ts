@@ -191,8 +191,14 @@ test('review runtime preserves legacy empty-string and invalid-value fallbacks',
 });
 
 test('review runtime allows multi-minute LLM walls up to 15 minutes', () => {
-  assert.equal(loadReviewRuntimeConfig({ ORVEX_LLM_MAX_TOTAL_MS: '600000' }).llmMaxTotalMs, 600_000);
-  assert.equal(loadReviewRuntimeConfig({ ORVEX_LLM_MAX_TOTAL_MS: '9999999' }).llmMaxTotalMs, 900_000);
+  assert.equal(
+    loadReviewRuntimeConfig({ ORVEX_LLM_MAX_TOTAL_MS: '600000' }).llmMaxTotalMs,
+    600_000,
+  );
+  assert.equal(
+    loadReviewRuntimeConfig({ ORVEX_LLM_MAX_TOTAL_MS: '9999999' }).llmMaxTotalMs,
+    900_000,
+  );
 });
 
 test("large-PR intake reaches GitHub's file boundary without exceeding it", () => {
