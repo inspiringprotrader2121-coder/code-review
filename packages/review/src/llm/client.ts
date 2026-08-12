@@ -67,10 +67,7 @@ async function llmChatHoldingProviderSlot(
         ? Math.min(opts.hardLimitMs ?? maxTotalMs(), PREFIX_CONTINUATION_MAX_MS)
         : opts.hardLimitMs,
       maxTokens: continuation
-        ? Math.min(
-            opts.maxTokens ?? PREFIX_CONTINUATION_MAX_TOKENS,
-            PREFIX_CONTINUATION_MAX_TOKENS,
-          )
+        ? Math.min(opts.maxTokens ?? PREFIX_CONTINUATION_MAX_TOKENS, PREFIX_CONTINUATION_MAX_TOKENS)
         : opts.maxTokens,
     };
     try {
