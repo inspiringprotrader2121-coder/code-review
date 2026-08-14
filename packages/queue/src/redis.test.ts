@@ -529,6 +529,26 @@ test(
       (await second.getProviderCooldownMs('deepseek')) > 0,
       'cooldown is visible to peer worker',
     );
+
+    const tpm = await first.providerAdmission.tryReserveProviderTpm?.({
+      lane: 'deepseek-k0',
+      tokens: 1_900_000,
+      budget: 2_000_000,
+      reservationId: 'fleet-a',
+    });
+    assert.equal(tpm?.ok, true);
+    await first.providerAdmission.commitProviderTpm?.({
+      lane: 'deepseek-k0',
+      reservationId: 'fleet-a',
+      actualTokens: 1_900_000,
+    });
+    const peer = await second.providerAdmission.tryReserveProviderTpm?.({
+      lane: 'deepseek-k0',
+      tokens: 150_000,
+      budget: 2_000_000,
+      reservationId: 'fleet-b',
+    });
+    assert.equal(peer?.ok, false, '2M TPM is visible to the peer worker');
   },
 );
 

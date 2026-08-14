@@ -95,7 +95,10 @@ Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenti
 | `ORVEX_STANDARD_BASE_URL` | URL; Anthropic-compatible API URL | `https://api.minimax.io/anthropic` | no / none | `MINIMAX_BASE_URL` | Active standard reviewer endpoint compatibility setting. |
 | `ORVEX_STANDARD_MODEL` | string; provider model ID | `MiniMax-M3` | no / none | `MINIMAX_MODEL` | Active standard reviewer model compatibility setting. |
 | `ORVEX_STANDARD_API` | enum; anthropic | `anthropic` | no / none | `MINIMAX_API` | Active standard reviewer transport compatibility setting. |
-| `ORVEX_DEEPSEEK_API_KEY` | string; provider API key | `(unset)` | yes / secret | - | DeepSeek v4 Pro/Flash shared API key. |
+| `ORVEX_DEEPSEEK_API_KEY` | string; provider API key | `(unset)` | yes / secret | - | DeepSeek Flash API key. Comma-separate keys from distinct DeepSeek accounts to round-robin by rolling 2M TPM and fail over on 429. Extra keys on the same account do not raise the account concurrency cap. |
+| `ORVEX_DEEPSEEK_TPM_PER_ACCOUNT` | integer; 1000..100000000 tokens / minute; default 2000000 | `2000000` | no / none | - | Rolling-minute token budget per DeepSeek account key. The Flash load balancer skips a key before this ceiling and sends the call to another account. |
+| `ORVEX_DEEPSEEK_TPM_WINDOW_MS` | integer; 1000..600000 ms; default 60000 | `60000` | no / none | - | Token-window length for DeepSeek TPM load balancing. Default is one minute. |
+| `ORVEX_DEEPSEEK_TPM_RESERVE_OUTPUT` | integer; 1000..384000 tokens; default 70000 | `70000` | no / none | - | Output tokens reserved against a DeepSeek account before the call starts, so in-flight Flash work counts toward the 2M TPM cap. |
 | `ORVEX_DEEPSEEK_BASE_URL` | URL; HTTPS provider base URL | `https://api.deepseek.com` | no / connection | - | DeepSeek endpoint; public Flash stages retain the fixed model and max-reasoning contract. |
 | `ORVEX_DEEPSEEK_MODEL` | string; provider model ID | `deepseek-v4-pro` | no / none | - | DeepSeek v4 Pro model identifier. |
 | `ORVEX_DEEPSEEK_EFFORT` | enum; max | `max` | no / none | - | DeepSeek v4 Pro reasoning effort. Production must remain maximum. |
@@ -111,18 +114,18 @@ Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenti
 | `ORVEX_OPENAI_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.2` | no / none | - | Legacy generic OpenAI input fallback. The pinned Luna stage uses its published fixed rate instead. |
 | `ORVEX_OPENAI_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.02` | no / none | - | Legacy generic OpenAI cached-input fallback. The pinned Luna stage uses its published fixed rate instead. |
 | `ORVEX_OPENAI_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.2` | no / none | - | Legacy generic OpenAI output fallback. The pinned Luna stage uses its published fixed rate instead. |
-| `ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.14` | no / none | - | DeepSeek Flash input pricing, verified 2026-08-01. |
-| `ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.0028` | no / none | - | DeepSeek Flash cached-input pricing, verified 2026-08-10. |
-| `ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `0.28` | no / none | - | DeepSeek Flash output pricing, verified 2026-08-01. |
+| `ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.22` | no / none | - | Ignored. Flash/Pro billing uses the published DeepSeek peak/off-peak card at call time. Off-peak Flash input is $0.22 / M from 16:00 UTC on 16 Aug 2026; peak is $0.44 / M during 01:00-04:00 and 06:00-10:00 UTC. |
+| `ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.007` | no / none | - | Ignored. Published Flash cache-hit is $0.007 / M off-peak and $0.014 / M peak. |
+| `ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `0.66` | no / none | - | Ignored. Published Flash output is $0.66 / M off-peak and $1.32 / M peak. |
 | `ORVEX_COST_INPUT_PER_M` | number; USD / 1M input tokens | `1.4` | no / none | - | Legacy premium-route input pricing. |
 | `ORVEX_COST_CACHED_INPUT_PER_M` | number; USD / 1M cached input tokens | `1.4` | no / none | - | Legacy premium-route cached-input pricing. |
 | `ORVEX_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `4.4` | no / none | - | Legacy premium-route output pricing. |
 | `ORVEX_STANDARD_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.3` | no / none | - | MiniMax standard-route input pricing. |
 | `ORVEX_STANDARD_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.06` | no / none | - | MiniMax M3 cached-input pricing, verified 2026-08-10. |
 | `ORVEX_STANDARD_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.2` | no / none | - | MiniMax standard-route output pricing. |
-| `ORVEX_DEEPSEEK_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.435` | no / none | - | DeepSeek Pro input pricing. |
-| `ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.003625` | no / none | - | DeepSeek Pro cached-input pricing, verified 2026-08-10. |
-| `ORVEX_DEEPSEEK_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `0.87` | no / none | - | DeepSeek Pro output pricing. |
+| `ORVEX_DEEPSEEK_COST_INPUT_PER_M` | number; USD / 1M input tokens | `0.66` | no / none | - | Ignored. Pro billing uses the published DeepSeek peak/off-peak card at call time. Off-peak Pro input is $0.66 / M from 16:00 UTC on 16 Aug 2026; peak is $1.32 / M. |
+| `ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M` | number; USD / 1M cached input tokens | `0.022` | no / none | - | Ignored. Published Pro cache-hit is $0.022 / M off-peak and $0.044 / M peak. |
+| `ORVEX_DEEPSEEK_COST_OUTPUT_PER_M` | number; USD / 1M output tokens | `1.98` | no / none | - | Ignored. Published Pro output is $1.98 / M off-peak and $3.96 / M peak. Peak hours are 01:00-04:00 and 06:00-10:00 UTC. |
 | `MOONSHOT_API_KEY` | string; provider API key | `(unset)` | yes / secret | - | Reserved future multi-model provider key; not wired. |
 | `ZHIPU_API_KEY` | string; provider API key | `(unset)` | yes / secret | - | Reserved future multi-model provider key; not wired. |
 

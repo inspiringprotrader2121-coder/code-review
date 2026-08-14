@@ -24,21 +24,63 @@ const PASS_TIERS: readonly PassTier[] = [
   'deepseek-flash',
 ];
 
+/** Official DeepSeek V4 peak/off-peak card.
+ * https://api-docs.deepseek.com/quick_start/pricing
+ * Peak hours are 01:00–04:00 and 06:00–10:00 UTC. Off-peak is half of peak.
+ * New prices take effect at 16:00 UTC on 16 Aug 2026; until then the prior
+ * flat Flash/Pro rates still apply. */
+export const DEEPSEEK_PEAK_OFFPEAK_EFFECTIVE_MS = Date.UTC(2026, 7, 16, 16, 0, 0);
+
+type DeepSeekFamily = 'flash' | 'pro';
+
+const DEEPSEEK_LEGACY_RATES: Record<DeepSeekFamily, UsageCostRates> = {
+  flash: { input: 0.14, cachedInput: 0.0028, cacheWrite: 0.14, output: 0.28 },
+  pro: { input: 0.435, cachedInput: 0.003625, cacheWrite: 0.435, output: 0.87 },
+};
+
+const DEEPSEEK_OFF_PEAK_RATES: Record<DeepSeekFamily, UsageCostRates> = {
+  flash: { input: 0.22, cachedInput: 0.007, cacheWrite: 0.22, output: 0.66 },
+  pro: { input: 0.66, cachedInput: 0.022, cacheWrite: 0.66, output: 1.98 },
+};
+
+const DEEPSEEK_PEAK_RATES: Record<DeepSeekFamily, UsageCostRates> = {
+  flash: { input: 0.44, cachedInput: 0.014, cacheWrite: 0.44, output: 1.32 },
+  pro: { input: 1.32, cachedInput: 0.044, cacheWrite: 1.32, output: 3.96 },
+};
+
+export function isDeepSeekPeakUtc(at: Date): boolean {
+  const hour = at.getUTCHours();
+  return (hour >= 1 && hour < 4) || (hour >= 6 && hour < 10);
+}
+
+export function publishedDeepSeekRates(
+  family: DeepSeekFamily,
+  at: Date = new Date(),
+): UsageCostRates {
+  if (at.getTime() < DEEPSEEK_PEAK_OFFPEAK_EFFECTIVE_MS) return DEEPSEEK_LEGACY_RATES[family];
+  return isDeepSeekPeakUtc(at) ? DEEPSEEK_PEAK_RATES[family] : DEEPSEEK_OFF_PEAK_RATES[family];
+}
+
+function deepSeekFamilyFor(model: string, tier: PassTier): DeepSeekFamily | undefined {
+  const identity = model.trim().toLowerCase();
+  if (identity.includes('deepseek-v4-flash') || identity.includes('deepseek-flash')) return 'flash';
+  if (identity.includes('deepseek')) return identity.includes('flash') ? 'flash' : 'pro';
+  if (identity) return undefined;
+  if (tier === 'deepseek-flash') return 'flash';
+  if (tier === 'deepseek') return 'pro';
+  return undefined;
+}
+
 export const DEFAULT_USAGE_COST_POLICY: UsageCostPolicy = {
   premium: { input: 1.4, cachedInput: 1.4, cacheWrite: 1.4, output: 4.4 },
   standard: { input: 0.3, cachedInput: 0.06, cacheWrite: 0.3, output: 1.2 },
   openai: { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 },
-  deepseek: { input: 0.435, cachedInput: 0.003625, cacheWrite: 0.435, output: 0.87 },
-  'deepseek-flash': { input: 0.14, cachedInput: 0.0028, cacheWrite: 0.14, output: 0.28 },
+  deepseek: { ...DEEPSEEK_OFF_PEAK_RATES.pro },
+  'deepseek-flash': { ...DEEPSEEK_OFF_PEAK_RATES.flash },
   modelRates: {
     'gpt-5.6-luna': { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 6 },
-    'deepseek-v4-pro': {
-      input: 0.435,
-      cachedInput: 0.003625,
-      cacheWrite: 0.435,
-      output: 0.87,
-    },
-    'deepseek-v4-flash': { input: 0.14, cachedInput: 0.0028, cacheWrite: 0.14, output: 0.28 },
+    'deepseek-v4-pro': { ...DEEPSEEK_OFF_PEAK_RATES.pro },
+    'deepseek-v4-flash': { ...DEEPSEEK_OFF_PEAK_RATES.flash },
     'minimax-m3': { input: 0.3, cachedInput: 0.06, cacheWrite: 0.3, output: 1.2 },
   },
 };
@@ -53,12 +95,18 @@ export function createUsageCostPolicy(values: UsageCostPolicyInput): UsageCostPo
     output: positive(value?.output, fallback.output),
   });
   const tiers = Object.fromEntries(
-    PASS_TIERS.map((tier) => [tier, rate(values[tier], DEFAULT_USAGE_COST_POLICY[tier])]),
+    PASS_TIERS.map((tier) => [
+      tier,
+      rate(
+        tier === 'deepseek' || tier === 'deepseek-flash' ? undefined : values[tier],
+        DEFAULT_USAGE_COST_POLICY[tier],
+      ),
+    ]),
   ) as Record<PassTier, UsageCostRates>;
   const modelRates = Object.fromEntries(
     Object.entries(DEFAULT_USAGE_COST_POLICY.modelRates).map(([model, fallback]) => [
       model,
-      rate(values.modelRates?.[model], fallback),
+      rate(model.startsWith('deepseek-') ? undefined : values.modelRates?.[model], fallback),
     ]),
   ) as Record<string, UsageCostRates>;
   return { ...tiers, modelRates: Object.freeze(modelRates) };
@@ -69,7 +117,10 @@ function usageRatesFor(
   model: string,
   policy: UsageCostPolicy,
   inputTokens = 0,
+  at: Date = new Date(),
 ): UsageCostRates {
+  const family = deepSeekFamilyFor(model, tier);
+  if (family) return publishedDeepSeekRates(family, at);
   const normalized = model.trim().toLowerCase();
   const rates = policy.modelRates[normalized] ?? policy[tier];
   // Provider pricing changes at a single-request context threshold. Usage is
@@ -97,6 +148,7 @@ export function computeCostUsd(
   cachedInputTokens = 0,
   model?: string,
   cacheWriteTokens = 0,
+  at: Date = new Date(),
 ): number {
   const safeInput = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
   const safeOutput = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
@@ -108,7 +160,7 @@ export function computeCostUsd(
     safeInput - safeCachedInput,
     Number.isFinite(cacheWriteTokens) && cacheWriteTokens > 0 ? cacheWriteTokens : 0,
   );
-  const rates = model ? usageRatesFor(tier, model, policy, safeInput) : policy[tier];
+  const rates = usageRatesFor(tier, model ?? '', policy, safeInput, at);
   return (
     ((safeInput - safeCachedInput - safeCacheWrite) / 1e6) * rates.input +
     (safeCachedInput / 1e6) * rates.cachedInput +
@@ -172,6 +224,7 @@ export function accountUsage(
   passName: string,
   usage: UsageEvent,
   policy: UsageCostPolicy = DEFAULT_USAGE_COST_POLICY,
+  at: Date = new Date(),
 ): AccountedUsage {
   const provider = usage.provider ?? usageProvider(target, passName);
   const model = usage.model ?? target.model;
@@ -192,7 +245,7 @@ export function accountUsage(
       ? usage.cacheWriteTokens!
       : 0,
   );
-  const rates = usageRatesFor(tier, model, policy, inputTokens);
+  const rates = usageRatesFor(tier, model, policy, inputTokens, at);
   return {
     ...usage,
     inputTokens,
@@ -214,6 +267,7 @@ export function accountUsage(
       cachedInputTokens,
       model,
       cacheWriteTokens,
+      at,
     ),
   };
 }

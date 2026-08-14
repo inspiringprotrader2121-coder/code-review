@@ -706,7 +706,37 @@
           "secret": true,
           "redaction": "secret",
           "enabled": false,
-          "description": "DeepSeek v4 Pro/Flash shared API key.",
+          "description": "DeepSeek Flash API key. Comma-separate keys from distinct DeepSeek accounts to round-robin by rolling 2M TPM and fail over on 429. Extra keys on the same account do not raise the account concurrency cap.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_TPM_PER_ACCOUNT",
+          "example": "2000000",
+          "type": "integer",
+          "range": "1000..100000000 tokens / minute; default 2000000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Rolling-minute token budget per DeepSeek account key. The Flash load balancer skips a key before this ceiling and sends the call to another account.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_TPM_WINDOW_MS",
+          "example": "60000",
+          "type": "integer",
+          "range": "1000..600000 ms; default 60000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Token-window length for DeepSeek TPM load balancing. Default is one minute.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_DEEPSEEK_TPM_RESERVE_OUTPUT",
+          "example": "70000",
+          "type": "integer",
+          "range": "1000..384000 tokens; default 70000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Output tokens reserved against a DeepSeek account before the call starts, so in-flight Flash work counts toward the 2M TPM cap.",
           "deprecatedAliases": []
         },
         {
@@ -864,32 +894,32 @@
         },
         {
           "name": "ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M",
-          "example": "0.14",
+          "example": "0.22",
           "type": "number",
           "range": "USD / 1M input tokens",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek Flash input pricing, verified 2026-08-01.",
+          "description": "Ignored. Flash/Pro billing uses the published DeepSeek peak/off-peak card at call time. Off-peak Flash input is $0.22 / M from 16:00 UTC on 16 Aug 2026; peak is $0.44 / M during 01:00-04:00 and 06:00-10:00 UTC.",
           "deprecatedAliases": []
         },
         {
           "name": "ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M",
-          "example": "0.0028",
+          "example": "0.007",
           "type": "number",
           "range": "USD / 1M cached input tokens",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek Flash cached-input pricing, verified 2026-08-10.",
+          "description": "Ignored. Published Flash cache-hit is $0.007 / M off-peak and $0.014 / M peak.",
           "deprecatedAliases": []
         },
         {
           "name": "ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M",
-          "example": "0.28",
+          "example": "0.66",
           "type": "number",
           "range": "USD / 1M output tokens",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek Flash output pricing, verified 2026-08-01.",
+          "description": "Ignored. Published Flash output is $0.66 / M off-peak and $1.32 / M peak.",
           "deprecatedAliases": []
         },
         {
@@ -954,32 +984,32 @@
         },
         {
           "name": "ORVEX_DEEPSEEK_COST_INPUT_PER_M",
-          "example": "0.435",
+          "example": "0.66",
           "type": "number",
           "range": "USD / 1M input tokens",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek Pro input pricing.",
+          "description": "Ignored. Pro billing uses the published DeepSeek peak/off-peak card at call time. Off-peak Pro input is $0.66 / M from 16:00 UTC on 16 Aug 2026; peak is $1.32 / M.",
           "deprecatedAliases": []
         },
         {
           "name": "ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M",
-          "example": "0.003625",
+          "example": "0.022",
           "type": "number",
           "range": "USD / 1M cached input tokens",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek Pro cached-input pricing, verified 2026-08-10.",
+          "description": "Ignored. Published Pro cache-hit is $0.022 / M off-peak and $0.044 / M peak.",
           "deprecatedAliases": []
         },
         {
           "name": "ORVEX_DEEPSEEK_COST_OUTPUT_PER_M",
-          "example": "0.87",
+          "example": "1.98",
           "type": "number",
           "range": "USD / 1M output tokens",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek Pro output pricing.",
+          "description": "Ignored. Published Pro output is $1.98 / M off-peak and $3.96 / M peak. Peak hours are 01:00-04:00 and 06:00-10:00 UTC.",
           "deprecatedAliases": []
         },
         {

@@ -192,3 +192,38 @@ test(
     await admission.releaseProviderLease('minimax', held);
   },
 );
+
+test('memory provider TPM reservations are shared across workers', async () => {
+  const state = {
+    leases: new Map(),
+    cooldowns: new Map(),
+  };
+  const first = new MemoryProviderAdmission({ state, retryDelayMs: 1 });
+  const second = new MemoryProviderAdmission({ state, retryDelayMs: 1 });
+  const reserved = await first.tryReserveProviderTpm({
+    lane: 'deepseek-k0',
+    tokens: 1_900_000,
+    budget: 2_000_000,
+    reservationId: 'a',
+  });
+  assert.equal(reserved.ok, true);
+  await first.commitProviderTpm({
+    lane: 'deepseek-k0',
+    reservationId: 'a',
+    actualTokens: 1_900_000,
+  });
+  const blocked = await second.tryReserveProviderTpm({
+    lane: 'deepseek-k0',
+    tokens: 150_000,
+    budget: 2_000_000,
+    reservationId: 'b',
+  });
+  assert.equal(blocked.ok, false);
+  const sibling = await second.tryReserveProviderTpm({
+    lane: 'deepseek-k1',
+    tokens: 150_000,
+    budget: 2_000_000,
+    reservationId: 'c',
+  });
+  assert.equal(sibling.ok, true);
+});

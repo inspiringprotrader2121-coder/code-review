@@ -8,6 +8,9 @@ import {
   ReviewCancelledError,
   selectProviderKey,
   setProviderCooldown,
+  splitApiKeys,
+  resetLocalProviderTpm,
+  tryReserveProviderTpm,
   withProviderCallSlot,
   waitForProviderAvailability,
   type LlmAttemptEvent,
@@ -1296,7 +1299,7 @@ test('an empty zero-usage provider response receives one bounded retry', async (
   );
 });
 
-test('comma-separated API keys share one total provider-attempt ceiling', async () => {
+test('comma-separated API keys walk every cool key on 429 then fail', async () => {
   const calls: string[] = [];
   const events: LlmAttemptEvent[] = [];
   await assert.rejects(
@@ -1318,10 +1321,68 @@ test('comma-separated API keys share one total provider-attempt ceiling', async 
     }),
     /429|rate limit/i,
   );
-  assert.equal(calls.length, 2, 'the hard ceiling covers all keys, not retry rounds per key');
-  assert.equal(new Set(calls).size, 2, 'the bounded retry rotates to one alternate key');
-  assert.equal(events.filter((event) => event.phase === 'started').length, 2);
-  assert.equal(events.filter((event) => event.phase === 'finished').length, 2);
+  assert.equal(calls.length, 3, 'every account key is tried once before the call fails');
+  assert.equal(new Set(calls).size, 3, '429 failover does not retry a hot key');
+  assert.equal(events.filter((event) => event.phase === 'started').length, 3);
+  assert.equal(events.filter((event) => event.phase === 'finished').length, 3);
+});
+
+test('five DeepSeek account keys fail over until a cool key succeeds', async () => {
+  const auths: string[] = [];
+  const output = await llmChat('sys', 'user', {
+    apiKey: 'ds-a, ds-b, ds-c, ds-d, ds-e',
+    model: 'deepseek-v4-flash',
+    baseUrl: 'https://api.deepseek.com',
+    api: 'chat',
+    dependencies: {
+      retryPolicy: { maxAttempts: 2, baseMs: 250, maxWaitMs: 1_000, totalWaitBudgetMs: 5_000 },
+      http: {
+        async fetch(_input, init) {
+          auths.push(String(new Headers(init?.headers).get('Authorization')));
+          if (auths.length < 5) return new Response('rate limited', { status: 429 });
+          return new Response(chatStream('{"findings":[]}'), { status: 200 });
+        },
+      },
+    },
+  });
+  assert.match(output, /findings/);
+  assert.equal(auths.length, 5);
+  assert.equal(new Set(auths).size, 5);
+});
+
+test('DeepSeek load balancer skips an account at 2M TPM and uses a sibling key', async (t) => {
+  resetLocalProviderTpm();
+  t.after(() => resetLocalProviderTpm());
+  const hot = await tryReserveProviderTpm({
+    lane: 'deepseek:k0',
+    tokens: 2_000_000,
+    budget: 2_000_000,
+    reservationId: 'prefill-hot-account',
+    windowMs: 60_000,
+  });
+  assert.equal(hot.ok, true);
+  const auths: string[] = [];
+  await llmChat('sys', 'user', {
+    apiKey: 'ds-hot, ds-cool',
+    model: 'deepseek-v4-flash',
+    baseUrl: 'https://api.deepseek.com',
+    api: 'chat',
+    dependencies: {
+      retryPolicy: { maxAttempts: 2, baseMs: 250, maxWaitMs: 1_000, totalWaitBudgetMs: 5_000 },
+      http: {
+        async fetch(_input: unknown, init?: { headers?: HeadersInit }) {
+          auths.push(String(new Headers(init?.headers).get('Authorization')));
+          return new Response(chatStream('{"findings":[]}'), { status: 200 });
+        },
+      },
+    },
+  });
+  assert.equal(auths.length, 1);
+  assert.equal(
+    auths[0],
+    'Bearer ds-cool',
+    'Flash must skip the account already at 2M TPM and use a sibling key',
+  );
 });
 
 interface TestTimer {
@@ -1821,6 +1882,11 @@ test('providerKeyLane isolates multi-key cooldown identities', () => {
   assert.equal(providerKeyLane('luna', 0, 1), 'luna');
   assert.equal(providerKeyLane('luna', 0, 2), 'luna:k0');
   assert.equal(providerKeyLane('luna', 1, 2), 'luna:k1');
+});
+
+test('splitApiKeys keeps unique comma-separated DeepSeek accounts', () => {
+  assert.deepEqual(splitApiKeys(' sk-a,sk-b, sk-a , sk-c '), ['sk-a', 'sk-b', 'sk-c']);
+  assert.deepEqual(splitApiKeys('sk-only'), ['sk-only']);
 });
 
 test('selectProviderKey prefers a cool sibling when one key is TPM-cooling', async () => {

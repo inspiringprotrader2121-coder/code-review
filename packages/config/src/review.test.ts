@@ -28,6 +28,9 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.fleetProviderConcurrency('luna'), 8);
   assert.equal(config.fleetProviderCapacityEpoch, 'v1');
   assert.equal(config.fleetTenantConcurrency, 8);
+  assert.equal(config.deepseekTpmPerAccount, 2_000_000);
+  assert.equal(config.deepseekTpmWindowMs, 60_000);
+  assert.equal(config.deepseekTpmReserveOutput, 70_000);
   assert.equal(config.promptChangedChars, 16_000);
   assert.equal(config.promptRelatedChars, 6_000);
   assert.equal(config.promptOtherChars, 2_000);
@@ -36,6 +39,34 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.deepEqual(config.codexAllowedRepos, []);
   assert.ok(Object.isFrozen(config));
   assert.ok(Object.isFrozen(config.childProcessEnvironment));
+});
+
+test('pinned DeepSeek pricing cannot inherit stale env rates', () => {
+  const config = loadReviewRuntimeConfig({
+    ORVEX_DEEPSEEK_COST_INPUT_PER_M: '0.435',
+    ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M: '0.003625',
+    ORVEX_DEEPSEEK_COST_OUTPUT_PER_M: '0.87',
+    ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M: '0.14',
+    ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M: '0.0028',
+    ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M: '0.28',
+  });
+
+  assert.deepEqual(config.pricing.deepseek, { input: 0.66, cachedInput: 0.022, output: 1.98 });
+  assert.deepEqual(config.pricing.deepseekFlash, {
+    input: 0.22,
+    cachedInput: 0.007,
+    output: 0.66,
+  });
+  assert.deepEqual(config.pricing.modelRates['deepseek-v4-pro'], {
+    input: 0.66,
+    cachedInput: 0.022,
+    output: 1.98,
+  });
+  assert.deepEqual(config.pricing.modelRates['deepseek-v4-flash'], {
+    input: 0.22,
+    cachedInput: 0.007,
+    output: 0.66,
+  });
 });
 
 test('pinned Luna pricing cannot inherit stale generic OpenAI rates', () => {

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { InMemoryTpmWindow } from './provider-tpm.js';
 
 /**
  * Distributed admission control for model providers. This is intentionally
@@ -29,6 +30,22 @@ export interface ProviderAdmission {
   setProviderCooldown(provider: string, durationMs: number): Promise<void>;
   /** Optional occupancy peek for adaptive per-review fanout under load. */
   getProviderLoad?(provider: string): Promise<{ active: number; limit: number }>;
+  /** Reserve tokens against a rolling-minute TPM budget for a key lane. */
+  tryReserveProviderTpm?(input: {
+    lane: string;
+    tokens: number;
+    budget: number;
+    windowMs?: number;
+    reservationId: string;
+    reserveTtlMs?: number;
+  }): Promise<{ ok: boolean; used: number }>;
+  commitProviderTpm?(input: {
+    lane: string;
+    reservationId: string;
+    actualTokens: number;
+    windowMs?: number;
+  }): Promise<void>;
+  getProviderTpm?(lane: string, windowMs?: number): Promise<number>;
 }
 
 /**
@@ -114,6 +131,7 @@ export interface MemoryProviderAdmissionState {
   cooldowns: Map<string, number>;
   limits?: Map<string, number>;
   waiters?: MemoryWaiter[];
+  tpm?: InMemoryTpmWindow;
 }
 
 export interface MemoryProviderAdmissionOptions {
@@ -150,6 +168,7 @@ export class MemoryProviderAdmission implements ProviderAdmission {
     if (!this.state.limits) this.state.limits = new Map();
     if (!this.state.waiters) this.state.waiters = [];
     this.now = options.now ?? Date.now;
+    if (!this.state.tpm) this.state.tpm = new InMemoryTpmWindow(this.now);
     this.retryDelayMs = Math.max(1, Math.floor(options.retryDelayMs ?? 5));
     this.waitMs = Math.max(1_000, Math.floor(options.waitMs ?? 30_000));
     this.leaseTtlMs = Math.max(1, Math.floor(options.leaseTtlMs ?? 960_000));
@@ -252,6 +271,30 @@ export class MemoryProviderAdmission implements ProviderAdmission {
       active,
       limit: Math.max(1, configured ?? active),
     };
+  }
+
+  async tryReserveProviderTpm(input: {
+    lane: string;
+    tokens: number;
+    budget: number;
+    windowMs?: number;
+    reservationId: string;
+    reserveTtlMs?: number;
+  }): Promise<{ ok: boolean; used: number }> {
+    return this.state.tpm!.tryReserve(input);
+  }
+
+  async commitProviderTpm(input: {
+    lane: string;
+    reservationId: string;
+    actualTokens: number;
+    windowMs?: number;
+  }): Promise<void> {
+    this.state.tpm!.commit(input);
+  }
+
+  async getProviderTpm(lane: string, windowMs?: number): Promise<number> {
+    return this.state.tpm!.used(lane, this.now(), windowMs);
   }
 
   private retryAfterSeconds(provider: string): number {

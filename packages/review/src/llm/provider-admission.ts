@@ -4,6 +4,7 @@ import type { LlmClientOptions, LlmProviderCoordinator } from './contracts.js';
 import { ReviewCancelledError, throwIfCancelled } from './cancellation.js';
 import { providerCooldownForFailure, sleep } from './retry-policy.js';
 import { providerName } from './support.js';
+import { localProviderTpm, type TpmReserveInput } from './tpm-window.js';
 
 let providerCoordinator: LlmProviderCoordinator | undefined;
 let configuredProviderConcurrency: ((provider: string) => number) | undefined;
@@ -78,12 +79,16 @@ export function providerBucketForTarget(
     .replace(/[^a-z0-9]+/g, '-');
 }
 
-/** Split comma-separated API keys. Empty segments are dropped. */
+/** Split comma-separated API keys. Empty segments and duplicates are dropped. */
 export function splitApiKeys(apiKey: string): string[] {
-  return apiKey
-    .split(',')
-    .map((key) => key.trim())
-    .filter(Boolean);
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  for (const key of apiKey.split(',').map((part) => part.trim())) {
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+  return keys;
 }
 
 /**
@@ -96,49 +101,90 @@ export function providerKeyLane(provider: string, keyIndex: number, keyCount: nu
   return `${provider}:k${index}`;
 }
 
+export interface ProviderTpmPolicy {
+  budget: number;
+  reserveTokens: number;
+  windowMs: number;
+  reservationId: string;
+  reserveTtlMs?: number;
+}
+
 export interface ProviderKeySelection {
   apiKey: string;
   keyIndex: number;
   lane: string;
   cooldownMs: number;
+  tpmReserved?: boolean;
+  tpmUsed?: number;
+  reservationId?: string;
 }
 
 /**
- * Prefer a cool key (round-robin from cursor); if every key is cooling, pick
- * the soonest Retry-After lane so admission waits the minimum TPM window.
+ * Prefer a cool key under the TPM budget (round-robin from cursor). If every
+ * key is cooling or over budget, return the least-loaded cool lane without a
+ * reservation so the caller can wait for the rolling minute to drain.
  */
 export async function selectProviderKey(
   provider: string,
   keys: readonly string[],
   cursor: number,
   coordinator: LlmProviderCoordinator | undefined = providerCoordinator,
+  tpm?: ProviderTpmPolicy,
 ): Promise<ProviderKeySelection> {
   if (keys.length === 0) throw new Error('LLM API key is required');
-  if (keys.length === 1) {
-    const lane = provider;
-    return {
-      apiKey: keys[0]!,
-      keyIndex: 0,
-      lane,
-      cooldownMs: await getProviderCooldownMs(lane, coordinator),
-    };
-  }
   const lanes = keys.map((_, index) => providerKeyLane(provider, index, keys.length));
   const cooldowns = await Promise.all(
     lanes.map((lane) => getProviderCooldownMs(lane, coordinator)),
   );
   const start = ((cursor % keys.length) + keys.length) % keys.length;
-  for (let offset = 0; offset < keys.length; offset++) {
-    const keyIndex = (start + offset) % keys.length;
-    if ((cooldowns[keyIndex] ?? 0) <= 0) {
-      return {
+
+  if (tpm) {
+    let fallback: ProviderKeySelection | undefined;
+    for (let offset = 0; offset < keys.length; offset++) {
+      const keyIndex = (start + offset) % keys.length;
+      const cooldownMs = cooldowns[keyIndex] ?? 0;
+      if (cooldownMs > 0) continue;
+      const lane = lanes[keyIndex]!;
+      const reserved = await tryReserveProviderTpm(
+        {
+          lane,
+          tokens: tpm.reserveTokens,
+          budget: tpm.budget,
+          windowMs: tpm.windowMs,
+          reservationId: tpm.reservationId,
+          reserveTtlMs: tpm.reserveTtlMs,
+        },
+        coordinator,
+      );
+      const candidate: ProviderKeySelection = {
         apiKey: keys[keyIndex]!,
         keyIndex,
-        lane: lanes[keyIndex]!,
+        lane,
         cooldownMs: 0,
+        tpmUsed: reserved.used,
+        reservationId: tpm.reservationId,
+        tpmReserved: reserved.ok,
       };
+      if (reserved.ok) return candidate;
+      if (!fallback || reserved.used < (fallback.tpmUsed ?? Number.POSITIVE_INFINITY)) {
+        fallback = { ...candidate, tpmReserved: false };
+      }
+    }
+    if (fallback) return fallback;
+  } else {
+    for (let offset = 0; offset < keys.length; offset++) {
+      const keyIndex = (start + offset) % keys.length;
+      if ((cooldowns[keyIndex] ?? 0) <= 0) {
+        return {
+          apiKey: keys[keyIndex]!,
+          keyIndex,
+          lane: lanes[keyIndex]!,
+          cooldownMs: 0,
+        };
+      }
     }
   }
+
   let best = 0;
   for (let index = 1; index < cooldowns.length; index++) {
     if ((cooldowns[index] ?? 0) < (cooldowns[best] ?? 0)) best = index;
@@ -148,7 +194,34 @@ export async function selectProviderKey(
     keyIndex: best,
     lane: lanes[best]!,
     cooldownMs: cooldowns[best] ?? 0,
+    tpmReserved: false,
+    reservationId: tpm?.reservationId,
   };
+}
+
+export async function tryReserveProviderTpm(
+  input: TpmReserveInput,
+  coordinator: LlmProviderCoordinator | undefined = providerCoordinator,
+): Promise<{ ok: boolean; used: number }> {
+  if (typeof coordinator?.tryReserveProviderTpm === 'function') {
+    return coordinator.tryReserveProviderTpm(input);
+  }
+  return localProviderTpm.tryReserve(input);
+}
+
+export async function commitProviderTpm(
+  input: { lane: string; reservationId: string; actualTokens: number; windowMs?: number },
+  coordinator: LlmProviderCoordinator | undefined = providerCoordinator,
+): Promise<void> {
+  if (typeof coordinator?.commitProviderTpm === 'function') {
+    await coordinator.commitProviderTpm(input);
+    return;
+  }
+  localProviderTpm.commit(input);
+}
+
+export function resetLocalProviderTpm(): void {
+  localProviderTpm.reset();
 }
 
 function gateFor(provider: string): ProviderGate {

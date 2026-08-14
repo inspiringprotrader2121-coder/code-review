@@ -1,8 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import type { RetryPolicy } from '../providers/types.js';
 import type { LlmClientOptions } from './contracts.js';
 import { ReviewCancelledError, isReviewCancelledError, throwIfCancelled } from './cancellation.js';
 import {
+  commitProviderTpm,
   currentProviderCoordinator,
   isProviderAdmissionError,
   providerBucketForTarget,
@@ -24,11 +26,20 @@ import {
   parseRetryAfterMs,
   sleep,
 } from './retry-policy.js';
-import { clockFor, maxTotalMs } from './support.js';
+import { clockFor, estimateTokens, maxTotalMs } from './support.js';
 import { jsonContractMissing, jsonFinishPrefix } from './parsing.js';
 import { DeepSeekContinuationRequiredError } from './transports.js';
 
-let keyCursor = 0;
+function workerKeyCursorSeed(): number {
+  const id = process.env.ORVEX_WORKER_ID ?? '';
+  let hash = 0;
+  for (let index = 0; index < id.length; index++) {
+    hash = (hash * 33 + id.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+let keyCursor = workerKeyCursorSeed();
 // Primary max-reasoning can exhaust the shared completion budget with zero JSON.
 // Continuations must finish the answer under load; keep them answer-only (thinking
 // off) with enough wall/token headroom that a queued multi-tenant burst still
@@ -146,7 +157,7 @@ export async function llmChat(
 ): Promise<string> {
   const injectedPolicy: RetryPolicy | undefined = opts.dependencies?.retryPolicy;
   const runtime = loadReviewRuntimeConfig();
-  const maxAttempts = Math.min(
+  const waitRetryCeiling = Math.min(
     2,
     Math.max(1, Math.floor(injectedPolicy?.maxAttempts ?? runtime.rateLimitMaxRetries)),
   );
@@ -167,22 +178,72 @@ export async function llmChat(
   const coordinator = opts.dependencies?.admission ?? currentProviderCoordinator();
   let sleptMs = 0;
   let lastError: Error | undefined;
-  let providerAttempt = 0;
+  let waitRetries = 0;
   let lastLane = provider;
-  while (providerAttempt < maxAttempts) {
+  const triedLanes = new Set<string>();
+  let dispatches = 0;
+  const tpmBudget = runtime.deepseekTpmPerAccount;
+  const tpmPolicy =
+    provider === 'deepseek' && Number.isFinite(tpmBudget) && tpmBudget > 0
+      ? {
+          budget: tpmBudget,
+          reserveTokens:
+            estimateTokens(system.length + user.length) +
+            Math.min(opts.maxTokens ?? runtime.maxOutputTokens, runtime.deepseekTpmReserveOutput),
+          windowMs: runtime.deepseekTpmWindowMs,
+          reserveTtlMs: Math.max(runtime.llmMaxTotalMs, 60_000),
+        }
+      : undefined;
+  const maxDispatches = Math.max(waitRetryCeiling, keys.length);
+  while (dispatches < maxDispatches) {
     throwIfCancelled(opts.signal);
-    const selection = await selectProviderKey(provider, keys, keyCursor++, coordinator);
+    const tpm = tpmPolicy ? { ...tpmPolicy, reservationId: randomUUID() } : undefined;
+    let selection = await selectProviderKey(provider, keys, keyCursor++, coordinator, tpm);
+    // Cool-key reserve miss (tpmUsed set) means the rolling minute is full.
+    // Cooldown-only misses must not be treated as TPM exhaustion.
+    while (
+      tpm &&
+      selection.tpmReserved === false &&
+      selection.cooldownMs <= 0 &&
+      selection.tpmUsed !== undefined
+    ) {
+      if (sleptMs + 2_000 > totalWaitBudgetMs) {
+        throw new Error(
+          `429 DeepSeek TPM ${tpm.budget}/min exhausted across ${keys.length} account(s); retry-after: 60`,
+        );
+      }
+      console.warn(
+        `[llm] DeepSeek TPM: every account is near ${tpm.budget}/min (${selection.tpmUsed} used on ${selection.lane}) — waiting for the rolling window to drain`,
+      );
+      await sleep(2_000, opts.signal, clockFor(opts));
+      sleptMs += 2_000;
+      selection = await selectProviderKey(provider, keys, keyCursor++, coordinator, {
+        ...tpm,
+        reservationId: randomUUID(),
+      });
+    }
+    dispatches++;
     lastLane = selection.lane;
+    triedLanes.add(selection.lane);
     let enteredProviderCall = false;
+    let billedTokens = 0;
+    let succeeded = false;
     try {
-      return await withProviderCallSlot(
+      const output = await withProviderCallSlot(
         provider,
         () => {
           enteredProviderCall = true;
           return llmChatHoldingProviderSlot(
             system,
             user,
-            { ...opts, apiKey: selection.apiKey },
+            {
+              ...opts,
+              apiKey: selection.apiKey,
+              onUsage: (usage) => {
+                billedTokens += Math.max(0, usage.inputTokens) + Math.max(0, usage.outputTokens);
+                opts.onUsage?.(usage);
+              },
+            },
             lineage,
             selection.keyIndex,
           );
@@ -191,6 +252,8 @@ export async function llmChat(
         coordinator,
         { keyLane: selection.lane },
       );
+      succeeded = true;
+      return output;
     } catch (error) {
       lastError =
         opts.signal?.aborted && !isReviewCancelledError(error)
@@ -216,43 +279,56 @@ export async function llmChat(
         throw lastError;
       }
       const retryableEmptyResponse = isRetryableEmptyProviderResponse(lastError.message);
-      const retryable = isRetryableRateLimit(lastError.message) || retryableEmptyResponse;
-      providerAttempt++;
-      if (providerAttempt >= maxAttempts || !retryable) throw lastError;
+      const retryable429 = isRetryableRateLimit(lastError.message);
+      if (!retryable429 && !retryableEmptyResponse) throw lastError;
       const advertised = parseRetryAfterMs(lastError.message);
       const cooldownMs = Math.min(
         300_000,
-        Math.max(2_000, advertised ?? baseMs * 2 ** (providerAttempt - 1)),
+        Math.max(2_000, advertised ?? baseMs * 2 ** waitRetries),
       );
       await setProviderCooldown(selection.lane, cooldownMs, coordinator);
 
-      // Multi-key: a window longer than maxWait on this key should not abort the
-      // review when a sibling key is still cool — rotate immediately.
+      const alternate =
+        keys.length > 1 ? await selectProviderKey(provider, keys, keyCursor, coordinator) : null;
+      const siblingCool =
+        alternate !== null &&
+        alternate.lane !== selection.lane &&
+        alternate.cooldownMs <= 0 &&
+        triedLanes.size < keys.length;
+
+      // Multi-key 429: walk every remaining cool account immediately. Holding
+      // a worker while one account's TPM window recovers is worse than using
+      // the next account. Empty-response rotates at most once.
+      if (
+        alternate &&
+        siblingCool &&
+        (retryable429 || (retryableEmptyResponse && waitRetries === 0))
+      ) {
+        console.warn(
+          `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : 'rate-limited'} on ${selection.lane} — rotating to cool key ${alternate.lane} (${triedLanes.size}/${keys.length} keys tried)`,
+        );
+        if (retryableEmptyResponse) waitRetries++;
+        continue;
+      }
+
+      if (keys.length > 1 && retryable429 && triedLanes.size >= keys.length) {
+        console.warn(
+          `[llm] rate-limited on every ${provider} key (${keys.length}) — failing so the job requeues instead of waiting on a hot account`,
+        );
+        throw lastError;
+      }
+
+      waitRetries++;
+      if (waitRetries >= waitRetryCeiling) throw lastError;
       if (advertised !== undefined && advertised > maxWaitMs) {
-        const alternate = await selectProviderKey(provider, keys, keyCursor, coordinator);
-        if (keys.length > 1 && alternate.lane !== selection.lane && alternate.cooldownMs <= 0) {
-          console.warn(
-            `[llm] rate limit window ${Math.round(advertised / 1000)}s on ${selection.lane} exceeds max wait — rotating to ${alternate.lane} without weakening the review`,
-          );
-          continue;
-        }
         console.warn(
           `[llm] rate limit window ${Math.round(advertised / 1000)}s exceeds max wait ${Math.round(maxWaitMs / 1000)}s — failing fast instead of retrying into it`,
         );
         throw lastError;
       }
-      const backoff = Math.min(baseMs * 2 ** (providerAttempt - 1), maxWaitMs);
+      const backoff = Math.min(baseMs * 2 ** (waitRetries - 1), maxWaitMs);
       const jitter = Math.floor(Math.random() * 1_000);
       const waitMs = Math.min((advertised ?? backoff) + jitter, maxWaitMs);
-      if (keys.length > 1) {
-        const alternate = await selectProviderKey(provider, keys, keyCursor, coordinator);
-        if (alternate.lane !== selection.lane && alternate.cooldownMs <= 0) {
-          console.warn(
-            `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : 'rate-limited'} on ${selection.lane} — rotating to cool key ${alternate.lane} (attempt ${providerAttempt}/${maxAttempts})`,
-          );
-          continue;
-        }
-      }
       if (sleptMs + waitMs > totalWaitBudgetMs) {
         console.warn(
           `[llm] rate-limit wait budget exhausted (${Math.round(sleptMs / 1000)}s slept of ${Math.round(totalWaitBudgetMs / 1000)}s) — failing so the job requeues instead of holding a worker slot`,
@@ -261,11 +337,24 @@ export async function llmChat(
       }
       sleptMs += waitMs;
       console.warn(
-        `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : 'rate-limited'} — holding ${Math.round(waitMs / 1000)}s then retrying (attempt ${providerAttempt}/${maxAttempts}): ${lastError.message.slice(0, 140)}`,
+        `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : 'rate-limited'} — holding ${Math.round(waitMs / 1000)}s then retrying (attempt ${waitRetries}/${waitRetryCeiling}): ${lastError.message.slice(0, 140)}`,
       );
       await sleep(waitMs, opts.signal, clockFor(opts));
       await waitForProviderAvailability([lastLane], opts.signal, coordinator);
+    } finally {
+      if (selection.tpmReserved && selection.reservationId) {
+        await commitProviderTpm(
+          {
+            lane: selection.lane,
+            reservationId: selection.reservationId,
+            actualTokens:
+              billedTokens > 0 ? billedTokens : succeeded ? tpmPolicy!.reserveTokens : 0,
+            windowMs: tpmPolicy?.windowMs,
+          },
+          coordinator,
+        );
+      }
     }
   }
-  throw lastError!;
+  throw lastError ?? new Error('LLM API key is required');
 }

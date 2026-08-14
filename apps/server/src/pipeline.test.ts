@@ -262,6 +262,8 @@ test('usage accounting keeps Luna pricing pinned and prices provider cache reads
     modelRoutingConfig().deepseekFlashModel,
     'verification',
     { inputTokens: 1_000_000, cachedInputTokens: 900_000, outputTokens: 1_000_000 },
+    createUsageCostPolicy({}),
+    new Date('2026-08-14T12:00:00Z'),
   );
   assert.equal(flash.costUsd, 0.29652);
 

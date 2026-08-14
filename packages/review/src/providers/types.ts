@@ -66,6 +66,26 @@ export interface ProviderAdmission {
   setProviderCooldown(provider: string, durationMs: number): Promise<void>;
   /** Optional occupancy peek for adaptive per-review fanout under load. */
   getProviderLoad?(provider: string): Promise<{ active: number; limit: number }>;
+  /**
+   * Atomically reserve tokens against a rolling-minute TPM budget for this
+   * provider key lane. Used so DeepSeek accounts stay under 2M TPM.
+   */
+  tryReserveProviderTpm?(input: {
+    lane: string;
+    tokens: number;
+    budget: number;
+    windowMs?: number;
+    reservationId: string;
+    reserveTtlMs?: number;
+  }): Promise<{ ok: boolean; used: number }>;
+  /** Drop an in-flight TPM reservation and record billed tokens into the window. */
+  commitProviderTpm?(input: {
+    lane: string;
+    reservationId: string;
+    actualTokens: number;
+    windowMs?: number;
+  }): Promise<void>;
+  getProviderTpm?(lane: string, windowMs?: number): Promise<number>;
 }
 
 export interface RetryPolicy {

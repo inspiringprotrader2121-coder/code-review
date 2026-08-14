@@ -13,6 +13,10 @@ export interface ReviewRuntimeConfig {
   readonly rateLimitMaxWaitMs: number;
   readonly rateLimitBaseMs: number;
   readonly rateLimitTotalWaitMs: number;
+  /** DeepSeek account TPM ceiling used for multi-key load balancing. */
+  readonly deepseekTpmPerAccount: number;
+  readonly deepseekTpmWindowMs: number;
+  readonly deepseekTpmReserveOutput: number;
   readonly anthropicThinkingBudgetTokens: number | undefined;
   readonly responsesTimeoutMs: number;
   readonly openAiReasoningEffort: string;
@@ -341,6 +345,18 @@ export function loadReviewRuntimeConfig(
     rateLimitMaxWaitMs: finite(env.ORVEX_RATELIMIT_MAX_WAIT_MS, 120_000),
     rateLimitBaseMs: finite(env.ORVEX_RATELIMIT_BASE_MS, 2_000),
     rateLimitTotalWaitMs: finite(env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 180_000),
+    deepseekTpmPerAccount: Math.min(
+      Math.max(positive(env.ORVEX_DEEPSEEK_TPM_PER_ACCOUNT, 2_000_000), 1_000),
+      100_000_000,
+    ),
+    deepseekTpmWindowMs: Math.min(
+      Math.max(positive(env.ORVEX_DEEPSEEK_TPM_WINDOW_MS, 60_000), 1_000),
+      600_000,
+    ),
+    deepseekTpmReserveOutput: Math.min(
+      Math.max(positive(env.ORVEX_DEEPSEEK_TPM_RESERVE_OUTPUT, 70_000), 1_000),
+      384_000,
+    ),
     anthropicThinkingBudgetTokens: optionalPositive(env.ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS),
     responsesTimeoutMs: Math.min(
       Math.max(positive(env.ORVEX_RESPONSES_TIMEOUT_MS, 900_000), 1_000),
@@ -492,15 +508,17 @@ export function loadReviewRuntimeConfig(
         cachedInput: positiveNumber(env.ORVEX_OPENAI_CACHED_INPUT_COST_PER_M, 0.02),
         output: positiveNumber(env.ORVEX_OPENAI_COST_OUTPUT_PER_M, 1.2),
       }),
+      // DeepSeek V4 published off-peak card. Actual review cost selects
+      // peak vs off-peak (and the pre-16 Aug 2026 flat card) at call time.
       deepseek: Object.freeze({
-        input: positiveNumber(env.ORVEX_DEEPSEEK_COST_INPUT_PER_M, 0.435),
-        cachedInput: positiveNumber(env.ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M, 0.003625),
-        output: positiveNumber(env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M, 0.87),
+        input: 0.66,
+        cachedInput: 0.022,
+        output: 1.98,
       }),
       deepseekFlash: Object.freeze({
-        input: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M, 0.14),
-        cachedInput: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M, 0.0028),
-        output: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M, 0.28),
+        input: 0.22,
+        cachedInput: 0.007,
+        output: 0.66,
       }),
       // The contracted public reviewer models retain their own rates so a
       // legacy generic OpenAI variable cannot silently understate Luna spend.
@@ -513,14 +531,14 @@ export function loadReviewRuntimeConfig(
           output: 6,
         }),
         'deepseek-v4-pro': Object.freeze({
-          input: positiveNumber(env.ORVEX_DEEPSEEK_COST_INPUT_PER_M, 0.435),
-          cachedInput: positiveNumber(env.ORVEX_DEEPSEEK_CACHED_INPUT_COST_PER_M, 0.003625),
-          output: positiveNumber(env.ORVEX_DEEPSEEK_COST_OUTPUT_PER_M, 0.87),
+          input: 0.66,
+          cachedInput: 0.022,
+          output: 1.98,
         }),
         'deepseek-v4-flash': Object.freeze({
-          input: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_COST_INPUT_PER_M, 0.14),
-          cachedInput: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_CACHED_INPUT_COST_PER_M, 0.0028),
-          output: positiveNumber(env.ORVEX_DEEPSEEK_FLASH_COST_OUTPUT_PER_M, 0.28),
+          input: 0.22,
+          cachedInput: 0.007,
+          output: 0.66,
         }),
         'minimax-m3': Object.freeze({
           input: positiveNumber(env.ORVEX_STANDARD_COST_INPUT_PER_M, 0.3),

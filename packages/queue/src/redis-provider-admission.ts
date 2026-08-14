@@ -100,6 +100,109 @@ if requested > current then
 end
 return current`;
 
+const TRY_RESERVE_TPM = `
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local budget = tonumber(ARGV[3])
+local reserve = tonumber(ARGV[4])
+local rid = ARGV[5]
+local ttl = tonumber(ARGV[6])
+local cutoff = now - window
+local fields = redis.call('HGETALL', KEYS[1])
+local used = 0
+for i = 1, #fields, 2 do
+  local field = fields[i]
+  local raw = fields[i + 1]
+  if string.sub(field, 1, 2) == 's:' then
+    local ts = tonumber(string.sub(field, 3))
+    if not ts or ts < cutoff then
+      redis.call('HDEL', KEYS[1], field)
+    else
+      used = used + (tonumber(raw) or 0)
+    end
+  elseif string.sub(field, 1, 2) == 'r:' then
+    local sep = string.find(raw, ':', 1, true)
+    local tokens = tonumber(sep and string.sub(raw, 1, sep - 1) or raw) or 0
+    local exp = tonumber(sep and string.sub(raw, sep + 1) or '0') or 0
+    if exp <= now then
+      redis.call('HDEL', KEYS[1], field)
+    else
+      used = used + tokens
+    end
+  end
+end
+if used + reserve > budget then
+  redis.call('PEXPIRE', KEYS[1], ttl)
+  return {0, used}
+end
+redis.call('HSET', KEYS[1], 'r:' .. rid, tostring(reserve) .. ':' .. tostring(now + ttl))
+redis.call('PEXPIRE', KEYS[1], ttl)
+return {1, used + reserve}
+`;
+
+const COMMIT_TPM = `
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local rid = ARGV[3]
+local actual = tonumber(ARGV[4])
+local ttl = tonumber(ARGV[5])
+local cutoff = now - window
+redis.call('HDEL', KEYS[1], 'r:' .. rid)
+if actual > 0 then
+  local bucket = 's:' .. tostring(now)
+  redis.call('HINCRBY', KEYS[1], bucket, actual)
+end
+local fields = redis.call('HGETALL', KEYS[1])
+for i = 1, #fields, 2 do
+  local field = fields[i]
+  if string.sub(field, 1, 2) == 's:' then
+    local ts = tonumber(string.sub(field, 3))
+    if not ts or ts < cutoff then
+      redis.call('HDEL', KEYS[1], field)
+    end
+  elseif string.sub(field, 1, 2) == 'r:' then
+    local raw = fields[i + 1]
+    local sep = string.find(raw, ':', 1, true)
+    local exp = tonumber(sep and string.sub(raw, sep + 1) or '0') or 0
+    if exp <= now then
+      redis.call('HDEL', KEYS[1], field)
+    end
+  end
+end
+redis.call('PEXPIRE', KEYS[1], ttl)
+return 1
+`;
+
+const GET_TPM = `
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local cutoff = now - window
+local fields = redis.call('HGETALL', KEYS[1])
+local used = 0
+for i = 1, #fields, 2 do
+  local field = fields[i]
+  local raw = fields[i + 1]
+  if string.sub(field, 1, 2) == 's:' then
+    local ts = tonumber(string.sub(field, 3))
+    if not ts or ts < cutoff then
+      redis.call('HDEL', KEYS[1], field)
+    else
+      used = used + (tonumber(raw) or 0)
+    end
+  elseif string.sub(field, 1, 2) == 'r:' then
+    local sep = string.find(raw, ':', 1, true)
+    local tokens = tonumber(sep and string.sub(raw, 1, sep - 1) or raw) or 0
+    local exp = tonumber(sep and string.sub(raw, sep + 1) or '0') or 0
+    if exp <= now then
+      redis.call('HDEL', KEYS[1], field)
+    else
+      used = used + tokens
+    end
+  end
+end
+return used
+`;
+
 export interface RedisProviderAdmissionOptions {
   namespace: string;
   /** Maximum wait for a slot. Defaults to 30 seconds. */
@@ -122,6 +225,7 @@ export class RedisProviderAdmission implements ProviderAdmission, ProviderCapaci
   private readonly waiterPrefix: string;
   private readonly wakePrefix: string;
   private readonly cooldownPrefix: string;
+  private readonly tpmPrefix: string;
   private readonly capacityPlan: ProviderCapacityPlan | undefined;
   private readonly capacityKey: string | undefined;
   private readonly waitMs: number;
@@ -138,6 +242,7 @@ export class RedisProviderAdmission implements ProviderAdmission, ProviderCapaci
     this.waiterPrefix = `${prefix}provider-waiters:`;
     this.wakePrefix = `${prefix}provider-wake:`;
     this.cooldownPrefix = `${prefix}provider-cooldown:`;
+    this.tpmPrefix = `${prefix}provider-tpm:`;
     this.capacityPlan = normalizeCapacityPlan(options.capacityPlan);
     this.capacityKey = this.capacityPlan
       ? fleetCapacityRegistryKey(options.namespace, this.capacityPlan.epoch)
@@ -303,6 +408,58 @@ export class RedisProviderAdmission implements ProviderAdmission, ProviderCapaci
   async setProviderCooldown(provider: string, durationMs: number): Promise<void> {
     const until = this.now() + Math.min(300_000, Math.max(250, Math.floor(durationMs)));
     await this.redis.eval(EXTEND_COOLDOWN, 1, this.key(this.cooldownPrefix, provider), until);
+  }
+
+  async tryReserveProviderTpm(input: {
+    lane: string;
+    tokens: number;
+    budget: number;
+    windowMs?: number;
+    reservationId: string;
+    reserveTtlMs?: number;
+  }): Promise<{ ok: boolean; used: number }> {
+    const ttl = Math.max(60_000, Math.floor(input.reserveTtlMs ?? 960_000));
+    const result = (await this.redis.eval(
+      TRY_RESERVE_TPM,
+      1,
+      this.key(this.tpmPrefix, input.lane),
+      this.now(),
+      Math.max(1_000, Math.floor(input.windowMs ?? 60_000)),
+      Math.max(1, Math.floor(input.budget)),
+      Math.max(0, Math.floor(input.tokens)),
+      input.reservationId,
+      ttl,
+    )) as [number | string, number | string];
+    return { ok: Number(result[0]) === 1, used: Number(result[1]) || 0 };
+  }
+
+  async commitProviderTpm(input: {
+    lane: string;
+    reservationId: string;
+    actualTokens: number;
+    windowMs?: number;
+  }): Promise<void> {
+    await this.redis.eval(
+      COMMIT_TPM,
+      1,
+      this.key(this.tpmPrefix, input.lane),
+      this.now(),
+      Math.max(1_000, Math.floor(input.windowMs ?? 60_000)),
+      input.reservationId,
+      Math.max(0, Math.floor(input.actualTokens)),
+      960_000,
+    );
+  }
+
+  async getProviderTpm(lane: string, windowMs = 60_000): Promise<number> {
+    const used = await this.redis.eval(
+      GET_TPM,
+      1,
+      this.key(this.tpmPrefix, lane),
+      this.now(),
+      Math.max(1_000, Math.floor(windowMs)),
+    );
+    return Number(used) || 0;
   }
 
   async getProviderLoad(provider: string): Promise<{ active: number; limit: number }> {

@@ -8,16 +8,19 @@
 export { ReviewCancelledError, isReviewCancelledError } from './llm/cancellation.js';
 export {
   configureLlmProviderCoordinator,
+  commitProviderTpm,
   getProviderCooldownMs,
   getProviderLoad,
   isProviderAdmissionError,
   providerBucketForTarget,
   providerConcurrency,
   providerKeyLane,
+  resetLocalProviderTpm,
   runWithProviderAdmissionPriority,
   selectProviderKey,
   setProviderCooldown,
   splitApiKeys,
+  tryReserveProviderTpm,
   waitForProviderAvailability,
   withProviderCallSlot,
 } from './llm/provider-admission.js';
