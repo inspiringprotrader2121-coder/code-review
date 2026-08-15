@@ -27,6 +27,14 @@ test('application assets are served externally with typed content', async () => 
   assert.equal(missing.headers.get('cache-control'), null);
 });
 
+test('marketing CSS keeps phone-width navigation and scrollable tables', () => {
+  const css = readFileSync(path.join(import.meta.dirname, 'marketing.css'), 'utf8');
+  assert.match(css, /@media \(max-width: 560px\)/);
+  assert.match(css, /\.nav-links a \{[\s\S]*min-height: 44px/);
+  assert.match(css, /\.table-scroll \{[\s\S]*overflow-x: auto/);
+  assert.doesNotMatch(css, /\.nav-links \{\s*display:\s*none/);
+});
+
 test('asset hrefs carry a source fingerprint', () => {
   assert.match(assetHref('dashboard.js'), /^\/assets\/dashboard\.js\?v=[a-f0-9]{12}$/);
 });
@@ -34,13 +42,14 @@ test('asset hrefs carry a source fingerprint', () => {
 test('public pages and assets remain strict-CSP compatible and accessible', () => {
   const serverDirectory = path.resolve(import.meta.dirname, '../..');
   const marketing = readFileSync(path.join(serverDirectory, 'marketing.html'), 'utf8');
-  const legalPages = ['privacy.html', 'terms.html', 'refunds.html'].map((name) =>
+  const legalPages = ['privacy.html', 'terms.html', 'refunds.html', 'compare.html'].map((name) =>
     readFileSync(path.join(serverDirectory, name), 'utf8'),
   );
   const dashboardScript = readFileSync(path.join(import.meta.dirname, 'dashboard.js'), 'utf8');
   const marketingScript = readFileSync(path.join(import.meta.dirname, 'marketing.js'), 'utf8');
 
   for (const page of [marketing, ...legalPages]) {
+    assert.match(page, /viewport-fit=cover/);
     assert.match(page, /class="skip-link" href="#main-content"/);
     assert.match(page, /<main id="main-content" tabindex="-1">/);
     assert.doesNotMatch(page, /\s(?:on\w+|style)\s*=/i);

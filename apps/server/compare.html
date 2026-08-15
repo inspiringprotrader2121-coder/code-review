@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Orvex vs CodeRabbit, Copilot, and Qodo · AI GitHub PR review</title>
+    <meta
+      name="description"
+      content="Honest comparison: Orvex is a GitHub App PR reviewer with a verifier step and per-workspace pricing. It is not a merge gate and does not claim parity with CodeRabbit or Copilot."
+    />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://useorvex.com/compare" />
+    <link rel="alternate" type="text/markdown" href="https://useorvex.com/compare.md" />
+    <link rel="describedby" href="https://useorvex.com/llms.txt" />
+    <meta property="og:title" content="Orvex vs CodeRabbit, Copilot, and Qodo" />
+    <meta
+      property="og:description"
+      content="How Orvex differs from other AI GitHub pull-request reviewers: verifier step, per-workspace billing, suggestions not merge gates."
+    />
+    <meta property="og:url" content="https://useorvex.com/compare" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebPage",
+            "@id": "https://useorvex.com/compare#webpage",
+            "url": "https://useorvex.com/compare",
+            "name": "Orvex vs CodeRabbit, Copilot, and Qodo",
+            "dateModified": "2026-08-15",
+            "description": "Comparison of Orvex with other AI GitHub pull-request reviewers. Orvex does not claim feature parity.",
+            "isPartOf": { "@id": "https://useorvex.com/#website" },
+            "about": { "@id": "https://useorvex.com/#software" }
+          },
+          {
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+              {
+                "@type": "ListItem",
+                "position": 1,
+                "name": "Home",
+                "item": "https://useorvex.com/"
+              },
+              {
+                "@type": "ListItem",
+                "position": 2,
+                "name": "Compare",
+                "item": "https://useorvex.com/compare"
+              }
+            ]
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Is Orvex a CodeRabbit alternative?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Orvex is a GitHub App that reviews pull requests with deterministic checks, two or four AI passes, and a verifier. It does not claim feature parity with CodeRabbit. Billing is per workspace, not per seat. Findings are suggestions, not a merge gate."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How is Orvex different from GitHub Copilot code review?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Copilot code review is part of GitHub Copilot. Orvex is a separate GitHub App with its own verifier step and per-workspace plans from $0 to $99/month. Teams already paying for Copilot may not need another reviewer; teams that want a dedicated app with workspace billing can try Orvex."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+    <link rel="stylesheet" href="/assets/legal.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <main id="main-content" tabindex="-1">
+      <nav class="crumbs" aria-label="Breadcrumb"><a href="/">Home</a> / Compare</nav>
+      <h1>Orvex compared with other AI GitHub PR reviewers</h1>
+      <p class="meta">Last updated: 15 August 2026</p>
+
+      <p>
+        Orvex is a GitHub App that reviews pull requests when they open. Deterministic checks run
+        first, then two or four AI passes by track, then a verifier re-checks each finding against
+        source before posting. Free: 10 lifetime reviews, no card. Paid plans are per workspace,
+        $29–$99/month, not per seat.
+      </p>
+      <p>
+        There is no universal “best” AI code review tool. Public 2026 roundups more often list
+        <a href="https://www.coderabbit.ai/" rel="noreferrer">CodeRabbit</a>,
+        <a href="https://github.com/features/copilot" rel="noreferrer">GitHub Copilot code review</a
+        >, <a href="https://www.qodo.ai/" rel="noreferrer">Qodo</a>, and
+        <a href="https://www.greptile.com/" rel="noreferrer">Greptile</a>. This page states what
+        Orvex is and is not. It does not invent competitor feature matrices or unpublished prices.
+      </p>
+
+      <h2>Side-by-side</h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Topic</th>
+              <th>Orvex</th>
+              <th>Typical dedicated reviewers (CodeRabbit, Qodo, Greptile)</th>
+              <th>GitHub Copilot code review</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Where it runs</td>
+              <td>
+                <a href="https://github.com/apps/orvex-review">Orvex Review GitHub App</a>
+              </td>
+              <td>Vendor GitHub App or similar integration</td>
+              <td>Built into GitHub Copilot</td>
+            </tr>
+            <tr>
+              <td>Billing</td>
+              <td>Per workspace: $0 (10 lifetime), then $29 / $49 / $69 / $99 per month</td>
+              <td>Usually per developer seat — confirm on the vendor site</td>
+              <td>Bundled with a Copilot plan — confirm on GitHub</td>
+            </tr>
+            <tr>
+              <td>Pipeline</td>
+              <td>Deterministic rules, then 2 or 4 AI passes, then a source verifier</td>
+              <td>Vendor-specific; often LLM comments plus optional linters</td>
+              <td>GitHub-hosted Copilot review</td>
+            </tr>
+            <tr>
+              <td>Merge gate?</td>
+              <td>
+                No. Suggestions only. Use
+                <a
+                  href="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches"
+                  rel="noreferrer"
+                  >branch protection</a
+                >
+                and CI
+              </td>
+              <td>Varies by product</td>
+              <td>Assignable reviewer inside GitHub</td>
+            </tr>
+            <tr>
+              <td>Nightly whole-repo scans</td>
+              <td>Not sold</td>
+              <td>Some vendors sell scheduled scans — check their docs</td>
+              <td>Not this product’s claim</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2>Is Orvex a CodeRabbit alternative?</h2>
+      <p>
+        Only if you want a GitHub App reviewer with per-workspace pricing and a verifier that drops
+        findings it cannot re-check. Orvex does not claim CodeRabbit’s IDE/CLI surface, issue
+        linking, or whatever else their current docs list. Read
+        <a href="https://www.coderabbit.ai/" rel="noreferrer">coderabbit.ai</a> for that product.
+      </p>
+
+      <h2>When Orvex is a poor fit</h2>
+      <ul>
+        <li>
+          You already standardized on Copilot code review and do not want a second GitHub App.
+        </li>
+        <li>You need a required status check or merge blocker from the reviewer itself.</li>
+        <li>
+          You need a nightly scan of the default branch as a sold product — Orvex does not sell
+          that.
+        </li>
+      </ul>
+
+      <h2>When Orvex is a fit</h2>
+      <ul>
+        <li>You want PR review billed per workspace, not per developer seat.</li>
+        <li>You want deterministic rules in <code>.orvex-review.yml</code> before LLM spend.</li>
+        <li>You want posted findings checked against the diff before they land on the PR.</li>
+      </ul>
+
+      <p>
+        <a href="/auth/register">Start free — 10 reviews, no card</a> ·
+        <a href="/#pricing">Pricing</a> ·
+        <a href="/">Product</a>
+      </p>
+    </main>
+  </body>
+</html>

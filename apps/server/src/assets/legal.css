@@ -20,6 +20,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
+  overflow-x: hidden;
   font:
     16px/1.65 -apple-system,
     BlinkMacSystemFont,
@@ -30,7 +31,8 @@ body {
 main {
   max-width: 760px;
   margin: 0 auto;
-  padding: 48px 20px 80px;
+  padding: 48px max(20px, env(safe-area-inset-right, 0px))
+    calc(80px + env(safe-area-inset-bottom, 0px)) max(20px, env(safe-area-inset-left, 0px));
 }
 h1 {
   font-size: 28px;
@@ -80,8 +82,61 @@ main :is(p, li, a) {
   font-size: 14px;
   text-decoration: none;
 }
+.crumbs {
+  font-size: 14px;
+  margin: 0 0 20px;
+  color: var(--ink-2);
+}
+.crumbs a {
+  text-decoration: none;
+}
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  margin: 16px 0 24px;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14.5px;
+  margin: 16px 0 24px;
+}
+.table-scroll table {
+  margin: 0;
+  min-width: 40rem;
+}
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 8px 8px 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  color: var(--ink);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 hr {
   border: 0;
   border-top: 1px solid var(--line);
   margin: 32px 0;
+}
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+@media (max-width: 560px) {
+  main {
+    padding-top: 28px;
+  }
+  h1 {
+    font-size: 24px;
+    line-height: 1.2;
+  }
+  table {
+    font-size: 13px;
+  }
 }

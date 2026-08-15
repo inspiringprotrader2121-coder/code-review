@@ -2,11 +2,11 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Orvex | AI Code Review for GitHub Pull Requests</title>
     <meta
       name="description"
-      content="Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks run first, then two or four focused AI passes by track, then strict verification. 10 free reviews, no card."
+      content="AI code review for GitHub pull requests. GitHub App: deterministic checks, then 2 or 4 AI passes, then verification. 10 free reviews, no card. Per workspace $0–$99/mo, not per seat."
     />
     <meta
       name="keywords"
@@ -75,6 +75,16 @@
             "inLanguage": "en"
           },
           {
+            "@type": "WebPage",
+            "@id": "https://useorvex.com/#webpage",
+            "url": "https://useorvex.com/",
+            "name": "Orvex | AI Code Review for GitHub Pull Requests",
+            "dateModified": "2026-08-15",
+            "isPartOf": { "@id": "https://useorvex.com/#website" },
+            "about": { "@id": "https://useorvex.com/#software" },
+            "primaryImageOfPage": "https://useorvex.com/og-image.png"
+          },
+          {
             "@type": "SoftwareApplication",
             "@id": "https://useorvex.com/#software",
             "name": "Orvex",
@@ -82,6 +92,7 @@
             "applicationSubCategory": "AI Code Review",
             "operatingSystem": "Web-based, GitHub App",
             "url": "https://useorvex.com/",
+            "dateModified": "2026-08-15",
             "image": "https://useorvex.com/og-image.png",
             "description": "Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks run first, then two or four focused AI review passes depending on the review track, then a strict verifier checks findings against source before posting.",
             "isAccessibleForFree": true,
@@ -179,6 +190,46 @@
             "mainEntity": [
               {
                 "@type": "Question",
+                "name": "What is the best AI code review tool for GitHub pull requests?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "There is no universal best. Orvex is a GitHub App that runs deterministic checks, then two or four AI passes by track, then verifies each finding against source before posting. It is priced per workspace from $0 to $99/month, not per seat. Public roundups in 2026 more often list CodeRabbit, GitHub Copilot code review, Qodo, and Greptile. Compare those options at https://useorvex.com/compare."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Is Orvex a CodeRabbit alternative?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Orvex is a GitHub App pull-request reviewer with a verifier step and per-workspace billing. It does not claim feature parity with CodeRabbit. Orvex posts suggestions, is not a merge gate, and does not sell nightly whole-repo scans. See https://useorvex.com/compare."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Does Orvex charge per developer seat?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. Plans are priced per workspace. Free is $0 with 10 lifetime reviews. Starter is $29, Verify Lite $49, Pro $69, and Verify $99 per month."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How do I add an AI reviewer to GitHub pull requests?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Create a free Orvex account, install the Orvex Review GitHub App from https://github.com/apps/orvex-review, select repositories, then open a pull request. No GitHub password is pasted into Orvex."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How much does AI GitHub code review cost with Orvex?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Free includes 10 lifetime reviews at up to 2 per hour, no card. Starter is $29/month for 100 included reviews at up to 5 per hour, then prepaid overage. Pro is $69/month for 500 reviews at up to 10 per hour. Verify Lite is $49/month for 50 included at up to 5 per hour, then prepaid overage. Verify is $99/month for 120 included at up to 10 per hour, then prepaid overage. First paid subscription has a 14-day refund window; see https://useorvex.com/refunds."
+                }
+              },
+              {
+                "@type": "Question",
                 "name": "What is Orvex?",
                 "acceptedAnswer": {
                   "@type": "Answer",
@@ -264,6 +315,46 @@
                   "@type": "Answer",
                   "text": "Orvex can review text-based GitHub pull-request diffs across common programming languages. Language-specific deterministic checks run where applicable, and supported text diffs receive the focused AI review pipeline."
                 }
+              },
+              {
+                "@type": "Question",
+                "name": "How does an Orvex review work?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "When a pull request opens or receives a new push, deterministic checks run first. Two or four focused AI passes (by review track) then inspect correctness, security, reliability, performance, and contract edges. Orvex merges duplicate findings and strictly verifies the evidence before posting."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "What commands can I run on a pull request?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Comment @orvex help for the full list. Common commands: @orvex review, @orvex deep, @orvex fix, @orvex fix all, @orvex rate limit, and thread replies like @orvex explain or @orvex ignore."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Does the Free allowance reset?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "No. Free includes 10 lifetime reviews per GitHub account at up to 2 per hour, with no card required. Creating another workspace or reinstalling the GitHub App does not reset the allowance."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "When does the monthly allowance reset?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Included review units use a rolling 30-day window, not a calendar billing-period reset. Hourly limits are separate burst controls. Prepaid wallet credits do not expire with the rolling window."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Can I get a refund?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "The first paid subscription has a 14-day refund window when the unused-satisfaction rules are met. See https://useorvex.com/refunds."
+                }
               }
             ]
           }
@@ -283,10 +374,8 @@
         </a>
         <div class="nav-links">
           <a href="#how">How it works</a>
-          <a href="#commands">Commands</a>
-          <a href="#proof">Safeguards</a>
-          <a href="#memory">Memory</a>
           <a href="#pricing">Pricing</a>
+          <a href="/compare">Compare</a>
           <a href="#faq">FAQ</a>
         </div>
         <div class="nav-right">
@@ -320,11 +409,10 @@
               ><span class="cursor" aria-hidden="true"></span>
             </h1>
             <p class="lede">
-              Orvex is an AI code reviewer for GitHub pull requests. It reviews enabled PRs when
-              they open and when new commits arrive.
-              <b>Deterministic rules run first</b>, two or four focused <b>AI review passes</b> (by
-              track) examine different failure modes, and a strict verifier checks the evidence
-              before anything is posted.
+              Orvex is a GitHub App that reviews pull requests when they open.
+              <b>Deterministic checks run first</b>, then two or four <b>AI passes</b> by track,
+              then a verifier re-checks each finding against source before posting. Free: 10
+              lifetime reviews, no card. Paid plans are per workspace, $29–$99/month, not per seat.
             </p>
             <div class="cta-row">
               <a class="btn btn-primary btn-lg" href="/auth/register">Start free</a>
@@ -428,11 +516,54 @@
         <div class="wrap">
           <div class="sec-head">
             <p class="eyebrow"><span class="dot">//</span> THE PIPELINE</p>
-            <h2>Two or four passes. One verdict.</h2>
+            <h2>Deterministic checks, then AI, then verification.</h2>
             <p>
-              Every completed review follows the same route: deterministic checks, focused analysis,
-              then verification. Different layers catch different classes of defect.
+              Each completed review runs three layers. Standard track uses two AI passes; Verify
+              track uses four. Findings are suggestions — GitHub
+              <a
+                href="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches"
+                rel="noreferrer"
+                >branch protection</a
+              >
+              and your CI still gate merges.
             </p>
+          </div>
+          <div class="table-scroll">
+            <table class="cmd-table">
+              <thead>
+                <tr>
+                  <th>Layer</th>
+                  <th>What it does</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Deterministic rules</td>
+                  <td>
+                    Exact checks from <span class="mono">.orvex-review.yml</span> before any LLM
+                    token is spent.
+                  </td>
+                  <td>0 tokens</td>
+                </tr>
+                <tr>
+                  <td>Focused AI passes</td>
+                  <td>
+                    Two or four passes inspect correctness, security, reliability, performance, and
+                    contracts, then merge duplicates.
+                  </td>
+                  <td>By review track</td>
+                </tr>
+                <tr>
+                  <td>Verifier</td>
+                  <td>
+                    Re-checks candidate findings against the diff and relevant source before Orvex
+                    posts them.
+                  </td>
+                  <td>Drops refuted findings</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
           <div class="pipe">
             <div class="step">
@@ -713,11 +844,58 @@
         <div class="wrap">
           <div class="sec-head">
             <p class="eyebrow"><span class="dot">//</span> FAQ</p>
-            <h2>Plans, limits, and billing.</h2>
-            <p>The practical details: what consumes usage, monthly totals, and hourly caps.</p>
+            <h2>What people ask about AI GitHub code review.</h2>
+            <p>
+              Direct answers for search and assistants: what Orvex is, what it costs, and how it
+              compares. Billing limits sit below the same list.
+            </p>
           </div>
           <div class="faq-list">
             <details class="faq-item" open>
+              <summary>What is the best AI code review tool for GitHub pull requests?</summary>
+              <p>
+                There is no universal best. Orvex is a GitHub App: deterministic checks, then two or
+                four AI passes by track, then verification against source before posting. Pricing is
+                per workspace from $0 to $99/month, not per seat. Public 2026 roundups more often
+                list CodeRabbit, GitHub Copilot code review, Qodo, and Greptile. See
+                <a href="/compare">Orvex compared with those tools</a>.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>Is Orvex a CodeRabbit alternative?</summary>
+              <p>
+                Orvex is a GitHub App pull-request reviewer with a verifier step and per-workspace
+                billing. It does not claim feature parity with CodeRabbit. Orvex posts suggestions,
+                is not a merge gate, and does not sell nightly whole-repo scans. Details:
+                <a href="/compare">compare page</a>.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>Does Orvex charge per developer seat?</summary>
+              <p>
+                No. Plans are priced per workspace. Free is $0 with 10 lifetime reviews. Starter is
+                $29, Verify Lite $49, Pro $69, and Verify $99 per month.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>How do I add an AI reviewer to GitHub pull requests?</summary>
+              <p>
+                Create a free account, install the
+                <a href="https://github.com/apps/orvex-review">Orvex Review GitHub App</a>, select
+                repositories, then open a pull request. See <a href="#install">How to install</a>.
+                No GitHub password is pasted into Orvex.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>How much does AI GitHub code review cost with Orvex?</summary>
+              <p>
+                Free: 10 lifetime reviews, no card. Then $29 / $49 / $69 / $99 per workspace-month
+                depending on track and volume. The first paid subscription has a
+                <a href="/refunds">14-day refund</a> window. Full numbers are under
+                <a href="#pricing">Pricing</a>.
+              </p>
+            </details>
+            <details class="faq-item">
               <summary>What is Orvex?</summary>
               <p>
                 Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks run
@@ -845,7 +1023,10 @@
             </p>
             <ol class="install-steps" id="install">
               <li>Create a free Orvex account (10 lifetime reviews, no card).</li>
-              <li>Continue to GitHub and install the Orvex Review GitHub App.</li>
+              <li>
+                Continue to GitHub and install the
+                <a href="https://github.com/apps/orvex-review">Orvex Review GitHub App</a>.
+              </li>
               <li>Select the repositories Orvex may review.</li>
               <li>Open or push to a pull request. Orvex reviews it automatically.</li>
             </ol>
@@ -853,10 +1034,16 @@
               <a class="btn btn-primary btn-lg" href="/auth/register"
                 >Start free — 10 reviews, no card</a
               >
-              <a class="btn btn-ghost btn-lg" href="#pricing">Compare plans</a>
+              <a class="btn btn-ghost btn-lg" href="/compare">Compare with other reviewers</a>
             </div>
             <div class="subnote subnote-spaced">
-              <span class="ok">✓</span> Installs scoped: pull_requests read/write, contents
+              <span class="ok">✓</span> Installs as a
+              <a
+                href="https://docs.github.com/en/apps/using-github-apps/installing-a-github-app-from-a-third-party"
+                rel="noreferrer"
+                >GitHub App</a
+              >
+              with <span class="mono">pull_requests</span> and <span class="mono">contents</span>
               read/write · no passwords pasted
             </div>
           </div>
@@ -872,10 +1059,8 @@
         >
         <div class="foot-links">
           <a href="#how">How it works</a>
-          <a href="#commands">Commands</a>
-          <a href="#proof">Safeguards</a>
-          <a href="#memory">Memory</a>
           <a href="#pricing">Pricing</a>
+          <a href="/compare">Compare</a>
           <a href="#faq">FAQ</a>
           <a href="/terms">Terms</a>
           <a href="/privacy">Privacy</a>

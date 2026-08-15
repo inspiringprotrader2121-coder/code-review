@@ -1,6 +1,6 @@
 # Orvex full briefing
 
-> Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks run first, then two or four focused AI review passes depending on the review track, then a strict verifier re-checks candidate findings against source before posting.
+> Orvex is a GitHub App that reviews pull requests when they open. Deterministic checks run first, then two or four AI passes by track, then a verifier re-checks each finding against source before posting. Free: 10 lifetime reviews, no card. Paid plans are per workspace, $29–$99/month, not per seat.
 
 Use this file when an agent needs a single fetch. Prefer https://useorvex.com/llms.txt as the index and https://useorvex.com/index.md for the product page.
 
@@ -60,6 +60,9 @@ A completed standard pull-request review uses one review unit. An on-demand deep
 **Do lower-priced plans get a weaker review pipeline?**
 No. Every plan receives the full pipeline for its review track: deterministic checks, two or four focused review passes, strict finding verification, and autofix. Paid plans also include on-demand deep review. Plans otherwise differ by review track, usage allowance, hourly rate limit, queue priority, and support.
 
+**Is Orvex a CodeRabbit alternative?**
+Orvex is a GitHub App pull-request reviewer with a verifier step and per-workspace billing. It does not claim feature parity with CodeRabbit. Details: https://useorvex.com/compare.md
+
 **Is pricing per seat?**
 No. Plans are priced per workspace rather than per developer seat. Only a workspace owner can start or change billing.
 
@@ -69,6 +72,7 @@ Orvex can review text-based GitHub pull-request diffs across common programming 
 ## Links
 
 - Home: https://useorvex.com/
+- Compare: https://useorvex.com/compare.md
 - Product markdown: https://useorvex.com/index.md
 - Pricing: https://useorvex.com/#pricing
 - Terms: https://useorvex.com/terms.md

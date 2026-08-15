@@ -1,9 +1,10 @@
 # Orvex — AI code review for GitHub pull requests
 
-Orvex is an AI code reviewer for GitHub pull requests. It is a GitHub App: you install it, pick repositories, and it reviews enabled pull requests when they open and when new commits arrive.
+Orvex is a GitHub App that reviews pull requests when they open. Deterministic checks run first, then two or four AI passes by track, then a verifier re-checks each finding against source before posting. Free: 10 lifetime reviews, no card. Paid plans are per workspace, $29–$99/month, not per seat.
 
 Canonical site: https://useorvex.com/
 GitHub App: https://github.com/apps/orvex-review
+Compare: https://useorvex.com/compare.md
 Support: support@useorvex.com
 
 ## What a review does
@@ -64,6 +65,7 @@ Only a workspace owner can start or change billing. Cancellation: email support@
 
 ## Policies
 
+- [Compare](https://useorvex.com/compare.md)
 - [Terms](https://useorvex.com/terms.md)
 - [Privacy](https://useorvex.com/privacy.md)
 - [Refunds](https://useorvex.com/refunds.md)

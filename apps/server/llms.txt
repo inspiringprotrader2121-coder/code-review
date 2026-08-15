@@ -9,6 +9,7 @@ Public plans are Free, Starter, Pro, Verify Lite, and Verify. Do not invent extr
 ## Pages
 
 - [Product brief](https://useorvex.com/index.md): What Orvex is, how a review works, GitHub commands, pricing, and how to install
+- [Compare](https://useorvex.com/compare.md): How Orvex differs from CodeRabbit, Copilot, Qodo, and Greptile — without claiming parity
 - [Full briefing](https://useorvex.com/llms-full.txt): Same facts as a single agent-readable document, including FAQ answers
 - [Homepage](https://useorvex.com/): Human-readable marketing site with the live command catalog
 

@@ -70,6 +70,7 @@ function htmlMainToMarkdown(html: string): string {
   const decoded = main
     .replace(/<script\b[\s\S]*?<\/script>/gi, '')
     .replace(/<a class="(?:skip-link|home)"[\s\S]*?<\/a>/gi, '')
+    .replace(/<nav class="crumbs"[\s\S]*?<\/nav>/gi, '')
     .replace(/<a href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
     .replace(/<strong>([\s\S]*?)<\/strong>/gi, '**$1**')
     .replace(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi, '# $1\n\n')
@@ -118,7 +119,11 @@ export function marketingRoutes() {
   app.get('/refunds', (c) =>
     sendHtml(c, staticPage('refunds.html', 'Refund Policy'), '/refunds.md'),
   );
+  app.get('/compare', (c) =>
+    sendHtml(c, staticPage('compare.html', 'Compare AI GitHub PR reviewers'), '/compare.md'),
+  );
   app.get('/index.md', (c) => sendMarkdown(c, staticPlain('index.md')));
+  app.get('/compare.md', (c) => sendMarkdown(c, staticPlain('compare.md')));
   app.get('/terms.md', (c) =>
     sendMarkdown(c, htmlMainToMarkdown(staticPage('terms.html', 'Terms of Service'))),
   );
@@ -168,6 +173,11 @@ export function marketingRoutes() {
     const lastmod = '2026-08-15';
     const pages: Array<{ path: string; changefreq: string; priority: string }> = [
       { path: '/', changefreq: 'weekly', priority: '1.0' },
+      { path: '/compare', changefreq: 'weekly', priority: '0.8' },
+      { path: '/index.md', changefreq: 'weekly', priority: '0.7' },
+      { path: '/llms.txt', changefreq: 'weekly', priority: '0.7' },
+      { path: '/llms-full.txt', changefreq: 'monthly', priority: '0.6' },
+      { path: '/compare.md', changefreq: 'weekly', priority: '0.6' },
       { path: '/terms', changefreq: 'monthly', priority: '0.5' },
       { path: '/privacy', changefreq: 'monthly', priority: '0.5' },
       { path: '/refunds', changefreq: 'monthly', priority: '0.5' },

@@ -10,6 +10,8 @@ test('public marketing explains every plan and does not disclose review provider
     privacyResponse,
     termsResponse,
     refundsResponse,
+    compareResponse,
+    compareMdResponse,
     llmsResponse,
     llmsFullResponse,
     indexMdResponse,
@@ -21,6 +23,8 @@ test('public marketing explains every plan and does not disclose review provider
     app.request('/privacy'),
     app.request('/terms'),
     app.request('/refunds'),
+    app.request('/compare'),
+    app.request('/compare.md'),
     app.request('/llms.txt'),
     app.request('/llms-full.txt'),
     app.request('/index.md'),
@@ -33,6 +37,8 @@ test('public marketing explains every plan and does not disclose review provider
   assert.equal(privacyResponse.status, 200);
   assert.equal(termsResponse.status, 200);
   assert.equal(refundsResponse.status, 200);
+  assert.equal(compareResponse.status, 200);
+  assert.equal(compareMdResponse.status, 200);
   assert.equal(llmsResponse.status, 200);
   assert.equal(llmsFullResponse.status, 200);
   assert.equal(indexMdResponse.status, 200);
@@ -46,6 +52,8 @@ test('public marketing explains every plan and does not disclose review provider
   const privacy = await privacyResponse.text();
   const terms = await termsResponse.text();
   const refunds = await refundsResponse.text();
+  const compare = await compareResponse.text();
+  const compareMd = await compareMdResponse.text();
   const llms = await llmsResponse.text();
   const llmsFull = await llmsFullResponse.text();
   const indexMd = await indexMdResponse.text();
@@ -55,7 +63,7 @@ test('public marketing explains every plan and does not disclose review provider
   const normalizedPrivacy = privacy.replace(/\s+/g, ' ');
   const normalizedTerms = terms.replace(/\s+/g, ' ');
   const normalizedRefunds = refunds.replace(/\s+/g, ' ');
-  const publicContent = `${home}\n${privacy}\n${terms}\n${refunds}\n${llms}\n${llmsFull}\n${indexMd}`;
+  const publicContent = `${home}\n${privacy}\n${terms}\n${refunds}\n${compare}\n${compareMd}\n${llms}\n${llmsFull}\n${indexMd}`;
   assert.doesNotMatch(
     publicContent,
     /multi[- ]model|[23]\s+AI models?|model·[ABC]|\b(?:MiniMax|DeepSeek|GLM|Luna|Anthropic)\b|bring-your-own-LLM/i,
@@ -79,12 +87,16 @@ test('public marketing explains every plan and does not disclose review provider
   ]) {
     assert.match(normalizedHome, new RegExp(escapeRegExp(expected)));
   }
-  assert.match(home, /<meta name="yandex-verification" content="94885c8f0fa2d0a4" \/>/);
+  assert.match(home, /viewport-fit=cover/);
+  assert.match(compare, /class="table-scroll"/);
   assert.match(home, /rel="describedby" href="https:\/\/useorvex.com\/llms.txt"/);
   assert.match(home, /AI code review for GitHub pull requests/);
   assert.match(home, /id="install"/);
   assert.match(home, /id="faq"/);
-  assert.equal((home.match(/class="faq-item"/g) ?? []).length, 13);
+  assert.equal((home.match(/class="faq-item"/g) ?? []).length, 18);
+  assert.match(home, /What is the best AI code review tool for GitHub pull requests/);
+  assert.match(home, /Is Orvex a CodeRabbit alternative/);
+  assert.match(home, /href="\/compare"/);
   assert.match(home, /id="commands"/);
   assert.match(home, /@orvex rate limit/);
   assert.match(home, /@orvex ignore &lt;file&gt;:&lt;line&gt;/);
@@ -110,8 +122,13 @@ test('public marketing explains every plan and does not disclose review provider
     /Plans otherwise differ by review track, pass count, allowance, hourly capacity/,
   );
   assert.doesNotMatch(llmsFull, /same three-pass depth/i);
-  assert.match(indexMd, /Orvex is an AI code reviewer for GitHub pull requests/);
+  assert.match(indexMd, /Orvex is a GitHub App that reviews pull requests when they open/);
   assert.match(sitemap, /<lastmod>2026-08-15<\/lastmod>/);
+  assert.match(sitemap, /https:\/\/useorvex.com\/compare</);
+  assert.match(sitemap, /https:\/\/useorvex.com\/llms.txt</);
+  assert.match(sitemap, /https:\/\/useorvex.com\/index.md</);
+  assert.match(compare, /does not claim feature parity/i);
+  assert.match(compareMd, /does not claim feature parity/i);
   assert.match(normalizedPrivacy, /contracted third-party AI inference providers/);
   assert.match(normalizedPrivacy, /temporary filesystem snapshot/);
   assert.match(
@@ -144,12 +161,17 @@ test('public marketing explains every plan and does not disclose review provider
   assert.ok(Array.isArray(parsed['@graph']));
   assert.ok(parsed['@graph']?.some((node) => node['@type'] === 'HowTo'));
   assert.ok(parsed['@graph']?.some((node) => node['@type'] === 'FAQPage'));
-  for (const page of [home, privacy, terms, refunds]) {
+  assert.ok(parsed['@graph']?.some((node) => node['@type'] === 'WebPage'));
+  const faqNode = parsed['@graph']?.find((node) => node['@type'] === 'FAQPage') as
+    | { mainEntity?: unknown[] }
+    | undefined;
+  assert.ok((faqNode?.mainEntity?.length ?? 0) >= 16);
+  for (const page of [home, privacy, terms, refunds, compare]) {
     assert.doesNotMatch(page, /<style|style=/);
   }
   assert.match(home, /href="\/assets\/marketing\.css"/);
   assert.match(home, /src="\/assets\/marketing\.js" defer/);
-  for (const page of [privacy, terms, refunds]) {
+  for (const page of [privacy, terms, refunds, compare]) {
     assert.match(page, /href="\/assets\/legal\.css"/);
   }
 });
