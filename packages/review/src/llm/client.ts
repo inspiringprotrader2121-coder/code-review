@@ -82,7 +82,7 @@ async function llmChatHoldingProviderSlot(
     provider: string;
     keys: readonly string[];
     coordinator: LlmProviderCoordinator | undefined;
-    tpm?: ProviderTpmPolicy;
+    tpm?: Omit<ProviderTpmPolicy, 'reservationId'>;
     tpmSession: TpmSession;
   },
 ): Promise<string> {
