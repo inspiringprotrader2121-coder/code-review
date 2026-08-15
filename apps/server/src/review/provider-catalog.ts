@@ -72,8 +72,7 @@ export class ProviderCatalog {
         }
         // Alongside Luna, Flash is the second agentic reviewer (checkout + tools).
         // Verification and dual-model discovery stay one-shot API calls.
-        const mode =
-          opts.agenticLuna && stage.kind === 'discovery' ? 'investigate' : 'api';
+        const mode = opts.agenticLuna && stage.kind === 'discovery' ? 'investigate' : 'api';
         return { stage, target, tier: 'deepseek-flash', mode, required: stage.required };
       }
       case 'minimax': {

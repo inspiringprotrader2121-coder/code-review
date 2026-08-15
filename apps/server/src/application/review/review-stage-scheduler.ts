@@ -275,7 +275,8 @@ export function selectScheduledReviewCalls(input: {
   const bonusInvestigate = input.calls.filter((call) => call.passTag === 'investigate');
   const risk = input.calls.filter((call) => call.passTag === 'risk-hunt');
   const passes = input.calls.filter(
-    (call) => call.kind === 'pass' && call.passTag !== 'investigate' && call.passTag !== 'risk-hunt',
+    (call) =>
+      call.kind === 'pass' && call.passTag !== 'investigate' && call.passTag !== 'risk-hunt',
   );
   const requiredPasses = passes.filter((call) => !call.bestEffort);
   const optionalPasses = passes.filter((call) => call.bestEffort);
