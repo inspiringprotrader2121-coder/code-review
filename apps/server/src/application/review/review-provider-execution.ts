@@ -1,4 +1,5 @@
 import {
+  isProviderAdmissionError,
   isTransientLlmError,
   llmFindingsToReviewFindings,
   REVIEW_INCOMPLETE_SUMMARY,
@@ -215,9 +216,7 @@ export async function executeReviewProviderCalls(
     } catch (error) {
       const message = (error as Error).message;
       console.warn(`[worker] ${call.label} failed:`, message);
-      const admissionBlocked =
-        /concurrency saturated|admission timed out|provider lease|cooldown active/i.test(message) &&
-        isTransientLlmError(message);
+      const admissionBlocked = isProviderAdmissionError(message) && isTransientLlmError(message);
       return outcome(
         call,
         false,

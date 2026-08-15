@@ -1,18 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import type { RetryPolicy } from '../providers/types.js';
-import type { LlmClientOptions } from './contracts.js';
+import type { LlmClientOptions, LlmProviderCoordinator } from './contracts.js';
 import { ReviewCancelledError, isReviewCancelledError, throwIfCancelled } from './cancellation.js';
 import {
   commitProviderTpm,
   currentProviderCoordinator,
+  getProviderCooldownMs,
   isProviderAdmissionError,
   providerBucketForTarget,
+  providerKeyLane,
   selectProviderKey,
   setProviderCooldown,
   splitApiKeys,
+  tryReserveProviderTpm,
   waitForProviderAvailability,
   withProviderCallSlot,
+  type ProviderTpmPolicy,
 } from './provider-admission.js';
 import {
   allocateAttemptIndex,
@@ -49,29 +53,91 @@ const PREFIX_CONTINUATION_MAX_MS = 180_000;
 const PREFIX_CONTINUATION_MAX_TOKENS = 24_000;
 const MAX_CONTINUATION_RATE_LIMIT_RETRIES = 2;
 
+interface ActiveProviderKey {
+  apiKey: string;
+  keyIndex: number;
+  lane: string;
+}
+
+interface TpmSession {
+  lease: { lane: string; reservationId: string } | null;
+  billed: number;
+  flush: (actualTokens: number) => Promise<void>;
+  attach: (lease: { lane: string; reservationId: string }) => void;
+}
+
 /**
  * One paid-call slot covers the primary attempt plus bounded answer-only
  * continuations so continuations never rejoin the back of a multi-minute fleet
  * wait queue after Luna already succeeded.
- * Key identity is fixed for the held slot (including continuations).
+ * A continuation 429 rotates to a cool sibling key without replaying the primary.
  */
 async function llmChatHoldingProviderSlot(
   system: string,
   user: string,
   opts: LlmClientOptions,
   lineage: AttemptLineage,
-  keyIndex: number,
+  start: ActiveProviderKey,
+  pool: {
+    provider: string;
+    keys: readonly string[];
+    coordinator: LlmProviderCoordinator | undefined;
+    tpm?: ProviderTpmPolicy;
+    tpmSession: TpmSession;
+  },
 ): Promise<string> {
   const runtime = loadReviewRuntimeConfig();
   const baseMs = Math.min(60_000, Math.max(250, runtime.rateLimitBaseMs));
   const maxWaitMs = Math.min(300_000, Math.max(1_000, runtime.rateLimitMaxWaitMs));
+  let current = start;
+  const triedContinuationLanes = new Set<string>([start.lane]);
   let continuationCount = 0;
   let continuation: LlmClientOptions['compatibleContinuation'];
   let continuationRateLimitAttempt = 0;
+
+  const rotateContinuationKey = async (): Promise<boolean> => {
+    if (pool.keys.length <= 1) return false;
+    for (let offset = 1; offset < pool.keys.length; offset++) {
+      const keyIndex = (current.keyIndex + offset) % pool.keys.length;
+      const lane = providerKeyLane(pool.provider, keyIndex, pool.keys.length);
+      if (triedContinuationLanes.has(lane)) continue;
+      if ((await getProviderCooldownMs(lane, pool.coordinator)) > 0) continue;
+      let nextLease: { lane: string; reservationId: string } | undefined;
+      if (pool.tpm) {
+        const reservationId = randomUUID();
+        const reserved = await tryReserveProviderTpm(
+          {
+            lane,
+            tokens: Math.min(PREFIX_CONTINUATION_MAX_TOKENS, pool.tpm.reserveTokens),
+            budget: pool.tpm.budget,
+            windowMs: pool.tpm.windowMs,
+            reservationId,
+            reserveTtlMs: pool.tpm.reserveTtlMs,
+          },
+          pool.coordinator,
+        );
+        if (!reserved.ok) continue;
+        nextLease = { lane, reservationId };
+      }
+      await setProviderCooldown(current.lane, Math.max(2_000, baseMs), pool.coordinator);
+      await pool.tpmSession.flush(pool.tpmSession.billed);
+      if (nextLease) pool.tpmSession.attach(nextLease);
+      current = { apiKey: pool.keys[keyIndex]!, keyIndex, lane };
+      triedContinuationLanes.add(lane);
+      continuationRateLimitAttempt = 0;
+      console.warn(
+        `[llm] DeepSeek continuation rate-limited on prior key — rotating to cool key ${lane} (${triedContinuationLanes.size}/${pool.keys.length} keys tried)`,
+      );
+      return true;
+    }
+    return false;
+  };
+
   for (;;) {
     throwIfCancelled(opts.signal);
     const attemptOpts: LlmClientOptions = {
       ...opts,
+      apiKey: current.apiKey,
       compatibleContinuation: continuation,
       ...(continuation ? { thinking: false } : {}),
       hardLimitMs: continuation
@@ -87,7 +153,7 @@ async function llmChatHoldingProviderSlot(
         user,
         attemptOpts,
         allocateAttemptIndex(lineage),
-        keyIndex,
+        current.keyIndex,
         lineage,
       );
       if (opts.json && jsonContractMissing(text)) {
@@ -128,6 +194,7 @@ async function llmChatHoldingProviderSlot(
         continue;
       }
       if (continuation && isRetryableRateLimit(lastError.message)) {
+        if (await rotateContinuationKey()) continue;
         continuationRateLimitAttempt++;
         if (continuationRateLimitAttempt > MAX_CONTINUATION_RATE_LIMIT_RETRIES) {
           throw new Error(
@@ -199,24 +266,25 @@ export async function llmChat(
     throwIfCancelled(opts.signal);
     const tpm = tpmPolicy ? { ...tpmPolicy, reservationId: randomUUID() } : undefined;
     let selection = await selectProviderKey(provider, keys, keyCursor++, coordinator, tpm);
-    // Cool-key reserve miss (tpmUsed set) means the rolling minute is full.
-    // Cooldown-only misses must not be treated as TPM exhaustion.
-    while (
-      tpm &&
-      selection.tpmReserved === false &&
-      selection.cooldownMs <= 0 &&
-      selection.tpmUsed !== undefined
-    ) {
+    // Never dispatch Flash without a reservation. Cool-key TPM misses wait
+    // for the rolling minute; cooldown misses wait until a key is cool enough
+    // to reserve so a 429 wake cannot stampede past 2M.
+    while (tpm && selection.tpmReserved !== true) {
       if (sleptMs + 2_000 > totalWaitBudgetMs) {
         throw new Error(
-          `429 DeepSeek TPM ${tpm.budget}/min exhausted across ${keys.length} account(s); retry-after: 60`,
+          selection.cooldownMs > 0
+            ? `429 DeepSeek account cooldown active across ${keys.length} account(s); retry-after: ${Math.max(1, Math.ceil(selection.cooldownMs / 1000))}`
+            : `429 DeepSeek TPM ${tpm.budget}/min exhausted across ${keys.length} account(s); retry-after: 60`,
         );
       }
+      const waitMs = selection.cooldownMs > 0 ? Math.min(selection.cooldownMs, 2_000) : 2_000;
       console.warn(
-        `[llm] DeepSeek TPM: every account is near ${tpm.budget}/min (${selection.tpmUsed} used on ${selection.lane}) — waiting for the rolling window to drain`,
+        selection.cooldownMs > 0
+          ? `[llm] DeepSeek TPM: ${selection.lane} is cooling (${Math.ceil(selection.cooldownMs / 1000)}s) — waiting before reserving`
+          : `[llm] DeepSeek TPM: every account is near ${tpm.budget}/min (${selection.tpmUsed ?? 0} used on ${selection.lane}) — waiting for the rolling window to drain`,
       );
-      await sleep(2_000, opts.signal, clockFor(opts));
-      sleptMs += 2_000;
+      await sleep(waitMs, opts.signal, clockFor(opts));
+      sleptMs += waitMs;
       selection = await selectProviderKey(provider, keys, keyCursor++, coordinator, {
         ...tpm,
         reservationId: randomUUID(),
@@ -226,8 +294,32 @@ export async function llmChat(
     lastLane = selection.lane;
     triedLanes.add(selection.lane);
     let enteredProviderCall = false;
-    let billedTokens = 0;
     let succeeded = false;
+    const tpmSession: TpmSession = {
+      lease:
+        selection.tpmReserved && selection.reservationId
+          ? { lane: selection.lane, reservationId: selection.reservationId }
+          : null,
+      billed: 0,
+      async flush(actualTokens) {
+        if (!this.lease) return;
+        await commitProviderTpm(
+          {
+            lane: this.lease.lane,
+            reservationId: this.lease.reservationId,
+            actualTokens: Math.max(0, Math.floor(actualTokens)),
+            windowMs: tpmPolicy?.windowMs,
+          },
+          coordinator,
+        );
+        this.lease = null;
+        this.billed = 0;
+      },
+      attach(lease) {
+        this.lease = lease;
+        this.billed = 0;
+      },
+    };
     try {
       const output = await withProviderCallSlot(
         provider,
@@ -240,12 +332,24 @@ export async function llmChat(
               ...opts,
               apiKey: selection.apiKey,
               onUsage: (usage) => {
-                billedTokens += Math.max(0, usage.inputTokens) + Math.max(0, usage.outputTokens);
+                tpmSession.billed +=
+                  Math.max(0, usage.inputTokens) + Math.max(0, usage.outputTokens);
                 opts.onUsage?.(usage);
               },
             },
             lineage,
-            selection.keyIndex,
+            {
+              apiKey: selection.apiKey,
+              keyIndex: selection.keyIndex,
+              lane: selection.lane,
+            },
+            {
+              provider,
+              keys,
+              coordinator,
+              tpm: tpmPolicy,
+              tpmSession,
+            },
           );
         },
         opts.signal,
@@ -315,7 +419,9 @@ export async function llmChat(
         console.warn(
           `[llm] rate-limited on every ${provider} key (${keys.length}) — failing so the job requeues instead of waiting on a hot account`,
         );
-        throw lastError;
+        throw new Error(
+          `429 rate-limited on every ${provider} key (${keys.length}); retry-after: 60`,
+        );
       }
 
       waitRetries++;
@@ -342,18 +448,9 @@ export async function llmChat(
       await sleep(waitMs, opts.signal, clockFor(opts));
       await waitForProviderAvailability([lastLane], opts.signal, coordinator);
     } finally {
-      if (selection.tpmReserved && selection.reservationId) {
-        await commitProviderTpm(
-          {
-            lane: selection.lane,
-            reservationId: selection.reservationId,
-            actualTokens:
-              billedTokens > 0 ? billedTokens : succeeded ? tpmPolicy!.reserveTokens : 0,
-            windowMs: tpmPolicy?.windowMs,
-          },
-          coordinator,
-        );
-      }
+      const actual =
+        tpmSession.billed > 0 ? tpmSession.billed : succeeded ? (tpmPolicy?.reserveTokens ?? 0) : 0;
+      await tpmSession.flush(actual);
     }
   }
   throw lastError ?? new Error('LLM API key is required');

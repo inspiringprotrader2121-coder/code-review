@@ -549,7 +549,7 @@ export async function getProviderLoad(
 }
 
 export function isProviderAdmissionError(message: string): boolean {
-  return /concurrency saturated|admission timed out|cancelled while waiting for provider lease|cooldown active/i.test(
+  return /concurrency saturated|admission timed out|provider lease|cooldown active|TPM .{0,120}exhausted|rate-limited on every|continuation rate-limited/i.test(
     message,
   );
 }

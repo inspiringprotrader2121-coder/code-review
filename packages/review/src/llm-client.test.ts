@@ -11,6 +11,7 @@ import {
   splitApiKeys,
   resetLocalProviderTpm,
   tryReserveProviderTpm,
+  isProviderAdmissionError,
   withProviderCallSlot,
   waitForProviderAvailability,
   type LlmAttemptEvent,
@@ -1383,6 +1384,139 @@ test('DeepSeek load balancer skips an account at 2M TPM and uses a sibling key',
     'Bearer ds-cool',
     'Flash must skip the account already at 2M TPM and use a sibling key',
   );
+});
+
+test('isProviderAdmissionError treats TPM exhaustion and every-key 429 as requeue', () => {
+  assert.equal(
+    isProviderAdmissionError(
+      '429 DeepSeek TPM 2000000/min exhausted across 3 account(s); retry-after: 60',
+    ),
+    true,
+  );
+  assert.equal(
+    isProviderAdmissionError('429 rate-limited on every deepseek key (3); retry-after: 60'),
+    true,
+  );
+  assert.equal(
+    isProviderAdmissionError(
+      '429 DeepSeek continuation rate-limited after 2 retries; LLM request failed (429): rate limited',
+    ),
+    true,
+  );
+  assert.equal(isProviderAdmissionError('LLM response contained no parseable JSON'), false);
+});
+
+test('DeepSeek continuation 429 rotates to a sibling key without replaying the primary', async () => {
+  const encoder = new TextEncoder();
+  const auths: string[] = [];
+  let calls = 0;
+  let admissions = 0;
+  const events: LlmAttemptEvent[] = [];
+  const admission: LlmProviderCoordinator = {
+    async acquireProviderLease() {
+      admissions++;
+      return `lease-${admissions}`;
+    },
+    async releaseProviderLease() {},
+    async getProviderCooldownMs() {
+      return 0;
+    },
+    async setProviderCooldown() {},
+  };
+  const output = await llmChat('sys', 'user', {
+    apiKey: 'ds-hot, ds-cool',
+    model: 'deepseek-v4-flash',
+    baseUrl: 'https://api.deepseek.com/v1',
+    api: 'chat',
+    reasoningEffort: 'max',
+    maxTokens: 28_000,
+    json: true,
+    dependencies: {
+      admission,
+      http: {
+        async fetch(_input, init) {
+          calls++;
+          auths.push(String(new Headers(init?.headers).get('Authorization')));
+          if (calls === 1) {
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: 'analysis' } }] })}\n\n`,
+                    ),
+                  );
+                  controller.enqueue(
+                    encoder.encode(
+                      `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\n`,
+                    ),
+                  );
+                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                  controller.close();
+                },
+              }),
+              { status: 200 },
+            );
+          }
+          if (auths.at(-1) === auths[0]) {
+            return new Response('rate limited', { status: 429 });
+          }
+          return new Response(chatStream('{"findings":[],"summary":"ok"}'), { status: 200 });
+        },
+      },
+    },
+    onAttempt: (event) => events.push(event),
+  });
+  assert.match(output, /findings/);
+  assert.equal(calls, 3);
+  assert.equal(auths[0], auths[1], 'first continuation stays on the primary key');
+  assert.notEqual(auths[2], auths[0], 'continuation 429 must rotate to a sibling key');
+  assert.equal(new Set(auths).size, 2);
+  assert.equal(admissions, 1, 'continuation rotation stays under the held provider slot');
+  const startedRoles = events
+    .filter((event) => event.phase === 'started')
+    .map((event) => event.role);
+  assert.equal(startedRoles[0], 'primary');
+  assert.ok(
+    !startedRoles.slice(1).includes('primary'),
+    'must not replay the expensive root request',
+  );
+});
+
+test('DeepSeek never dispatches after cooldown without a TPM reservation', async (t) => {
+  resetLocalProviderTpm();
+  t.after(() => resetLocalProviderTpm());
+  for (const lane of ['deepseek:k0', 'deepseek:k1']) {
+    const reserved = await tryReserveProviderTpm({
+      lane,
+      tokens: 2_000_000,
+      budget: 2_000_000,
+      reservationId: `full-${lane}`,
+      windowMs: 60_000,
+    });
+    assert.equal(reserved.ok, true);
+    await setProviderCooldown(lane, 250);
+  }
+  let fetches = 0;
+  await assert.rejects(
+    llmChat('sys', 'user', {
+      apiKey: 'ds-a, ds-b',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.com',
+      api: 'chat',
+      dependencies: {
+        retryPolicy: { maxAttempts: 2, baseMs: 250, maxWaitMs: 1_000, totalWaitBudgetMs: 2_500 },
+        http: {
+          async fetch() {
+            fetches++;
+            return new Response(chatStream('{"findings":[]}'), { status: 200 });
+          },
+        },
+      },
+    }),
+    /TPM .*exhausted|cooldown active/i,
+  );
+  assert.equal(fetches, 0, 'must not hit DeepSeek until a TPM reservation exists');
 });
 
 interface TestTimer {
