@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { formatCommandsHtmlRows } from '@orvex-review/review';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -49,21 +49,14 @@ function staticPlain(file: string): string {
   return text;
 }
 
-function sendMarkdown(
-  c: { header: (k: string, v: string) => void; body: (v: string) => Response },
-  body: string,
-) {
+function sendMarkdown(c: Context, body: string) {
   c.header('Content-Type', 'text/markdown; charset=utf-8');
   c.header('Cache-Control', 'public, max-age=86400');
   c.header('Link', '</llms.txt>; rel="describedby"');
   return c.body(body.endsWith('\n') ? body : `${body}\n`);
 }
 
-function sendHtml(
-  c: { header: (k: string, v: string) => void; html: (v: string) => Response },
-  html: string,
-  markdownPath: string,
-) {
+function sendHtml(c: Context, html: string, markdownPath: string) {
   c.header(
     'Link',
     `<${markdownPath}>; rel="alternate"; type="text/markdown", </llms.txt>; rel="describedby"`,
