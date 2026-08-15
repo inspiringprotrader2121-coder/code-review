@@ -272,10 +272,10 @@ export function selectScheduledReviewCalls(input: {
   requestedAggregation: ReviewExecutionPolicy['aggregation'];
   skippedLenses: string[];
 }): ScheduledReviewCalls {
-  const investigate = input.calls.filter((call) => call.mode === 'investigate');
+  const bonusInvestigate = input.calls.filter((call) => call.passTag === 'investigate');
   const risk = input.calls.filter((call) => call.passTag === 'risk-hunt');
   const passes = input.calls.filter(
-    (call) => call.kind === 'pass' && call.mode !== 'investigate' && call.passTag !== 'risk-hunt',
+    (call) => call.kind === 'pass' && call.passTag !== 'investigate' && call.passTag !== 'risk-hunt',
   );
   const requiredPasses = passes.filter((call) => !call.bestEffort);
   const optionalPasses = passes.filter((call) => call.bestEffort);
@@ -285,7 +285,7 @@ export function selectScheduledReviewCalls(input: {
     passes.length,
     input.maxCalls,
     Math.min(
-      sweeps.length + investigate.length + risk.length,
+      sweeps.length + bonusInvestigate.length + risk.length,
       Math.max(0, input.maxCalls - passes.length),
     ),
   );
@@ -294,13 +294,16 @@ export function selectScheduledReviewCalls(input: {
   }
   let calls: ReviewCall[];
   if (aggregation.enabled) {
+    const agenticLuna = input.calls.some((call) => call.mode === 'agentic');
     const repeated = Array.from({ length: aggregation.effectiveRuns }, (_, sample) =>
       passes.map((call) => {
         if (sample === 0)
           return { ...call, label: `${call.label} sample 1/${aggregation.effectiveRuns}`, sample };
         const repeatedAgentic = call.mode === 'agentic';
         const fixedRoute = call.stage
-          ? input.catalog.resolveStage(call.stage, { agenticLuna: repeatedAgentic })
+          ? input.catalog.resolveStage(call.stage, {
+              agenticLuna: repeatedAgentic || agenticLuna,
+            })
           : null;
         // Existing calls were already compiled from the public plan. Repeating a
         // sample changes only its temperature, never its provider route.
@@ -308,7 +311,7 @@ export function selectScheduledReviewCalls(input: {
         return {
           ...call,
           label: `${call.label} sample ${sample + 1}/${aggregation.effectiveRuns}`,
-          mode: fixedRoute?.mode ?? (repeatedAgentic ? 'agentic' : 'api'),
+          mode: fixedRoute?.mode ?? call.mode,
           target: routed.target,
           tier: routed.tier,
           sample,
@@ -318,17 +321,17 @@ export function selectScheduledReviewCalls(input: {
     ).flat();
     calls = takeReviewCallsByPriority(
       repeated.filter((call) => !call.bestEffort),
-      [...repeated.filter((call) => call.bestEffort), ...sweeps, ...investigate, ...risk],
+      [...repeated.filter((call) => call.bestEffort), ...sweeps, ...bonusInvestigate, ...risk],
       input.maxCalls,
     );
   } else {
     calls = takeReviewCallsByPriority(
       requiredPasses,
-      [...optionalPasses, ...sweeps, ...investigate, ...risk],
+      [...optionalPasses, ...sweeps, ...bonusInvestigate, ...risk],
       input.maxCalls,
     );
   }
-  if (investigate.length > 0 && !calls.some((call) => call.mode === 'investigate')) {
+  if (bonusInvestigate.length > 0 && !calls.some((call) => call.passTag === 'investigate')) {
     console.warn('[worker] investigate skipped: maxCalls budget exhausted before investigate');
     input.skippedLenses.push('investigate (call budget exhausted)');
   }

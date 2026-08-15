@@ -440,6 +440,8 @@ test('Verify routes all paid public stages through the catalog', () => {
     ],
   );
   assert.equal(high.verification.target.model, 'deepseek-v4-flash');
+  assert.equal(high.discovery[1]?.mode, 'investigate');
+  assert.equal(high.verification.mode, 'api');
 });
 
 test('direct Luna diagnostics accept only native HTTPS Responses configuration', () => {

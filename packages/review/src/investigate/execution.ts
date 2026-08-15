@@ -25,6 +25,11 @@ function parseStep(text: string): InvestigateStep | null {
   }
 }
 
+/** Tool hops stay cheap. Only a findings turn uses max thinking. */
+export function investigateThinkingEnabled(step: number, maxSteps: number): boolean {
+  return step >= Math.max(0, maxSteps - 1);
+}
+
 function capFindings(response: LlmReviewResponse): LlmReviewResponse {
   const cap = loadReviewRuntimeConfig().maxFindings;
   const rank = (severity: string): number =>
@@ -111,15 +116,17 @@ export async function runInvestigateReview(
     onAttempt: options.onAttempt,
   };
 
+  let findingsTurn = false;
   for (let step = 0; step < maxSteps; step++) {
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('investigate cancelled');
-    const forceDone = step === maxSteps - 1;
+    const forceDone = step === maxSteps - 1 || findingsTurn;
+    const thinking = forceDone;
     const user = forceDone
       ? `${transcript.join('\n')}\n\nFINAL TURN — you MUST respond with {"action":"done",...} now. No more tools.`
       : transcript.join('\n');
     let text: string;
     try {
-      text = await llmChat(system, user, llmOptions);
+      text = await llmChat(system, user, { ...llmOptions, thinking });
     } catch (error) {
       const message = (error as Error).message ?? '';
       if (step === 0 || isTransientLlmError(message)) throw error;
@@ -147,6 +154,14 @@ export async function runInvestigateReview(
     }
 
     if (parsed.action === 'done') {
+      if (!thinking && !forceDone) {
+        findingsTurn = true;
+        transcript.push(
+          '',
+          'You have enough evidence. FINAL TURN — respond with {"action":"done", findings, summary}. No more tools.',
+        );
+        continue;
+      }
       try {
         const rawCount = Array.isArray(parsed.findings) ? parsed.findings.length : 0;
         const review = LlmReviewResponseSchema.parse(

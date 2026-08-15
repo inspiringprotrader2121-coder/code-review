@@ -35,7 +35,7 @@ export class SqliteBillingAnalyticsRepository {
        SELECT COUNT(*) AS runs,
               SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
               SUM(CASE WHEN r.status = 'failed' THEN 1 ELSE 0 END) AS failed_runs,
-              SUM(CASE WHEN r.status = 'skipped' THEN 1 ELSE 0 END) AS skipped_runs,
+              SUM(CASE WHEN r.status = 'skipped' AND IFNULL(r.skip_reason,'') != 'concurrency_limited' THEN 1 ELSE 0 END) AS skipped_runs,
               SUM(CASE WHEN rc.run_id IS NULL THEN r.input_tokens ELSE rc.input_tokens END) AS input_tokens,
               SUM(CASE WHEN rc.run_id IS NULL THEN r.output_tokens ELSE rc.output_tokens END) AS output_tokens,
               SUM(CASE WHEN rc.run_id IS NULL THEN r.cost_usd ELSE rc.cost_usd END) AS cost_usd,
@@ -43,7 +43,8 @@ export class SqliteBillingAnalyticsRepository {
               COUNT(CASE WHEN rc.run_id IS NOT NULL THEN 1 END) AS instrumented_runs,
               COUNT(CASE WHEN r.cost_usd > 0 OR rc.run_id IS NOT NULL THEN 1 END) AS runs_with_cost
        FROM review_runs r LEFT JOIN run_costs rc ON rc.run_id = r.id
-       WHERE r.created_at >= ? AND r.created_at < ?`,
+       WHERE r.created_at >= ? AND r.created_at < ?
+         AND NOT (r.status = 'skipped' AND r.skip_reason = 'concurrency_limited')`,
       )
       .get(...rangeArgs, ...rangeArgs) as OverviewRow;
 
@@ -142,7 +143,9 @@ export class SqliteBillingAnalyticsRepository {
        SELECT r.*, rc.input_tokens AS usage_input_tokens, rc.output_tokens AS usage_output_tokens,
               rc.cost_usd AS usage_cost_usd
        FROM review_runs r LEFT JOIN run_costs rc ON rc.run_id = r.id
-       WHERE r.created_at >= ? AND r.created_at < ? ORDER BY r.created_at DESC LIMIT ?`,
+       WHERE r.created_at >= ? AND r.created_at < ?
+         AND NOT (r.status = 'skipped' AND r.skip_reason = 'concurrency_limited')
+       ORDER BY r.created_at DESC LIMIT ?`,
       )
       .all(...rangeArgs, ...rangeArgs, recentLimit) as RecentRunRow[];
     const usageByRun = new Map<string, ReviewRunUsage[]>();

@@ -13,8 +13,7 @@ const f = (over: Partial<ReviewFinding>): ReviewFinding => ({
   line: 10,
   severity: 'P2',
   category: 'correctness',
-  // Default to a message that states a trigger and an outcome, so tests about
-  // severity routing are not silently also testing the inline evidence gate.
+  // Default to a message that states a trigger and an outcome.
   message:
     "When the request arrives without a tenant scope, the lookup returns another tenant's record.",
   confidence: 0.8,
@@ -193,37 +192,22 @@ test('hasConcreteFailurePath: a stated trigger and outcome passes; an assertion 
   );
 });
 
-test('the evidence gate moves vague P2/P3s to the table and never touches P1', (t) => {
-  t.after(() => {
-    delete process.env.ORVEX_INLINE_EVIDENCE_GATE;
-  });
+test('lined findings stay on the diff even when the message is observational', () => {
   const vague =
     'This pattern is risky and inconsistent with the surrounding code; a shared helper would read better here.';
-  const concrete =
-    'When the cursor exceeds the export ceiling, the final page is emitted without a truncation ' +
-    'marker, so the caller silently receives partial data.';
-
   const { inline, summaryOnly } = filterAndCapFindings(
     [
       f({ severity: 'P1', line: 1, message: vague }),
       f({ severity: 'P2', line: 2, message: vague }),
-      f({ severity: 'P2', line: 5, message: concrete }),
       f({ severity: 'P3', line: 3, message: vague }),
-      f({ severity: 'P3', line: 4, message: concrete }),
+      f({ severity: 'P2', line: undefined, message: vague }),
     ],
     cfg,
   );
   assert.deepEqual(
     inline.map((x) => x.line),
-    [1, 5, 4],
+    [1, 2, 3],
   );
-  // Gated, not dropped — they still reach the author in the summary table.
-  assert.deepEqual(
-    summaryOnly.map((x) => x.line),
-    [2, 3],
-  );
-
-  process.env.ORVEX_INLINE_EVIDENCE_GATE = '0';
-  const off = filterAndCapFindings([f({ severity: 'P3', line: 3, message: vague })], cfg);
-  assert.equal(off.inline.length, 1);
+  assert.equal(summaryOnly.length, 1);
+  assert.equal(summaryOnly[0]?.line, undefined);
 });

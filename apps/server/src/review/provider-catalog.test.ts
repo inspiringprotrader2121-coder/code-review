@@ -62,7 +62,11 @@ test('catalog compiles exact public-plan targets without URL or api inference', 
       ['MiniMax-M3', 'anthropic', undefined, 'minimax', true],
     ],
   );
+  assert.equal(high.discovery[0]?.mode, 'agentic');
+  assert.equal(high.discovery[1]?.mode, 'investigate');
+  assert.equal(high.discovery[2]?.mode, 'api');
   assert.equal(high.verification.target.model, 'deepseek-v4-flash');
+  assert.equal(high.verification.mode, 'api');
   assert.equal(high.verification.target.transport, 'compatible-chat');
   assert.equal(high.discovery.filter((stage) => stage.required).length, 3);
   assert.equal(high.verification.required, true);
@@ -70,8 +74,11 @@ test('catalog compiles exact public-plan targets without URL or api inference', 
   const lower = catalog.compilePublicPlan('dual-model', { agenticLuna: false });
   assert.ok(lower);
   assert.deepEqual(
-    lower.discovery.map((stage) => stage.target.model),
-    ['MiniMax-M3', 'deepseek-v4-flash'],
+    lower.discovery.map((stage) => [stage.target.model, stage.mode]),
+    [
+      ['MiniMax-M3', 'api'],
+      ['deepseek-v4-flash', 'api'],
+    ],
   );
   assert.equal(lower.verification.target.model, 'deepseek-v4-flash');
 });

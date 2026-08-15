@@ -11,7 +11,7 @@ export interface ResolvedStageTarget {
   stage: ReviewStage;
   target: LlmTarget;
   tier: PassTier;
-  mode: 'agentic' | 'api';
+  mode: 'agentic' | 'investigate' | 'api';
   required: boolean;
 }
 
@@ -70,7 +70,11 @@ export class ProviderCatalog {
         ) {
           throw new Error(`DeepSeek v4 Flash at max reasoning is required for ${stage.id}`);
         }
-        return { stage, target, tier: 'deepseek-flash', mode: 'api', required: stage.required };
+        // Alongside Luna, Flash is the second agentic reviewer (checkout + tools).
+        // Verification and dual-model discovery stay one-shot API calls.
+        const mode =
+          opts.agenticLuna && stage.kind === 'discovery' ? 'investigate' : 'api';
+        return { stage, target, tier: 'deepseek-flash', mode, required: stage.required };
       }
       case 'minimax': {
         const target = this.config.standardModel;

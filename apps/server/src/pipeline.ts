@@ -78,9 +78,9 @@ export { mayPublishRuntimeEvidence } from './application/review/publication-serv
  *  - 'codex-hybrid' → pass 1 (general) on CODEX (sharp), pass 2+ (deep-dive) on
  *    MiniMax (thorough breadth, and it reasons hard where codex's deep-dive skips).
  *  - 'multi-model'  → THREE discovery passes for blind-spot diversity:
- *    pass 1 Luna/Codex (general), pass 2 DeepSeek v4 Flash (deep-dive plus
- *    removed-behavior/callers), pass 3 MiniMax
- *    (perf/completeness), followed by a separate Flash verification pass.
+ *    pass 1 Luna/Codex (general, agentic), pass 2 DeepSeek v4 Flash (deep-dive
+ *    agentic tool-loop on the same checkout), pass 3 MiniMax (one-shot
+ *    perf/completeness), followed by a separate Flash verification pass.
  *  - 'dual-model' → TWO discovery passes: MiniMax (general) + DeepSeek v4 Flash
  *    (deep-dive). Flash also runs the end-of-review verify pass.
  * Legacy model-tier values remain readable for stored configuration, but the

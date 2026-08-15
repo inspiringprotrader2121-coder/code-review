@@ -1,5 +1,4 @@
 import type { ReviewConfig } from '@orvex-review/rules';
-import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { mergeFindingProvenance, type ReviewFinding } from './finding.js';
 import { sameDefectText } from './similarity.js';
 
@@ -22,16 +21,8 @@ const CONSEQUENCE_RE =
 /**
  * True when a finding names both a trigger and a consequence.
  *
- * The review prompt already requires "a concrete FAILURE SCENARIO (input/state
- * → wrong outcome)" for every finding, so a message with neither is failing our
- * own contract. Benchmarking against Greptile v5 showed Orvex posting several
- * times as many inline comments per PR, and the surplus was concentrated in
- * exactly these unfalsifiable P3 observations ("this pattern is risky",
- * "consider validating") that a reader cannot act on or dismiss.
- *
- * Deliberately used ONLY to choose a SURFACE, never to drop a finding: P1
- * always posts inline, and a gated P2/P3 still appears in the summary table with
- * its apply-fix checkbox. A wrong call here costs prominence, not the finding.
+ * Kept as a quality check, not an output gate. Lined findings always post on
+ * the diff; using this to demote them produced detached issue comments.
  */
 export function hasConcreteFailurePath(message: string): boolean {
   const text = message.trim();
@@ -62,24 +53,11 @@ export function filterAndCapFindings(
   const inline: ReviewFinding[] = [];
   const summaryOnly: ReviewFinding[] = [];
 
-  // Findings that cannot state what triggers them and what goes wrong are the
-  // bulk of our excess comment volume vs Greptile (median 5 vs 1 inline/PR).
-  // They go to the summary table instead of the diff. P1 is never gated — a
-  // marquee bug always earns an inline comment. P2/P3 must earn the surface.
-  // Gated, never dropped: the finding still reaches the author with its
-  // apply-fix checkbox.
-  const evidenceGate = loadReviewRuntimeConfig().inlineEvidenceGate;
-  const earnsInline = (f: ReviewFinding): boolean => {
-    if (!evidenceGate) return true;
-    if (f.severity === 'P1') return true;
-    return hasConcreteFailurePath(f.message);
-  };
-
   for (const f of capped) {
-    // Confidence is telemetry, not an output gate. Severity and a usable diff
-    // anchor determine the normal review surface; the verifier may still demote
-    // a concretely refuted candidate to manual review with its evidence.
-    if (typeof f.line === 'number' && earnsInline(f)) inline.push(f);
+    // Confidence is telemetry, not an output gate. A usable diff line is the
+    // review surface — never a detached issue-thread comment. Findings without
+    // a line stay in the summary table.
+    if (typeof f.line === 'number') inline.push(f);
     else summaryOnly.push(f);
   }
 

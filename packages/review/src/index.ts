@@ -117,6 +117,7 @@ export {
 export { runAgent, type AgentFile, type AgentOptions, type AgentResponse } from './agent.js';
 export {
   runInvestigateReview,
+  investigateThinkingEnabled,
   resolveUnderRoot,
   isSafeGrepPattern,
   isSafeGlob,

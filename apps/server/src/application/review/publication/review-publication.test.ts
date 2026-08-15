@@ -134,3 +134,48 @@ test('verification-incomplete publication records the limitation in the durable 
   assert.match(result.incompleteReason ?? '', /^review incomplete: verification did not complete/);
   assert.match(result.incompleteReason ?? '', /no parseable JSON/);
 });
+
+test('summary-table findings are not posted as detached issue comments', async () => {
+  let issueComments = 0;
+  const input = publicationInput({
+    plan: { id: 'enterprise', autofix: true, codeExecution: true, modelTier: 'multi-model' },
+    findings: {
+      inline: [],
+      summaryOnly: [
+        {
+          file: 'backend/src/lib/redis-lock.js',
+          line: 168,
+          severity: 'P3',
+          category: 'correctness',
+          message: 'fence resets to zero for every acquisition',
+          confidence: 0.8,
+          ruleId: 'llm.general',
+        },
+      ],
+      nitpicks: [],
+      allFixed: [],
+      stats: { newCount: 1, fixedCount: 0, openCount: 1 },
+    },
+    octokit: {
+      rest: {
+        pulls: {
+          get: async () => ({ data: { state: 'open' } }),
+          createReview: async () => ({
+            data: { id: 17, html_url: 'https://example.test/review/17' },
+          }),
+        },
+        issues: {
+          createComment: async () => {
+            issueComments += 1;
+            return { data: { id: 99 } };
+          },
+        },
+      },
+    },
+  });
+
+  const result = await publishReview(directPublisher, input);
+
+  assert.equal(result.published, true);
+  assert.equal(issueComments, 0);
+});

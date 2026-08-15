@@ -9,6 +9,7 @@ import {
   resolveUnderRoot,
   runInvestigateTool,
   extractDeletedSymbols,
+  investigateThinkingEnabled,
 } from './investigate.js';
 
 test('resolveUnderRoot confines paths under checkout', () => {
@@ -172,4 +173,11 @@ test('extractDeletedSymbols includes fully deleted files', () => {
     },
   ]);
   assert.ok(symbols.includes('guardTenant'));
+});
+
+test('investigate thinking stays off until the findings turn', () => {
+  assert.equal(investigateThinkingEnabled(0, 6), false);
+  assert.equal(investigateThinkingEnabled(4, 6), false);
+  assert.equal(investigateThinkingEnabled(5, 6), true);
+  assert.equal(investigateThinkingEnabled(0, 1), true);
 });

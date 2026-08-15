@@ -336,3 +336,28 @@ test('agentic reviews start a fresh Codex thread in the isolated container', asy
   assert.equal(receivedOptions.length, 1);
   assert.equal('threadId' in (receivedOptions[0] ?? {}), false);
 });
+
+test('agentic Flash is not split into focused API shards', () => {
+  const luna = call('gpt-5.6-luna', 1);
+  luna.mode = 'agentic';
+  const flash = call('deepseek-v4-flash', 2);
+  flash.mode = 'investigate';
+  flash.modelPassIndex = 1;
+  flash.passTag = 'deep-dive';
+  const minimax = call('MiniMax-M3', 3);
+  minimax.modelPassIndex = 3;
+  minimax.passTag = 'perf/completeness/api';
+  const large = Array.from({ length: 12 }, (_, index) => ({
+    filename: `src/large-${index}.ts`,
+    status: 'modified',
+    patch: `@@ -${index * 10 + 1},1 +${index * 10 + 1},1 @@\n-OLD_MARKER_${index}\n+NEW_MARKER_${index}\n${'+x'.repeat(1_400)}`,
+  })) as ChangedFile[];
+  const scheduled = boundHighTierDiscoveryWorkloads([luna, flash, minimax], large);
+  const flashCalls = scheduled.filter((entry) => entry.passTag === 'deep-dive');
+  const minimaxCalls = scheduled.filter((entry) => entry.passTag === 'perf/completeness/api');
+  assert.equal(flashCalls.length, 1);
+  assert.equal(flashCalls[0]?.mode, 'investigate');
+  assert.equal(flashCalls[0]?.requiredCoverageKey, undefined);
+  assert.ok(minimaxCalls.length > 1);
+  assert.ok(minimaxCalls.every((entry) => entry.mode === 'api'));
+});

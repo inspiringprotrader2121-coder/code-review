@@ -1002,6 +1002,62 @@ test('review runs: recorded and aggregated into workspace stats', () => {
   assert.equal(db.listReviewRuns(other.id).length, 0);
 });
 
+test('tenant concurrency overflow does not record a skipped dashboard run', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('overflow');
+  const reserved = db.tryReserveReviewRun(
+    {
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'acme',
+      repo: 'api',
+      pr: 295,
+      headSha: 'waiting',
+      action: 'opened',
+    },
+    () => 'concurrency_limited',
+  );
+  assert.equal(reserved.ok, false);
+  if (!reserved.ok) assert.equal(reserved.reason, 'concurrency_limited');
+  assert.equal(db.listReviewRuns(tenant.id).length, 0);
+  assert.equal(db.getWorkspaceStats(tenant.id, 14).runsSkipped, 0);
+});
+
+test('dashboard hides leftover concurrency wait placeholders so completed reviews stay visible', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('visible');
+  const base = {
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'acme',
+    repo: 'api',
+    headSha: 'abc1234',
+    action: 'opened' as const,
+  };
+  db.recordReviewRun({
+    ...base,
+    pr: 286,
+    status: 'completed',
+    durationMs: 1000,
+    findingsNew: 4,
+  });
+  db.recordReviewRun({
+    ...base,
+    pr: 295,
+    status: 'skipped',
+    skipReason: 'concurrency_limited',
+    durationMs: 0,
+  });
+  const runs = db.listReviewRuns(tenant.id, 8);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]?.pr, 286);
+  assert.equal(runs[0]?.status, 'completed');
+  const stats = db.getWorkspaceStats(tenant.id, 14);
+  assert.equal(stats.runsTotal, 1);
+  assert.equal(stats.runsCompleted, 1);
+  assert.equal(stats.runsSkipped, 0);
+});
+
 test('review runs: setReviewRunHeadSha re-points a run at the effective SHA', () => {
   const db = freshDb();
   const tenant = db.createTenant('acme');

@@ -54,7 +54,10 @@ export class WorkspaceReadRepository implements WorkspaceReadStore {
                )
            )
          ) AS cost_estimated
-         FROM review_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`,
+         FROM review_runs
+         WHERE tenant_id = ?
+           AND NOT (status = 'skipped' AND skip_reason = 'concurrency_limited')
+         ORDER BY created_at DESC LIMIT ?`,
       )
       .all(tenantId, limit) as ReviewRunRow[];
     return rows.map(mapReviewRun);
@@ -73,7 +76,9 @@ export class WorkspaceReadRepository implements WorkspaceReadStore {
            SUM(findings_fixed) AS findings_fixed,
            SUM(cost_usd) AS cost_usd,
            AVG(CASE WHEN status = 'completed' THEN duration_ms END) AS avg_duration_ms
-         FROM review_runs WHERE tenant_id = ? AND created_at >= ?`,
+         FROM review_runs
+         WHERE tenant_id = ? AND created_at >= ?
+           AND NOT (status = 'skipped' AND skip_reason = 'concurrency_limited')`,
       )
       .get(tenantId, since) as WorkspaceStatsRow;
     return {

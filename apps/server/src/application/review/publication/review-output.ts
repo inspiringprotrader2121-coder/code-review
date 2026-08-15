@@ -1,11 +1,5 @@
-import {
-  applyCheckboxLine,
-  commandTrigger,
-  displaySeverity,
-  fingerprintFinding,
-  formatReviewBody,
-} from '@orvex-review/review';
-import { postPullRequestReview, replyToIssueComment } from '@orvex-review/github';
+import { commandTrigger, formatReviewBody } from '@orvex-review/review';
+import { postPullRequestReview } from '@orvex-review/github';
 import type { ArtifactPublisher, PublicationInput } from './contracts.js';
 import { buildInlineComments } from './inline-comments.js';
 
@@ -83,33 +77,7 @@ export async function publishReviewOutput(
     commentIdMap.set(`${comment.path}:${comment.line}`, comment.id);
   }
 
-  if (input.plan.autofix && summaryOnly.length > 0) {
-    for (const finding of summaryOnly.slice(0, input.policy.maxUnanchoredComments)) {
-      await publishUnanchoredFinding(publisher, input, scope, finding);
-    }
-  }
+  // Summary-only findings stay in the review table. Posting them as issue
+  // comments made a second, detached thread without the inline AI-agent prompt.
   return { reviewId: review.reviewId, commentIdMap };
-}
-
-async function publishUnanchoredFinding(
-  publisher: ArtifactPublisher,
-  input: PublicationInput,
-  scope: { tenantId: string; runId: string },
-  finding: PublicationInput['findings']['summaryOnly'][number],
-): Promise<void> {
-  const fingerprint = fingerprintFinding(finding);
-  const parts = [
-    `**${displaySeverity(finding.severity)}** · \`${finding.file}${finding.line ? `:${finding.line}` : ''}\` · \`${finding.ruleId}\``,
-    '',
-    finding.message,
-  ];
-  if (finding.fixedCode) parts.push('', '```suggestion-preview', finding.fixedCode, '```');
-  parts.push('', applyCheckboxLine(fingerprint, finding.fixedCode !== undefined));
-  try {
-    await publisher.publishArtifact(scope, `unanchored:${input.effectiveSha}:${fingerprint}`, () =>
-      replyToIssueComment(input.octokit, input.ref, parts.join('\n')),
-    );
-  } catch (error) {
-    console.warn('[worker] unanchored-finding comment failed:', (error as Error).message);
-  }
 }
