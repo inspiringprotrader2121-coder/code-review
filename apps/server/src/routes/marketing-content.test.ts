@@ -65,6 +65,7 @@ test('public marketing explains every plan and does not disclose review provider
   ]) {
     assert.match(normalizedHome, new RegExp(escapeRegExp(expected)));
   }
+  assert.match(home, /<meta name="yandex-verification" content="94885c8f0fa2d0a4" \/>/);
   assert.match(home, /id="faq"/);
   assert.equal((home.match(/class="faq-item"/g) ?? []).length, 11);
   assert.match(home, /id="commands"/);
