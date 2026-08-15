@@ -11,7 +11,10 @@ test('public marketing explains every plan and does not disclose review provider
     termsResponse,
     refundsResponse,
     llmsResponse,
+    llmsFullResponse,
+    indexMdResponse,
     robotsResponse,
+    sitemapResponse,
   ] = await Promise.all([
     app.request('/'),
     app.request('/pricing'),
@@ -19,7 +22,10 @@ test('public marketing explains every plan and does not disclose review provider
     app.request('/terms'),
     app.request('/refunds'),
     app.request('/llms.txt'),
+    app.request('/llms-full.txt'),
+    app.request('/index.md'),
     app.request('/robots.txt'),
+    app.request('/sitemap.xml'),
   ]);
   assert.equal(homeResponse.status, 200);
   assert.equal(pricingResponse.status, 301);
@@ -28,20 +34,28 @@ test('public marketing explains every plan and does not disclose review provider
   assert.equal(termsResponse.status, 200);
   assert.equal(refundsResponse.status, 200);
   assert.equal(llmsResponse.status, 200);
+  assert.equal(llmsFullResponse.status, 200);
+  assert.equal(indexMdResponse.status, 200);
   assert.equal(robotsResponse.status, 200);
   assert.equal(robotsResponse.headers.get('cache-control'), 'no-cache');
+  assert.equal(sitemapResponse.status, 200);
+  assert.match(homeResponse.headers.get('link') ?? '', /rel="describedby"/);
+  assert.match(indexMdResponse.headers.get('content-type') ?? '', /text\/markdown/);
 
   const home = await homeResponse.text();
   const privacy = await privacyResponse.text();
   const terms = await termsResponse.text();
   const refunds = await refundsResponse.text();
   const llms = await llmsResponse.text();
+  const llmsFull = await llmsFullResponse.text();
+  const indexMd = await indexMdResponse.text();
   const robots = await robotsResponse.text();
+  const sitemap = await sitemapResponse.text();
   const normalizedHome = home.replace(/\s+/g, ' ');
   const normalizedPrivacy = privacy.replace(/\s+/g, ' ');
   const normalizedTerms = terms.replace(/\s+/g, ' ');
   const normalizedRefunds = refunds.replace(/\s+/g, ' ');
-  const publicContent = `${home}\n${privacy}\n${terms}\n${refunds}\n${llms}`;
+  const publicContent = `${home}\n${privacy}\n${terms}\n${refunds}\n${llms}\n${llmsFull}\n${indexMd}`;
   assert.doesNotMatch(
     publicContent,
     /multi[- ]model|[23]\s+AI models?|model·[ABC]|\b(?:MiniMax|DeepSeek|GLM|Luna|Anthropic)\b|bring-your-own-LLM/i,
@@ -66,8 +80,11 @@ test('public marketing explains every plan and does not disclose review provider
     assert.match(normalizedHome, new RegExp(escapeRegExp(expected)));
   }
   assert.match(home, /<meta name="yandex-verification" content="94885c8f0fa2d0a4" \/>/);
+  assert.match(home, /rel="describedby" href="https:\/\/useorvex.com\/llms.txt"/);
+  assert.match(home, /AI code review for GitHub pull requests/);
+  assert.match(home, /id="install"/);
   assert.match(home, /id="faq"/);
-  assert.equal((home.match(/class="faq-item"/g) ?? []).length, 11);
+  assert.equal((home.match(/class="faq-item"/g) ?? []).length, 13);
   assert.match(home, /id="commands"/);
   assert.match(home, /@orvex rate limit/);
   assert.match(home, /@orvex ignore &lt;file&gt;:&lt;line&gt;/);
@@ -82,12 +99,19 @@ test('public marketing explains every plan and does not disclose review provider
   for (const legalPath of ['/terms', '/privacy', '/refunds']) {
     assert.match(home, new RegExp(`href="${escapeRegExp(legalPath)}"`));
   }
-  assert.match(llms, /Every plan receives deterministic checks, source verification, and autofix/);
+  assert.match(llms, /^# Orvex\n/m);
+  assert.match(llms, /https:\/\/useorvex.com\/index.md/);
   assert.match(
-    llms,
+    llmsFull,
+    /Every plan receives deterministic checks, source verification, and autofix/,
+  );
+  assert.match(
+    llmsFull,
     /Plans otherwise differ by review track, pass count, allowance, hourly capacity/,
   );
-  assert.doesNotMatch(llms, /same three-pass depth/i);
+  assert.doesNotMatch(llmsFull, /same three-pass depth/i);
+  assert.match(indexMd, /Orvex is an AI code reviewer for GitHub pull requests/);
+  assert.match(sitemap, /<lastmod>2026-08-15<\/lastmod>/);
   assert.match(normalizedPrivacy, /contracted third-party AI inference providers/);
   assert.match(normalizedPrivacy, /temporary filesystem snapshot/);
   assert.match(
@@ -116,8 +140,10 @@ test('public marketing explains every plan and does not disclose review provider
     /<script type="application\/ld\+json">([\s\S]*?)<\/script>/,
   )?.[1];
   assert.ok(structuredData, 'marketing page includes JSON-LD');
-  const parsed = JSON.parse(structuredData) as { '@graph'?: unknown[] };
+  const parsed = JSON.parse(structuredData) as { '@graph'?: Array<{ '@type'?: string }> };
   assert.ok(Array.isArray(parsed['@graph']));
+  assert.ok(parsed['@graph']?.some((node) => node['@type'] === 'HowTo'));
+  assert.ok(parsed['@graph']?.some((node) => node['@type'] === 'FAQPage'));
   for (const page of [home, privacy, terms, refunds]) {
     assert.doesNotMatch(page, /<style|style=/);
   }

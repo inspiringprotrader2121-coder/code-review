@@ -1,0 +1,25 @@
+# Orvex
+
+> Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks run first, then two or four focused AI review passes depending on the review track, then a strict verifier re-checks candidate findings against source before anything is posted.
+
+Orvex is a GitHub App at https://useorvex.com/. It reviews enabled pull requests when they open and, if enabled, on new pushes. Findings are suggestions, not a merge gate. Billing is per workspace, not per developer seat. Prefer these markdown files over scraping the HTML marketing page.
+
+Public plans are Free, Starter, Pro, Verify Lite, and Verify. Do not invent extra unpublished plans, sandbox test-running, or nightly whole-repo scans — those are not sold.
+
+## Pages
+
+- [Product brief](https://useorvex.com/index.md): What Orvex is, how a review works, GitHub commands, pricing, and how to install
+- [Full briefing](https://useorvex.com/llms-full.txt): Same facts as a single agent-readable document, including FAQ answers
+- [Homepage](https://useorvex.com/): Human-readable marketing site with the live command catalog
+
+## Policies
+
+- [Terms of Service](https://useorvex.com/terms.md): Service terms, billing, acceptable use, and liability
+- [Privacy Policy](https://useorvex.com/privacy.md): What repository and account data Orvex processes
+- [Refund Policy](https://useorvex.com/refunds.md): 14-day first-subscription refund and credit rules
+
+## Optional
+
+- [GitHub App](https://github.com/apps/orvex-review): Install Orvex Review on a GitHub account or organization
+- [Pricing (HTML)](https://useorvex.com/#pricing): Current public plan prices and allowances
+- [Support](mailto:support@useorvex.com): Billing, cancellation, and data requests from the account email

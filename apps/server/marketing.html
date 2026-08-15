@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Orvex — AI Code Review That Catches Bugs Before Production</title>
+    <title>Orvex | AI Code Review for GitHub Pull Requests</title>
     <meta
       name="description"
-      content="Orvex reviews GitHub pull requests with deterministic checks, two or four focused AI passes by review track, strict finding verification, finding memory, and autofix. Start with 10 free reviews, no card."
+      content="Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks run first, then two or four focused AI passes by track, then strict verification. 10 free reviews, no card."
     />
     <meta
       name="keywords"
-      content="AI code review, automated pull request review, GitHub PR reviewer, pull request analysis, catch bugs before production"
+      content="AI code review, GitHub pull request reviewer, GitHub App PR review, automated code review, catch bugs before production"
     />
     <meta
       name="robots"
@@ -19,6 +19,8 @@
     <meta name="yandex-verification" content="94885c8f0fa2d0a4" />
     <meta name="author" content="Orvex" />
     <link rel="canonical" href="https://useorvex.com/" />
+    <link rel="alternate" type="text/markdown" href="https://useorvex.com/index.md" />
+    <link rel="describedby" href="https://useorvex.com/llms.txt" />
     <meta name="theme-color" content="#0a0c10" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#fbfcfe" media="(prefers-color-scheme: light)" />
     <link
@@ -29,11 +31,11 @@
     <meta property="og:site_name" content="Orvex" />
     <meta
       property="og:title"
-      content="Orvex — AI Code Review That Catches Bugs Before Production"
+      content="Orvex | AI Code Review for GitHub Pull Requests"
     />
     <meta
       property="og:description"
-      content="Two or four focused review passes by track, strict finding verification, and autofix for GitHub pull requests. 10 free reviews, no card."
+      content="Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks, two or four focused AI passes by track, then strict verification. 10 free reviews, no card."
     />
     <meta property="og:url" content="https://useorvex.com/" />
     <meta property="og:image" content="https://useorvex.com/og-image.png" />
@@ -47,11 +49,11 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta
       name="twitter:title"
-      content="Orvex — AI Code Review That Catches Bugs Before Production"
+      content="Orvex | AI Code Review for GitHub Pull Requests"
     />
     <meta
       name="twitter:description"
-      content="Two or four focused review passes by track with strict finding verification. 10 free reviews, no card."
+      content="Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks, two or four AI passes by track, then strict verification. 10 free reviews, no card."
     />
     <meta name="twitter:image" content="https://useorvex.com/og-image.png" />
     <meta name="twitter:image:alt" content="Orvex catches bugs before production." />
@@ -66,13 +68,15 @@
             "url": "https://useorvex.com/",
             "logo": "https://useorvex.com/og-image.png",
             "email": "support@useorvex.com",
-            "description": "Orvex builds an AI code reviewer that catches bugs in GitHub pull requests before they reach production."
+            "sameAs": ["https://github.com/apps/orvex-review"],
+            "description": "Orvex is an AI code reviewer for GitHub pull requests. It catches bugs before they reach production."
           },
           {
             "@type": "WebSite",
             "@id": "https://useorvex.com/#website",
             "url": "https://useorvex.com/",
             "name": "Orvex",
+            "description": "AI code review for GitHub pull requests.",
             "publisher": { "@id": "https://useorvex.com/#organization" },
             "inLanguage": "en"
           },
@@ -85,7 +89,8 @@
             "operatingSystem": "Web-based, GitHub App",
             "url": "https://useorvex.com/",
             "image": "https://useorvex.com/og-image.png",
-            "description": "Orvex reviews enabled GitHub pull requests with deterministic checks, two or four focused AI review passes depending on the review track, strict finding verification, finding memory, and autofix.",
+            "description": "Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks run first, then two or four focused AI review passes depending on the review track, then a strict verifier checks findings against source before posting.",
+            "isAccessibleForFree": true,
             "featureList": [
               "Two or four focused AI review passes depending on the review track",
               "Deterministic rules before AI analysis",
@@ -98,6 +103,7 @@
             "publisher": { "@id": "https://useorvex.com/#organization" },
             "offers": {
               "@type": "AggregateOffer",
+              "url": "https://useorvex.com/#pricing",
               "priceCurrency": "USD",
               "lowPrice": "0",
               "highPrice": "99",
@@ -142,6 +148,38 @@
             }
           },
           {
+            "@type": "HowTo",
+            "@id": "https://useorvex.com/#install",
+            "name": "How to install Orvex on GitHub",
+            "description": "Create a free Orvex account, install the Orvex Review GitHub App, select repositories, and open a pull request.",
+            "step": [
+              {
+                "@type": "HowToStep",
+                "position": 1,
+                "name": "Create a free account",
+                "text": "Sign up at useorvex.com. Free includes 10 lifetime reviews and does not require a card."
+              },
+              {
+                "@type": "HowToStep",
+                "position": 2,
+                "name": "Install the GitHub App",
+                "text": "Continue to GitHub and install the Orvex Review GitHub App on your account or organization."
+              },
+              {
+                "@type": "HowToStep",
+                "position": 3,
+                "name": "Select repositories",
+                "text": "Pick which repositories Orvex may review. It does not see repos you do not select."
+              },
+              {
+                "@type": "HowToStep",
+                "position": 4,
+                "name": "Open a pull request",
+                "text": "Open or push to a pull request. Orvex reviews it automatically."
+              }
+            ]
+          },
+          {
             "@type": "FAQPage",
             "@id": "https://useorvex.com/#faq",
             "mainEntity": [
@@ -151,6 +189,14 @@
                 "acceptedAnswer": {
                   "@type": "Answer",
                   "text": "Orvex is an AI code reviewer for GitHub. Deterministic checks run first, two or four focused AI review passes (by review track) examine the change and relevant repository context, and candidate findings are merged, deduplicated, and strictly verified before posting."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "How do I install Orvex on GitHub?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Create a free Orvex account, install the Orvex Review GitHub App, select the repositories it may review, then open a pull request. No GitHub password is pasted into Orvex."
                 }
               },
               {
@@ -276,11 +322,12 @@
             >
             <h1 class="slogan">
               <span class="product-name">Orvex</span
-              ><span class="slogan-copy"> catches bugs before production.</span
+              ><span class="slogan-copy"> — AI code review for GitHub pull requests.</span
               ><span class="cursor" aria-hidden="true"></span>
             </h1>
             <p class="lede">
-              Orvex reviews enabled pull requests when they open and when new commits arrive.
+              Orvex is an AI code reviewer for GitHub pull requests. It reviews enabled PRs when
+              they open and when new commits arrive.
               <b>Deterministic rules run first</b>, two or four focused <b>AI review passes</b> (by
               track) examine different failure modes, and a strict verifier checks the evidence
               before anything is posted.
@@ -677,6 +724,23 @@
           </div>
           <div class="faq-list">
             <details class="faq-item" open>
+              <summary>What is Orvex?</summary>
+              <p>
+                Orvex is an AI code reviewer for GitHub pull requests. Deterministic checks run
+                first. Two or four focused AI passes (by review track) then inspect correctness,
+                security, reliability, performance, and contract edges. Orvex merges duplicate
+                findings and strictly verifies the evidence before posting.
+              </p>
+            </details>
+            <details class="faq-item">
+              <summary>How do I install Orvex on GitHub?</summary>
+              <p>
+                Create a free account, continue to GitHub to install the Orvex Review GitHub App,
+                select the repositories Orvex may review, then open a pull request. See
+                <a href="#install">How to install</a>. No GitHub password is pasted into Orvex.
+              </p>
+            </details>
+            <details class="faq-item">
               <summary>How does an Orvex review work?</summary>
               <p>
                 When a pull request opens or receives a new push, deterministic checks run first.
@@ -785,6 +849,12 @@
             <p>
               Install the GitHub App and your next pull request gets reviewed — before it merges.
             </p>
+            <ol class="install-steps" id="install">
+              <li>Create a free Orvex account (10 lifetime reviews, no card).</li>
+              <li>Continue to GitHub and install the Orvex Review GitHub App.</li>
+              <li>Select the repositories Orvex may review.</li>
+              <li>Open or push to a pull request. Orvex reviews it automatically.</li>
+            </ol>
             <div class="cta-row">
               <a class="btn btn-primary btn-lg" href="/auth/register"
                 >Start free — 10 reviews, no card</a
@@ -816,6 +886,7 @@
           <a href="/terms">Terms</a>
           <a href="/privacy">Privacy</a>
           <a href="/refunds">Refunds</a>
+          <a href="/llms.txt">llms.txt</a>
           <a href="/auth/register">Start free</a>
         </div>
         <div class="foot-copy">

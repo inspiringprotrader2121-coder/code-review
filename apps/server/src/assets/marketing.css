@@ -1136,6 +1136,19 @@ section {
   justify-content: center;
   position: relative;
 }
+.install-steps {
+  position: relative;
+  text-align: left;
+  max-width: 520px;
+  margin: 0 auto 28px;
+  padding-left: 1.3em;
+  color: var(--ink-2);
+  font-size: 15.5px;
+  line-height: 1.55;
+}
+.install-steps li + li {
+  margin-top: 8px;
+}
 
 /* ---------- FOOTER ---------- */
 footer {

@@ -40,6 +40,62 @@ function staticPage(file: string, fallbackTitle: string): string {
   return html;
 }
 
+function staticPlain(file: string): string {
+  let text = pageCache.get(file);
+  if (text === undefined) {
+    text = readFileSync(path.resolve(__dirname, `../../${file}`), 'utf8');
+    pageCache.set(file, text);
+  }
+  return text;
+}
+
+function sendMarkdown(
+  c: { header: (k: string, v: string) => void; body: (v: string) => Response },
+  body: string,
+) {
+  c.header('Content-Type', 'text/markdown; charset=utf-8');
+  c.header('Cache-Control', 'public, max-age=86400');
+  c.header('Link', '</llms.txt>; rel="describedby"');
+  return c.body(body.endsWith('\n') ? body : `${body}\n`);
+}
+
+function sendHtml(
+  c: { header: (k: string, v: string) => void; html: (v: string) => Response },
+  html: string,
+  markdownPath: string,
+) {
+  c.header(
+    'Link',
+    `<${markdownPath}>; rel="alternate"; type="text/markdown", </llms.txt>; rel="describedby"`,
+  );
+  return c.html(html);
+}
+
+/** Best-effort HTML → Markdown so agents can fetch /terms.md without scraping chrome. */
+function htmlMainToMarkdown(html: string): string {
+  const main = html.match(/<main\b[\s\S]*?<\/main>/i)?.[0] ?? html;
+  const decoded = main
+    .replace(/<script\b[\s\S]*?<\/script>/gi, '')
+    .replace(/<a class="(?:skip-link|home)"[\s\S]*?<\/a>/gi, '')
+    .replace(/<a href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)')
+    .replace(/<strong>([\s\S]*?)<\/strong>/gi, '**$1**')
+    .replace(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi, '# $1\n\n')
+    .replace(/<h2\b[^>]*>([\s\S]*?)<\/h2>/gi, '## $1\n\n')
+    .replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, '$1\n\n')
+    .replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, '- $1\n')
+    .replace(/<\/?(?:ul|ol|main|div|span|hr)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return `${decoded}\n`;
+}
+
 export function marketingRoutes() {
   const app = new Hono();
   app.get('/', (c) => {
@@ -48,7 +104,7 @@ export function marketingRoutes() {
       '<!--ORVEX_COMMANDS_ROWS-->',
       formatCommandsHtmlRows('@orvex'),
     );
-    return c.html(html);
+    return sendHtml(c, html, '/index.md');
   });
   // Keep older upgrade links working while the pricing section remains an
   // anchor on the single-page marketing site.
@@ -62,9 +118,23 @@ export function marketingRoutes() {
     return c.body(png);
   });
   // Legal pages — linked from the pricing section, the footer, and Stripe.
-  app.get('/terms', (c) => c.html(staticPage('terms.html', 'Terms of Service')));
-  app.get('/privacy', (c) => c.html(staticPage('privacy.html', 'Privacy Policy')));
-  app.get('/refunds', (c) => c.html(staticPage('refunds.html', 'Refund Policy')));
+  app.get('/terms', (c) => sendHtml(c, staticPage('terms.html', 'Terms of Service'), '/terms.md'));
+  app.get('/privacy', (c) =>
+    sendHtml(c, staticPage('privacy.html', 'Privacy Policy'), '/privacy.md'),
+  );
+  app.get('/refunds', (c) =>
+    sendHtml(c, staticPage('refunds.html', 'Refund Policy'), '/refunds.md'),
+  );
+  app.get('/index.md', (c) => sendMarkdown(c, staticPlain('index.md')));
+  app.get('/terms.md', (c) =>
+    sendMarkdown(c, htmlMainToMarkdown(staticPage('terms.html', 'Terms of Service'))),
+  );
+  app.get('/privacy.md', (c) =>
+    sendMarkdown(c, htmlMainToMarkdown(staticPage('privacy.html', 'Privacy Policy'))),
+  );
+  app.get('/refunds.md', (c) =>
+    sendMarkdown(c, htmlMainToMarkdown(staticPage('refunds.html', 'Refund Policy'))),
+  );
 
   // ——— SEO / AI-discoverability ———
   // robots.txt: all crawlers may index public content, but authenticated and
@@ -78,6 +148,12 @@ export function marketingRoutes() {
     c.header('Cache-Control', 'no-cache');
     return c.body(
       [
+        '# AI briefing files (not crawl-control): https://useorvex.com/llms.txt',
+        '# Full briefing: https://useorvex.com/llms-full.txt',
+        '# GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot, Claude-SearchBot,',
+        '# PerplexityBot, Google-Extended, Googlebot, Bingbot, Applebot, and',
+        '# Yandex follow User-agent: *. Do not add named Allow: / groups;',
+        '# those would skip the Disallow rules below.',
         'User-agent: *',
         'Allow: /',
         'Disallow: /dashboard',
@@ -96,11 +172,17 @@ export function marketingRoutes() {
   });
 
   app.get('/sitemap.xml', (c) => {
-    const pages = ['/', '/terms', '/privacy', '/refunds'];
+    const lastmod = '2026-08-15';
+    const pages: Array<{ path: string; changefreq: string; priority: string }> = [
+      { path: '/', changefreq: 'weekly', priority: '1.0' },
+      { path: '/terms', changefreq: 'monthly', priority: '0.5' },
+      { path: '/privacy', changefreq: 'monthly', priority: '0.5' },
+      { path: '/refunds', changefreq: 'monthly', priority: '0.5' },
+    ];
     const urls = pages
       .map(
         (p) =>
-          `  <url><loc>https://useorvex.com${p}</loc><changefreq>${p === '/' ? 'weekly' : 'monthly'}</changefreq><priority>${p === '/' ? '1.0' : '0.5'}</priority></url>`,
+          `  <url><loc>https://useorvex.com${p.path}</loc><lastmod>${lastmod}</lastmod><changefreq>${p.changefreq}</changefreq><priority>${p.priority}</priority></url>`,
       )
       .join('\n');
     c.header('Content-Type', 'application/xml; charset=utf-8');
@@ -110,53 +192,16 @@ export function marketingRoutes() {
     );
   });
 
-  // llms.txt: a concise, factual, machine-readable brief for LLM ingestion
-  // (an emerging convention for generative-engine optimization). Plain facts,
-  // no marketing fluff, so an answer engine can quote it accurately.
   app.get('/llms.txt', (c) => {
     c.header('Content-Type', 'text/plain; charset=utf-8');
     c.header('Cache-Control', 'public, max-age=86400');
-    return c.body(LLMS_TXT);
+    return c.body(staticPlain('llms.txt'));
+  });
+  app.get('/llms-full.txt', (c) => {
+    c.header('Content-Type', 'text/plain; charset=utf-8');
+    c.header('Cache-Control', 'public, max-age=86400');
+    return c.body(staticPlain('llms-full.txt'));
   });
 
   return app;
 }
-
-const LLMS_TXT = `# Orvex
-
-> Orvex is an AI code reviewer for GitHub pull requests. It uses a layered pipeline
-> of deterministic checks, focused AI analysis, and strict finding verification
-> to catch bugs before production.
-
-## What it does
-- Reviews enabled GitHub repositories automatically on pull-request open and new pushes by default; each trigger can be changed per repository. \`@orvex review\` starts an on-demand review.
-- Runs deterministic rules first, then two or four focused AI review passes depending on the review track, then a strict verifier that re-checks candidate findings against source context before posting.
-- Reads the changed files plus selected imports, dependents, and relevant repository files. It reports when GitHub or configured file limits make coverage partial.
-- Tracks findings across pushes, suppresses already-reported issues, and marks findings fixed when their source anchor changes.
-- One-command auto-fix (\`@orvex fix\` / \`@orvex fix all\`) that re-verifies each finding before writing a fix.
-- Gives a copy-paste prompt per finding for use with a coding agent.
-- Paid plans can request additional analysis with \`@orvex deep\`; a deep review uses two review units.
-- Comment \`@orvex help\` on any PR for the full command list, or \`@orvex rate limit\` to check remaining quota without starting a review.
-- Repositories can tune ignores, comment limits, and deterministic checks with \`.orvex-review.yml\`. Finding confidence is recorded as telemetry, not a suppression threshold.
-
-## Pricing (USD)
-- Free: 10 lifetime reviews at up to 2/hour, no card required.
-- Starter: $29/month — 100 reviews included at up to 5/hour, then prepaid overage at $0.50/review.
-- Pro: $69/month — 500 reviews/month at up to 10/hour.
-- Verify Lite: $49/month — 50 reviews included at up to 5/hour, then prepaid overage at $0.75/review on the advanced review track.
-- Verify: $99/month — 120 reviews included at up to 10/hour, then prepaid overage at $1.50/review on the advanced review track.
-A completed standard review uses one unit. An \`@orvex deep\` review uses two.
-Skipped reviews and fix or explanation commands do not consume units. Failed reviews still count toward free-trial, hourly, and monthly caps.
-Overage past the included monthly total requires prepaid wallet credits bought in the dashboard — reviews stop if the wallet is empty.
-Every plan receives deterministic checks, source verification, and autofix. Paid plans add on-demand deep review. Plans otherwise differ by review track, pass count, allowance, hourly capacity, queue priority, and support.
-
-## Billing
-- Pricing is per workspace, not per developer seat.
-- Only a workspace owner can purchase or change a plan.
-- For cancellation or billing help, contact support@useorvex.com from the account email.
-
-## Links
-- Home: https://useorvex.com/
-- Pricing: https://useorvex.com/#pricing
-- Contact: support@useorvex.com
-`;
