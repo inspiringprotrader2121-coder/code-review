@@ -44,13 +44,13 @@ A completed standard review uses one unit. An on-demand deep review uses two. Sk
 
 ## Pricing (USD, per workspace)
 
-| Plan | Price | Allowance |
-| --- | --- | --- |
-| Free | $0 | 10 lifetime reviews, 2/hour, no card |
-| Starter | $29/month | 100 included at 5/hour, then prepaid overage at $0.50/review |
-| Pro | $69/month | 500/month hard total at 10/hour |
-| Verify Lite | $49/month | 50 included at 5/hour, then prepaid overage at $0.75/review, advanced review track |
-| Verify | $99/month | 120 included at 10/hour, then prepaid overage at $1.50/review, advanced review track |
+| Plan        | Price     | Allowance                                                                            |
+| ----------- | --------- | ------------------------------------------------------------------------------------ |
+| Free        | $0        | 10 lifetime reviews, 2/hour, no card                                                 |
+| Starter     | $29/month | 100 included at 5/hour, then prepaid overage at $0.50/review                         |
+| Pro         | $69/month | 500/month hard total at 10/hour                                                      |
+| Verify Lite | $49/month | 50 included at 5/hour, then prepaid overage at $0.75/review, advanced review track   |
+| Verify      | $99/month | 120 included at 10/hour, then prepaid overage at $1.50/review, advanced review track |
 
 Every plan includes deterministic checks, two or four focused review passes by track, strict verification, finding memory, and autofix. Paid plans also include on-demand deep review (`@orvex deep`). Plans otherwise differ by review track, allowance, hourly capacity, queue priority, and support.
 
