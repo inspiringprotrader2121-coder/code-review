@@ -548,8 +548,18 @@ export async function getProviderLoad(
   }
 }
 
+/** Whole-review replays after Luna/Flash TPM 429s, independent of ORVEX_MAX_JOB_RETRIES. */
+export const ADMISSION_JOB_REQUEUE_CAP = 8;
+
 export function isProviderAdmissionError(message: string): boolean {
-  return /concurrency saturated|admission timed out|provider lease|cooldown active|TPM .{0,120}exhausted|rate-limited on every|continuation rate-limited/i.test(
+  return /concurrency saturated|admission timed out|provider lease|cooldown active|TPM .{0,120}exhausted|rate-limited on every|continuation rate-limited|requeueing instead of publishing|rate.?limit|tokens? per min|\bTPM\b.{0,80}(?:limit|used|exceed)/i.test(
     message,
+  );
+}
+
+export function shouldRequeueAdmissionFailure(message: string, attempts = 0): boolean {
+  return (
+    isProviderAdmissionError(message) &&
+    Math.max(0, Math.floor(attempts)) < ADMISSION_JOB_REQUEUE_CAP
   );
 }

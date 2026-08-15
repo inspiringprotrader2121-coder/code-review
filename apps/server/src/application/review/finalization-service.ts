@@ -1,3 +1,4 @@
+import { shouldRequeueAdmissionFailure } from '@orvex-review/review';
 import type { FailureNotice } from './admission-service.js';
 import type { AdmittedReview, ProcessResult } from './types.js';
 import fs from 'node:fs';
@@ -100,6 +101,7 @@ export class FinalizationService {
     });
     config.store.refundOverageCredits(runId, `refund: failed review (${message.slice(0, 80)})`);
     if (
+      !shouldRequeueAdmissionFailure(message, job.attempts ?? 0) &&
       config.store.countRecentFailedRuns({
         installationId: job.installationId,
         owner: job.owner,

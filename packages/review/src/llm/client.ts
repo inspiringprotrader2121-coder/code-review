@@ -53,6 +53,16 @@ const PREFIX_CONTINUATION_MAX_MS = 180_000;
 const PREFIX_CONTINUATION_MAX_TOKENS = 24_000;
 const MAX_CONTINUATION_RATE_LIMIT_RETRIES = 2;
 
+function rateLimitAdmissionError(provider: string, keyCount: number, cause: Error): Error {
+  const retryAfterSec = Math.max(
+    1,
+    Math.ceil((parseRetryAfterMs(cause.message) ?? 60_000) / 1_000),
+  );
+  return new Error(
+    `429 rate-limited on every ${provider} key (${keyCount}); retry-after: ${retryAfterSec}; ${cause.message.slice(0, 160)}`,
+  );
+}
+
 interface ActiveProviderKey {
   apiKey: string;
   keyIndex: number;
@@ -415,22 +425,22 @@ export async function llmChat(
         continue;
       }
 
-      if (keys.length > 1 && retryable429 && triedLanes.size >= keys.length) {
+      if (retryable429 && triedLanes.size >= keys.length && keys.length > 1) {
         console.warn(
           `[llm] rate-limited on every ${provider} key (${keys.length}) — failing so the job requeues instead of waiting on a hot account`,
         );
-        throw new Error(
-          `429 rate-limited on every ${provider} key (${keys.length}); retry-after: 60`,
-        );
+        throw rateLimitAdmissionError(provider, keys.length, lastError);
       }
 
       waitRetries++;
-      if (waitRetries >= waitRetryCeiling) throw lastError;
+      if (waitRetries >= waitRetryCeiling) {
+        throw retryable429 ? rateLimitAdmissionError(provider, keys.length, lastError) : lastError;
+      }
       if (advertised !== undefined && advertised > maxWaitMs) {
         console.warn(
           `[llm] rate limit window ${Math.round(advertised / 1000)}s exceeds max wait ${Math.round(maxWaitMs / 1000)}s — failing fast instead of retrying into it`,
         );
-        throw lastError;
+        throw retryable429 ? rateLimitAdmissionError(provider, keys.length, lastError) : lastError;
       }
       const backoff = Math.min(baseMs * 2 ** (waitRetries - 1), maxWaitMs);
       const jitter = Math.floor(Math.random() * 1_000);
@@ -439,7 +449,7 @@ export async function llmChat(
         console.warn(
           `[llm] rate-limit wait budget exhausted (${Math.round(sleptMs / 1000)}s slept of ${Math.round(totalWaitBudgetMs / 1000)}s) — failing so the job requeues instead of holding a worker slot`,
         );
-        throw lastError;
+        throw retryable429 ? rateLimitAdmissionError(provider, keys.length, lastError) : lastError;
       }
       sleptMs += waitMs;
       console.warn(

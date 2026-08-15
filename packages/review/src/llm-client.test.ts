@@ -12,6 +12,8 @@ import {
   resetLocalProviderTpm,
   tryReserveProviderTpm,
   isProviderAdmissionError,
+  shouldRequeueAdmissionFailure,
+  ADMISSION_JOB_REQUEUE_CAP,
   withProviderCallSlot,
   waitForProviderAvailability,
   type LlmAttemptEvent,
@@ -1300,6 +1302,41 @@ test('an empty zero-usage provider response receives one bounded retry', async (
   );
 });
 
+test('a single Luna key 429 becomes an admission requeue after in-slot retries', async () => {
+  const calls: string[] = [];
+  await assert.rejects(
+    llmChat('sys', 'user', {
+      apiKey: 'luna-only-key',
+      model: 'gpt-5.6-luna',
+      baseUrl: 'https://api.openai.com/v1',
+      api: 'chat',
+      dependencies: {
+        retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+        admission: {
+          async acquireProviderLease() {
+            return 'luna-test';
+          },
+          async releaseProviderLease() {},
+          async getProviderCooldownMs() {
+            return 0;
+          },
+          async setProviderCooldown() {},
+        },
+        http: {
+          async fetch(_input, init) {
+            calls.push(String(new Headers(init?.headers).get('Authorization')));
+            return new Response('Rate limit reached for gpt-5.6-luna. Limit 2000000 TPM', {
+              status: 429,
+            });
+          },
+        },
+      },
+    }),
+    /rate-limited on every luna key \(1\)/,
+  );
+  assert.equal(calls.length, 1);
+});
+
 test('comma-separated API keys walk every cool key on 429 then fail', async () => {
   const calls: string[] = [];
   const events: LlmAttemptEvent[] = [];
@@ -1403,7 +1440,28 @@ test('isProviderAdmissionError treats TPM exhaustion and every-key 429 as requeu
     ),
     true,
   );
+  assert.equal(
+    isProviderAdmissionError(
+      'Rate limit reached for gpt-5.6-luna in organization org. Limit 2000000 TPM, Used 2000000',
+    ),
+    true,
+  );
+  assert.equal(
+    isProviderAdmissionError(
+      'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because provider admission was saturated or timed out while waiting for capacity; requeueing instead of publishing an incomplete review',
+    ),
+    true,
+  );
   assert.equal(isProviderAdmissionError('LLM response contained no parseable JSON'), false);
+  assert.equal(
+    shouldRequeueAdmissionFailure('429 rate-limited on every luna key (1); retry-after: 60', 0),
+    true,
+  );
+  assert.equal(
+    shouldRequeueAdmissionFailure('429 rate-limited on every luna key (1); retry-after: 60', 8),
+    false,
+  );
+  assert.equal(ADMISSION_JOB_REQUEUE_CAP, 8);
 });
 
 test('DeepSeek continuation 429 rotates to a sibling key without replaying the primary', async () => {

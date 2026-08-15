@@ -12,6 +12,8 @@ export {
   getProviderCooldownMs,
   getProviderLoad,
   isProviderAdmissionError,
+  shouldRequeueAdmissionFailure,
+  ADMISSION_JOB_REQUEUE_CAP,
   providerBucketForTarget,
   providerConcurrency,
   providerKeyLane,

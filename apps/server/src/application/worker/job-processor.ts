@@ -1,6 +1,10 @@
 import type { ReviewJobPayload, ReviewQueue } from '@orvex-review/queue';
 import { prKey, providerAdmissionFor, queueFailure } from '@orvex-review/queue';
-import { isTransientLlmError, runWithProviderAdmissionPriority } from '@orvex-review/review';
+import {
+  isTransientLlmError,
+  runWithProviderAdmissionPriority,
+  shouldRequeueAdmissionFailure,
+} from '@orvex-review/review';
 import {
   processAskJob,
   processExplainJob,
@@ -122,8 +126,10 @@ export async function processWorkerJob(
       const transient = isTransientLlmError(message);
       const code = failureCode(message, leaseOwnershipValid);
       const nextAttempt = (job.attempts ?? 0) + 1;
+      const admissionRequeue = shouldRequeueAdmissionFailure(message, job.attempts ?? 0);
       const willRetry =
-        job.action !== 'command' && transient && nextAttempt <= resolveMaxJobRetries(input.runtime);
+        job.action !== 'command' &&
+        (admissionRequeue || (transient && nextAttempt <= resolveMaxJobRetries(input.runtime)));
       finalizedOwned =
         (await queue.markFailed(job, queueFailure(code, message, willRetry))) !== false;
       if (finalizedOwned) {
@@ -209,10 +215,10 @@ async function requeueTransientFailure(
   if (!willRetry) return;
   const key = prKey(job);
   log.warn(
-    `[worker] transient failure on ${key}; re-queuing (attempt ${attempts}/${resolveMaxJobRetries(runtime)})`,
+    `[worker] transient failure on ${key}; re-queuing (attempt ${attempts}/${Math.max(resolveMaxJobRetries(runtime), attempts)})`,
   );
   try {
-    const requeued = await queue.enqueue({ ...job, attempts });
+    const requeued = await queue.enqueue({ ...job, attempts, enqueuedAt: job.enqueuedAt });
     if (!requeued.accepted)
       throw new Error(`queue refused retry as ${requeued.reason ?? 'unknown'}`);
   } catch (error) {

@@ -67,6 +67,35 @@ test('successful persisted work is completed after transient lease noise, not di
   assert.deepEqual(events, ['running', 'persist:durable-run', 'completed', 'settled', 'drain']);
 });
 
+test('Luna TPM 429s requeue even when whole-review retries are disabled', async () => {
+  const queue = new MemoryReviewQueue();
+  await queue.enqueue(job);
+  const claimed = await queue.dequeue();
+  assert.ok(claimed);
+
+  await processWorkerJob(claimed!, {
+    queue,
+    runtime: testServerConfig({ ORVEX_MAX_JOB_RETRIES: '0' }),
+    loadConfig: () => ({ store: {} }) as WorkerConfig,
+    processReview: async () => {
+      throw new Error(
+        'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because provider admission was saturated or timed out while waiting for capacity; requeueing instead of publishing an incomplete review',
+      );
+    },
+    active: () => 1,
+    capacity: 8,
+    onSettled: () => {},
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  assert.deepEqual(await queue.listDeadLetters!(), []);
+  const again = await queue.dequeue();
+  assert.equal(again?.headSha, job.headSha);
+  assert.equal(again?.attempts, 1);
+  assert.equal(again?.enqueuedAt, job.enqueuedAt);
+  await queue.markCompleted(again!);
+});
+
 test('exhausted work is dead-lettered and produces an operator alert', async () => {
   const queue = new MemoryReviewQueue();
   await queue.enqueue(job);

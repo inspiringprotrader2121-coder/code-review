@@ -47,6 +47,26 @@ test('undelivered review result refunds prepaid overage even after provider spen
   assert.equal(refunds.length, 1);
 });
 
+test('admission TPM failures skip the GitHub failure notice while they will requeue', async () => {
+  const notices: string[] = [];
+  const { review } = admittedReview();
+  review.config.store.countRecentFailedRuns = () => 1;
+  const service = new FinalizationService({
+    now: () => 2,
+    postFailureNotice: async (_config, _job, message) => {
+      notices.push(message);
+    },
+  });
+  await assert.rejects(
+    service.fail(
+      review,
+      new Error('429 rate-limited on every luna key (1); retry-after: 20; Rate limit reached TPM'),
+    ),
+    /rate-limited on every luna/,
+  );
+  assert.deepEqual(notices, []);
+});
+
 test('thrown provider failure refunds prepaid overage even when usage was recorded', async () => {
   const { review, refunds } = admittedReview();
   const service = new FinalizationService({
