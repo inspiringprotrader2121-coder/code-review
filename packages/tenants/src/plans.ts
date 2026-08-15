@@ -254,7 +254,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
   },
   enterprise: {
     id: 'enterprise',
-    label: 'Enterprise',
+    label: 'Custom plan',
     reviewPasses: 3,
     retrievalTopK: 28,
     repoSweep: false,

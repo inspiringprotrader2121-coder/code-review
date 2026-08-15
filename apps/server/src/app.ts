@@ -21,7 +21,11 @@ import { processRoleRunsHttp } from './bootstrap/topology.js';
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "base-uri 'none'",
-  "form-action 'self'",
+  // /connect's "Continue to GitHub" form GETs /auth/github/install, which 302s
+  // to github.com (OAuth proof, then the App install page). Browsers apply
+  // form-action to that whole redirect chain, so GitHub must be listed or the
+  // button appears to do nothing.
+  "form-action 'self' https://github.com",
   "frame-ancestors 'none'",
   "object-src 'none'",
   "img-src 'self' data:",

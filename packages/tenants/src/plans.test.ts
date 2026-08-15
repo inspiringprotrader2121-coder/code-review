@@ -160,6 +160,7 @@ test('priority increases with tier (queue fairness)', () => {
 });
 
 test('enterprise remains supported internally but is not exposed by customer-facing labels', () => {
+  assert.equal(planFeatures('enterprise').label, 'Custom plan');
   assert.equal(publicPlanLabel(planFeatures('enterprise')), 'Custom plan');
   assert.equal(publicPlanLabel(planFeatures('verify')), 'Verify');
 });

@@ -35,6 +35,10 @@ test('sets browser security headers and keeps authenticated surfaces out of cach
     publicResponse.headers.get('content-security-policy') ?? '',
     /frame-ancestors 'none'/,
   );
+  assert.match(
+    publicResponse.headers.get('content-security-policy') ?? '',
+    /form-action 'self' https:\/\/github.com/,
+  );
   assert.doesNotMatch(publicResponse.headers.get('content-security-policy') ?? '', /unsafe-inline/);
   assert.match(
     publicResponse.headers.get('content-security-policy') ?? '',
