@@ -10,6 +10,7 @@ import {
   type ReviewPromptContext,
   type ReviewSurfaceFinding,
   compileReviewPlan,
+  waitForProviderAvailability,
 } from '@orvex-review/review';
 import { planFeatures } from '@orvex-review/tenants';
 import { activeReviewSignal } from '../../active-reviews.js';
@@ -134,6 +135,13 @@ export function describeRequiredCoverageDegradation(
       `review incomplete: ${missingCoverageKeys.length}/${coverageKeys.length} required review ` +
       `coverage unit(s) did not complete because ${cause}`,
   };
+}
+
+/** Luna / Flash / MiniMax capacity misses must wait or requeue, not publish without that model. */
+export function shouldRequeueIncompleteCoverage(
+  degradation: RequiredCoverageDegradation | null,
+): boolean {
+  return Boolean(degradation && (degradation.admissionBlocked || degradation.transient));
 }
 
 export { takeReviewCallsByPriority } from './review-execution-policy.js';
@@ -530,7 +538,6 @@ export async function executeReviewCore(
           );
           if (
             firstDegradation &&
-            !firstDegradation.admissionBlocked &&
             firstDegradation.transient &&
             finalOutcomes.some((outcome) => outcome.ok && !outcome.bestEffort)
           ) {
@@ -540,6 +547,15 @@ export async function executeReviewCore(
               ),
             );
             if (retryCalls.length > 0) {
+              const buckets = [
+                ...new Set(retryCalls.map((call) => call.target.admissionBucket).filter(Boolean)),
+              ];
+              if (buckets.length > 0) {
+                console.warn(
+                  `[worker] waiting for ${buckets.join(', ')} capacity before retrying ${retryCalls.length} missing required coverage unit(s)`,
+                );
+                await waitForProviderAvailability(buckets, reviewAbortController.signal);
+              }
               console.warn(
                 `[worker] surgically retrying ${retryCalls.length} missing required coverage unit(s) once at full quality`,
               );
@@ -599,7 +615,9 @@ export async function executeReviewCore(
                 ? 'unparseable model responses'
                 : 'model calls errored before completing';
           throw new Error(
-            `review aborted: all ${finalOutcomes.length} model calls failed — ${why}. Will retry on the next push or \`@orvex review\`.`,
+            transientCount > 0
+              ? `review aborted: all ${finalOutcomes.length} model calls failed — ${why}; requeueing instead of publishing an incomplete review`
+              : `review aborted: all ${finalOutcomes.length} model calls failed — ${why}. Will retry on the next push or \`@orvex review\`.`,
           );
         }
 
@@ -625,9 +643,9 @@ export async function executeReviewCore(
           finalOutcomes,
           requiredSuccesses,
         );
-        if (requiredCoverageDegradation?.admissionBlocked) {
+        if (shouldRequeueIncompleteCoverage(requiredCoverageDegradation)) {
           throw new Error(
-            `review aborted: ${requiredCoverageDegradation.reason}; requeueing instead of publishing an incomplete review`,
+            `review aborted: ${requiredCoverageDegradation!.reason}; requeueing instead of publishing an incomplete review`,
           );
         }
         if (requiredCoverageDegradation) {

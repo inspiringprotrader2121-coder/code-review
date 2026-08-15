@@ -30,7 +30,7 @@ export function isRetryableRateLimit(message: string): boolean {
   if (/insufficient_quota|exceeded your current quota|billing_hard_limit/i.test(message))
     return false;
   if (isOversizedModelRequest(message)) return false;
-  return /\b429\b|\b529\b|rate.?limit|tokens? per min|requests? per min|\bTPM\b|\bRPM\b|try again in|overloaded|please try again/i.test(
+  return /\b429\b|\b529\b|rate.?limit|tokens? per min|requests? per min|\bTPM\b|\bRPM\b|try again in|overloaded|please try again|token plan|usage limit/i.test(
     message,
   );
 }

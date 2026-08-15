@@ -1,5 +1,5 @@
 import {
-  isProviderAdmissionError,
+  isProviderCapacityError,
   isTransientLlmError,
   llmFindingsToReviewFindings,
   REVIEW_INCOMPLETE_SUMMARY,
@@ -216,7 +216,7 @@ export async function executeReviewProviderCalls(
     } catch (error) {
       const message = (error as Error).message;
       console.warn(`[worker] ${call.label} failed:`, message);
-      const admissionBlocked = isProviderAdmissionError(message) && isTransientLlmError(message);
+      const admissionBlocked = isProviderCapacityError(message) && isTransientLlmError(message);
       return outcome(
         call,
         false,

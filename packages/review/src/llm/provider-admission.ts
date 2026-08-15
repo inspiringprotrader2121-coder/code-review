@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolveProviderConcurrency } from '../runtime-limits.js';
 import type { LlmClientOptions, LlmProviderCoordinator } from './contracts.js';
 import { ReviewCancelledError, throwIfCancelled } from './cancellation.js';
-import { providerCooldownForFailure, sleep } from './retry-policy.js';
+import { isRetryableRateLimit, providerCooldownForFailure, sleep } from './retry-policy.js';
 import { providerName } from './support.js';
 import { localProviderTpm, type TpmReserveInput } from './tpm-window.js';
 
@@ -552,14 +552,19 @@ export async function getProviderLoad(
 export const ADMISSION_JOB_REQUEUE_CAP = 8;
 
 export function isProviderAdmissionError(message: string): boolean {
-  return /concurrency saturated|admission timed out|provider lease|cooldown active|TPM .{0,120}exhausted|rate-limited on every|continuation rate-limited|requeueing instead of publishing|rate.?limit|tokens? per min|\bTPM\b.{0,80}(?:limit|used|exceed)/i.test(
+  return /concurrency saturated|admission timed out|provider lease|cooldown active|TPM .{0,120}exhausted|rate-limited on every|continuation rate-limited|requeueing instead of publishing|rate.?limit|tokens? per min|\bTPM\b.{0,80}(?:limit|used|exceed)|token plan|usage limit|overloaded|\b529\b/i.test(
     message,
   );
 }
 
+/** Luna, Flash, and MiniMax capacity misses — wait or requeue, never drop the pass. */
+export function isProviderCapacityError(message: string): boolean {
+  return isProviderAdmissionError(message) || isRetryableRateLimit(message);
+}
+
 export function shouldRequeueAdmissionFailure(message: string, attempts = 0): boolean {
   return (
-    isProviderAdmissionError(message) &&
+    isProviderCapacityError(message) &&
     Math.max(0, Math.floor(attempts)) < ADMISSION_JOB_REQUEUE_CAP
   );
 }

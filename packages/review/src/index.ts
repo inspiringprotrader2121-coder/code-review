@@ -170,6 +170,7 @@ export {
   getProviderCooldownMs,
   getProviderLoad,
   isProviderAdmissionError,
+  isProviderCapacityError,
   shouldRequeueAdmissionFailure,
   ADMISSION_JOB_REQUEUE_CAP,
   providerBucketForTarget,

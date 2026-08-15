@@ -12,6 +12,7 @@ import {
   resetLocalProviderTpm,
   tryReserveProviderTpm,
   isProviderAdmissionError,
+  isProviderCapacityError,
   shouldRequeueAdmissionFailure,
   ADMISSION_JOB_REQUEUE_CAP,
   withProviderCallSlot,
@@ -1337,6 +1338,39 @@ test('a single Luna key 429 becomes an admission requeue after in-slot retries',
   assert.equal(calls.length, 1);
 });
 
+test('a MiniMax token-plan limit becomes an admission requeue instead of dropping MiniMax', async () => {
+  const calls: string[] = [];
+  await assert.rejects(
+    llmChat('sys', 'user', {
+      apiKey: 'minimax-only-key',
+      model: 'MiniMax-M3',
+      baseUrl: 'https://api.minimax.io/v1',
+      api: 'chat',
+      dependencies: {
+        retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+        admission: {
+          async acquireProviderLease() {
+            return 'minimax-test';
+          },
+          async releaseProviderLease() {},
+          async getProviderCooldownMs() {
+            return 0;
+          },
+          async setProviderCooldown() {},
+        },
+        http: {
+          async fetch(_input, init) {
+            calls.push(String(new Headers(init?.headers).get('Authorization')));
+            return new Response('Token Plan usage limit reached (2056)', { status: 429 });
+          },
+        },
+      },
+    }),
+    /rate-limited on every minimax key \(1\)/,
+  );
+  assert.equal(calls.length, 1);
+});
+
 test('comma-separated API keys walk every cool key on 429 then fail', async () => {
   const calls: string[] = [];
   const events: LlmAttemptEvent[] = [];
@@ -1453,6 +1487,20 @@ test('isProviderAdmissionError treats TPM exhaustion and every-key 429 as requeu
     true,
   );
   assert.equal(isProviderAdmissionError('LLM response contained no parseable JSON'), false);
+  assert.equal(
+    isProviderCapacityError('Token Plan usage limit reached (2056)'),
+    true,
+    'MiniMax token-plan TPM must requeue like Luna/Flash 429s',
+  );
+  assert.equal(
+    isProviderCapacityError('429 rate-limited on every minimax key (1); retry-after: 20'),
+    true,
+  );
+  assert.equal(
+    isProviderCapacityError('429 rate-limited on every deepseek key (3); retry-after: 60'),
+    true,
+  );
+  assert.equal(isProviderCapacityError('LLM response contained no parseable JSON'), false);
   assert.equal(
     shouldRequeueAdmissionFailure('429 rate-limited on every luna key (1); retry-after: 60', 0),
     true,

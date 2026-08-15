@@ -73,6 +73,11 @@ test('isRetryableRateLimit: waits on recoverable limits, fails fast on hard quot
   assert.equal(isRetryableRateLimit('LLM request failed (429): too many requests'), true);
   assert.equal(isRetryableRateLimit('LLM request failed (529): overloaded'), true);
   assert.equal(isRetryableRateLimit('Please try again in 6s'), true);
+  assert.equal(isRetryableRateLimit('Token Plan usage limit reached (2056)'), true);
+  assert.equal(
+    isRetryableRateLimit('Token Plan rate limit reached: Upgrade your Token Plan'),
+    true,
+  );
   // NOT recoverable by waiting — a credit top-up is required; must fail fast.
   assert.equal(
     isRetryableRateLimit('LLM request failed (402): requires more credits, insufficient balance'),

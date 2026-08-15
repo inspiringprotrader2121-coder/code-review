@@ -4,7 +4,11 @@ import { DEFAULT_REVIEW_CONFIG } from '@orvex-review/rules';
 import { AdmissionService } from './admission-service.js';
 import { FindingPipeline } from './finding-pipeline.js';
 import { PublicationInProgressError, PublicationService } from './publication-service.js';
-import { describeRequiredCoverageDegradation, ReviewExecutor } from './review-executor.js';
+import {
+  describeRequiredCoverageDegradation,
+  shouldRequeueIncompleteCoverage,
+  ReviewExecutor,
+} from './review-executor.js';
 import { createReviewUsageAccounting } from './review-usage-accounting.js';
 import { orchestrateVerification } from './verification-orchestrator.js';
 import { DEFAULT_USAGE_COST_POLICY } from '../../review/usage-accounting.js';
@@ -105,6 +109,46 @@ test('admission saturation is disclosed as admissionBlocked so the executor can 
   );
   assert.equal(degradation?.admissionBlocked, true);
   assert.match(degradation?.reason ?? '', /admission was saturated/);
+  assert.equal(shouldRequeueIncompleteCoverage(degradation), true);
+});
+
+test('a missing MiniMax, Flash, or Luna pass requeues instead of publishing without that model', () => {
+  const minimax = describeRequiredCoverageDegradation(
+    ['required:general:0:chunk:1/1', 'required:perf:2:chunk:1/1'],
+    [
+      { requiredCoverageKey: 'required:general:0:chunk:1/1', ok: true },
+      {
+        requiredCoverageKey: 'required:perf:2:chunk:1/1',
+        label: 'pass 3/4 (perf) [minimax-m3]',
+        ok: false,
+        transient: true,
+      },
+    ],
+    1,
+  );
+  assert.equal(shouldRequeueIncompleteCoverage(minimax), true);
+
+  const flash = describeRequiredCoverageDegradation(
+    ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1'],
+    [
+      { requiredCoverageKey: 'required:general:0:chunk:1/1', ok: true },
+      {
+        requiredCoverageKey: 'required:deep-dive:1:chunk:1/1',
+        ok: false,
+        transient: true,
+        admissionBlocked: true,
+      },
+    ],
+    1,
+  );
+  assert.equal(shouldRequeueIncompleteCoverage(flash), true);
+
+  const parseFailure = describeRequiredCoverageDegradation(
+    ['required:general:0:chunk:1/1'],
+    [{ requiredCoverageKey: 'required:general:0:chunk:1/1', ok: false, transient: false }],
+    1,
+  );
+  assert.equal(shouldRequeueIncompleteCoverage(parseFailure), false);
 });
 
 test('a successful unsharded agentic lens satisfies its fallback coverage key', () => {

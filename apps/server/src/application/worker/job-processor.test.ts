@@ -96,6 +96,36 @@ test('Luna TPM 429s requeue even when whole-review retries are disabled', async 
   await queue.markCompleted(again!);
 });
 
+test('MiniMax and DeepSeek capacity misses requeue the same way as Luna', async () => {
+  for (const message of [
+    '429 rate-limited on every minimax key (1); retry-after: 20; Token Plan usage limit reached (2056)',
+    '429 DeepSeek TPM 2000000/min exhausted across 3 account(s); retry-after: 60',
+  ]) {
+    const queue = new MemoryReviewQueue();
+    await queue.enqueue(job);
+    const claimed = await queue.dequeue();
+    assert.ok(claimed);
+    await processWorkerJob(claimed!, {
+      queue,
+      runtime: testServerConfig({ ORVEX_MAX_JOB_RETRIES: '0' }),
+      loadConfig: () => ({ store: {} }) as WorkerConfig,
+      processReview: async () => {
+        throw new Error(
+          `review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because ${message}; requeueing instead of publishing an incomplete review`,
+        );
+      },
+      active: () => 1,
+      capacity: 8,
+      onSettled: () => {},
+      log: { log: () => {}, warn: () => {}, error: () => {} },
+    });
+    assert.equal((await queue.listDeadLetters!()).length, 0, message);
+    const again = await queue.dequeue();
+    assert.equal(again?.attempts, 1, message);
+    await queue.markCompleted(again!);
+  }
+});
+
 test('exhausted work is dead-lettered and produces an operator alert', async () => {
   const queue = new MemoryReviewQueue();
   await queue.enqueue(job);
