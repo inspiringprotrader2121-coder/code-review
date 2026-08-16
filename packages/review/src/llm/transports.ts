@@ -390,7 +390,7 @@ export async function anthropicChat(
     if (opts.json) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: continuation?.reasoningContent ?? '',
-        contentPrefix: text || jsonFinishPrefix(rawText, opts.jsonContractPrefix),
+        contentPrefix: jsonFinishPrefix(text || rawText, opts.jsonContractPrefix),
       });
     }
     throw new Error('LLM response truncated (stop_reason=max_tokens); increase max tokens');
@@ -678,7 +678,7 @@ export async function openAiCompatStreamChat(
       const streamedText = stripThinking(content);
       const contentPrefix = continuationPrefix
         ? combineContinuationText(continuationPrefix, streamedText)
-        : streamedText || jsonFinishPrefix(streamedText, opts.jsonContractPrefix);
+        : jsonFinishPrefix(streamedText, opts.jsonContractPrefix);
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
         contentPrefix,
@@ -720,7 +720,7 @@ export async function openAiCompatStreamChat(
     if (opts.json && (thinkingEnabled(opts) || Boolean(continuation))) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
-        contentPrefix: text || jsonFinishPrefix(streamedText, opts.jsonContractPrefix),
+        contentPrefix: jsonFinishPrefix(text || streamedText, opts.jsonContractPrefix),
       });
     }
     throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
