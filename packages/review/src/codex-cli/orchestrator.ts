@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { currentEnvironment, loadReviewRuntimeConfig } from '@orvex-review/config';
 import {
-  extractJsonLoose,
   isOversizedModelRequest,
   isRetryableRateLimit,
   parseRetryAfterMs,
@@ -10,8 +9,8 @@ import {
   withProviderCallSlot,
   type LlmAttemptEvent,
 } from '../llm-client.js';
-import { normalizeLlmResponse } from '../llm.js';
-import { LlmReviewResponseSchema, type ReviewableFile } from '../types.js';
+import { parseReviewJson } from '../llm.js';
+import type { ReviewableFile } from '../types.js';
 import type { AttemptObserver, Clock } from '../providers/types.js';
 import {
   benchCodexHome,
@@ -303,9 +302,7 @@ export async function runCodexCliReview(
     }
   }
   if (!result?.threadId && !threadId) throw new Error('codex-cli did not return a session id');
-  const parsed = LlmReviewResponseSchema.parse(
-    normalizeLlmResponse(extractJsonLoose(result!.text)),
-  );
+  const parsed = parseReviewJson(result!.text);
   const maxFindings = loadReviewRuntimeConfig().maxFindings;
   return {
     response: {

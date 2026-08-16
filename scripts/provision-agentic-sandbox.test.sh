@@ -36,6 +36,8 @@ rg -q -- '--ipc none' "$SCRIPT"
 rg -q -- 'OPENAI_API_KEY_FILE=/run/secrets/openai_api_key' "$SCRIPT"
 rg -q -- 'EGRESS_SIGNING_KEY_FILE=/run/secrets/broker_signing_key' "$SCRIPT"
 rg -q -- 'EGRESS_BODY_READ_TIMEOUT_MS=30000' "$SCRIPT"
+rg -q -- 'EGRESS_MAX_CONCURRENT=10000' "$SCRIPT"
+rg -q -- 'EGRESS_MAX_REQUESTS_PER_WINDOW=10000' "$SCRIPT"
 rg -q 'broker-signing-key' "$SCRIPT"
 if rg -n -- '--env OPENAI_API_KEY=|--env ORVEX_OPENAI_API_KEY=|printf.*ORVEX_OPENAI_API_KEY' "$SCRIPT"; then
   printf 'broker provisioning must not pass or print the real API key via Docker or stdout\n' >&2

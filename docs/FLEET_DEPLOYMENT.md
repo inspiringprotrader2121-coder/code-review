@@ -24,21 +24,21 @@ starting a dedicated worker or scheduler.
 `ecosystem.config.cjs` defines a same-host role split that keeps SQLite on one
 machine while isolating HTTP from review work:
 
-| PM2 app                  | Role        | Notes                                                                           |
-| ------------------------ | ----------- | ------------------------------------------------------------------------------- |
-| `velatrix-api`           | `api`       | Port 8788; webhooks and dashboard stay responsive under review load.            |
-| `velatrix-scheduler`     | `scheduler` | Stable `ORVEX_WORKER_ID=scheduler-01`; registers fleet capacity.                |
-| `velatrix-worker-01..13` | `worker`    | Stable `ORVEX_WORKER_ID=review-worker-NN`; **8** reviews each (**13×8 = 104**). |
+| PM2 app                  | Role        | Notes                                                                                                      |
+| ------------------------ | ----------- | ---------------------------------------------------------------------------------------------------------- |
+| `velatrix-api`           | `api`       | Port 8788; webhooks and dashboard stay responsive under review load.                                       |
+| `velatrix-scheduler`     | `scheduler` | Stable `ORVEX_WORKER_ID=scheduler-01`; registers fleet capacity.                                           |
+| `velatrix-worker-01..13` | `worker`    | Stable `ORVEX_WORKER_ID=review-worker-NN`; **32** reviews each so host RAM/disk bind before a fleet total. |
 
-Fleet provider ceilings remain Redis-owned (`ORVEX_FLEET_PROVIDER_CONCURRENCY_*`
-= Luna **150** / DeepSeek **200** / MiniMax **150**, epoch `review-scale-v3`).
-Those are whole-fleet Redis caps — Luna is **not** a leftover host-wide 8.
-Per-worker `ORVEX_MAX_CONCURRENT_REVIEWS=8` and `ORVEX_PROVIDER_CONCURRENCY_LUNA=8`
-are local process ceilings only (13×8=104).
-`ORVEX_FLEET_TENANT_CONCURRENCY=8` caps one tenant's concurrent claims so
-twenty clients can share ~100 fleet slots. Operator `quotaUnlimited` jobs skip
-that Redis tenant ceiling. Worker `kill_timeout` stays above `ORVEX_SHUTDOWN_DRAIN_MS`.
-`ORVEX_MAX_SANDBOXES=100` is the host-wide Luna/runtime sandbox ceiling (code max).
+Fleet provider Redis values (`ORVEX_FLEET_PROVIDER_CONCURRENCY_*`
+= Luna / DeepSeek / MiniMax **10000**, epoch `review-scale-v4`) sit far above
+host capacity. They are not an all-clients review cap. Per-worker local
+provider ceilings match the 32 review slots. `ORVEX_FLEET_TENANT_CONCURRENCY=8`
+is **per tenant** so one workspace cannot occupy every worker. Operator
+`quotaUnlimited` jobs skip that Redis tenant ceiling. Worker `kill_timeout`
+stays above `ORVEX_SHUTDOWN_DRAIN_MS`.
+`ORVEX_MAX_SANDBOXES=10000` is a code clamp, not a practical host limit;
+host-admission (MemAvailable / disk) refuses new claims first.
 
 Workers also gate dequeue on host memory/disk headroom
 (`ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES` / `ORVEX_HOST_MIN_AVAILABLE_DISK_BYTES`)
@@ -53,13 +53,10 @@ to clear drain until api/scheduler plus at least one worker are online.
 
 `ORVEX_PROVIDER_CONCURRENCY_LUNA`, `_DEEPSEEK`, and `_MINIMAX` are **local**
 worker ceilings. They protect one worker's CPU, sockets, and sandbox slots.
-Production workers pin Luna=8 locally (13×8=104); that is not the fleet Luna cap.
-`ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA`, `_DEEPSEEK`, and `_MINIMAX` are the
-whole-fleet ceilings. They default to the local values for the compatible
-single-host deployment, so a fleet must set them deliberately (production:
-150 / 200 / 150). `ORVEX_FLEET_TENANT_CONCURRENCY` is the matching whole-fleet
-review-claim ceiling for one tenant. Production pins it at 8, below the 104
-review slots, so one workspace cannot occupy the entire fleet.
+Production pins them at 32 per worker so the process can fill until host
+memory or disk refuses the next claim. `ORVEX_FLEET_PROVIDER_CONCURRENCY_*`
+values are 10000 so Redis is not an all-clients review cap.
+`ORVEX_FLEET_TENANT_CONCURRENCY=8` is per-tenant fairness, not a fleet total.
 
 The scheduler registers the global values in Redis under
 `ORVEX_FLEET_CAPACITY_EPOCH`. Workers verify the same values before accepting

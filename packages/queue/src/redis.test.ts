@@ -19,6 +19,10 @@ test('CLAIM_LUA honors quotaUnlimited from ARGV[1] job JSON like DEQUEUE', () =>
   assert.match(CLAIM_LUA, /decoded\.quotaUnlimited/);
   assert.match(CLAIM_LUA, /unlimited ~= true and unlimited ~= 'true'/);
   assert.match(CLAIM_LUA, /LPUSH', KEYS\[6\], ARGV\[1\]/);
+  assert.match(
+    CLAIM_LUA,
+    /tenantLimit > 0 and unlimited ~= true and unlimited ~= 'true' then[\s\S]*HINCRBY/,
+  );
 });
 
 test('DEQUEUE inspects 256 ready jobs so eligible tenants behind a saturated window still claim', () => {

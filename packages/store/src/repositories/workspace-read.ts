@@ -56,7 +56,7 @@ export class WorkspaceReadRepository implements WorkspaceReadStore {
          ) AS cost_estimated
          FROM review_runs
          WHERE tenant_id = ?
-           AND NOT (status = 'skipped' AND skip_reason = 'concurrency_limited')
+           AND NOT (status = 'skipped' AND skip_reason IN ('concurrency_limited', 'rate_limited'))
          ORDER BY created_at DESC LIMIT ?`,
       )
       .all(tenantId, limit) as ReviewRunRow[];
@@ -78,7 +78,7 @@ export class WorkspaceReadRepository implements WorkspaceReadStore {
            AVG(CASE WHEN status = 'completed' THEN duration_ms END) AS avg_duration_ms
          FROM review_runs
          WHERE tenant_id = ? AND created_at >= ?
-           AND NOT (status = 'skipped' AND skip_reason = 'concurrency_limited')`,
+           AND NOT (status = 'skipped' AND skip_reason IN ('concurrency_limited', 'rate_limited'))`,
       )
       .get(tenantId, since) as WorkspaceStatsRow;
     return {

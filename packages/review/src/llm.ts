@@ -87,17 +87,30 @@ export interface LlmReviewOptions {
   target?: ModelTarget;
 }
 
+function hasDiscoveryContract(json: unknown): boolean {
+  if (Array.isArray(json)) return true;
+  if (!json || typeof json !== 'object') return false;
+  const root = json as Record<string, unknown>;
+  return Array.isArray(root.findings) || Array.isArray(root.issues);
+}
+
+export function parseReviewJson(text: string): LlmReviewResponse {
+  const extracted = extractJsonLoose(text);
+  if (!hasDiscoveryContract(extracted)) {
+    throw new Error('LLM review JSON was missing findings/issues');
+  }
+  return LlmReviewResponseSchema.parse(normalizeLlmResponse(extracted));
+}
+
 export async function runLlmReview(
   files: ReviewableFile[],
   opts: LlmReviewOptions,
 ): Promise<LlmReviewResponse> {
-  const reviewable = files.filter((f) => f.patch && f.status !== 'removed');
+  const reviewable = files.filter((f) => Boolean(f.patch));
   if (reviewable.length === 0) {
-    return {
-      findings: [],
-      summary:
-        'No reviewable text diff in this PR (binary, lockfiles, or generated paths skipped).',
-    };
+    throw new Error(
+      'no reviewable source diff for required model coverage; refusing to publish an incomplete review',
+    );
   }
 
   const redactedFiles = reviewable.map((f) => ({
@@ -168,9 +181,6 @@ export async function runLlmReview(
 
   // Production review targets are configured at max effort.
   const reviewThinking = true;
-  const parseReview = (text: string) =>
-    LlmReviewResponseSchema.parse(normalizeLlmResponse(extractJsonLoose(text)));
-
   // One discovery request only. llmChat owns bounded same-provider rate-limit
   // retries and answer-only JSON/prefix continuations; replaying a complete
   // max-reasoning call for malformed JSON doubled spend without adding evidence.
@@ -178,7 +188,7 @@ export async function runLlmReview(
   // required-lens gate prevents it from being reported as a clean review.
   let parsed: LlmReviewResponse;
   try {
-    parsed = parseReview(await call(reviewThinking));
+    parsed = parseReviewJson(await call(reviewThinking));
   } catch (err) {
     if (isReviewCancelledError(err) || opts.signal?.aborted) throw err;
     const message = (err as Error).message;
@@ -342,6 +352,10 @@ export function normalizeLlmResponse(json: unknown): unknown {
       };
     })
     .filter((f): f is NonNullable<typeof f> => f !== null);
+
+  if (rawFindings.length > 0 && findings.length === 0) {
+    throw new Error('LLM review JSON had no usable findings');
+  }
 
   return { findings, summary: pickString(root, 'summary', 'overview') };
 }

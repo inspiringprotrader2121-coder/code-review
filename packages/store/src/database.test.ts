@@ -1023,6 +1023,27 @@ test('tenant concurrency overflow does not record a skipped dashboard run', () =
   assert.equal(db.getWorkspaceStats(tenant.id, 14).runsSkipped, 0);
 });
 
+test('hourly overflow does not record a skipped dashboard run', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('hourly');
+  const reserved = db.tryReserveReviewRun(
+    {
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'acme',
+      repo: 'api',
+      pr: 296,
+      headSha: 'waiting',
+      action: 'opened',
+    },
+    () => 'rate_limited',
+  );
+  assert.equal(reserved.ok, false);
+  if (!reserved.ok) assert.equal(reserved.reason, 'rate_limited');
+  assert.equal(db.listReviewRuns(tenant.id).length, 0);
+  assert.equal(db.getWorkspaceStats(tenant.id, 14).runsSkipped, 0);
+});
+
 test('dashboard hides leftover concurrency wait placeholders so completed reviews stay visible', () => {
   const db = freshDb();
   const tenant = db.createTenant('visible');
@@ -1046,6 +1067,13 @@ test('dashboard hides leftover concurrency wait placeholders so completed review
     pr: 295,
     status: 'skipped',
     skipReason: 'concurrency_limited',
+    durationMs: 0,
+  });
+  db.recordReviewRun({
+    ...base,
+    pr: 296,
+    status: 'skipped',
+    skipReason: 'rate_limited',
     durationMs: 0,
   });
   const runs = db.listReviewRuns(tenant.id, 8);

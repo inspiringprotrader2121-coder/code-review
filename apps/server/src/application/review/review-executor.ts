@@ -88,7 +88,7 @@ export interface RequiredCoverageDegradation {
   skippedLenses: string[];
   reason: string;
   transient: boolean;
-  /** True when missing coverage failed because provider admission refused capacity. */
+  /** True when every missing required coverage failed because provider admission refused capacity. */
   admissionBlocked: boolean;
   /** True when at least one required pass already produced paid output. */
   hadSuccessfulRequiredPass: boolean;
@@ -120,7 +120,8 @@ export function describeRequiredCoverageDegradation(
       failed.map((outcome) => outcome.label ?? outcome.requiredCoverageKey ?? 'required pass'),
     ),
   ];
-  const admissionBlocked = failed.some((outcome) => outcome.admissionBlocked === true);
+  const admissionBlocked =
+    failed.length > 0 && failed.every((outcome) => outcome.admissionBlocked === true);
   const transient = failed.some((outcome) => outcome.transient === true);
   const cause = admissionBlocked
     ? 'provider admission was saturated while waiting for capacity'
@@ -220,6 +221,11 @@ export async function executeReviewCore(
     repoTreePaths,
   } = prepared;
   if (prepared.skipResult) return prepared.skipResult;
+  if (files.length > 0 && filesForLlm.length === 0) {
+    throw new Error(
+      'review aborted: no reviewable source diff for required model coverage; refusing to publish an incomplete review',
+    );
+  }
   const { routingPolicy, usagePolicy, verificationEnabled, publicationPolicy, executionPolicy } =
     services;
   const { installationId, tenantId, owner, repo, pr: number } = job;
@@ -619,6 +625,7 @@ export async function executeReviewCore(
         // review on a PR that was never actually reviewed. A real clean review has
         // ok:true calls, so it is still correctly distinguished.
         if (finalOutcomes.length > 0 && okCount === 0) {
+          const admissionOnly = finalOutcomes.every((outcome) => outcome.admissionBlocked === true);
           const why =
             transientCount > 0
               ? 'rate-limit/transport errors (likely token-plan quota)'
@@ -626,9 +633,9 @@ export async function executeReviewCore(
                 ? 'unparseable model responses'
                 : 'model calls errored before completing';
           throw new Error(
-            transientCount > 0
+            admissionOnly
               ? `review aborted: all ${finalOutcomes.length} model calls failed — ${why}; requeueing instead of publishing an incomplete review`
-              : `review aborted: all ${finalOutcomes.length} model calls failed — ${why}. Will retry on the next push or \`@orvex review\`.`,
+              : `review aborted: all ${finalOutcomes.length} model calls failed — ${why}; refusing to publish an incomplete review`,
           );
         }
 

@@ -10,6 +10,7 @@ import {
   processingMetaKey,
 } from './redis-keys.js';
 import {
+  DEQUEUE_INSPECTION_WINDOW,
   jobIdempotencyKey,
   prKey,
   reviewShaIdempotencyKey,
@@ -68,7 +69,7 @@ export class RedisEnqueueOperations {
   }
 
   async dequeue(): Promise<ReviewJobPayload | null> {
-    for (let index = 0; index < 50; index += 1) {
+    for (let index = 0; index < DEQUEUE_INSPECTION_WINDOW; index += 1) {
       const token = randomUUID();
       const raw = (await this.redis.eval(
         DEQUEUE_LUA,

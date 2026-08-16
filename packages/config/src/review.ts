@@ -198,9 +198,9 @@ function providerCapacity(
   return boundedConcurrency(overrides[providerEnvironmentName(provider)], fallback, maximum);
 }
 
-function localProviderCapacityMaximum(provider: string): number {
-  // Allow one worker to run a large concurrent enterprise burst at full strength.
-  return providerEnvironmentName(provider) === 'DEEPSEEK' ? 128 : 100;
+function localProviderCapacityMaximum(_provider: string): number {
+  // Local process protection only. Do not invent a fleet-wide review total here.
+  return 10_000;
 }
 
 function capacityEpoch(raw: string | undefined): string {
@@ -290,16 +290,16 @@ export function loadReviewRuntimeConfig(
       NODE_EXTRA_CA_CERTS: env.NODE_EXTRA_CA_CERTS,
     }).filter(([, value]) => value !== undefined),
   );
-  const reviewWorkerConcurrency = boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 100);
+  const reviewWorkerConcurrency = boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 10_000);
   const codexApiKeyConcurrency = boundedConcurrency(
     env.ORVEX_CODEX_APIKEY_CONCURRENCY,
-    boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 100),
-    100,
+    boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 10_000),
+    10_000,
   );
   const sharedProviderCapacity =
     env.ORVEX_CODEX_CLI === '1'
       ? codexApiKeyConcurrency
-      : boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 100);
+      : boundedConcurrency(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 10_000);
   const providerOverrides = snapshotProviderOverrides(env, 'ORVEX_PROVIDER_CONCURRENCY_');
   const fleetProviderOverrides = snapshotProviderOverrides(
     env,
@@ -372,7 +372,7 @@ export function loadReviewRuntimeConfig(
     verifyBatchSize: positive(env.ORVEX_VERIFY_BATCH_SIZE, 3),
     verifyConcurrency: (() => {
       const raw = Number(env.ORVEX_VERIFY_CONCURRENCY ?? 3);
-      return Number.isFinite(raw) ? Math.min(100, Math.max(1, Math.floor(raw))) : 3;
+      return Number.isFinite(raw) ? Math.min(10_000, Math.max(1, Math.floor(raw))) : 3;
     })(),
     riskProbes:
       Number.isFinite(Number(env.ORVEX_RISK_PROBES)) && Number(env.ORVEX_RISK_PROBES) >= 0
@@ -563,7 +563,7 @@ export function loadReviewRuntimeConfig(
     execution: Object.freeze({
       abortPollMs: boundedRange(env.ORVEX_ABORT_POLL_MS, 5_000, 1_000, 900_000),
       maxCalls: boundedRange(env.ORVEX_REVIEW_MAX_CALLS, 28, 1, 100),
-      concurrency: boundedRange(env.ORVEX_REVIEW_CONCURRENCY, 8, 1, 64),
+      concurrency: boundedRange(env.ORVEX_REVIEW_CONCURRENCY, 8, 1, 10_000),
       maxOtherChars: positiveBounded(env.ORVEX_MAX_OTHER_CHARS, 45_000, 2_000_000),
       sweepFileChars: positiveBounded(env.ORVEX_SWEEP_FILE_CHARS, 10_000, 200_000),
       maxInlinePerPr: nonNegativeBounded(env.ORVEX_MAX_INLINE_PER_PR, 100, 10_000),

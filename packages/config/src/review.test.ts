@@ -161,9 +161,9 @@ test('local provider concurrency keeps provider-specific safety bounds', () => {
     ORVEX_PROVIDER_CONCURRENCY_MINIMAX: '999',
   });
 
-  assert.equal(config.providerConcurrency('luna'), 100);
-  assert.equal(config.providerConcurrency('deepseek'), 128);
-  assert.equal(config.providerConcurrency('minimax'), 100);
+  assert.equal(config.providerConcurrency('luna'), 999);
+  assert.equal(config.providerConcurrency('deepseek'), 999);
+  assert.equal(config.providerConcurrency('minimax'), 999);
 });
 
 test('fleet provider capacity is independent from per-worker capacity and snapshots its environment', () => {
@@ -209,13 +209,13 @@ test('production PM2 profile splits api/scheduler/workers with fleet Redis caps'
   assert.match(schedulerArgs, /ORVEX_WORKER_ID=scheduler-01/);
   assert.match(workerArgs, /ORVEX_PROCESS_ROLE=worker/);
   assert.match(workerArgs, /ORVEX_WORKER_ID=review-worker-01/);
-  assert.match(workerArgs, /ORVEX_MAX_CONCURRENT_REVIEWS=8(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_LUNA=8(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=16(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_MINIMAX=12(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA=150(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=200(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=150(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_MAX_CONCURRENT_REVIEWS=32(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_LUNA=32(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=32(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_MINIMAX=32(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA=10000(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=10000(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=10000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_FLEET_TENANT_CONCURRENCY=8(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_UNLIMITED_GITHUB_OWNERS=inspiringprotrader2121-coder(?:\s|\\")/);
   assert.match(
@@ -227,24 +227,33 @@ test('production PM2 profile splits api/scheduler/workers with fleet Redis caps'
     /ORVEX_UNLIMITED_TENANT_SLUGS=org-inspiringprotrader2121-coder,inspiringprotrader2121-coder(?:\s|\\")/,
   );
   assert.match(workerArgs, /ORVEX_PROVIDER_LEASE_WAIT_MS=600000(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v3(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v4(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_REVIEW_CONCURRENCY=32(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_VERIFY_CONCURRENCY=32(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_MAX_SANDBOXES=100(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_MAX_SANDBOXES=10000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_SHUTDOWN_DRAIN_MS=960000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_LEASE_RENEW_MS=60000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_MONTHLY_COGS_CAP_USD=5000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_MAX_OUTPUT_TOKENS=128000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_MAX_OUTPUT_TOKENS_CAP=128000(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES=1073741824(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_HOST_MIN_AVAILABLE_DISK_BYTES=2147483648(?:\s|\\")/);
   assert.ok(config.apps.every((app) => app.kill_timeout === 1_020_000));
-  assert.ok(workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8'));
+  assert.ok(workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=32'));
   assert.ok(workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_OUTPUT_TOKENS=128000'));
+  assert.ok(
+    workerArgs.indexOf('. ./.env') <
+      workerArgs.indexOf('ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES=1073741824'),
+  );
 });
 
 test('verify and sandbox concurrency honor the production scale ceilings', () => {
   const config = loadReviewRuntimeConfig({ ORVEX_VERIFY_CONCURRENCY: '32' });
   assert.equal(config.verifyConcurrency, 32);
-  assert.equal(loadReviewRuntimeConfig({ ORVEX_VERIFY_CONCURRENCY: '999' }).verifyConcurrency, 100);
+  assert.equal(
+    loadReviewRuntimeConfig({ ORVEX_VERIFY_CONCURRENCY: '99999' }).verifyConcurrency,
+    10_000,
+  );
   assert.equal(
     loadReviewRuntimeConfig({ ORVEX_MONTHLY_COGS_CAP_USD: '5000' }).accountLimits.monthlyCogsCapUsd,
     5_000,

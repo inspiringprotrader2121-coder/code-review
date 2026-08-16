@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LlmReviewResponseSchema } from './types.js';
-import { normalizeLlmResponse, runLlmReview } from './llm.js';
+import { normalizeLlmResponse, parseReviewJson, runLlmReview } from './llm.js';
 
 test('normalizeLlmResponse maps MiniMax severity vocabulary to P-levels', () => {
   const raw = {
@@ -68,6 +68,81 @@ test('normalizeLlmResponse drops findings missing message or file', () => {
   const parsed = LlmReviewResponseSchema.parse(normalizeLlmResponse(raw));
   assert.equal(parsed.findings.length, 1);
   assert.equal(parsed.findings[0].file, 'ok.ts');
+});
+
+test('normalizeLlmResponse rejects garbage JSON that drops every finding', () => {
+  assert.throws(
+    () =>
+      normalizeLlmResponse({
+        findings: [{ file: 'a.ts', severity: 'high' }, { message: 'orphan' }],
+      }),
+    /no usable findings/,
+  );
+  assert.throws(() => normalizeLlmResponse({ issues: [{ foo: 1 }] }), /no usable findings/);
+  assert.deepEqual(normalizeLlmResponse({ findings: [], summary: 'clean' }), {
+    findings: [],
+    summary: 'clean',
+  });
+});
+
+test('deleted files with patches are sent to discovery instead of faking an empty pass', async () => {
+  let user = '';
+  const result = await runLlmReview(
+    [{ filename: 'gone.ts', status: 'removed', patch: '@@ -1 +0,0 @@\n-old\n' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+      },
+      runner: {
+        transport: 'compatible-chat',
+        async run(request) {
+          user = request.user;
+          return JSON.stringify({ findings: [], summary: 'deleted' });
+        },
+      },
+    },
+  );
+  assert.match(user, /gone.ts/);
+  assert.equal(result.summary, 'deleted');
+});
+
+test('parseReviewJson requires a findings or issues array', () => {
+  assert.throws(() => parseReviewJson('{}'), /missing findings\/issues/);
+  assert.throws(() => parseReviewJson('{"summary":"looks good"}'), /missing findings\/issues/);
+  assert.throws(() => parseReviewJson('{"verdicts":[]}'), /missing findings\/issues/);
+  assert.deepEqual(parseReviewJson('{"findings":[],"summary":"clean"}'), {
+    findings: [],
+    summary: 'clean',
+  });
+});
+
+test('verifier-shaped JSON is not a successful discovery pass', async () => {
+  await assert.rejects(
+    () =>
+      runLlmReview(
+        [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
+        {
+          apiKey: 'test-key',
+          model: 'deepseek-v4-flash',
+          target: {
+            transport: 'compatible-chat',
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+          },
+          runner: {
+            transport: 'compatible-chat',
+            async run() {
+              return JSON.stringify({ verdicts: [] });
+            },
+          },
+        },
+      ),
+    /missing findings\/issues/,
+  );
 });
 
 test('normalizeLlmResponse defaults unknown severity to info (fail toward nitpick) and clamps confidence', () => {

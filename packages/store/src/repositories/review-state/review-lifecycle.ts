@@ -115,10 +115,10 @@ export class SqliteReviewRunLifecycleRepository {
       .transaction(() => {
         const reason = limitReason();
         if (reason) {
-          // Tenant concurrency overflow waits in the queue. Recording a skipped
-          // run here made the dashboard look like the review never ran while
-          // workers hot-looped thousands of placeholder rows per PR.
-          if (reason !== 'concurrency_limited') {
+          // Tenant concurrency and hourly overflow wait in the queue. Recording
+          // a skipped run here made the dashboard look like the review never ran
+          // while workers hot-looped thousands of placeholder rows per PR.
+          if (reason !== 'concurrency_limited' && reason !== 'rate_limited') {
             this.recordReviewRun({
               ...input,
               status: 'skipped',

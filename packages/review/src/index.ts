@@ -9,6 +9,7 @@ export {
 } from './prompt.js';
 export {
   runLlmReview,
+  parseReviewJson,
   llmFindingsToReviewFindings,
   formatReviewComment,
   isTransientLlmError,

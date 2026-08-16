@@ -98,7 +98,7 @@ export function buildCodexPrompt(
         ? configuredBudget('ORVEX_CODEX_MAX_DIFF_CHARS', 60_000)
         : Number.POSITIVE_INFINITY;
   const redactedDiffs = files
-    .filter((file) => file.patch && file.status !== 'removed')
+    .filter((file) => Boolean(file.patch))
     .map((file) => ({
       filename: file.filename,
       status: file.status,

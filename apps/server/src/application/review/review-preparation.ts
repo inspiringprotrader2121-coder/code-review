@@ -60,6 +60,13 @@ export interface ReviewPreparationDependencies {
   };
 }
 
+/** Diffs with a patch, including deletions. Binary/empty-patch files cannot satisfy required models. */
+export function selectFilesForModelReview<T extends { patch?: string | null }>(
+  files: readonly T[],
+): T[] {
+  return files.filter((file) => Boolean(file.patch));
+}
+
 /**
  * Model prompts must never be built from a partial GitHub diff. Required
  * coverage chunks prevent prompt-size sampling, while this guard handles
@@ -236,8 +243,8 @@ export class ReviewPreparation {
       files,
       reviewConfig,
     );
-    const filesForLlm = files.filter((file) => Boolean(file.patch) && file.status !== 'removed');
-    const filesForInvestigate = files.filter((file) => Boolean(file.patch));
+    const filesForLlm = selectFilesForModelReview(files);
+    const filesForInvestigate = selectFilesForModelReview(files);
     const highRiskDiff = isHighRiskDiff(filesForLlm);
     let reviewContext;
     let reviewContextFiles: Array<{ path: string; content: string }> = [];

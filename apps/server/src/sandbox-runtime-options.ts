@@ -43,7 +43,7 @@ export function loadSandboxRuntimeOptions(
     maxConcurrentSandboxes: boundedPositive(
       env.ORVEX_MAX_SANDBOXES,
       DEFAULT_SANDBOX_RUNTIME_OPTIONS.maxConcurrentSandboxes,
-      100,
+      10_000,
     ),
     slotWaitMs: boundedPositive(
       env.ORVEX_SANDBOX_SLOT_WAIT_MS,

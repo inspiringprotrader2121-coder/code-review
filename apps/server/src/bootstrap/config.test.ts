@@ -66,7 +66,7 @@ test('server config clamps malformed operational values and snapshots auth alias
   assert.equal(config.staleRunMs, 60_000);
   assert.equal(config.codexStatusFile, '/tmp/codex-status');
   assert.equal(config.platformSecret, 'webhook-fallback');
-  assert.equal(config.worker.concurrency, 100);
+  assert.equal(config.worker.concurrency, 1_000);
   assert.equal(config.topology.role, 'worker');
   assert.equal(config.store.workerIdBase, 'worker-a');
   assert.equal(config.store.checkoutRoot, '/tmp/orvex-checkout');

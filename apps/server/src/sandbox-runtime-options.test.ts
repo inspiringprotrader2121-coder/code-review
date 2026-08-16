@@ -51,12 +51,12 @@ test('sandbox compatibility loader preserves fail-closed defaults and numeric bo
   assert.equal(defaults.workdirMaxBytes, 1024 * 1024 * 1024);
 
   const bounded = loadSandboxRuntimeOptions({
-    ORVEX_MAX_SANDBOXES: '999',
+    ORVEX_MAX_SANDBOXES: '99999',
     ORVEX_SANDBOX_SLOT_WAIT_MS: '99999999',
     ORVEX_SANDBOX_WORKDIR_MAX_BYTES: '999999999999',
     ORVEX_SANDBOX_IMAGE: ` ${RUNTIME_IMAGE}`,
   });
-  assert.equal(bounded.maxConcurrentSandboxes, 100);
+  assert.equal(bounded.maxConcurrentSandboxes, 10_000);
   assert.equal(bounded.slotWaitMs, 3_600_000);
   assert.equal(bounded.workdirMaxBytes, 2 * 1024 * 1024 * 1024);
   assert.equal(bounded.image, undefined, 'whitespace-altered image references stay invalid');

@@ -226,7 +226,7 @@ export function loadServerConfig(env: Environment = process.env): ServerConfig {
     billingCatalog: loadPlanCatalog(env),
     topology: Object.freeze({ role: processRole }),
     worker: Object.freeze({
-      concurrency: bounded(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 1, 100),
+      concurrency: bounded(env.ORVEX_MAX_CONCURRENT_REVIEWS, 8, 1, 10_000),
       maxJobRetries: bounded(env.ORVEX_MAX_JOB_RETRIES, 0, 0, 1),
       leaseRenewMs: bounded(env.ORVEX_LEASE_RENEW_MS, 300_000, 10_000, 300_000),
       shutdownDrainMs: bounded(env.ORVEX_SHUTDOWN_DRAIN_MS, 240_000, 1_000, 86_400_000),

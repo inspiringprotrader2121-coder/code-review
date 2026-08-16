@@ -116,6 +116,7 @@ local function cleanupExpiredTenantClaims()
   end
 end
 local tenantLimit = 0
+local unlimited = false
 if ARGV[11] == '1' then
   cleanupExpiredTenantClaims()
   tenantLimit = tonumber(redis.call('HGET', KEYS[10], ARGV[12]) or '')
@@ -127,7 +128,7 @@ if ARGV[11] == '1' then
   -- ARGV[1] is the job JSON (same payload DEQUEUE already selected).
   local active = tonumber(redis.call('HGET', KEYS[7], ARGV[9]) or '0')
   local decodedOk, decoded = pcall(cjson.decode, ARGV[1])
-  local unlimited = decodedOk and decoded and decoded.quotaUnlimited
+  unlimited = decodedOk and decoded and decoded.quotaUnlimited
   if active >= tenantLimit and unlimited ~= true and unlimited ~= 'true' then
     redis.call('LREM', KEYS[5], 1, ARGV[8])
     -- LPUSH preserves queue age so this job stays ahead of later arrivals.
@@ -137,7 +138,8 @@ if ARGV[11] == '1' then
 end
 local ok = redis.call('SET', KEYS[1], ARGV[4] .. '\\n' .. ARGV[1], 'EX', ARGV[3], 'NX')
 if ok then
-  if tenantLimit > 0 then
+  -- Operator-unlimited jobs skip occupancy so they cannot fill the tenant ceiling.
+  if tenantLimit > 0 and unlimited ~= true and unlimited ~= 'true' then
     redis.call('HSET', KEYS[8], ARGV[4], ARGV[9])
     redis.call('HINCRBY', KEYS[7], ARGV[9], 1)
     redis.call('ZADD', KEYS[9], tonumber(ARGV[10]) + tonumber(ARGV[3]) * 1000, ARGV[4])

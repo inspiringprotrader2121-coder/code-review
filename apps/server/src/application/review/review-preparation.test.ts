@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertCompleteReviewInput } from './review-preparation.js';
+import { assertCompleteReviewInput, selectFilesForModelReview } from './review-preparation.js';
 
 test('complete GitHub input can proceed to model scheduling', () => {
   assert.doesNotThrow(() =>
@@ -30,5 +30,24 @@ test('incomplete GitHub input stops before a partial model review is scheduled',
         githubCapHit: true,
       }),
     /review input coverage incomplete; no model calls were made .*GitHub's file limit.*truncated patch.*missing patch/,
+  );
+});
+
+test('deleted files with patches are reviewable so required models still run', () => {
+  const files = selectFilesForModelReview([
+    { filename: 'gone.ts', patch: '@@ -1 +0,0 @@\n-old\n', status: 'removed' },
+    { filename: 'app.png', patch: '', status: 'added' },
+    { filename: 'keep.ts', patch: '@@ -1 +1 @@\n-a\n+b\n', status: 'modified' },
+  ]);
+  assert.deepEqual(
+    files.map((file) => file.filename),
+    ['gone.ts', 'keep.ts'],
+  );
+});
+
+test('binary-only changes are not treated as a completed model review', () => {
+  assert.deepEqual(
+    selectFilesForModelReview([{ filename: 'app.png', patch: '', status: 'added' }]),
+    [],
   );
 });

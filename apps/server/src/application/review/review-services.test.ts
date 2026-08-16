@@ -6,6 +6,7 @@ import { FindingPipeline } from './finding-pipeline.js';
 import { PublicationInProgressError, PublicationService } from './publication-service.js';
 import {
   describeRequiredCoverageDegradation,
+  executeReviewCore,
   shouldRequeueIncompleteCoverage,
   ReviewExecutor,
 } from './review-executor.js';
@@ -56,6 +57,21 @@ test('review execution accepts an injected computation without provider or GitHu
   assert.deepEqual(
     await executor.mapConcurrent([1, 2, 3], 2, async (value) => value * 2),
     [2, 4, 6],
+  );
+});
+
+test('a PR with files but no reviewable diff refuses to publish a fake full review', async () => {
+  await assert.rejects(
+    () =>
+      executeReviewCore(
+        {
+          skipResult: undefined,
+          files: [{ filename: 'app.png', patch: '', status: 'added' }],
+          filesForLlm: [],
+        } as never,
+        {} as never,
+      ),
+    /no reviewable source diff for required model coverage.*refusing to publish an incomplete review/,
   );
 });
 
@@ -135,6 +151,26 @@ test('admission saturation requeues only when no required pass has already succe
     1,
   );
   assert.equal(shouldRequeueIncompleteCoverage(noneStarted), true);
+
+  const mixedPaidFailure = describeRequiredCoverageDegradation(
+    ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1'],
+    [
+      {
+        requiredCoverageKey: 'required:general:0:chunk:1/1',
+        ok: false,
+        transient: false,
+      },
+      {
+        requiredCoverageKey: 'required:deep-dive:1:chunk:1/1',
+        ok: false,
+        transient: true,
+        admissionBlocked: true,
+      },
+    ],
+    1,
+  );
+  assert.equal(mixedPaidFailure?.admissionBlocked, false);
+  assert.equal(shouldRequeueIncompleteCoverage(mixedPaidFailure), false);
 });
 
 test('two successful models are not enough when a third required pass is missing', () => {
