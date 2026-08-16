@@ -4,7 +4,12 @@
  */
 import type { BillingRepository } from '@orvex-review/store';
 import { BillingPeriod } from '@orvex-review/billing';
-import { publicPlanLabel, uncapPlan, isUnlimitedGithubOwner, type PlanFeatures } from '@orvex-review/tenants';
+import {
+  publicPlanLabel,
+  uncapPlan,
+  isUnlimitedGithubOwner,
+  type PlanFeatures,
+} from '@orvex-review/tenants';
 import { commandTrigger } from '@orvex-review/review';
 import type { ServerConfig } from './bootstrap/config.js';
 
@@ -74,7 +79,9 @@ export function loadAccountQuotaStatus(
 ): AccountQuotaStatus {
   const resolved = isUnlimitedGithubOwner(owner) ? uncapPlan(plan) : plan;
   const hourlyUsed =
-    resolved.reviewsPerHour !== null ? store.countAccountReviews(owner, { sinceMs: MS_PER_HOUR }) : 0;
+    resolved.reviewsPerHour !== null
+      ? store.countAccountReviews(owner, { sinceMs: MS_PER_HOUR })
+      : 0;
   let nextSlotAt: string | null = null;
   if (resolved.reviewsPerHour !== null && hourlyUsed >= resolved.reviewsPerHour) {
     const oldest = store.oldestAccountReviewCreatedAt(owner, MS_PER_HOUR);

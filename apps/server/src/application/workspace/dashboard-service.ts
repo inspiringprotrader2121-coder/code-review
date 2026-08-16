@@ -1,5 +1,10 @@
 import type { BillingRepository, IdentityRepository, TenancyRepository } from '@orvex-review/store';
-import { planFeatures, uncapPlan, isUnlimitedTenantSlug, type PlanFeatures } from '@orvex-review/tenants';
+import {
+  planFeatures,
+  uncapPlan,
+  isUnlimitedTenantSlug,
+  type PlanFeatures,
+} from '@orvex-review/tenants';
 import { llmCostVisibleForTenant } from '../../routes/cost-visibility.js';
 import type { ServerConfig } from '../../bootstrap/config.js';
 

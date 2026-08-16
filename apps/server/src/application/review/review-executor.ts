@@ -131,9 +131,7 @@ export function describeRequiredCoverageDegradation(
     skippedLenses,
     transient,
     admissionBlocked,
-    hadSuccessfulRequiredPass: outcomes.some(
-      (outcome) => outcome.ok && !outcome.bestEffort,
-    ),
+    hadSuccessfulRequiredPass: outcomes.some((outcome) => outcome.ok && !outcome.bestEffort),
     reason:
       `review incomplete: ${missingCoverageKeys.length}/${coverageKeys.length} required review ` +
       `coverage unit(s) did not complete because ${cause}`,
@@ -885,9 +883,7 @@ export async function executeReviewCore(
     merged.toPost = verification.toPost;
     merged.reviewOnly = verification.reviewOnly;
     if (verification.incomplete) {
-      const why = verification.unavailableReason
-        ? ` (${verification.unavailableReason})`
-        : '';
+      const why = verification.unavailableReason ? ` (${verification.unavailableReason})` : '';
       throw new Error(
         `review aborted: review incomplete: verification did not complete${why}; refusing to publish an incomplete review`,
       );
