@@ -44,11 +44,7 @@ export function jsonFinishPrefix(text: string, contractPrefix = '{"findings":'):
 
 export type JsonContractKey = 'findings' | 'issues' | 'verdicts' | 'action';
 
-const DEFAULT_JSON_CONTRACT_KEYS: readonly JsonContractKey[] = [
-  'findings',
-  'issues',
-  'verdicts',
-];
+const DEFAULT_JSON_CONTRACT_KEYS: readonly JsonContractKey[] = ['findings', 'issues', 'verdicts'];
 
 function hasJsonContractKey(root: Record<string, unknown>, key: JsonContractKey): boolean {
   if (key === 'action') return typeof root.action === 'string' && root.action.trim().length > 0;

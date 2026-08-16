@@ -50,11 +50,11 @@ export async function runSemgrepOnPaths(
   if (runtimeConfig.semgrepDisabled) return [];
 
   try {
-    const { stdout } = await execFileAsync(
-      'semgrep',
-      semgrepScanArgs(paths),
-      { cwd, maxBuffer: 10 * 1024 * 1024, timeout: 120_000 },
-    );
+    const { stdout } = await execFileAsync('semgrep', semgrepScanArgs(paths), {
+      cwd,
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 120_000,
+    });
     return parseSemgrepOutput(stdout);
   } catch (err: unknown) {
     const execErr = err as { stdout?: string; code?: number };

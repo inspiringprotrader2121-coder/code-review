@@ -239,7 +239,9 @@ test('production PM2 profile splits api/scheduler/workers with fleet Redis caps'
   assert.match(workerArgs, /ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES=1073741824(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_HOST_MIN_AVAILABLE_DISK_BYTES=2147483648(?:\s|\\")/);
   assert.ok(config.apps.every((app) => app.kill_timeout === 1_020_000));
-  assert.ok(workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=10000'));
+  assert.ok(
+    workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=10000'),
+  );
   assert.ok(workerArgs.indexOf('. ./.env') < workerArgs.indexOf('ORVEX_MAX_OUTPUT_TOKENS=128000'));
   assert.ok(
     workerArgs.indexOf('. ./.env') <

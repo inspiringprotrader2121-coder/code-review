@@ -482,36 +482,32 @@ test('verifier concurrency does not silently clamp a configured high ceiling', a
   const startedAll = new Promise<void>((resolve) => {
     allStarted = resolve;
   });
-  const review = verifyFindings(
-    candidates,
-    [{ path: 'a.js', content: 'function reviewed() {}' }],
-    {
-      apiKey: 'test-key',
-      model: 'test-verifier',
-      maxFindingsPerBatch: 1,
-      concurrency: batchCount,
-      runner: {
-        transport: 'compatible-chat',
-        async run() {
-          active++;
-          peak = Math.max(peak, active);
-          started++;
-          if (started === batchCount) allStarted();
-          try {
-            await gate;
-            return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
-          } finally {
-            active--;
-          }
-        },
-      },
-      target: {
-        transport: 'compatible-chat',
-        apiKey: 'test-key',
-        model: 'test-verifier',
+  const review = verifyFindings(candidates, [{ path: 'a.js', content: 'function reviewed() {}' }], {
+    apiKey: 'test-key',
+    model: 'test-verifier',
+    maxFindingsPerBatch: 1,
+    concurrency: batchCount,
+    runner: {
+      transport: 'compatible-chat',
+      async run() {
+        active++;
+        peak = Math.max(peak, active);
+        started++;
+        if (started === batchCount) allStarted();
+        try {
+          await gate;
+          return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+        } finally {
+          active--;
+        }
       },
     },
-  );
+    target: {
+      transport: 'compatible-chat',
+      apiKey: 'test-key',
+      model: 'test-verifier',
+    },
+  });
 
   await startedAll;
   assert.equal(peak, batchCount);
@@ -592,10 +588,19 @@ test('strict verification preserves resolved verdicts when its bounded retry rem
 
   assert.equal(calls, 2);
   assert.equal(result.status, 'verified');
-  assert.deepEqual(result.dropped.map(({ finding }) => finding.line), [1]);
-  assert.deepEqual(result.unverified.map((finding) => finding.line), [2]);
+  assert.deepEqual(
+    result.dropped.map(({ finding }) => finding.line),
+    [1],
+  );
+  assert.deepEqual(
+    result.unverified.map((finding) => finding.line),
+    [2],
+  );
   const disposition = partitionVerifiedFindings(candidates, [], result);
-  assert.deepEqual(disposition.toPost.map((finding) => finding.line), [2]);
+  assert.deepEqual(
+    disposition.toPost.map((finding) => finding.line),
+    [2],
+  );
 });
 
 test('a complete verifier response ignores extraneous ids without a paid retry', async () => {
@@ -632,8 +637,14 @@ test('a complete verifier response ignores extraneous ids without a paid retry',
   );
 
   assert.equal(calls, 1);
-  assert.deepEqual(result.kept.map((finding) => finding.line), [1]);
-  assert.deepEqual(result.dropped.map(({ finding }) => finding.line), [2]);
+  assert.deepEqual(
+    result.kept.map((finding) => finding.line),
+    [1],
+  );
+  assert.deepEqual(
+    result.dropped.map(({ finding }) => finding.line),
+    [2],
+  );
 });
 
 test('a bounded format retry retains usable siblings when ids remain missing', async () => {
@@ -665,8 +676,14 @@ test('a bounded format retry retains usable siblings when ids remain missing', a
 
   assert.equal(calls, 2);
   assert.equal(result.status, 'verified');
-  assert.deepEqual(result.kept.map((finding) => finding.line), [1]);
-  assert.deepEqual(result.unverified.map((finding) => finding.line), [2]);
+  assert.deepEqual(
+    result.kept.map((finding) => finding.line),
+    [1],
+  );
+  assert.deepEqual(
+    result.unverified.map((finding) => finding.line),
+    [2],
+  );
 });
 
 test('verification finishes a JSON-contract miss with one parent-linked continuation', async (t) => {

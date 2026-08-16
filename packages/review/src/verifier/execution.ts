@@ -114,14 +114,15 @@ function validateVerifierResponse(
 }
 
 function parseVerifierResponse(text: string, findingCount: number, strict: boolean): Verdicts {
-  return validateVerifierResponse(VerdictSchema.parse(extractJsonLoose(text)), findingCount, strict);
+  return validateVerifierResponse(
+    VerdictSchema.parse(extractJsonLoose(text)),
+    findingCount,
+    strict,
+  );
 }
 
 function parseUsableVerifierResponse(text: string, findingCount: number): Verdicts {
-  const usable = usableVerifierVerdicts(
-    VerdictSchema.parse(extractJsonLoose(text)),
-    findingCount,
-  );
+  const usable = usableVerifierVerdicts(VerdictSchema.parse(extractJsonLoose(text)), findingCount);
   if (usable.verdicts.length === 0)
     throw new VerifierContractError('Verifier retry returned no usable candidate verdicts');
   return usable;

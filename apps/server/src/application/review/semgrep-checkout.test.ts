@@ -16,7 +16,10 @@ test('Semgrep receives an isolated PR-head checkout instead of the worker source
     async (paths, cwd) => {
       observedCwd = cwd;
       assert.deepEqual(paths, ['src/changed.ts', 'nested/module.py']);
-      assert.equal(await readFile(`${cwd}/src/changed.ts`, 'utf8'), 'export const changed = true;\n');
+      assert.equal(
+        await readFile(`${cwd}/src/changed.ts`, 'utf8'),
+        'export const changed = true;\n',
+      );
       assert.equal(await readFile(`${cwd}/nested/module.py`, 'utf8'), 'print("head")\n');
       return 'scanned';
     },
