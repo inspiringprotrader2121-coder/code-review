@@ -157,7 +157,7 @@ export interface ReviewQueue {
   /** Returns false when this worker no longer owns the durable claim. */
   markFailed(job: ReviewJobPayload, failure: QueueFailure): Promise<boolean | void>;
   /** Return an owned claim to the ready queue without recording a failure. */
-  returnToQueue?(
+  returnToQueue(
     job: ReviewJobPayload,
     opts?: { availableAtMs?: number },
   ): Promise<'newer-pending' | 'requeued' | false>;
