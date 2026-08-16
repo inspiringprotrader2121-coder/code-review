@@ -19,7 +19,12 @@ import { runWithActiveReview } from '../../active-reviews.js';
 import { sendOperationalAlert } from '../../alerts.js';
 import { bindWorkerRuntime } from './runtime.js';
 import { startLeaseHeartbeat } from './lease-heartbeat.js';
-import { finalizeQueueJob, fleetProvidersSaturated, resolveMaxJobRetries } from './queue-policy.js';
+import {
+  finalizeQueueJob,
+  fleetProvidersSaturated,
+  resolveMaxJobRetries,
+  returnJobForProviderHeadroom,
+} from './queue-policy.js';
 import { alertQueueOperationalEvents } from './queue-alerts.js';
 
 export interface JobProcessorDependencies {
@@ -75,7 +80,7 @@ export async function processWorkerJob(
       const admission = providerAdmissionFor(queue);
       if (await fleetProvidersSaturated(admission)) {
         log.log(`[worker] defer ${key}: provider fleet saturated; preserving queue age`);
-        await returnClaimedJob(queue, job);
+        await returnJobForProviderHeadroom(queue, job);
         finalizedOwned = true;
         return;
       }
@@ -104,7 +109,7 @@ export async function processWorkerJob(
         log.log(
           `[worker] defer ${key}: ${result.skipReason === 'rate_limited_deferred' ? 'hourly cap' : 'tenant concurrency full'}; preserving queue age`,
         );
-        await returnClaimedJob(queue, job, {
+        await returnJobForProviderHeadroom(queue, job, {
           availableAtMs:
             result.skipReason === 'rate_limited_deferred' ? Date.now() + 60_000 : undefined,
         });
@@ -128,7 +133,7 @@ export async function processWorkerJob(
       log.error(`[worker] failed ${key}:`, message);
       if (job.action !== 'command' && shouldRequeueAdmissionFailure(message, 0)) {
         log.log(`[worker] defer ${key}: provider admission saturated; preserving queue age`);
-        await returnClaimedJob(queue, job);
+        await returnJobForProviderHeadroom(queue, job);
         finalizedOwned = true;
         return;
       }
@@ -241,16 +246,5 @@ async function requeueTransientFailure(
       },
       runtime.alerts.webhookUrl,
     );
-  }
-}
-
-async function returnClaimedJob(
-  queue: ReviewQueue,
-  job: ReviewJobPayload,
-  opts?: { availableAtMs?: number },
-): Promise<void> {
-  const returned = await queue.returnToQueue(job, opts);
-  if (returned === false) {
-    throw new Error(`review lease lost before returning ${prKey(job)} to the queue`);
   }
 }
