@@ -15,16 +15,15 @@ export interface SemgrepFinding {
   ruleId: string;
 }
 
-interface SarifResult {
-  ruleId?: string;
-  level?: string;
-  message?: { text?: string };
-  locations?: Array<{
-    physicalLocation?: {
-      artifactLocation?: { uri?: string };
-      region?: { startLine?: number };
-    };
-  }>;
+/** Native `semgrep --json` result shape (not SARIF). */
+interface SemgrepJsonResult {
+  check_id?: string;
+  path?: string;
+  start?: { line?: number };
+  extra?: {
+    severity?: string;
+    message?: string;
+  };
 }
 
 export async function runSemgrepOnPaths(
@@ -38,7 +37,10 @@ export async function runSemgrepOnPaths(
   try {
     const { stdout } = await execFileAsync(
       'semgrep',
-      ['scan', '--json', '--quiet', '--', ...paths],
+      // `--config auto` is required when the repo has no semgrep.yaml; without it
+      // recent semgrep builds exit with "No config given". `--json` emits the
+      // native results schema (check_id/path/start), not SARIF.
+      ['scan', '--config', 'auto', '--json', '--quiet', '--', ...paths],
       { cwd, maxBuffer: 10 * 1024 * 1024, timeout: 120_000 },
     );
     return parseSemgrepJson(stdout);
@@ -50,26 +52,28 @@ export async function runSemgrepOnPaths(
   }
 }
 
-function parseSemgrepJson(stdout: string): SemgrepFinding[] {
-  const data = JSON.parse(stdout) as { results?: SarifResult[] };
+/** Exported for unit tests. */
+export function parseSemgrepJson(stdout: string): SemgrepFinding[] {
+  const data = JSON.parse(stdout) as { results?: SemgrepJsonResult[] };
   const findings: SemgrepFinding[] = [];
 
   for (const r of data.results ?? []) {
-    const file = r.locations?.[0]?.physicalLocation?.artifactLocation?.uri;
-    const line = r.locations?.[0]?.physicalLocation?.region?.startLine;
+    const file = r.path;
+    const line = r.start?.line;
     if (!file || !line) continue;
 
-    const level = r.level ?? 'warning';
-    const severity = level === 'error' ? 'P1' : level === 'warning' ? 'P2' : 'P3';
+    const level = (r.extra?.severity ?? 'WARNING').toUpperCase();
+    const severity = level === 'ERROR' ? 'P1' : level === 'WARNING' ? 'P2' : 'P3';
+    const ruleId = r.check_id ?? 'unknown';
 
     findings.push({
       file,
       line,
       severity,
       category: 'semgrep',
-      message: r.message?.text ?? r.ruleId ?? 'Semgrep finding',
+      message: r.extra?.message ?? ruleId,
       confidence: 0.95,
-      ruleId: `semgrep.${r.ruleId ?? 'unknown'}`,
+      ruleId: `semgrep.${ruleId}`,
     });
   }
 
