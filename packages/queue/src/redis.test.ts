@@ -4,7 +4,13 @@ import test from 'node:test';
 import { Redis } from 'ioredis';
 import { RedisReviewQueue } from './redis.js';
 import { CLAIM_LUA, DEQUEUE_LUA } from './redis-scripts.js';
-import { DEQUEUE_INSPECTION_WINDOW, jobIdempotencyKey, prKey, queueFailure, type ReviewJobPayload } from './types.js';
+import {
+  DEQUEUE_INSPECTION_WINDOW,
+  jobIdempotencyKey,
+  prKey,
+  queueFailure,
+  type ReviewJobPayload,
+} from './types.js';
 
 const redisUrl = process.env.REDIS_TEST_URL;
 

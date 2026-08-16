@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryReviewQueue } from './memory.js';
-import { jobIdempotencyKey, queueFailure, DEQUEUE_INSPECTION_WINDOW, type ReviewJobPayload } from './types.js';
+import {
+  jobIdempotencyKey,
+  queueFailure,
+  DEQUEUE_INSPECTION_WINDOW,
+  type ReviewJobPayload,
+} from './types.js';
 
 function job(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   return {

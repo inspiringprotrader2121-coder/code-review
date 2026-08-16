@@ -141,9 +141,7 @@ export async function processWorkerJob(
       const code = failureCode(message, leaseOwnershipValid);
       const nextAttempt = (job.attempts ?? 0) + 1;
       const willRetry =
-        job.action !== 'command' &&
-        transient &&
-        nextAttempt <= resolveMaxJobRetries(input.runtime);
+        job.action !== 'command' && transient && nextAttempt <= resolveMaxJobRetries(input.runtime);
       finalizedOwned =
         (await queue.markFailed(job, queueFailure(code, message, willRetry))) !== false;
       if (finalizedOwned) {
