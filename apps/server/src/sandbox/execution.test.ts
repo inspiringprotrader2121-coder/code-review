@@ -30,21 +30,22 @@ function fakeChild(): ReturnType<typeof spawn> {
 
 test('a full sandbox host waits for a slot instead of failing the review immediately', async () => {
   const slotDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-slot-wait-dir-'));
+  fs.chmodSync(slotDirectory, 0o700);
   const firstWorkdir = createSandboxWorkdir();
   const secondWorkdir = createSandboxWorkdir();
   const firstRun = fakeChild();
-  let secondStarted = false;
+  let runCount = 0;
   const fakeSpawn = ((_: string, args: readonly string[] = []) => {
     if (args[0] === 'run') {
-      if (!secondStarted) return firstRun;
+      runCount += 1;
+      if (runCount === 1) return firstRun;
       const second = fakeChild();
-      secondStarted = true;
       queueMicrotask(() => second.emit('close', 0));
       return second;
     }
     const child = fakeChild();
     queueMicrotask(() => {
-      if (args[0] === 'inspect') child.stderr.write('Error: No such object\n');
+      if (args[0] === 'inspect') (child.stderr as PassThrough).write('Error: No such object\n');
       child.emit('close', args[0] === 'inspect' ? 1 : 0);
     });
     return child;
@@ -71,11 +72,7 @@ test('a full sandbox host waits for a slot instead of failing the review immedia
     const [firstResult, secondResult] = await Promise.all([first, second]);
     assert.equal(firstResult.exitCode, 0);
     assert.equal(secondResult.exitCode, 0);
-    assert.equal(
-      secondStarted,
-      true,
-      'the waiter acquired the slot after the first review released it',
-    );
+    assert.equal(runCount, 2, 'the waiter acquired the slot after the first review released it');
   } finally {
     fs.rmSync(firstWorkdir, { recursive: true, force: true });
     fs.rmSync(secondWorkdir, { recursive: true, force: true });
@@ -85,6 +82,7 @@ test('a full sandbox host waits for a slot instead of failing the review immedia
 
 test('sandbox slot timeout is an admission miss, not an immediate review failure', async () => {
   const slotDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-slot-timeout-dir-'));
+  fs.chmodSync(slotDirectory, 0o700);
   fs.mkdirSync(path.join(slotDirectory, 'slot-0'), { mode: 0o700 });
   fs.writeFileSync(
     path.join(slotDirectory, 'slot-0', 'owner.json'),
