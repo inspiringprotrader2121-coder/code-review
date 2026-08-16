@@ -4,7 +4,7 @@ import {
   fetchPullRequest,
   type GitHubAppConfig,
 } from '@orvex-review/github';
-import { planFeatures, TenantService } from '@orvex-review/tenants';
+import { TenantService, reviewJobAdmissionFields } from '@orvex-review/tenants';
 import type { GitHubInstallation } from '@orvex-review/store';
 import type { ServerConfig } from '../../bootstrap/config.js';
 import type {
@@ -97,7 +97,7 @@ export class GitHubWebhookEventContext {
       action: 'command',
       fix,
       sourceEventId: extra?.sourceEventId ?? fix?.sourceEventId,
-      priority: planFeatures(this.db.getTenantPlan(installation.tenantId)).priority,
+      ...reviewJobAdmissionFields(owner, this.db.getTenantPlan(installation.tenantId)),
       enqueuedAt: new Date().toISOString(),
     };
     const result = await this.queue.enqueue(job);

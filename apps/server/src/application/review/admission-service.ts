@@ -1,5 +1,5 @@
 import type { ReviewJobPayload } from '@orvex-review/queue';
-import { planFeatures, type PlanFeatures } from '@orvex-review/tenants';
+import { planFeaturesForAccount, type PlanFeatures } from '@orvex-review/tenants';
 import type { WorkerConfig } from '../../review/worker-types.js';
 import type { AdmissionResult } from './types.js';
 
@@ -103,7 +103,7 @@ export class AdmissionService {
       }
     }
 
-    const plan = planFeatures(config.store.getTenantPlan(job.tenantId));
+    const plan = planFeaturesForAccount(config.store.getTenantPlan(job.tenantId), job.owner);
     const providerIssue = this.dependencies.providerIssue(
       plan,
       config,

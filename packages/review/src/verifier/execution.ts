@@ -57,6 +57,7 @@ async function invokeVerifier(
       onUsage: options.onUsage,
       onAttempt: options.onAttempt,
       attemptLineage,
+      jsonContractPrefix: '{"verdicts":',
     });
   } catch (error) {
     console.warn('[verifier] call failed (no whole-call replay):', (error as Error).message);
@@ -71,7 +72,7 @@ function parseVerifierResponse(text: string) {
 function isVerifierContractError(error: unknown): boolean {
   const name = error instanceof Error ? error.name : '';
   const message = error instanceof Error ? error.message : String(error);
-  return name === 'ZodError' || /no parseable JSON/i.test(message);
+  return name === 'ZodError' || /no parseable JSON|returned no text/i.test(message);
 }
 
 async function verifyFindingsBatch(

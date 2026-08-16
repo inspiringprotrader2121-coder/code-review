@@ -32,6 +32,12 @@ export async function publishReview(
     return createClosedPrResult(input);
   }
 
+  if (input.incompleteReason || input.verificationIncomplete) {
+    throw new Error(
+      input.incompleteReason ??
+        `review incomplete: verification did not complete${input.verificationUnavailableReason ? ` (${input.verificationUnavailableReason})` : ''}`,
+    );
+  }
   const output = await publishReviewOutput(publisher, input, scope);
   const { state, finalFindings } = serializeReviewState(input, output.commentIdMap);
   await runPostPublicationStep('state persistence', () => input.config.store.saveState(state));

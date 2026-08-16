@@ -122,17 +122,16 @@ test('runtime-evidence failure cannot turn an accepted review into a failed resu
   assert.equal(result.reviewId, 17);
 });
 
-test('verification-incomplete publication records the limitation in the durable run result', async () => {
+test('verification-incomplete publication refuses to post a partial review', async () => {
   const input = publicationInput({
     verificationIncomplete: true,
     verificationUnavailableReason: 'verifier response contained no parseable JSON',
   });
 
-  const result = await publishReview(directPublisher, input);
-
-  assert.equal(result.published, true);
-  assert.match(result.incompleteReason ?? '', /^review incomplete: verification did not complete/);
-  assert.match(result.incompleteReason ?? '', /no parseable JSON/);
+  await assert.rejects(
+    () => publishReview(directPublisher, input),
+    /verification did not complete/,
+  );
 });
 
 test('summary-table findings are not posted as detached issue comments', async () => {

@@ -181,11 +181,11 @@ export async function runLlmReview(
   } catch (err) {
     if (isReviewCancelledError(err) || opts.signal?.aborted) throw err;
     const message = (err as Error).message;
-    // Rate-limit, transport and timeout failures are not clean reviews. Preserve
-    // them so provider cooldown/admission and the required-pass gate can act.
     if (isTransientLlmError(message) || isRetryableRateLimit(message)) throw err;
-    console.error('[llm] review response invalid — returning incomplete without replay:', message);
-    return { findings: [], summary: REVIEW_INCOMPLETE_SUMMARY };
+    // Invalid JSON after in-slot continuations is not a clean empty review.
+    // Callers must fail the required pass, not publish a partial sign-off.
+    console.error('[llm] review response invalid after in-slot continuations:', message);
+    throw err;
   }
 
   // Generous backstop against a runaway model, not a quality gate — the rules

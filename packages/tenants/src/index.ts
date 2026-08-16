@@ -55,6 +55,14 @@ export {
   type PlanFeatures,
 } from './plans.js';
 export {
+  isUnlimitedGithubOwner,
+  isUnlimitedAccountEmail,
+  isUnlimitedTenantSlug,
+  uncapPlan,
+  planFeaturesForAccount,
+  reviewJobAdmissionFields,
+} from './account-quota.js';
+export {
   authDisabled,
   legacyAuthMode,
   buildAuthorizeUrl,

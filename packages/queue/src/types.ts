@@ -56,6 +56,8 @@ export interface ReviewJobPayload {
   /** Subscription queue priority. Higher values are selected first within a
    * bounded dequeue window; FIFO ordering is preserved within one priority. */
   priority?: number;
+  /** Skip the fleet per-tenant claim ceiling for operator-unlimited accounts. */
+  quotaUnlimited?: boolean;
 }
 
 export interface EnqueueResult {

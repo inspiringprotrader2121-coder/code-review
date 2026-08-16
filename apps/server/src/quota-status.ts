@@ -4,7 +4,7 @@
  */
 import type { BillingRepository } from '@orvex-review/store';
 import { BillingPeriod } from '@orvex-review/billing';
-import { publicPlanLabel, type PlanFeatures } from '@orvex-review/tenants';
+import { publicPlanLabel, uncapPlan, isUnlimitedGithubOwner, type PlanFeatures } from '@orvex-review/tenants';
 import { commandTrigger } from '@orvex-review/review';
 import type { ServerConfig } from './bootstrap/config.js';
 
@@ -72,10 +72,11 @@ export function loadAccountQuotaStatus(
   config?: Pick<ServerConfig, 'quota'>,
   _now = Date.now(),
 ): AccountQuotaStatus {
+  const resolved = isUnlimitedGithubOwner(owner) ? uncapPlan(plan) : plan;
   const hourlyUsed =
-    plan.reviewsPerHour !== null ? store.countAccountReviews(owner, { sinceMs: MS_PER_HOUR }) : 0;
+    resolved.reviewsPerHour !== null ? store.countAccountReviews(owner, { sinceMs: MS_PER_HOUR }) : 0;
   let nextSlotAt: string | null = null;
-  if (plan.reviewsPerHour !== null && hourlyUsed >= plan.reviewsPerHour) {
+  if (resolved.reviewsPerHour !== null && hourlyUsed >= resolved.reviewsPerHour) {
     const oldest = store.oldestAccountReviewCreatedAt(owner, MS_PER_HOUR);
     if (oldest) {
       nextSlotAt = new Date(new Date(oldest).getTime() + MS_PER_HOUR).toISOString();
@@ -84,62 +85,62 @@ export function loadAccountQuotaStatus(
 
   let monthly: AccountQuotaStatus['monthly'];
   const useTenantUnits =
-    plan.trialReviewLimit === null &&
-    (plan.includedReviewsPerMonth !== null || plan.reviewsPerMonth !== null);
+    resolved.trialReviewLimit === null &&
+    (resolved.includedReviewsPerMonth !== null || resolved.reviewsPerMonth !== null);
   const monthlyUsed = useTenantUnits
     ? store.countTenantReviewUnits(tenantId, {
         sinceIso: BillingPeriod.start(store.getTenantBilling(tenantId)?.stripeCurrentPeriodStart),
       })
     : store.countAccountReviews(owner, { sinceMs: MS_PER_30_DAYS });
-  if (plan.includedReviewsPerMonth !== null && plan.overageCentsPerReview !== null) {
-    // Included allotment + prepaid overage — show included usage; hard ceiling is
-    // still enforced by accountLimitReason.
+  if (resolved.includedReviewsPerMonth !== null && resolved.overageCentsPerReview !== null) {
     monthly = {
       kind: 'metered',
       used: monthlyUsed,
-      included: plan.includedReviewsPerMonth,
-      overageCents: plan.overageCentsPerReview,
+      included: resolved.includedReviewsPerMonth,
+      overageCents: resolved.overageCentsPerReview,
     };
-  } else if (plan.reviewsPerMonth !== null) {
+  } else if (resolved.reviewsPerMonth !== null) {
     monthly = {
       kind: 'hard',
       used: monthlyUsed,
-      limit: plan.reviewsPerMonth,
-      remaining: Math.max(0, plan.reviewsPerMonth - monthlyUsed),
+      limit: resolved.reviewsPerMonth,
+      remaining: Math.max(0, resolved.reviewsPerMonth - monthlyUsed),
     };
   } else {
     monthly = { kind: 'unlimited' };
   }
   const cost = store.sumAccountCost(owner, MS_PER_30_DAYS);
-  const costLimit = monthlyCogsCapUsd(config);
+  const costLimit = isUnlimitedGithubOwner(owner)
+    ? Number.POSITIVE_INFINITY
+    : monthlyCogsCapUsd(config);
 
   let trial: AccountQuotaStatus['trial'] = null;
-  if (plan.trialReviewLimit !== null) {
+  if (resolved.trialReviewLimit !== null) {
     const used = store.countAccountReviews(owner);
     trial = {
       used,
-      limit: plan.trialReviewLimit,
-      remaining: Math.max(0, plan.trialReviewLimit - used),
+      limit: resolved.trialReviewLimit,
+      remaining: Math.max(0, resolved.trialReviewLimit - used),
     };
   }
 
   return {
-    planId: plan.id,
-    planLabel: publicPlanLabel(plan),
+    planId: resolved.id,
+    planLabel: publicPlanLabel(resolved),
     hourly: {
       used: hourlyUsed,
-      limit: plan.reviewsPerHour,
+      limit: resolved.reviewsPerHour,
       remaining:
-        plan.reviewsPerHour === null ? null : Math.max(0, plan.reviewsPerHour - hourlyUsed),
+        resolved.reviewsPerHour === null ? null : Math.max(0, resolved.reviewsPerHour - hourlyUsed),
       nextSlotAt,
     },
     concurrent: {
       running: store.countRunningAccountReviews(owner),
-      limit: plan.maxConcurrentReviews,
+      limit: resolved.maxConcurrentReviews,
     },
     credits: {
       balanceCents: store.getCreditBalanceCents(tenantId),
-      overageCentsPerReview: plan.overageCentsPerReview,
+      overageCentsPerReview: resolved.overageCentsPerReview,
     },
     monthly,
     cost: { usedUsd: cost.costUsd, limitUsd: costLimit },

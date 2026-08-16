@@ -5,7 +5,7 @@ import {
   type GitHubAppConfig,
 } from '@orvex-review/github';
 import { closeCodexSession } from '@orvex-review/review';
-import { planFeatures } from '@orvex-review/tenants';
+import { reviewJobAdmissionFields } from '@orvex-review/tenants';
 import { cancelActiveReviewsForPr } from '../../active-reviews.js';
 import type { GithubWebhookEventResult, PullRequestWebhook } from './github-webhook-contracts.js';
 import type { GitHubWebhookEventContext } from './github-webhook-event-context.js';
@@ -129,7 +129,7 @@ export async function handlePullRequestEvent(
     pr,
     headSha,
     action: action as 'opened' | 'synchronize' | 'reopened' | 'ready_for_review',
-    priority: planFeatures(context.db.getTenantPlan(installation.tenantId)).priority,
+    ...reviewJobAdmissionFields(owner, context.db.getTenantPlan(installation.tenantId)),
     enqueuedAt: new Date().toISOString(),
   });
   console.log(

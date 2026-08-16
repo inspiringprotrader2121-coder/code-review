@@ -59,7 +59,7 @@ test('review execution accepts an injected computation without provider or GitHu
   );
 });
 
-test('missing required coverage is publishable only with an explicit incomplete disclosure', () => {
+test('missing required coverage is never a publishable partial review', () => {
   const degradation = describeRequiredCoverageDegradation(
     ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1'],
     [
@@ -83,12 +83,14 @@ test('missing required coverage is publishable only with an explicit incomplete 
     skippedLenses: ['pass 2/4 (deep-dive)'],
     transient: true,
     admissionBlocked: false,
+    hadSuccessfulRequiredPass: true,
     reason:
       'review incomplete: 1/2 required review coverage unit(s) did not complete because a provider timed out or was temporarily unavailable',
   });
+  assert.equal(shouldRequeueIncompleteCoverage(degradation), false);
 });
 
-test('admission saturation is disclosed as admissionBlocked so the executor can requeue', () => {
+test('admission saturation requeues only when no required pass has already succeeded', () => {
   const degradation = describeRequiredCoverageDegradation(
     ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1'],
     [
@@ -108,11 +110,29 @@ test('admission saturation is disclosed as admissionBlocked so the executor can 
     1,
   );
   assert.equal(degradation?.admissionBlocked, true);
-  assert.match(degradation?.reason ?? '', /admission was saturated/);
-  assert.equal(shouldRequeueIncompleteCoverage(degradation), true);
+  assert.equal(degradation?.hadSuccessfulRequiredPass, true);
+  assert.equal(shouldRequeueIncompleteCoverage(degradation), false);
+
+  const noneStarted = describeRequiredCoverageDegradation(
+    ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1'],
+    [
+      {
+        requiredCoverageKey: 'required:general:0:chunk:1/1',
+        ok: false,
+        admissionBlocked: true,
+      },
+      {
+        requiredCoverageKey: 'required:deep-dive:1:chunk:1/1',
+        ok: false,
+        admissionBlocked: true,
+      },
+    ],
+    1,
+  );
+  assert.equal(shouldRequeueIncompleteCoverage(noneStarted), true);
 });
 
-test('a missing MiniMax, Flash, or Luna pass requeues instead of publishing without that model', () => {
+test('a missing MiniMax, Flash, or Luna pass does not replay a review that already paid for another model', () => {
   const minimax = describeRequiredCoverageDegradation(
     ['required:general:0:chunk:1/1', 'required:perf:2:chunk:1/1'],
     [
@@ -126,7 +146,7 @@ test('a missing MiniMax, Flash, or Luna pass requeues instead of publishing with
     ],
     1,
   );
-  assert.equal(shouldRequeueIncompleteCoverage(minimax), true);
+  assert.equal(shouldRequeueIncompleteCoverage(minimax), false);
 
   const flash = describeRequiredCoverageDegradation(
     ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1'],
@@ -141,7 +161,7 @@ test('a missing MiniMax, Flash, or Luna pass requeues instead of publishing with
     ],
     1,
   );
-  assert.equal(shouldRequeueIncompleteCoverage(flash), true);
+  assert.equal(shouldRequeueIncompleteCoverage(flash), false);
 
   const parseFailure = describeRequiredCoverageDegradation(
     ['required:general:0:chunk:1/1'],

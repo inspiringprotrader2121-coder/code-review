@@ -187,8 +187,9 @@ for i = 0, count - 1 do
   local ok, decoded = pcall(cjson.decode, candidate)
   if ok and decoded and tonumber(decoded.priority) then priority = math.floor(tonumber(decoded.priority)) end
   local tenant = ok and decoded and tostring(decoded.tenantId or '') or ''
+  local unlimited = ok and decoded and decoded.quotaUnlimited
   local active = tenantLimit > 0 and tonumber(redis.call('HGET', KEYS[4], tenant) or '0') or 0
-  if tenantLimit == 0 or active < tenantLimit then
+  if tenantLimit == 0 or unlimited == true or unlimited == 'true' or active < tenantLimit then
     if forceFifo then
       selectedIndex = i
       break

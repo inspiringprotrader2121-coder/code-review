@@ -1,5 +1,5 @@
 import type { BillingRepository, IdentityRepository, TenancyRepository } from '@orvex-review/store';
-import { planFeatures, type PlanFeatures } from '@orvex-review/tenants';
+import { planFeatures, uncapPlan, isUnlimitedTenantSlug, type PlanFeatures } from '@orvex-review/tenants';
 import { llmCostVisibleForTenant } from '../../routes/cost-visibility.js';
 import type { ServerConfig } from '../../bootstrap/config.js';
 
@@ -57,11 +57,13 @@ export class DashboardService {
       isSuperAdmin = user.isSuperAdmin;
       canManageBilling = membership.role === 'owner';
     }
+    const plan = planFeatures(this.store.getTenantPlan(tenant.id));
+    const unlimited = isUnlimitedTenantSlug(tenant.slug);
     return {
       isSuperAdmin,
       canManageBilling,
       showLlmCost: llmCostVisibleForTenant(tenant.slug, this.config.costVisibilityTenants),
-      plan: planFeatures(this.store.getTenantPlan(tenant.id)),
+      plan: unlimited ? uncapPlan(plan) : plan,
       creditBalanceCents: this.store.getCreditBalanceCents(tenant.id),
     };
   }

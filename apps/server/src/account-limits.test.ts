@@ -389,11 +389,32 @@ test('per-account concurrency caps parallel burn of the hourly bucket', () => {
   );
 });
 
-test('small plans allow fewer concurrent reviews than Verify', () => {
-  assert.equal(planFeatures('review').maxConcurrentReviews, 2);
-  assert.equal(planFeatures('verify-lite').maxConcurrentReviews, 2);
-  assert.equal(planFeatures('review-plus').maxConcurrentReviews, 3);
-  assert.equal(planFeatures('enterprise').maxConcurrentReviews, 8);
+test('operator-unlimited github owners skip every account quota including COGS', () => {
+  const previous = process.env.ORVEX_UNLIMITED_GITHUB_OWNERS;
+  process.env.ORVEX_UNLIMITED_GITHUB_OWNERS = 'inspiringprotrader2121-coder';
+  const d = db();
+  const tenantId = defaultTenant(d);
+  const plan = planFeatures('enterprise');
+  for (let i = 0; i < 20; i++) {
+    d.startReviewRun({
+      tenantId,
+      installationId: 1,
+      owner: 'inspiringprotrader2121-coder',
+      repo: 'Velatrix-Cloud',
+      pr: 300 + i,
+      headSha: `unlimited${i}`,
+      action: 'opened',
+    });
+  }
+  try {
+    assert.equal(
+      accountLimitReason(d, 'inspiringprotrader2121-coder', plan, 1, 0, { tenantId }),
+      null,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ORVEX_UNLIMITED_GITHUB_OWNERS;
+    else process.env.ORVEX_UNLIMITED_GITHUB_OWNERS = previous;
+  }
 });
 
 test('COGS admission uses the injected monthly cap, not the legacy plan-id default', () => {

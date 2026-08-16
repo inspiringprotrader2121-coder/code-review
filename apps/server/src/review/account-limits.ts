@@ -1,4 +1,4 @@
-import { planFeatures } from '@orvex-review/tenants';
+import { planFeatures, isUnlimitedGithubOwner } from '@orvex-review/tenants';
 import { BillingPeriod } from '@orvex-review/billing';
 import type { WorkerConfig } from './worker-types.js';
 
@@ -70,6 +70,7 @@ export function accountLimitReason(
   opts: AccountLimitOptions = {},
   policy: AccountLimitPolicy = DEFAULT_ACCOUNT_LIMIT_POLICY,
 ): AccountLimitReason | null {
+  if (isUnlimitedGithubOwner(owner)) return null;
   if (!opts.cogsOnly) {
     if (plan.trialReviewLimit !== null) {
       const globalToday = store.countGlobalFreeTierReviewsSince(24 * 3_600_000);

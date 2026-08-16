@@ -24,6 +24,7 @@ test('tenant runtime config snapshots auth, plan, and identity settings immutabl
   assert.equal(config.requireLogin, true);
   assert.equal(config.defaultPlanId, 'verify');
   assert.deepEqual(config.extraDisposableDomains, ['temp.example', 'extra.example']);
+  assert.deepEqual(config.unlimitedGithubOwners, []);
   assert.ok(Object.isFrozen(config));
   assert.ok(Object.isFrozen(config.extraDisposableDomains));
   assert.ok(Object.isFrozen(config.githubOAuth));

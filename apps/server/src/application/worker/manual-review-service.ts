@@ -5,7 +5,7 @@ import {
   fetchPullRequest,
   getInstallationIdForRepo,
 } from '@orvex-review/github';
-import { TenantService, planFeatures } from '@orvex-review/tenants';
+import { TenantService, reviewJobAdmissionFields } from '@orvex-review/tenants';
 import { loadWorkerConfig } from '../../pipeline.js';
 
 export interface ManualReviewInput {
@@ -73,7 +73,7 @@ export async function enqueueManualReview(
     pr: input.pr,
     headSha: input.headSha ?? pr.headSha,
     action: 'manual',
-    priority: planFeatures(config.store.getTenantPlan(tenantId)).priority,
+    ...reviewJobAdmissionFields(input.owner, config.store.getTenantPlan(tenantId)),
     enqueuedAt: new Date().toISOString(),
   };
   await queue.enqueue(job);

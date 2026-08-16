@@ -15,7 +15,7 @@ import {
   verifyFindings,
   type ReviewFinding,
 } from '@orvex-review/review';
-import { planFeatures } from '@orvex-review/tenants';
+import { planFeatures, reviewJobAdmissionFields } from '@orvex-review/tenants';
 import {
   createUsageRecorder,
   accountLimitReason,
@@ -106,7 +106,7 @@ export async function enqueueNightlyScans(
       pr: 0,
       headSha: 'nightly',
       scanDay,
-      priority: planFeatures(t.plan).priority,
+      ...reviewJobAdmissionFields(t.owner, t.plan),
       enqueuedAt: new Date().toISOString(),
     });
     enqueued++;

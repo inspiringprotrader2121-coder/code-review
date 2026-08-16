@@ -398,6 +398,12 @@ export async function anthropicChat(
   if (!text) {
     if (response.usage?.input_tokens === 0 && response.usage.output_tokens === 0)
       throw new Error(RETRYABLE_EMPTY_PROVIDER_RESPONSE);
+    if (opts.json) {
+      throw new DeepSeekContinuationRequiredError({
+        reasoningContent: continuation?.reasoningContent ?? '',
+        contentPrefix: jsonFinishPrefix(rawText, opts.jsonContractPrefix),
+      });
+    }
     throw new Error('LLM returned no text content');
   }
   return text;
@@ -511,6 +517,12 @@ export async function openAiResponsesStreamChat(
     throw new Error(`LLM responses truncated (${incomplete}); increase ORVEX_MAX_OUTPUT_TOKENS`);
   if (!content) {
     if (inTok === 0 && outTok === 0) throw new Error(RETRYABLE_EMPTY_PROVIDER_RESPONSE);
+    if (opts.json) {
+      throw new DeepSeekContinuationRequiredError({
+        reasoningContent: '',
+        contentPrefix: jsonFinishPrefix(content, opts.jsonContractPrefix),
+      });
+    }
     throw new Error('LLM responses returned no text');
   }
   return content;
@@ -713,7 +725,15 @@ export async function openAiCompatStreamChat(
     }
     throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
   }
-  if (!text) throw new Error('LLM returned no text content');
+  if (!text) {
+    if (opts.json) {
+      throw new DeepSeekContinuationRequiredError({
+        reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
+        contentPrefix: jsonFinishPrefix(streamedText, opts.jsonContractPrefix),
+      });
+    }
+    throw new Error('LLM returned no text content');
+  }
   return text;
 }
 

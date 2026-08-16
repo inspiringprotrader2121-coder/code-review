@@ -89,13 +89,13 @@ export interface RequiredCoverageDegradation {
   transient: boolean;
   /** True when missing coverage failed because provider admission refused capacity. */
   admissionBlocked: boolean;
+  /** True when at least one required pass already produced paid output. */
+  hadSuccessfulRequiredPass: boolean;
 }
 
 /**
- * A review with at least one completed discovery pass can publish its findings
- * safely, provided the missing coverage is explicit. This avoids throwing away
- * completed provider work while ensuring the result is never presented as a
- * full sign-off.
+ * Every required discovery pass must succeed. Missing coverage is never a
+ * publishable partial review.
  */
 export function describeRequiredCoverageDegradation(
   coverageKeys: readonly string[],
@@ -131,17 +131,20 @@ export function describeRequiredCoverageDegradation(
     skippedLenses,
     transient,
     admissionBlocked,
+    hadSuccessfulRequiredPass: outcomes.some(
+      (outcome) => outcome.ok && !outcome.bestEffort,
+    ),
     reason:
       `review incomplete: ${missingCoverageKeys.length}/${coverageKeys.length} required review ` +
       `coverage unit(s) did not complete because ${cause}`,
   };
 }
 
-/** Luna / Flash / MiniMax capacity misses must wait or requeue, not publish without that model. */
+/** Replay only when the fleet never started a required paid pass. */
 export function shouldRequeueIncompleteCoverage(
   degradation: RequiredCoverageDegradation | null,
 ): boolean {
-  return Boolean(degradation && (degradation.admissionBlocked || degradation.transient));
+  return Boolean(degradation?.admissionBlocked && !degradation.hadSuccessfulRequiredPass);
 }
 
 export { takeReviewCallsByPriority } from './review-execution-policy.js';
@@ -339,10 +342,8 @@ export async function executeReviewCore(
     });
 
     let llmSummary: string | undefined;
-    // Best-effort passes that failed — surfaced in the posted review so a partial
-    // run can never read as a full sign-off.
+    // Best-effort extras that did not run — never a substitute for a required pass.
     let skippedLenses: string[] = [];
-    let reviewIncompleteReason: string | undefined;
     // Only true once an extra deep lens has actually produced a review.
     let deepLensesRan = false;
     let llmFindings: ReviewFinding[] = [];
@@ -643,18 +644,14 @@ export async function executeReviewCore(
           finalOutcomes,
           requiredSuccesses,
         );
-        if (shouldRequeueIncompleteCoverage(requiredCoverageDegradation)) {
-          throw new Error(
-            `review aborted: ${requiredCoverageDegradation!.reason}; requeueing instead of publishing an incomplete review`,
-          );
-        }
         if (requiredCoverageDegradation) {
-          reviewIncompleteReason = requiredCoverageDegradation.reason;
-          skippedLenses = [
-            ...new Set([...skippedLenses, ...requiredCoverageDegradation.skippedLenses]),
-          ];
-          console.warn(
-            `[worker] ${requiredCoverageDegradation.reason}; publishing completed pass results with disclosure`,
+          if (shouldRequeueIncompleteCoverage(requiredCoverageDegradation)) {
+            throw new Error(
+              `review aborted: ${requiredCoverageDegradation.reason}; requeueing instead of publishing an incomplete review`,
+            );
+          }
+          throw new Error(
+            `review aborted: ${requiredCoverageDegradation.reason}; refusing to publish an incomplete review`,
           );
         }
         const outcomesForMerge = finalOutcomes;
@@ -887,6 +884,14 @@ export async function executeReviewCore(
     });
     merged.toPost = verification.toPost;
     merged.reviewOnly = verification.reviewOnly;
+    if (verification.incomplete) {
+      const why = verification.unavailableReason
+        ? ` (${verification.unavailableReason})`
+        : '';
+      throw new Error(
+        `review aborted: review incomplete: verification did not complete${why}; refusing to publish an incomplete review`,
+      );
+    }
     console.log(
       `[worker] model contribution (posted): ${formatModelContribution(summarizeModelContribution(merged.toPost))}`,
     );
@@ -927,8 +932,8 @@ export async function executeReviewCore(
       findings,
       llmSummary,
       skippedLenses,
-      incompleteReason: reviewIncompleteReason,
-      verificationIncomplete: verification.incomplete,
+      incompleteReason: undefined,
+      verificationIncomplete: false,
       verificationInconclusiveCount: verification.inconclusiveRequiredCount,
       verificationUnavailableReason: verification.unavailableReason,
       usage,

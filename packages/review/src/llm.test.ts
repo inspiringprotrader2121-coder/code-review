@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LlmReviewResponseSchema } from './types.js';
-import { normalizeLlmResponse, REVIEW_INCOMPLETE_SUMMARY, runLlmReview } from './llm.js';
+import { normalizeLlmResponse, runLlmReview } from './llm.js';
 
 test('normalizeLlmResponse maps MiniMax severity vocabulary to P-levels', () => {
   const raw = {
@@ -79,7 +79,7 @@ test('normalizeLlmResponse defaults unknown severity to info (fail toward nitpic
   assert.equal(parsed.findings[0].category, 'general');
 });
 
-test('an invalid discovery response uses one bounded JSON-finish continuation, not a max-reasoning replay', async (t) => {
+test('an invalid discovery response uses bounded JSON-finish continuations then fails the pass', async (t) => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   const bodies: Array<Record<string, unknown>> = [];
@@ -109,20 +109,22 @@ test('an invalid discovery response uses one bounded JSON-finish continuation, n
     globalThis.fetch = originalFetch;
   });
 
-  const result = await runLlmReview(
-    [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
-    {
-      apiKey: 'test-key',
-      model: 'MiniMax-M3',
-      baseUrl: 'https://minimax.test/v1',
-      api: 'chat',
-      maxTokens: 16_000,
-    },
+  await assert.rejects(
+    () =>
+      runLlmReview(
+        [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
+        {
+          apiKey: 'test-key',
+          model: 'MiniMax-M3',
+          baseUrl: 'https://minimax.test/v1',
+          api: 'chat',
+          maxTokens: 16_000,
+        },
+      ),
+    /no parseable JSON/,
   );
 
   assert.equal(calls, 3, 'primary plus two bounded JSON-finish continuations');
-  assert.equal(result.summary, REVIEW_INCOMPLETE_SUMMARY);
-  assert.deepEqual(result.findings, []);
   const thinkingMode = (body: Record<string, unknown>) =>
     (body.chat_template_kwargs as { thinking_mode?: string } | undefined)?.thinking_mode;
   assert.equal(thinkingMode(bodies[0]!), 'enabled');

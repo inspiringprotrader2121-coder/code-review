@@ -38,6 +38,9 @@ const SHARED_FLEET = [
   // DeepSeek, and MiniMax actually request 128k output tokens.
   'ORVEX_MAX_OUTPUT_TOKENS=128000',
   'ORVEX_MAX_OUTPUT_TOKENS_CAP=128000',
+  'ORVEX_UNLIMITED_GITHUB_OWNERS=inspiringprotrader2121-coder',
+  'ORVEX_UNLIMITED_ACCOUNT_EMAILS=inspiringprotrader2121@gmail.com',
+  'ORVEX_UNLIMITED_TENANT_SLUGS=org-inspiringprotrader2121-coder,inspiringprotrader2121-coder',
 ].join(' ');
 
 const WORKER_LOCAL = [

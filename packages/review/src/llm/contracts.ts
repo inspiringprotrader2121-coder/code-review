@@ -70,6 +70,8 @@ export interface LlmClientOptions {
     reasoningContent: string;
     contentPrefix: string;
   };
+  /** Seed used when a JSON call returns reasoning-only / empty assistant text. */
+  jsonContractPrefix?: string;
   /** Internal per-request wall cap; public review calls use the configured LLM max-total cap. */
   hardLimitMs?: number;
   dependencies?: LlmClientDependencies;

@@ -33,13 +33,13 @@ export function extractJsonLoose(text: string): unknown {
 }
 
 /** Assistant prefix used to finish a truncated or prose-only JSON contract. */
-export function jsonFinishPrefix(text: string): string {
+export function jsonFinishPrefix(text: string, contractPrefix = '{"findings":'): string {
   const stripped = stripThinking(text);
   const start = stripped.indexOf('{');
-  if (start === -1) return '{"findings":';
+  if (start === -1) return contractPrefix;
   const slice = stripped.slice(start);
-  if (tryParse(slice) !== undefined) return '{"findings":';
-  return slice || '{"findings":';
+  if (tryParse(slice) !== undefined) return contractPrefix;
+  return slice || contractPrefix;
 }
 
 export function jsonContractMissing(text: string): boolean {

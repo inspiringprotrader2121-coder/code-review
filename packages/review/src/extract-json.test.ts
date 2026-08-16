@@ -52,4 +52,5 @@ test('jsonFinishPrefix continues from a truncated object or starts a findings co
   assert.equal(jsonFinishPrefix('no json here'), '{"findings":');
   assert.equal(jsonFinishPrefix('<think>x</think>{"findings":[{"file":'), '{"findings":[{"file":');
   assert.equal(jsonFinishPrefix('{"findings":[],"summary":"ok"}'), '{"findings":');
+  assert.equal(jsonFinishPrefix('no json here', '{"verdicts":'), '{"verdicts":');
 });

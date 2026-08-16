@@ -172,7 +172,7 @@ async function llmChatHoldingProviderSlot(
         }
         continuation = {
           reasoningContent: continuation?.reasoningContent ?? '',
-          contentPrefix: jsonFinishPrefix(text),
+          contentPrefix: jsonFinishPrefix(text, opts.jsonContractPrefix),
         };
         continuationCount++;
         continuationRateLimitAttempt = 0;

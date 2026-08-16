@@ -16,6 +16,9 @@ export interface TenantRuntimeConfig {
   readonly requireLogin: boolean;
   readonly defaultPlanId: string | null;
   readonly extraDisposableDomains: readonly string[];
+  readonly unlimitedGithubOwners: readonly string[];
+  readonly unlimitedAccountEmails: readonly string[];
+  readonly unlimitedTenantSlugs: readonly string[];
 }
 
 function oauthConfig(
@@ -53,5 +56,8 @@ export function loadTenantRuntimeConfig(
     requireLogin: env.ORVEX_REQUIRE_LOGIN === '1',
     defaultPlanId: env.ORVEX_DEFAULT_PLAN ?? null,
     extraDisposableDomains: list(env.ORVEX_EXTRA_DISPOSABLE_DOMAINS),
+    unlimitedGithubOwners: list(env.ORVEX_UNLIMITED_GITHUB_OWNERS),
+    unlimitedAccountEmails: list(env.ORVEX_UNLIMITED_ACCOUNT_EMAILS),
+    unlimitedTenantSlugs: list(env.ORVEX_UNLIMITED_TENANT_SLUGS),
   });
 }
