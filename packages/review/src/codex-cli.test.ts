@@ -332,8 +332,8 @@ test('resolveCodexHomeConcurrency: API-key homes honor bounded parallel capacity
   process.env.ORVEX_CODEX_APIKEY_CONCURRENCY = '3';
   assert.equal(resolveCodexHomeConcurrency('apikey'), 3);
 
-  process.env.ORVEX_CODEX_APIKEY_CONCURRENCY = '999';
-  assert.equal(resolveCodexHomeConcurrency('apikey'), 100);
+  process.env.ORVEX_CODEX_APIKEY_CONCURRENCY = '20000';
+  assert.equal(resolveCodexHomeConcurrency('apikey'), 10_000);
 });
 
 test('production home lock admits eight API-key calls and holds the ninth', async () => {
