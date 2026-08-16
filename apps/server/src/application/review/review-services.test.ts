@@ -132,6 +132,25 @@ test('admission saturation requeues only when no required pass has already succe
   assert.equal(shouldRequeueIncompleteCoverage(noneStarted), true);
 });
 
+test('two successful models are not enough when a third required pass is missing', () => {
+  const degradation = describeRequiredCoverageDegradation(
+    ['required:general:0:chunk:1/1', 'required:deep-dive:1:chunk:1/1', 'required:perf:3:chunk:1/1'],
+    [
+      { requiredCoverageKey: 'required:general:0:chunk:1/1', ok: true },
+      { requiredCoverageKey: 'required:deep-dive:1:chunk:1/1', ok: true },
+      {
+        requiredCoverageKey: 'required:perf:3:chunk:1/1',
+        label: 'pass 3/4 (perf) [minimax-m3]',
+        ok: false,
+      },
+    ],
+    1,
+  );
+  assert.ok(degradation);
+  assert.deepEqual(degradation?.missingCoverageKeys, ['required:perf:3:chunk:1/1']);
+  assert.equal(shouldRequeueIncompleteCoverage(degradation), false);
+});
+
 test('a missing MiniMax, Flash, or Luna pass does not replay a review that already paid for another model', () => {
   const minimax = describeRequiredCoverageDegradation(
     ['required:general:0:chunk:1/1', 'required:perf:2:chunk:1/1'],

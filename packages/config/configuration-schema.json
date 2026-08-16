@@ -1326,6 +1326,39 @@
           "deprecatedAliases": []
         },
         {
+          "name": "ORVEX_UNLIMITED_GITHUB_OWNERS",
+          "example": "inspiringprotrader2121-coder",
+          "type": "csv",
+          "range": "GitHub org/user logins; default empty",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "GitHub owners that skip plan concurrent, hourly, monthly, and COGS caps.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_UNLIMITED_ACCOUNT_EMAILS",
+          "example": "inspiringprotrader2121@gmail.com",
+          "type": "csv",
+          "range": "account emails; default empty",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Account emails that skip plan concurrent, hourly, monthly, and COGS caps.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_UNLIMITED_TENANT_SLUGS",
+          "example": "org-inspiringprotrader2121-coder,inspiringprotrader2121-coder",
+          "type": "csv",
+          "range": "workspace slugs; default empty",
+          "secret": false,
+          "redaction": "none",
+          "enabled": false,
+          "description": "Workspace slugs that skip plan concurrent, hourly, monthly, and COGS caps.",
+          "deprecatedAliases": []
+        },
+        {
           "name": "ORVEX_MONTHLY_COGS_CAP_USD",
           "example": "250",
           "type": "number",

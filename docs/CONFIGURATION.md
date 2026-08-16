@@ -162,6 +162,9 @@ Production uses durable storage outside the checkout and Redis with a namespaced
 | `ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK` | integer; 1..10000; default local DeepSeek provider limit | `8` | no / none | - | Fleet-wide DeepSeek provider-stage capacity registered by the scheduler. |
 | `ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX` | integer; 1..10000; default local MiniMax provider limit | `8` | no / none | - | Fleet-wide MiniMax provider-stage capacity registered by the scheduler. |
 | `ORVEX_FLEET_TENANT_CONCURRENCY` | integer; 1..10000; default whole-review worker limit | `8` | no / none | - | Fleet-wide concurrent review limit per tenant. Set it below total worker capacity on a multi-tenant fleet so one workspace cannot consume every worker. |
+| `ORVEX_UNLIMITED_GITHUB_OWNERS` | csv; GitHub org/user logins; default empty | `inspiringprotrader2121-coder` | no / none | - | GitHub owners that skip plan concurrent, hourly, monthly, and COGS caps. |
+| `ORVEX_UNLIMITED_ACCOUNT_EMAILS` | csv; account emails; default empty | `inspiringprotrader2121@gmail.com` | no / none | - | Account emails that skip plan concurrent, hourly, monthly, and COGS caps. |
+| `ORVEX_UNLIMITED_TENANT_SLUGS` | csv; workspace slugs; default empty | `org-inspiringprotrader2121-coder,inspiringprotrader2121-coder` | no / none | - | Workspace slugs that skip plan concurrent, hourly, monthly, and COGS caps. |
 | `ORVEX_MONTHLY_COGS_CAP_USD` | number; positive USD; default 250 | `250` | no / none | - | Monthly spend circuit breaker for non-custom plans. |
 | `ORVEX_RUNNING_STALE_MS` | integer; 60000..86400000 ms; default 900000 | `900000` | no / none | - | Durable heartbeat staleness threshold before startup recovery interrupts a row. |
 | `ORVEX_LEASE_RENEW_MS` | integer; 10000..300000 ms; default 300000 | `300000` | no / none | - | Review-lease renewal cadence. Keep it well below the queue lease TTL. |

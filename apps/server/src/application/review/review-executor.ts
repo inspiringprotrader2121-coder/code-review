@@ -622,8 +622,8 @@ export async function executeReviewCore(
 
         // Every purchased discovery stage and every complete-diff chunk is
         // required. A successful sibling chunk cannot satisfy a failed chunk.
-        // In repeated mode each exact coverage key needs one successful sample
-        // before aggregation. Explicit diagnostic/deep extras remain optional.
+        // Two of three models is not success: each coverage key must succeed,
+        // then verification must succeed, or nothing is published.
         const requiredCalls = toRun.filter((call) => call.kind === 'pass' && !call.bestEffort);
         const requiredCoverageKeys = [
           ...new Set(
@@ -632,10 +632,6 @@ export async function executeReviewCore(
             ),
           ),
         ];
-        // A required lens is incomplete only when it has ZERO successful samples.
-        // Publish the other completed lenses with a clear disclosure instead of
-        // discarding paid work. Under aggregation, a lens with 1..min-1 samples
-        // also remains visibly degraded below rather than blocking the whole run.
         const requiredSuccesses = 1;
         const requiredCoverageDegradation = describeRequiredCoverageDegradation(
           requiredCoverageKeys,
