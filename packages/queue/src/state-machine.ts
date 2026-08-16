@@ -12,7 +12,7 @@ const TRANSITIONS: Readonly<Record<QueueJobState, readonly QueueJobState[]>> = O
   submitted: ['ready', 'cancelled'],
   ready: ['claimed', 'cancelled'],
   claimed: ['running', 'ready', 'cancelled', 'dead-lettered'],
-  running: ['succeeded', 'failed', 'cancelled', 'dead-lettered'],
+  running: ['succeeded', 'failed', 'cancelled', 'dead-lettered', 'ready'],
   succeeded: [],
   failed: ['ready', 'dead-lettered'],
   cancelled: [],

@@ -160,6 +160,49 @@ test(
 );
 
 test(
+  'Redis fleet tenant admission lets quotaUnlimited jobs claim past the tenant ceiling',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    const namespace = testNamespace();
+    const plan = {
+      epoch: 'tenant-unlimited-v1',
+      limits: { luna: 4, deepseek: 4, minimax: 4 },
+      tenantConcurrency: 1,
+    };
+    const queue = new RedisReviewQueue(redisUrl!, { namespace, providerCapacityPlan: plan });
+    const scheduler =
+      queue.providerAdmission as import('./redis-provider-admission.js').RedisProviderAdmission;
+    t.after(async () => {
+      await queue.close();
+      await clearNamespace(cleanup, namespace);
+      await cleanup.quit();
+    });
+    await scheduler.initializeProviderCapacities();
+
+    const first = { ...job('unlimited-first', 701, 'opened'), tenantId: 'tenant-unlimited' };
+    const second = {
+      ...job('unlimited-second', 702, 'opened'),
+      tenantId: 'tenant-unlimited',
+      quotaUnlimited: true,
+    };
+    await queue.enqueue(first);
+    await queue.enqueue(second);
+
+    const claimedFirst = await queue.dequeue();
+    assert.equal(claimedFirst?.headSha, first.headSha);
+    const claimedSecond = await queue.dequeue();
+    assert.equal(
+      claimedSecond?.headSha,
+      second.headSha,
+      'an operator-unlimited job must not bounce on CLAIM after DEQUEUE selected it',
+    );
+    await queue.markCompleted(claimedFirst!);
+    await queue.markCompleted(claimedSecond!);
+  },
+);
+
+test(
   'Redis fleet tenant admission bounds a mixed hundreds-of-jobs burst across many workers',
   { skip: !redisUrl, timeout: 30_000 },
   async (t) => {

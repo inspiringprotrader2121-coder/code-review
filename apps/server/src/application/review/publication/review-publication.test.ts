@@ -130,7 +130,19 @@ test('verification-incomplete publication refuses to post a partial review', asy
 
   await assert.rejects(
     () => publishReview(directPublisher, input),
-    /verification did not complete/,
+    /refusing to publish an incomplete review/,
+  );
+});
+
+test('incompleteReason publication refuses to post a partial review', async () => {
+  const input = publicationInput({
+    incompleteReason:
+      'review incomplete: 1/3 required review coverage unit(s) did not complete because a provider timed out or was temporarily unavailable',
+  });
+
+  await assert.rejects(
+    () => publishReview(directPublisher, input),
+    /refusing to publish an incomplete review/,
   );
 });
 

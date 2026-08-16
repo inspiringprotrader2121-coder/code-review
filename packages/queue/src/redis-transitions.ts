@@ -1,6 +1,7 @@
 import type { Redis } from 'ioredis';
 import type { QueueJobState } from './state-machine.js';
 import type { RedisQueueKeys } from './redis-keys.js';
+import { RETURN_TO_QUEUE_LUA } from './redis-scripts.js';
 
 const COMPARE_AND_EXTEND = `
 local cur = redis.call('GET', KEYS[1])
@@ -321,5 +322,41 @@ export class RedisQueueTransitionRepository {
       tenantLeaseKeys.tenantClaimExpiry,
       token,
     );
+  }
+
+  async returnOwnedClaimToQueue(input: {
+    inflightKey: string;
+    processingKey: string;
+    processingMetaKey: string;
+    stateKey: string;
+    pendingKey: string;
+    pendingCountKey: string;
+    queueKey: string;
+    token: string;
+    processingEntry: string;
+    jobJson: string;
+    stateTtlSeconds: number;
+    tenantLeaseKeys: TenantLeaseKeys;
+  }): Promise<'newer-pending' | 'requeued' | false> {
+    const result = await this.redis.eval(
+      RETURN_TO_QUEUE_LUA,
+      10,
+      input.inflightKey,
+      input.processingKey,
+      input.processingMetaKey,
+      input.stateKey,
+      input.pendingKey,
+      input.pendingCountKey,
+      input.tenantLeaseKeys.tenantActive,
+      input.tenantLeaseKeys.tenantClaims,
+      input.tenantLeaseKeys.tenantClaimExpiry,
+      input.queueKey,
+      input.token,
+      input.processingEntry,
+      input.jobJson,
+      input.stateTtlSeconds,
+    );
+    if (result === 'newer-pending' || result === 'requeued') return result;
+    return false;
   }
 }

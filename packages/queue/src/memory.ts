@@ -5,6 +5,7 @@ import {
   jobIdempotencyKey,
   prKey,
   reviewShaIdempotencyKey,
+  DEQUEUE_INSPECTION_WINDOW,
   type EnqueueResult,
   type MarkCompletedOptions,
   type ReviewJobPayload,
@@ -166,19 +167,20 @@ export class MemoryReviewQueue implements ReviewQueue {
     // Mirror the Redis queue: skip already-completed SHAs, and never start a
     // second review while one is already in-flight for the same PR (coalesce it
     // to pending instead).
-    for (let i = 0; i < 50; i++) {
-      const window = Math.min(50, this.state.queue.length);
-      let selected = 0;
+    for (let i = 0; i < DEQUEUE_INSPECTION_WINDOW; i++) {
+      const window = Math.min(DEQUEUE_INSPECTION_WINDOW, this.state.queue.length);
+      let selected = -1;
       let selectedPriority = Number.NEGATIVE_INFINITY;
       for (let index = 0; index < window; index++) {
-        const priority = Number.isFinite(this.state.queue[index]?.priority)
-          ? Math.floor(this.state.queue[index]!.priority!)
-          : 0;
-        if (priority > selectedPriority) {
+        const candidate = this.state.queue[index]!;
+        if (candidate.availableAtMs && candidate.availableAtMs > Date.now()) continue;
+        const priority = Number.isFinite(candidate.priority) ? Math.floor(candidate.priority!) : 0;
+        if (selected < 0 || priority > selectedPriority) {
           selected = index;
           selectedPriority = priority;
         }
       }
+      if (selected < 0) return null;
       const [job] = this.state.queue.splice(selected, 1);
       if (!job) return null;
       const pk = prKey(job);
@@ -255,6 +257,30 @@ export class MemoryReviewQueue implements ReviewQueue {
     }
     this.transition(job, 'failed');
     return true;
+  }
+
+  async returnToQueue(
+    job: ReviewJobPayload,
+    opts?: { availableAtMs?: number },
+  ): Promise<'newer-pending' | 'requeued' | false> {
+    if (this.state.inFlight.get(prKey(job)) !== job) return false;
+    const pk = prKey(job);
+    this.state.inFlight.delete(pk);
+    const list = this.state.pending.get(pk);
+    if (list && list.length > 0) {
+      const next = list.shift()!;
+      if (list.length === 0) this.state.pending.delete(pk);
+      else this.state.pending.set(pk, list);
+      this.transition(job, 'cancelled');
+      this.state.queue.unshift(next);
+      return 'newer-pending';
+    }
+    this.transition(job, 'ready');
+    const returned: ReviewJobPayload = { ...job };
+    if (opts?.availableAtMs) returned.availableAtMs = opts.availableAtMs;
+    else delete returned.availableAtMs;
+    this.state.queue.unshift(returned);
+    return 'requeued';
   }
 
   async releaseLockAndDrain(prKeyStr: string): Promise<ReviewJobPayload | null> {

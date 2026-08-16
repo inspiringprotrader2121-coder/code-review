@@ -3,6 +3,9 @@ import type { ProviderAdmission } from './provider-admission.js';
 
 export type JobId = string;
 
+/** How many ready jobs DEQUEUE inspects for tenant/priority eligibility. */
+export const DEQUEUE_INSPECTION_WINDOW = 256;
+
 export type JobKind = 'review' | 'fix' | 'explain' | 'ask' | 'resolve' | 'scan';
 
 /** Which findings a fix job targets. */
@@ -58,6 +61,8 @@ export interface ReviewJobPayload {
   priority?: number;
   /** Skip the fleet per-tenant claim ceiling for operator-unlimited accounts. */
   quotaUnlimited?: boolean;
+  /** Epoch ms; dequeue skips the job until this time so capacity waits do not spin. */
+  availableAtMs?: number;
 }
 
 export interface EnqueueResult {
@@ -151,6 +156,11 @@ export interface ReviewQueue {
   persistJob?(job: ReviewJobPayload): Promise<void>;
   /** Returns false when this worker no longer owns the durable claim. */
   markFailed(job: ReviewJobPayload, failure: QueueFailure): Promise<boolean | void>;
+  /** Return an owned claim to the ready queue without recording a failure. */
+  returnToQueue?(
+    job: ReviewJobPayload,
+    opts?: { availableAtMs?: number },
+  ): Promise<'newer-pending' | 'requeued' | false>;
   releaseLockAndDrain(prKey: string): Promise<ReviewJobPayload | null>;
   /** Startup cleanup: clear stale in-flight locks + requeue pending. Returns count. */
   recoverOrphans(): Promise<number>;

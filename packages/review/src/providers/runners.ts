@@ -42,6 +42,7 @@ function llmOptions(
     onUsage: request.onUsage,
     onAttempt: request.onAttempt,
     attemptLineage: request.attemptLineage,
+    jsonContractPrefix: request.jsonContractPrefix,
     dependencies,
   };
 }

@@ -10,6 +10,7 @@ import {
   type ReviewPromptContext,
   type ReviewSurfaceFinding,
   compileReviewPlan,
+  isReviewCancelledError,
   waitForProviderAvailability,
 } from '@orvex-review/review';
 import { planFeatures } from '@orvex-review/tenants';
@@ -122,7 +123,7 @@ export function describeRequiredCoverageDegradation(
   const admissionBlocked = failed.some((outcome) => outcome.admissionBlocked === true);
   const transient = failed.some((outcome) => outcome.transient === true);
   const cause = admissionBlocked
-    ? 'provider admission was saturated or timed out while waiting for capacity'
+    ? 'provider admission was saturated while waiting for capacity'
     : transient
       ? 'a provider timed out or was temporarily unavailable'
       : 'a required provider pass did not complete';
@@ -553,7 +554,18 @@ export async function executeReviewCore(
                 console.warn(
                   `[worker] waiting for ${buckets.join(', ')} capacity before retrying ${retryCalls.length} missing required coverage unit(s)`,
                 );
-                await waitForProviderAvailability(buckets, reviewAbortController.signal);
+                try {
+                  await waitForProviderAvailability(buckets, reviewAbortController.signal);
+                } catch (error) {
+                  if (isReviewCancelledError(error) || reviewAbortController.signal.aborted) {
+                    throw error;
+                  }
+                  // Paid required work already succeeded. A capacity wait must not
+                  // surface "timed out" and replay the whole review.
+                  throw new Error(
+                    `review aborted: ${firstDegradation.reason}; refusing to publish an incomplete review`,
+                  );
+                }
               }
               console.warn(
                 `[worker] surgically retrying ${retryCalls.length} missing required coverage unit(s) once at full quality`,

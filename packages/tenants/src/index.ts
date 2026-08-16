@@ -58,6 +58,7 @@ export {
   isUnlimitedGithubOwner,
   isUnlimitedAccountEmail,
   isUnlimitedTenantSlug,
+  isUnlimitedOperator,
   uncapPlan,
   planFeaturesForAccount,
   reviewJobAdmissionFields,

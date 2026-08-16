@@ -53,9 +53,8 @@ export interface PlanFeatures {
   reviewsPerHour: number | null;
   /**
    * Max in-flight reviews for this account at once (null = unlimited besides the
-   * worker's global ORVEX_MAX_CONCURRENT_REVIEWS). Prevents a single push storm
-   * from burning the entire hourly bucket in parallel — especially costly when
-   * reviews fail after LLM spend.
+   * worker's global ORVEX_MAX_CONCURRENT_REVIEWS). Paid public plans allow 5 so
+   * twenty clients can occupy 100 fleet slots; hourly caps still bound spend.
    */
   maxConcurrentReviews: number | null;
   /**
@@ -168,7 +167,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true,
     trialReviewLimit: null,
     reviewsPerHour: 5,
-    maxConcurrentReviews: 2,
+    // 5 in-flight. Overflow waits in the queue; plans do not fail-on-cap.
+    maxConcurrentReviews: 5,
     reviewsPerMonth: 1000, // hard safety ceiling; included 100, then prepaid overage
     includedReviewsPerMonth: 100,
     overageCentsPerReview: 50,
@@ -192,7 +192,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true,
     trialReviewLimit: null,
     reviewsPerHour: 10,
-    maxConcurrentReviews: 3,
+    // 5 in-flight. Overflow waits in the queue; plans do not fail-on-cap.
+    maxConcurrentReviews: 5,
     reviewsPerMonth: 500,
     includedReviewsPerMonth: 500,
     overageCentsPerReview: null,
@@ -216,7 +217,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true,
     trialReviewLimit: null,
     reviewsPerHour: 5,
-    maxConcurrentReviews: 2,
+    // 5 in-flight. Overflow waits in the queue; plans do not fail-on-cap.
+    maxConcurrentReviews: 5,
     reviewsPerMonth: 500,
     includedReviewsPerMonth: 50,
     overageCentsPerReview: 75,
@@ -245,7 +247,8 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     deepVerify: true,
     trialReviewLimit: null,
     reviewsPerHour: 10,
-    maxConcurrentReviews: 3,
+    // 5 in-flight. Overflow waits in the queue; plans do not fail-on-cap.
+    maxConcurrentReviews: 5,
     reviewsPerMonth: 1000,
     includedReviewsPerMonth: 120,
     overageCentsPerReview: 150,
@@ -268,7 +271,7 @@ export const PLANS: Record<PlanId, PlanFeatures> = {
     // Safety defaults for the custom-contract tier — raise per customer via
     // plan-admin; never ship a null monthly/hourly path that can burn uncapped.
     // 8 in-flight per tenant covers a 6-review client burst. Overflow waits in
-    // the queue instead of skipping or failing the review.
+    // the queue instead of skipping or failing the review. Not a public offer.
     reviewsPerHour: 50,
     maxConcurrentReviews: 8,
     reviewsPerMonth: 2000,

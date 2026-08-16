@@ -1482,7 +1482,7 @@ test('isProviderAdmissionError treats TPM exhaustion and every-key 429 as requeu
   );
   assert.equal(
     isProviderAdmissionError(
-      'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because provider admission was saturated or timed out while waiting for capacity; requeueing instead of publishing an incomplete review',
+      'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because provider admission was saturated while waiting for capacity; requeueing instead of publishing an incomplete review',
     ),
     true,
   );
@@ -1507,6 +1507,20 @@ test('isProviderAdmissionError treats TPM exhaustion and every-key 429 as requeu
   );
   assert.equal(
     shouldRequeueAdmissionFailure('429 rate-limited on every luna key (1); retry-after: 60', 8),
+    false,
+  );
+  assert.equal(
+    shouldRequeueAdmissionFailure(
+      'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because provider admission was saturated while waiting for capacity; refusing to publish an incomplete review',
+      0,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRequeueAdmissionFailure(
+      'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because a provider timed out or was temporarily unavailable; refusing to publish an incomplete review',
+      0,
+    ),
     false,
   );
   assert.equal(ADMISSION_JOB_REQUEUE_CAP, 8);
@@ -1786,6 +1800,47 @@ test('MiniMax max_tokens continues as answer-only JSON instead of marking the le
   const continuationMessages = requests[1]?.messages as Array<{ role: string; content: string }>;
   assert.equal(continuationMessages.at(-1)?.role, 'assistant');
   assert.equal(continuationMessages.at(-1)?.content, '{"findings":[');
+});
+
+test('Anthropic max_tokens continuation uses jsonContractPrefix for verifier JSON', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  let call = 0;
+  const replies = [
+    { text: 'still evaluating the candidates', stop: 'max_tokens' },
+    { text: '[{"id":0,"verdict":"confirmed"}]}', stop: 'end_turn' },
+  ];
+  const anthropic = {
+    messages: {
+      stream(params: Record<string, unknown>) {
+        requests.push(params);
+        const reply = replies[call++]!;
+        const message = {
+          content: [{ type: 'text' as const, text: reply.text }],
+          stop_reason: reply.stop,
+          usage: { input_tokens: 12, output_tokens: 40 },
+        };
+        const stream = new FakeAnthropicStream(message);
+        queueMicrotask(() => stream.resolve(message));
+        return stream;
+      },
+    },
+  };
+
+  const result = await llmChat('sys', 'user', {
+    apiKey: 'test-key',
+    model: 'MiniMax-M3',
+    api: 'anthropic',
+    json: true,
+    jsonContractPrefix: '{"verdicts":',
+    maxTokens: 48_000,
+    dependencies: { anthropic },
+  });
+
+  assert.equal(result, '{"verdicts":[{"id":0,"verdict":"confirmed"}]}');
+  assert.equal(requests.length, 2);
+  const continuationMessages = requests[1]?.messages as Array<{ role: string; content: string }>;
+  assert.equal(continuationMessages.at(-1)?.role, 'assistant');
+  assert.equal(continuationMessages.at(-1)?.content, '{"verdicts":');
 });
 
 test('provider cooldowns delay only reviews that require that provider', async (t) => {

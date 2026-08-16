@@ -19,12 +19,7 @@ import { runWithActiveReview } from '../../active-reviews.js';
 import { sendOperationalAlert } from '../../alerts.js';
 import { bindWorkerRuntime } from './runtime.js';
 import { startLeaseHeartbeat } from './lease-heartbeat.js';
-import {
-  finalizeQueueJob,
-  fleetProvidersSaturated,
-  resolveMaxJobRetries,
-  returnJobForProviderHeadroom,
-} from './queue-policy.js';
+import { finalizeQueueJob, fleetProvidersSaturated, resolveMaxJobRetries } from './queue-policy.js';
 import { alertQueueOperationalEvents } from './queue-alerts.js';
 
 export interface JobProcessorDependencies {
@@ -80,7 +75,7 @@ export async function processWorkerJob(
       const admission = providerAdmissionFor(queue);
       if (await fleetProvidersSaturated(admission)) {
         log.log(`[worker] defer ${key}: provider fleet saturated; preserving queue age`);
-        await returnJobForProviderHeadroom(queue, job);
+        await returnClaimedJob(queue, job);
         finalizedOwned = true;
         return;
       }
@@ -102,9 +97,17 @@ export async function processWorkerJob(
       const result = await runWithProviderAdmissionPriority('straggler', () =>
         dispatchWorkerJob(job, config, input.runtime, input.processReview),
       );
-      if (result?.skipReason === 'concurrency_deferred') {
-        log.log(`[worker] defer ${key}: tenant concurrency full; preserving queue age`);
-        await returnJobForProviderHeadroom(queue, job);
+      if (
+        result?.skipReason === 'concurrency_deferred' ||
+        result?.skipReason === 'rate_limited_deferred'
+      ) {
+        log.log(
+          `[worker] defer ${key}: ${result.skipReason === 'rate_limited_deferred' ? 'hourly cap' : 'tenant concurrency full'}; preserving queue age`,
+        );
+        await returnClaimedJob(queue, job, {
+          availableAtMs:
+            result.skipReason === 'rate_limited_deferred' ? Date.now() + 60_000 : undefined,
+        });
         finalizedOwned = true;
         return;
       }
@@ -123,13 +126,19 @@ export async function processWorkerJob(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log.error(`[worker] failed ${key}:`, message);
+      if (job.action !== 'command' && shouldRequeueAdmissionFailure(message, 0)) {
+        log.log(`[worker] defer ${key}: provider admission saturated; preserving queue age`);
+        await returnClaimedJob(queue, job);
+        finalizedOwned = true;
+        return;
+      }
       const transient = isTransientLlmError(message);
       const code = failureCode(message, leaseOwnershipValid);
       const nextAttempt = (job.attempts ?? 0) + 1;
-      const admissionRequeue = shouldRequeueAdmissionFailure(message, job.attempts ?? 0);
       const willRetry =
         job.action !== 'command' &&
-        (admissionRequeue || (transient && nextAttempt <= resolveMaxJobRetries(input.runtime)));
+        transient &&
+        nextAttempt <= resolveMaxJobRetries(input.runtime);
       finalizedOwned =
         (await queue.markFailed(job, queueFailure(code, message, willRetry))) !== false;
       if (finalizedOwned) {
@@ -232,5 +241,16 @@ async function requeueTransientFailure(
       },
       runtime.alerts.webhookUrl,
     );
+  }
+}
+
+async function returnClaimedJob(
+  queue: ReviewQueue,
+  job: ReviewJobPayload,
+  opts?: { availableAtMs?: number },
+): Promise<void> {
+  const returned = await queue.returnToQueue(job, opts);
+  if (returned === false) {
+    throw new Error(`review lease lost before returning ${prKey(job)} to the queue`);
   }
 }

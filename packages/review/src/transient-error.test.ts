@@ -7,6 +7,7 @@ import {
   parseRetryAfterMs,
   isRetryableRateLimit,
   isOversizedModelRequest,
+  shouldRequeueAdmissionFailure,
 } from './llm-client.js';
 
 test('same-provider key rotation uses rate-limit/quota errors specifically', () => {
@@ -159,6 +160,18 @@ test('does NOT treat a genuine parse/model failure as a whole-review retry', () 
   assert.ok(!isTransientLlmError('Unexpected token in JSON'));
   assert.ok(!isTransientLlmError('LLM returned no text content'));
   assert.ok(isTransientLlmError('LLM provider returned empty response with zero usage'));
+  assert.ok(
+    !isTransientLlmError(
+      'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because a provider timed out or was temporarily unavailable; refusing to publish an incomplete review',
+    ),
+  );
+});
+
+test('refusing an incomplete review is never a whole-job retry even with timed-out wording', () => {
+  const message =
+    'review aborted: review incomplete: verification did not complete (LLM stream stalled (no data for 240000ms)); refusing to publish an incomplete review';
+  assert.equal(isTransientLlmError(message), false);
+  assert.equal(shouldRequeueAdmissionFailure(message, 0), false);
 });
 
 test('NaN env vars cannot defeat retry bounds (infinite-loop guard)', () => {

@@ -195,6 +195,7 @@ export interface TextModelRunRequest {
   }) => void;
   onAttempt?: (event: ModelAttemptEvent) => void;
   attemptLineage?: ModelAttemptLineage;
+  jsonContractPrefix?: string;
 }
 
 export interface ModelRunner<TRequest = TextModelRunRequest, TResult = string> {

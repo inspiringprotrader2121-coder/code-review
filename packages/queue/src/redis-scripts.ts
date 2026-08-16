@@ -1,7 +1,10 @@
+import { DEQUEUE_INSPECTION_WINDOW } from './types.js';
+
 /**
  * Redis Lua programs used by the queue. Keeping all multi-key state changes
  * here makes their atomicity reviewable independently from queue orchestration.
  */
+export { DEQUEUE_INSPECTION_WINDOW };
 export const RELEASE_RECOVERY_LEASE_LUA = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('DEL', KEYS[1])
@@ -118,13 +121,17 @@ if ARGV[11] == '1' then
   tenantLimit = tonumber(redis.call('HGET', KEYS[10], ARGV[12]) or '')
   if not tenantLimit or tenantLimit < 1 then
     redis.call('LREM', KEYS[5], 1, ARGV[8])
-    redis.call('RPUSH', KEYS[6], ARGV[1])
+    redis.call('LPUSH', KEYS[6], ARGV[1])
     return {'capacity_missing', ARGV[12]}
   end
+  -- ARGV[1] is the job JSON (same payload DEQUEUE already selected).
   local active = tonumber(redis.call('HGET', KEYS[7], ARGV[9]) or '0')
-  if active >= tenantLimit then
+  local decodedOk, decoded = pcall(cjson.decode, ARGV[1])
+  local unlimited = decodedOk and decoded and decoded.quotaUnlimited
+  if active >= tenantLimit and unlimited ~= true and unlimited ~= 'true' then
     redis.call('LREM', KEYS[5], 1, ARGV[8])
-    redis.call('RPUSH', KEYS[6], ARGV[1])
+    -- LPUSH preserves queue age so this job stays ahead of later arrivals.
+    redis.call('LPUSH', KEYS[6], ARGV[1])
     return 'tenant_full'
   end
 end
@@ -172,7 +179,7 @@ local function cleanupExpiredTenantClaims()
     redis.call('ZREM', KEYS[6], claimToken)
   end
 end
-local count = math.min(50, redis.call('LLEN', KEYS[1]))
+local count = math.min(${DEQUEUE_INSPECTION_WINDOW}, redis.call('LLEN', KEYS[1]))
 if count == 0 then redis.call('DEL', KEYS[3]); return false end
 local tenantLimit = 0
 if ARGV[4] == '1' then
@@ -188,8 +195,10 @@ for i = 0, count - 1 do
   if ok and decoded and tonumber(decoded.priority) then priority = math.floor(tonumber(decoded.priority)) end
   local tenant = ok and decoded and tostring(decoded.tenantId or '') or ''
   local unlimited = ok and decoded and decoded.quotaUnlimited
+  local notBefore = ok and decoded and tonumber(decoded.availableAtMs)
+  local delayed = notBefore and notBefore > tonumber(ARGV[3])
   local active = tenantLimit > 0 and tonumber(redis.call('HGET', KEYS[4], tenant) or '0') or 0
-  if tenantLimit == 0 or unlimited == true or unlimited == 'true' or active < tenantLimit then
+  if (not delayed) and (tenantLimit == 0 or unlimited == true or unlimited == 'true' or active < tenantLimit) then
     if forceFifo then
       selectedIndex = i
       break
@@ -198,6 +207,21 @@ for i = 0, count - 1 do
   end
 end
 if selectedIndex == nil then
+  local waitingForTime = false
+  for i = 0, count - 1 do
+    local candidate = redis.call('LINDEX', KEYS[1], i)
+    local ok, decoded = pcall(cjson.decode, candidate)
+    local notBefore = ok and decoded and tonumber(decoded.availableAtMs)
+    local unlimited = ok and decoded and decoded.quotaUnlimited
+    local tenant = ok and decoded and tostring(decoded.tenantId or '') or ''
+    local active = tenantLimit > 0 and tonumber(redis.call('HGET', KEYS[4], tenant) or '0') or 0
+    local tenantOk = tenantLimit == 0 or unlimited == true or unlimited == 'true' or active < tenantLimit
+    if tenantOk and notBefore and notBefore > tonumber(ARGV[3]) then
+      waitingForTime = true
+      break
+    end
+  end
+  if waitingForTime then return false end
   -- All currently inspected tenants are saturated. Rotate this bounded window
   -- so a later eligible tenant is reachable in the same worker poll cycle.
   for i = 1, count do
@@ -231,3 +255,43 @@ local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
 if removed == 0 then redis.call('DEL', KEYS[2]); return 'missing' end
 redis.call('RPUSH', KEYS[3], ARGV[2]); redis.call('LPUSH', KEYS[5], ARGV[4]); redis.call('LTRIM', KEYS[5], 0, 9999)
 redis.call('SET', KEYS[6], 'ready', 'EX', ARGV[3]); return 'replayed'`;
+
+/** Release an owned claim back to the ready queue without a failed/dead-letter transition. */
+export const RETURN_TO_QUEUE_LUA = `
+local function releaseTenantClaim()
+  local tenant = redis.call('HGET', KEYS[8], ARGV[1])
+  if tenant then
+    local remaining = redis.call('HINCRBY', KEYS[7], tenant, -1)
+    if remaining <= 0 then redis.call('HDEL', KEYS[7], tenant) end
+    redis.call('HDEL', KEYS[8], ARGV[1])
+  end
+  redis.call('ZREM', KEYS[9], ARGV[1])
+end
+local cur = redis.call('GET', KEYS[1])
+local curToken = nil
+if cur then
+  local sep = string.find(cur, '\\n', 1, true)
+  curToken = sep and string.sub(cur, 1, sep - 1) or cur
+end
+if not curToken or curToken ~= ARGV[1] then
+  releaseTenantClaim()
+  redis.call('LREM', KEYS[2], 1, ARGV[2])
+  redis.call('DEL', KEYS[3])
+  return 0
+end
+releaseTenantClaim()
+redis.call('DEL', KEYS[1])
+redis.call('LREM', KEYS[2], 1, ARGV[2])
+redis.call('DEL', KEYS[3])
+local pending = redis.call('LPOP', KEYS[5])
+if pending then
+  local pendingCount = tonumber(redis.call('GET', KEYS[6]) or '0')
+  if pendingCount > 0 then redis.call('DECR', KEYS[6]) end
+  redis.call('SET', KEYS[4], 'cancelled', 'EX', ARGV[4])
+  redis.call('RPUSH', KEYS[10], pending)
+  return 'newer-pending'
+end
+redis.call('SET', KEYS[4], 'ready', 'EX', ARGV[4])
+-- Oldest deferred work stays at the FIFO head so later arrivals cannot jump it.
+redis.call('LPUSH', KEYS[10], ARGV[3])
+return 'requeued'`;

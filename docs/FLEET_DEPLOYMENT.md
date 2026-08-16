@@ -24,17 +24,21 @@ starting a dedicated worker or scheduler.
 `ecosystem.config.cjs` defines a same-host role split that keeps SQLite on one
 machine while isolating HTTP from review work:
 
-| PM2 app                  | Role        | Notes                                                                |
-| ------------------------ | ----------- | -------------------------------------------------------------------- |
-| `velatrix-api`           | `api`       | Port 8788; webhooks and dashboard stay responsive under review load. |
-| `velatrix-scheduler`     | `scheduler` | Stable `ORVEX_WORKER_ID=scheduler-01`; registers fleet capacity.     |
-| `velatrix-worker-01..13` | `worker`    | Stable `ORVEX_WORKER_ID=review-worker-NN`; **8** reviews each.       |
+| PM2 app                  | Role        | Notes                                                                           |
+| ------------------------ | ----------- | ------------------------------------------------------------------------------- |
+| `velatrix-api`           | `api`       | Port 8788; webhooks and dashboard stay responsive under review load.            |
+| `velatrix-scheduler`     | `scheduler` | Stable `ORVEX_WORKER_ID=scheduler-01`; registers fleet capacity.                |
+| `velatrix-worker-01..13` | `worker`    | Stable `ORVEX_WORKER_ID=review-worker-NN`; **8** reviews each (**13×8 = 104**). |
 
 Fleet provider ceilings remain Redis-owned (`ORVEX_FLEET_PROVIDER_CONCURRENCY_*`
-= 100/128/100, epoch `review-scale-v2`). Per-worker
-`ORVEX_MAX_CONCURRENT_REVIEWS=8` is a local slot count only.
-`ORVEX_FLEET_TENANT_CONCURRENCY=40` caps one tenant's concurrent claims for
-fairness. Worker `kill_timeout` stays above `ORVEX_SHUTDOWN_DRAIN_MS`.
+= Luna **150** / DeepSeek **200** / MiniMax **150**, epoch `review-scale-v3`).
+Those are whole-fleet Redis caps — Luna is **not** a leftover host-wide 8.
+Per-worker `ORVEX_MAX_CONCURRENT_REVIEWS=8` and `ORVEX_PROVIDER_CONCURRENCY_LUNA=8`
+are local process ceilings only (13×8=104).
+`ORVEX_FLEET_TENANT_CONCURRENCY=8` caps one tenant's concurrent claims so
+twenty clients can share ~100 fleet slots. Operator `quotaUnlimited` jobs skip
+that Redis tenant ceiling. Worker `kill_timeout` stays above `ORVEX_SHUTDOWN_DRAIN_MS`.
+`ORVEX_MAX_SANDBOXES=100` is the host-wide Luna/runtime sandbox ceiling (code max).
 
 Workers also gate dequeue on host memory/disk headroom
 (`ORVEX_HOST_MIN_AVAILABLE_MEMORY_BYTES` / `ORVEX_HOST_MIN_AVAILABLE_DISK_BYTES`)
@@ -49,12 +53,13 @@ to clear drain until api/scheduler plus at least one worker are online.
 
 `ORVEX_PROVIDER_CONCURRENCY_LUNA`, `_DEEPSEEK`, and `_MINIMAX` are **local**
 worker ceilings. They protect one worker's CPU, sockets, and sandbox slots.
+Production workers pin Luna=8 locally (13×8=104); that is not the fleet Luna cap.
 `ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA`, `_DEEPSEEK`, and `_MINIMAX` are the
 whole-fleet ceilings. They default to the local values for the compatible
-single-host deployment, but they must be set deliberately for a worker fleet.
-`ORVEX_FLEET_TENANT_CONCURRENCY` is the matching whole-fleet review-claim
-ceiling for one tenant. It defaults to the compatible worker limit; set it
-below total fleet worker capacity when several tenants share the fleet.
+single-host deployment, so a fleet must set them deliberately (production:
+150 / 200 / 150). `ORVEX_FLEET_TENANT_CONCURRENCY` is the matching whole-fleet
+review-claim ceiling for one tenant. Production pins it at 8, below the 104
+review slots, so one workspace cannot occupy the entire fleet.
 
 The scheduler registers the global values in Redis under
 `ORVEX_FLEET_CAPACITY_EPOCH`. Workers verify the same values before accepting

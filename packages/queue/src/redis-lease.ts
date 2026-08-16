@@ -164,6 +164,33 @@ export class RedisLeaseOperations {
     return finalized;
   }
 
+  async returnToQueue(
+    job: ReviewJobPayload,
+    opts?: { availableAtMs?: number },
+  ): Promise<'newer-pending' | 'requeued' | false> {
+    const claim = this.claims.get(job);
+    if (!claim || !claim.includes('\n')) return false;
+    const returned: ReviewJobPayload = { ...job };
+    if (opts?.availableAtMs) returned.availableAtMs = opts.availableAtMs;
+    else delete returned.availableAtMs;
+    const result = await this.transitions.returnOwnedClaimToQueue({
+      inflightKey: `${this.keys.inflightPrefix}${prKey(job)}`,
+      processingKey: this.keys.processing,
+      processingMetaKey: processingMetaKey(this.keys.processingMetaPrefix, claim),
+      stateKey: `${this.keys.statePrefix}${jobIdempotencyKey(job)}`,
+      pendingKey: `${this.keys.pendingPrefix}${prKey(job)}`,
+      pendingCountKey: this.keys.pendingCount,
+      queueKey: this.keys.queue,
+      token: claimToken(claim),
+      processingEntry: claim,
+      jobJson: JSON.stringify(returned),
+      stateTtlSeconds: STATE_TTL_SECONDS,
+      tenantLeaseKeys: this.keys,
+    });
+    this.claims.delete(job);
+    return result;
+  }
+
   private completedKeys(job: ReviewJobPayload): string[] {
     const idKey = jobIdempotencyKey(job);
     const doneKeys = [`${this.keys.donePrefix}${idKey}`];

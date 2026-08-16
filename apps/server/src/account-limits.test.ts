@@ -364,8 +364,8 @@ test('per-account concurrency caps parallel burn of the hourly bucket', () => {
   const d = db();
   const plan = planFeatures('verify');
   const tenantId = defaultTenant(d);
-  assert.equal(plan.maxConcurrentReviews, 3);
-  for (let i = 0; i < 3; i++) {
+  assert.equal(plan.maxConcurrentReviews, 5);
+  for (let i = 0; i < 5; i++) {
     d.startReviewRun({
       tenantId,
       installationId: 1,

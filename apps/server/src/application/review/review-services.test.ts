@@ -111,6 +111,11 @@ test('admission saturation requeues only when no required pass has already succe
   );
   assert.equal(degradation?.admissionBlocked, true);
   assert.equal(degradation?.hadSuccessfulRequiredPass, true);
+  assert.match(
+    degradation?.reason ?? '',
+    /provider admission was saturated while waiting for capacity/,
+  );
+  assert.doesNotMatch(degradation?.reason ?? '', /timed out/);
   assert.equal(shouldRequeueIncompleteCoverage(degradation), false);
 
   const noneStarted = describeRequiredCoverageDegradation(
@@ -149,6 +154,7 @@ test('two successful models are not enough when a third required pass is missing
   assert.ok(degradation);
   assert.deepEqual(degradation?.missingCoverageKeys, ['required:perf:3:chunk:1/1']);
   assert.equal(shouldRequeueIncompleteCoverage(degradation), false);
+  assert.match(degradation?.reason ?? '', /1\/3 required review coverage unit/);
 });
 
 test('a missing MiniMax, Flash, or Luna pass does not replay a review that already paid for another model', () => {
@@ -250,6 +256,47 @@ test('admission defers tenant concurrency instead of skipping the review', async
 
   assert.equal(result.kind, 'deferred');
   if (result.kind === 'deferred') assert.equal(result.reason, 'concurrency_limited');
+  assert.equal(nudged, 0);
+});
+
+test('admission defers hourly overflow instead of skipping the review', async () => {
+  let nudged = 0;
+  const admission = new AdmissionService({
+    providerIssue: () => null,
+    accountLimitReason: () => 'rate_limited',
+    prepaidOverageDebitCents: () => 0,
+    postLimitNudge: async () => {
+      nudged += 1;
+    },
+    postFailureNotice: async () => assert.fail('hourly deferral is not a failure notice'),
+    postCooldownNotice: async () => assert.fail('hourly deferral is not a cooldown notice'),
+  });
+  const result = await admission.admit(
+    {
+      tenantId: 'tenant-1',
+      installationId: 1,
+      owner: 'acme',
+      repo: 'api',
+      pr: 10,
+      headSha: 'def',
+      action: 'opened',
+    } as never,
+    {
+      store: {
+        getTenantPlan: () => 'review',
+        tryReserveReviewRun: (
+          _input: unknown,
+          limitReason: () => string | null,
+        ): { ok: false; reason: string } => ({
+          ok: false,
+          reason: limitReason() ?? 'rate_limited',
+        }),
+      },
+    } as never,
+  );
+
+  assert.equal(result.kind, 'deferred');
+  if (result.kind === 'deferred') assert.equal(result.reason, 'rate_limited');
   assert.equal(nudged, 0);
 });
 

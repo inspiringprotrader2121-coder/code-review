@@ -33,9 +33,13 @@ export async function publishReview(
   }
 
   if (input.incompleteReason || input.verificationIncomplete) {
-    throw new Error(
+    const reason =
       input.incompleteReason ??
-        `review incomplete: verification did not complete${input.verificationUnavailableReason ? ` (${input.verificationUnavailableReason})` : ''}`,
+      `review incomplete: verification did not complete${input.verificationUnavailableReason ? ` (${input.verificationUnavailableReason})` : ''}`;
+    throw new Error(
+      /refusing to publish an incomplete review/i.test(reason)
+        ? reason
+        : `review aborted: ${reason}; refusing to publish an incomplete review`,
     );
   }
   const output = await publishReviewOutput(publisher, input, scope);

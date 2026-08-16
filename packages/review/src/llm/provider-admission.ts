@@ -563,6 +563,7 @@ export function isProviderCapacityError(message: string): boolean {
 }
 
 export function shouldRequeueAdmissionFailure(message: string, attempts = 0): boolean {
+  if (/refusing to publish an incomplete review/i.test(message)) return false;
   return (
     isProviderCapacityError(message) &&
     Math.max(0, Math.floor(attempts)) < ADMISSION_JOB_REQUEUE_CAP

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractJsonLoose, jsonFinishPrefix } from './llm-client.js';
+import { extractJsonLoose, jsonContractMissing, jsonFinishPrefix } from './llm-client.js';
 
 test('extracts a plain JSON object', () => {
   assert.deepEqual(extractJsonLoose('{"findings":[],"summary":"ok"}'), {
@@ -37,6 +37,13 @@ test('falls back to the outermost object when there is no json fence', () => {
 test('ignores a leading non-JSON fenced block and finds the bare object', () => {
   const reply = '```bash\nNGINX -t\n```\n{"findings":[],"summary":"clean"}';
   assert.deepEqual(extractJsonLoose(reply), { findings: [], summary: 'clean' });
+});
+
+test('jsonContractMissing continues when parseable JSON is missing the review contract', () => {
+  assert.equal(jsonContractMissing('{"findings":[],"summary":"ok"}'), false);
+  assert.equal(jsonContractMissing('{"verdicts":[]}'), false);
+  assert.equal(jsonContractMissing('{}'), true);
+  assert.equal(jsonContractMissing('{"summary":"looks good"}'), true);
 });
 
 test('strips <think> reasoning before parsing', () => {

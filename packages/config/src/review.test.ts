@@ -210,16 +210,27 @@ test('production PM2 profile splits api/scheduler/workers with fleet Redis caps'
   assert.match(workerArgs, /ORVEX_PROCESS_ROLE=worker/);
   assert.match(workerArgs, /ORVEX_WORKER_ID=review-worker-01/);
   assert.match(workerArgs, /ORVEX_MAX_CONCURRENT_REVIEWS=8(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA=100(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=128(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=100(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_TENANT_CONCURRENCY=40(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_LUNA=8(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK=16(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_PROVIDER_CONCURRENCY_MINIMAX=12(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA=150(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK=200(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX=150(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_TENANT_CONCURRENCY=8(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_UNLIMITED_GITHUB_OWNERS=inspiringprotrader2121-coder(?:\s|\\")/);
+  assert.match(
+    workerArgs,
+    /ORVEX_UNLIMITED_ACCOUNT_EMAILS=inspiringprotrader2121@gmail.com(?:\s|\\")/,
+  );
+  assert.match(
+    workerArgs,
+    /ORVEX_UNLIMITED_TENANT_SLUGS=org-inspiringprotrader2121-coder,inspiringprotrader2121-coder(?:\s|\\")/,
+  );
   assert.match(workerArgs, /ORVEX_PROVIDER_LEASE_WAIT_MS=600000(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v2(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v3(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_REVIEW_CONCURRENCY=8(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_VERIFY_CONCURRENCY=32(?:\s|\\")/);
-  assert.match(workerArgs, /ORVEX_MAX_SANDBOXES=32(?:\s|\\")/);
+  assert.match(workerArgs, /ORVEX_MAX_SANDBOXES=100(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_SHUTDOWN_DRAIN_MS=960000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_LEASE_RENEW_MS=60000(?:\s|\\")/);
   assert.match(workerArgs, /ORVEX_MONTHLY_COGS_CAP_USD=5000(?:\s|\\")/);

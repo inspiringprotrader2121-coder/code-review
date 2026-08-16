@@ -109,6 +109,42 @@ test('pricing structure: Starter/Verify use included + prepaid overage; Pro/Ente
   assert.equal(planFeatures('free').reviewsPerHour, 2);
 });
 
+test('paid public plans allow 5 concurrent reviews; hourly caps stay 5/10', () => {
+  assert.equal(planFeatures('review').maxConcurrentReviews, 5);
+  assert.equal(planFeatures('review').reviewsPerHour, 5);
+  assert.equal(planFeatures('verify-lite').maxConcurrentReviews, 5);
+  assert.equal(planFeatures('verify-lite').reviewsPerHour, 5);
+  assert.equal(planFeatures('review-plus').maxConcurrentReviews, 5);
+  assert.equal(planFeatures('review-plus').reviewsPerHour, 10);
+  assert.equal(planFeatures('verify').maxConcurrentReviews, 5);
+  assert.equal(planFeatures('verify').reviewsPerHour, 10);
+  assert.equal(planFeatures('free').maxConcurrentReviews, 1);
+  assert.equal(planFeatures('free').reviewsPerHour, 2);
+  assert.equal(planFeatures('free').trialReviewLimit, 10);
+  assert.equal(planFeatures('enterprise').maxConcurrentReviews, 8);
+  assert.equal(planFeatures('enterprise').reviewsPerHour, 50);
+});
+
+test('plan quotas stay finite so overflow queues; operator uncap is overlay-only', () => {
+  for (const id of [
+    'free',
+    'review',
+    'review-plus',
+    'verify-lite',
+    'verify',
+    'enterprise',
+  ] as const) {
+    const plan = planFeatures(id);
+    assert.notEqual(plan.maxConcurrentReviews, null, `${id} keeps a concurrent cap`);
+    assert.notEqual(plan.reviewsPerHour, null, `${id} keeps an hourly cap`);
+    assert.ok(
+      plan.maxConcurrentReviews! >= 1 && plan.maxConcurrentReviews! <= 8,
+      `${id} concurrent cap stays within fleet tenant fairness`,
+    );
+  }
+  assert.equal(planFeatures('enterprise').label, 'Custom plan');
+});
+
 test('Verify Lite is the SAME product as Verify — same models/thoroughness, smaller quota only', () => {
   const lite = planFeatures('verify-lite');
   const verify = planFeatures('verify');

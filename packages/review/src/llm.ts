@@ -22,6 +22,7 @@ import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } 
  * review replay — that is how spend explodes under load.
  */
 export function isTransientLlmError(message: string): boolean {
+  if (/refusing to publish an incomplete review/i.test(message)) return false;
   if (isRetryableEmptyProviderResponse(message)) return true;
   // Client errors are permanent unless the status explicitly means retry later.
   // Check the complete 4xx range before the broad `request failed` matcher so an

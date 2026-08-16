@@ -228,13 +228,13 @@ for (const [variable, expected] of Object.entries({
   ORVEX_PROVIDER_CONCURRENCY_LUNA: 8,
   ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 16,
   ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 12,
-  ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA: 100,
-  ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK: 128,
-  ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX: 100,
-  ORVEX_FLEET_TENANT_CONCURRENCY: 40,
+  ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA: 150,
+  ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK: 200,
+  ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX: 150,
+  ORVEX_FLEET_TENANT_CONCURRENCY: 8,
   ORVEX_PROVIDER_LEASE_WAIT_MS: 600000,
   ORVEX_VERIFY_CONCURRENCY: 32,
-  ORVEX_MAX_SANDBOXES: 32,
+  ORVEX_MAX_SANDBOXES: 100,
 })) {
   if (!workerArgs.includes(`${variable}=${expected}`)) {
     throw new Error(`production worker profile does not pin ${variable}=${expected}`);
@@ -243,8 +243,21 @@ for (const [variable, expected] of Object.entries({
 if (!schedulerArgs.includes('ORVEX_WORKER_ID=scheduler-01')) {
   throw new Error('production scheduler profile does not pin ORVEX_WORKER_ID');
 }
-if (!workerArgs.includes('ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v2')) {
-  throw new Error('production profile does not pin the review-scale-v2 capacity epoch');
+if (!workerArgs.includes('ORVEX_FLEET_CAPACITY_EPOCH=review-scale-v3')) {
+  throw new Error('production profile does not pin the review-scale-v3 capacity epoch');
+}
+if (!workerArgs.includes('ORVEX_UNLIMITED_GITHUB_OWNERS=inspiringprotrader2121-coder')) {
+  throw new Error('production profile does not pin the operator GitHub owner');
+}
+if (!workerArgs.includes('ORVEX_UNLIMITED_ACCOUNT_EMAILS=inspiringprotrader2121@gmail.com')) {
+  throw new Error('production profile does not pin the operator account email');
+}
+if (
+  !workerArgs.includes(
+    'ORVEX_UNLIMITED_TENANT_SLUGS=org-inspiringprotrader2121-coder,inspiringprotrader2121-coder',
+  )
+) {
+  throw new Error('production profile does not pin the operator tenant slugs');
 }
 if (workerArgs.indexOf('. ./.env') > workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=8')) {
   throw new Error('immutable .env would override the code-owned production profile');

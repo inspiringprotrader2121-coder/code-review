@@ -42,6 +42,7 @@ async function invokeVerifier(
       onUsage: options.onUsage,
       onAttempt: options.onAttempt,
       attemptLineage,
+      jsonContractPrefix: '{"verdicts":',
     });
   }
   try {

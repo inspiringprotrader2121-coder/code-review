@@ -20,6 +20,7 @@ export {
   draftSkipIdempotencyKey,
   automaticReviewAlreadyDone,
   queueFailure,
+  DEQUEUE_INSPECTION_WINDOW,
 } from './types.js';
 export { MemoryReviewQueue } from './memory.js';
 export { RedisReviewQueue } from './redis.js';

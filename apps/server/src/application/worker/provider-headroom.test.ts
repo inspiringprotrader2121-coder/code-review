@@ -121,6 +121,37 @@ test('processWorkerJob requeues tenant concurrency overflow instead of completin
   await queue.markCompleted(again!);
 });
 
+test('processWorkerJob requeues hourly overflow instead of completing a skip', async () => {
+  const queue = new MemoryReviewQueue();
+  await queue.enqueue(job);
+  const claimed = await queue.dequeue();
+  assert.ok(claimed);
+  const logs: string[] = [];
+
+  await processWorkerJob(claimed!, {
+    queue,
+    runtime: testServerConfig(),
+    loadConfig: () => ({ store: {} }) as WorkerConfig,
+    processReview: async () => ({
+      findingCount: 0,
+      newCount: 0,
+      fixedCount: 0,
+      skipReason: 'rate_limited_deferred',
+    }),
+    active: () => 1,
+    capacity: 8,
+    onSettled: () => {},
+    log: {
+      log: (message) => logs.push(String(message)),
+      warn: () => {},
+      error: () => {},
+    },
+  });
+
+  assert.ok(logs.some((line) => /hourly cap/i.test(line)));
+  assert.equal(await queue.dequeue(), null, 'hourly overflow waits before the next claim');
+});
+
 test('processWorkerJob marks mid-review calls as straggler priority', async () => {
   const queue = {
     async markRunning() {

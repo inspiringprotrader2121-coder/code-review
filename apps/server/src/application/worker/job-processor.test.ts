@@ -79,7 +79,7 @@ test('Luna TPM 429s requeue even when whole-review retries are disabled', async 
     loadConfig: () => ({ store: {} }) as WorkerConfig,
     processReview: async () => {
       throw new Error(
-        'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because provider admission was saturated or timed out while waiting for capacity; requeueing instead of publishing an incomplete review',
+        'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because provider admission was saturated while waiting for capacity; requeueing instead of publishing an incomplete review',
       );
     },
     active: () => 1,
@@ -94,6 +94,33 @@ test('Luna TPM 429s requeue even when whole-review retries are disabled', async 
   assert.equal(again?.attempts, 1);
   assert.equal(again?.enqueuedAt, job.enqueuedAt);
   await queue.markCompleted(again!);
+});
+
+test('incomplete reviews after paid work are not whole-job retried', async () => {
+  const queue = new MemoryReviewQueue();
+  await queue.enqueue(job);
+  const claimed = await queue.dequeue();
+  assert.ok(claimed);
+
+  await processWorkerJob(claimed!, {
+    queue,
+    runtime: testServerConfig({ ORVEX_MAX_JOB_RETRIES: '1' }),
+    loadConfig: () => ({ store: {} }) as WorkerConfig,
+    processReview: async () => {
+      throw new Error(
+        'review aborted: review incomplete: 1/3 required review coverage unit(s) did not complete because a provider timed out or was temporarily unavailable; refusing to publish an incomplete review',
+      );
+    },
+    active: () => 1,
+    capacity: 8,
+    onSettled: () => {},
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  const [record] = await queue.listDeadLetters!();
+  assert.ok(record);
+  assert.equal(record.reason, 'execution_failed');
+  assert.equal(await queue.dequeue(), null);
 });
 
 test('MiniMax and DeepSeek capacity misses requeue the same way as Luna', async () => {

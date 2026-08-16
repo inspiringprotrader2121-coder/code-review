@@ -88,9 +88,19 @@ export async function fleetProvidersSaturated(
  * straggler work keeps FIFO priority once provider headroom returns.
  */
 export async function returnJobForProviderHeadroom(
-  queue: Pick<ReviewQueue, 'markFailed' | 'releaseLockAndDrain' | 'enqueue'>,
+  queue: Pick<ReviewQueue, 'markFailed' | 'releaseLockAndDrain' | 'enqueue'> & {
+    returnToQueue?: ReviewQueue['returnToQueue'];
+  },
   job: ReviewJobPayload,
+  opts: { availableAtMs?: number } = {},
 ): Promise<'newer-pending' | 'requeued'> {
+  if (queue.returnToQueue) {
+    const result = await queue.returnToQueue(job, opts);
+    if (result === false) {
+      throw new Error(`review lease lost before returning headroom-deferred job for ${prKey(job)}`);
+    }
+    return result;
+  }
   const owned =
     (await queue.markFailed(
       job,
@@ -100,6 +110,9 @@ export async function returnJobForProviderHeadroom(
     throw new Error(`review lease lost before returning headroom-deferred job for ${prKey(job)}`);
   const pending = await queue.releaseLockAndDrain(prKey(job));
   if (pending) return 'newer-pending';
-  await queue.enqueue({ ...job, enqueuedAt: job.enqueuedAt });
+  const next: ReviewJobPayload = { ...job, enqueuedAt: job.enqueuedAt };
+  if (opts.availableAtMs) next.availableAtMs = opts.availableAtMs;
+  else delete next.availableAtMs;
+  await queue.enqueue(next);
   return 'requeued';
 }

@@ -142,6 +142,13 @@ export class RedisReviewQueue implements ReviewQueue {
     return this.leaseOperations.markFailed(job, failure);
   }
 
+  returnToQueue(
+    job: ReviewJobPayload,
+    opts?: { availableAtMs?: number },
+  ): Promise<'newer-pending' | 'requeued' | false> {
+    return this.leaseOperations.returnToQueue(job, opts);
+  }
+
   releaseLockAndDrain(prKey: string): Promise<ReviewJobPayload | null> {
     return this.enqueueOperations.releaseLockAndDrain(prKey);
   }

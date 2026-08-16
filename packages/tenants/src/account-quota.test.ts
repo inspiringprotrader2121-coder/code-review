@@ -4,6 +4,7 @@ import { loadTenantRuntimeConfig } from './config.js';
 import {
   isUnlimitedAccountEmail,
   isUnlimitedGithubOwner,
+  isUnlimitedOperator,
   isUnlimitedTenantSlug,
   planFeaturesForAccount,
   reviewJobAdmissionFields,
@@ -22,8 +23,12 @@ test('operator allowlists match github owner, email, and tenant slug', () => {
   assert.equal(isUnlimitedGithubOwner('OTHER-ORG', config), true);
   assert.equal(isUnlimitedGithubOwner('someone-else', config), false);
   assert.equal(isUnlimitedAccountEmail('inspiringprotrader2121@gmail.com', config), true);
+  assert.equal(isUnlimitedAccountEmail('inspiring.protrader2121+ops@gmail.com', config), true);
   assert.equal(isUnlimitedAccountEmail('other@example.com', config), false);
   assert.equal(isUnlimitedTenantSlug('org-inspiringprotrader2121-coder', config), true);
+  assert.equal(isUnlimitedOperator({ email: 'inspiringprotrader2121@gmail.com' }, config), true);
+  assert.equal(isUnlimitedOperator({ slug: 'inspiringprotrader2121-coder' }, config), true);
+  assert.equal(isUnlimitedOperator({ owner: 'acme', email: 'other@example.com' }, config), false);
 });
 
 test('uncapping a custom plan removes every numeric quota', () => {
@@ -47,4 +52,29 @@ test('review enqueue fields mark the operator owner as quota-unlimited', () => {
   const other = reviewJobAdmissionFields('acme', 'enterprise', config);
   assert.equal(other.quotaUnlimited, false);
   assert.equal(planFeaturesForAccount('enterprise', 'acme', config).maxConcurrentReviews, 8);
+});
+
+test('operator github owner and email stay uncapped at the plan overlay', () => {
+  const byOwner = planFeaturesForAccount('verify', 'inspiringprotrader2121-coder', config);
+  assert.equal(byOwner.maxConcurrentReviews, null);
+  assert.equal(byOwner.reviewsPerHour, null);
+  assert.equal(byOwner.reviewsPerMonth, null);
+  assert.equal(byOwner.trialReviewLimit, null);
+  assert.equal(byOwner.overageCentsPerReview, null);
+  assert.equal(byOwner.modelTier, 'multi-model');
+
+  const byEmail = planFeaturesForAccount('review', 'acme', config, {
+    email: 'inspiringprotrader2121@gmail.com',
+  });
+  assert.equal(byEmail.maxConcurrentReviews, null);
+  assert.equal(byEmail.reviewsPerHour, null);
+
+  const bySlug = planFeaturesForAccount('review-plus', 'acme', config, {
+    slug: 'org-inspiringprotrader2121-coder',
+  });
+  assert.equal(bySlug.maxConcurrentReviews, null);
+
+  const paid = planFeaturesForAccount('verify', 'acme', config);
+  assert.equal(paid.maxConcurrentReviews, 5);
+  assert.equal(paid.reviewsPerHour, 10);
 });

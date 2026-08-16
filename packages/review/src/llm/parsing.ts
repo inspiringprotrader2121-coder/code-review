@@ -44,8 +44,13 @@ export function jsonFinishPrefix(text: string, contractPrefix = '{"findings":'):
 
 export function jsonContractMissing(text: string): boolean {
   try {
-    extractJsonLoose(text);
-    return false;
+    const parsed = extractJsonLoose(text);
+    if (Array.isArray(parsed)) return false;
+    if (!parsed || typeof parsed !== 'object') return true;
+    const root = parsed as Record<string, unknown>;
+    return (
+      !Array.isArray(root.findings) && !Array.isArray(root.issues) && !Array.isArray(root.verdicts)
+    );
   } catch {
     return true;
   }
