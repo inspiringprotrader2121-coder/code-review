@@ -21,7 +21,7 @@
     "@octokit/plugin-throttling": "^9.6.1",
     "@octokit/rest": "^21.1.1",
     "@orvex-review/config": "workspace:*",
-    "minimatch": "^10.0.1"
+    "minimatch": "^10.2.6"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
