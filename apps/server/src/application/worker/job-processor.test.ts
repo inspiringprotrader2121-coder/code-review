@@ -91,7 +91,7 @@ test('Luna TPM 429s requeue even when whole-review retries are disabled', async 
   assert.deepEqual(await queue.listDeadLetters!(), []);
   const again = await queue.dequeue();
   assert.equal(again?.headSha, job.headSha);
-  assert.equal(again?.attempts, 1);
+  assert.equal(again?.attempts, undefined);
   assert.equal(again?.enqueuedAt, job.enqueuedAt);
   await queue.markCompleted(again!);
 });
@@ -148,7 +148,8 @@ test('MiniMax and DeepSeek capacity misses requeue the same way as Luna', async 
     });
     assert.equal((await queue.listDeadLetters!()).length, 0, message);
     const again = await queue.dequeue();
-    assert.equal(again?.attempts, 1, message);
+    assert.equal(again?.attempts, undefined, message);
+    assert.equal(again?.enqueuedAt, job.enqueuedAt, message);
     await queue.markCompleted(again!);
   }
 });
@@ -187,4 +188,77 @@ test('exhausted work is dead-lettered and produces an operator alert', async () 
   assert.equal(alerts.length, 1);
   assert.match(alerts[0]!, /^queue-dead-lettered:.*:critical:/);
   assert.equal((await queue.depth()).inFlight, 0);
+});
+
+test('tenant concurrency deferral returns the job without markFailed', async () => {
+  const queue = new MemoryReviewQueue();
+  let failed = 0;
+  const original = queue.markFailed.bind(queue);
+  queue.markFailed = async (claimed, failure) => {
+    failed += 1;
+    return original(claimed, failure);
+  };
+  await queue.enqueue(job);
+  const claimed = await queue.dequeue();
+  assert.ok(claimed);
+
+  await processWorkerJob(claimed!, {
+    queue,
+    runtime: testServerConfig(),
+    loadConfig: () => ({ store: {} }) as WorkerConfig,
+    processReview: async () => ({
+      findingCount: 0,
+      newCount: 0,
+      fixedCount: 0,
+      skipReason: 'concurrency_deferred',
+    }),
+    active: () => 1,
+    capacity: 8,
+    onSettled: () => {},
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  assert.equal(failed, 0);
+  assert.deepEqual(await queue.listDeadLetters!(), []);
+  const again = await queue.dequeue();
+  assert.equal(again?.headSha, job.headSha);
+  assert.equal(again?.enqueuedAt, job.enqueuedAt);
+  assert.equal(again?.attempts, undefined);
+  await queue.markCompleted(again!);
+});
+
+test('hourly cap deferral returns the job with a delayed availableAtMs and no markFailed', async () => {
+  const queue = new MemoryReviewQueue();
+  let failed = 0;
+  const original = queue.markFailed.bind(queue);
+  queue.markFailed = async (claimed, failure) => {
+    failed += 1;
+    return original(claimed, failure);
+  };
+  await queue.enqueue(job);
+  const claimed = await queue.dequeue();
+  assert.ok(claimed);
+  const before = Date.now();
+
+  await processWorkerJob(claimed!, {
+    queue,
+    runtime: testServerConfig(),
+    loadConfig: () => ({ store: {} }) as WorkerConfig,
+    processReview: async () => ({
+      findingCount: 0,
+      newCount: 0,
+      fixedCount: 0,
+      skipReason: 'rate_limited_deferred',
+    }),
+    active: () => 1,
+    capacity: 8,
+    onSettled: () => {},
+    log: { log: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  assert.equal(failed, 0);
+  const waiting = (queue as unknown as { state: { queue: ReviewJobPayload[] } }).state.queue[0];
+  assert.ok(waiting);
+  assert.ok((waiting.availableAtMs ?? 0) >= before + 60_000 - 1_000);
+  assert.equal(await queue.dequeue(), null, 'delayed jobs wait instead of spinning');
 });
