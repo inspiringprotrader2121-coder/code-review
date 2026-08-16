@@ -43,7 +43,12 @@ export async function assertReviewQueueContract(queue: ReviewQueue): Promise<voi
   const next = await queue.dequeue();
   assert.deepEqual(next, newer);
   assert.equal(await queue.markRunning(next!), true);
-  await queue.markFailed(next!, queueFailure('execution_failed', 'contract retry', true));
+  assert.equal(await queue.returnToQueue(next!), 'requeued');
+  assert.equal(await queue.getJobState(jobIdempotencyKey(newer)), 'ready');
+  const deferred = await queue.dequeue();
+  assert.equal(deferred?.headSha, newer.headSha);
+  assert.equal(deferred?.enqueuedAt, newer.enqueuedAt);
+  await queue.markFailed(deferred!, queueFailure('execution_failed', 'contract retry', true));
   assert.equal(await queue.getJobState(jobIdempotencyKey(newer)), 'failed');
   assert.equal((await queue.enqueue(newer)).accepted, true);
 }

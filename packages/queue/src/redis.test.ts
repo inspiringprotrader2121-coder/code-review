@@ -3,9 +3,22 @@ import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { Redis } from 'ioredis';
 import { RedisReviewQueue } from './redis.js';
-import { jobIdempotencyKey, prKey, queueFailure, type ReviewJobPayload } from './types.js';
+import { CLAIM_LUA, DEQUEUE_LUA } from './redis-scripts.js';
+import { DEQUEUE_INSPECTION_WINDOW, jobIdempotencyKey, prKey, queueFailure, type ReviewJobPayload } from './types.js';
 
 const redisUrl = process.env.REDIS_TEST_URL;
+
+test('CLAIM_LUA honors quotaUnlimited from ARGV[1] job JSON like DEQUEUE', () => {
+  assert.match(CLAIM_LUA, /pcall\(cjson\.decode, ARGV\[1\]\)/);
+  assert.match(CLAIM_LUA, /decoded\.quotaUnlimited/);
+  assert.match(CLAIM_LUA, /unlimited ~= true and unlimited ~= 'true'/);
+  assert.match(CLAIM_LUA, /LPUSH', KEYS\[6\], ARGV\[1\]/);
+});
+
+test('DEQUEUE inspects 256 ready jobs so eligible tenants behind a saturated window still claim', () => {
+  assert.equal(DEQUEUE_INSPECTION_WINDOW, 256);
+  assert.match(DEQUEUE_LUA, new RegExp(`math\\.min\\(${DEQUEUE_INSPECTION_WINDOW},`));
+});
 
 function testNamespace(): string {
   return `orvex-review:test:${process.pid}:${randomUUID()}`;
@@ -199,6 +212,35 @@ test(
     );
     await queue.markCompleted(claimedFirst!);
     await queue.markCompleted(claimedSecond!);
+  },
+);
+
+test(
+  'Redis returnToQueue restores a claimed job without marking it failed',
+  { skip: !redisUrl },
+  async (t) => {
+    const cleanup = new Redis(redisUrl!);
+    const namespace = testNamespace();
+    const queue = new RedisReviewQueue(redisUrl!, { namespace });
+    t.after(async () => {
+      await queue.close();
+      await clearNamespace(cleanup, namespace);
+      await cleanup.quit();
+    });
+
+    const payload = job('return-to-queue', 801, 'opened');
+    await queue.enqueue(payload);
+    const claimed = await queue.dequeue();
+    assert.ok(claimed);
+    assert.equal(await queue.markRunning(claimed!), true);
+    assert.equal(await queue.returnToQueue(claimed!), 'requeued');
+    assert.equal(await queue.getJobState(jobIdempotencyKey(payload)), 'ready');
+    assert.deepEqual(await queue.listDeadLetters!(), []);
+    const again = await queue.dequeue();
+    assert.equal(again?.headSha, payload.headSha);
+    assert.equal(again?.enqueuedAt, payload.enqueuedAt);
+    assert.equal(again?.attempts, payload.attempts);
+    await queue.markCompleted(again!);
   },
 );
 

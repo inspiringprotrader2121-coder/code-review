@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MemoryReviewQueue } from './memory.js';
-import { jobIdempotencyKey, queueFailure, type ReviewJobPayload } from './types.js';
+import { jobIdempotencyKey, queueFailure, DEQUEUE_INSPECTION_WINDOW, type ReviewJobPayload } from './types.js';
 
 function job(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   return {
@@ -240,4 +240,45 @@ test('retryable failures remain replayable by the worker and are not dead-letter
   assert.deepEqual(await q.listDeadLetters!(), []);
   assert.deepEqual(q.drainOperationalEvents!(), []);
   assert.equal((await q.enqueue(payload)).accepted, true);
+});
+
+test('returnToQueue preserves age and does not mark the job failed', async () => {
+  const q = new MemoryReviewQueue();
+  const payload = job({ headSha: 'wait-not-fail', action: 'opened' });
+  await q.enqueue(payload);
+  const claimed = await q.dequeue();
+  assert.ok(claimed);
+  assert.equal(await q.markRunning(claimed!), true);
+  assert.equal(await q.returnToQueue(claimed!), 'requeued');
+  assert.equal(await q.getJobState(jobIdempotencyKey(payload)), 'ready');
+  assert.deepEqual(await q.listDeadLetters!(), []);
+  const again = await q.dequeue();
+  assert.equal(again?.headSha, payload.headSha);
+  assert.equal(again?.enqueuedAt, payload.enqueuedAt);
+  assert.equal(again?.attempts, undefined);
+  await q.markCompleted(again!);
+});
+
+test('dequeue inspects 256 ready jobs so a later eligible job is still claimed', async () => {
+  const q = new MemoryReviewQueue();
+  for (let index = 0; index < 200; index++) {
+    await q.enqueue(
+      job({
+        pr: index + 1,
+        headSha: `low-${index}`,
+        action: 'manual',
+        priority: 0,
+      }),
+    );
+  }
+  await q.enqueue(
+    job({
+      pr: 900,
+      headSha: 'high-behind-window',
+      action: 'manual',
+      priority: 9,
+    }),
+  );
+  assert.ok(200 < DEQUEUE_INSPECTION_WINDOW);
+  assert.equal((await q.dequeue())?.headSha, 'high-behind-window');
 });
