@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { ReviewFinding } from '../finding.js';
 import { buildVerifierPrompt } from './prompt.js';
 import { applyVerdicts } from './verdicts.js';
+import { verifyFindings } from './execution.js';
 
 const finding = (overrides: Partial<ReviewFinding> = {}): ReviewFinding => ({
   file: 'src/handler.ts',
@@ -48,4 +49,32 @@ test('verdict normalization keeps a rejected candidate distinct from a same-file
   assert.deepEqual(result.kept, [second]);
   assert.equal(result.duplicates.length, 0);
   assert.equal(result.dropped.length, 1);
+});
+
+test('verifier runner path continues from the verdicts JSON contract prefix', async () => {
+  let seen: string | undefined;
+  const result = await verifyFindings(
+    [finding()],
+    [{ path: 'src/handler.ts', content: 'export const handler = () => true;' }],
+    {
+      apiKey: 'test-key',
+      model: 'test-verifier',
+      runner: {
+        transport: 'anthropic',
+        async run(request) {
+          seen = request.jsonContractPrefix;
+          return '{"verdicts":[{"id":0,"verdict":"confirmed","reason":"the throw is reachable"}]}';
+        },
+      },
+      target: {
+        transport: 'anthropic',
+        apiKey: 'test-key',
+        model: 'test-verifier',
+      },
+    },
+  );
+
+  assert.equal(seen, '{"verdicts":');
+  assert.equal(result.status, 'verified');
+  assert.equal(result.kept.length, 1);
 });

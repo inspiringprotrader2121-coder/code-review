@@ -253,7 +253,9 @@ async function acquireSlot(
     const lease = tryAcquireHostSlot(runtime);
     if (lease) return lease;
     if (Date.now() >= deadline)
-      throw new Error(`sandbox slot wait timed out after ${runtime.slotWaitMs}ms`);
+      throw new Error(
+        `sandbox slot wait timed out after ${runtime.slotWaitMs}ms; admission timed out; retry-after: ${Math.max(1, Math.ceil(runtime.slotWaitMs / 1000))}`,
+      );
     await sleep(Math.min(CONTAINER_CLEANUP_RETRY_MS, Math.max(1, deadline - Date.now())));
   }
 }

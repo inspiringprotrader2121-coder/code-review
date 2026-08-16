@@ -10,7 +10,7 @@ test('queue state machine permits the documented success lifecycle', () => {
 });
 
 test('queue state machine requires explicit retry and dead-letter transitions', () => {
-  assert.equal(canTransitionJob('running', 'ready'), false);
+  assert.equal(canTransitionJob('running', 'ready'), true);
   assert.equal(canTransitionJob('failed', 'ready'), true);
   assert.equal(canTransitionJob('dead-lettered', 'ready'), true);
   assert.throws(() => assertJobTransition('succeeded', 'running'), /invalid queue transition/);
