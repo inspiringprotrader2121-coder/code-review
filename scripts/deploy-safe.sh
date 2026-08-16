@@ -383,6 +383,56 @@ REMOTE_CHECK
     return 1
   }
 
+  # Decide once, while the old release is still live, which process manager
+  # owns it. A merely enabled systemd unit is not proof that Docker owns the
+  # running app; choosing it while PM2 is live could leave source files changed
+  # under a running process or start a second fleet.
+  detect_process_manager() {
+    "${SSH[@]}" bash -s <<'REMOTE_DETECT_PROCESS_MANAGER'
+set -euo pipefail
+docker_active=0
+pm2_active=0
+if sudo -n systemctl is-active --quiet orvex-stack.service >/dev/null 2>&1; then
+  docker_active=1
+fi
+pm2_home=${PM2_HOME:-"$HOME/.pm2"}
+if [[ -S "$pm2_home/rpc.sock" ]] && command -v pm2 >/dev/null 2>&1; then
+  if pm2 jlist 2>/dev/null | node -e '
+const fs = require("node:fs");
+try {
+  const apps = JSON.parse(fs.readFileSync(0, "utf8") || "[]");
+  const names = /^velatrix-(api|scheduler|review|worker-\d+)$/;
+  const live = new Set(["online", "launching", "stopping", "waiting_restart"]);
+  process.exit(apps.some((app) => names.test(app.name) && live.has(app.pm2_env && app.pm2_env.status)) ? 0 : 1);
+} catch {
+  process.exit(1);
+}
+'
+  then
+    pm2_active=1
+  fi
+fi
+case "$docker_active:$pm2_active" in
+  1:0) printf 'docker\n' ;;
+  0:1) printf 'pm2\n' ;;
+  1:1)
+    echo "both orvex-stack.service and a Velatrix PM2 fleet are active; refusing split-brain deploy" >&2
+    exit 1
+    ;;
+  *)
+    echo "no active Orvex process manager found; refusing to guess a restart target" >&2
+    exit 1
+    ;;
+esac
+REMOTE_DETECT_PROCESS_MANAGER
+  }
+
+  if ! PROCESS_MANAGER=$(detect_process_manager); then
+    echo "[deploy] aborting before setting the drain: could not identify the active process manager" >&2
+    exit 3
+  fi
+  echo "[deploy] active process manager: $PROCESS_MANAGER"
+
   echo "[deploy] enabling server-side drain before the idle check"
   set_drain
 
@@ -423,10 +473,16 @@ REMOTE_CHECK
     exit 3
   fi
 
-  echo "[deploy] gracefully stopping drained Orvex PM2 apps"
-  if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_STOP_APPS'
+  echo "[deploy] gracefully stopping drained Orvex apps"
+  if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" "$PROCESS_MANAGER" <<'REMOTE_STOP_APPS'
 set -euo pipefail
 live=$1
+manager=$2
+if [[ "$manager" == "docker" ]]; then
+  sudo -n systemctl stop orvex-stack.service
+  exit 0
+fi
+[[ "$manager" == "pm2" ]] || { echo "unknown process manager: $manager" >&2; exit 1; }
 pm2 stop velatrix-api >/dev/null 2>&1 || true
 pm2 stop velatrix-scheduler >/dev/null 2>&1 || true
 pm2 stop /velatrix-worker-/ >/dev/null 2>&1 || true
@@ -445,9 +501,15 @@ if (bad.length) {
 REMOTE_STOP_APPS
   then
     echo "[deploy] PM2 stop failed; attempting to bring the unchanged apps back" >&2
-    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_RESTART_UNCHANGED'
+    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" "$PROCESS_MANAGER" <<'REMOTE_RESTART_UNCHANGED'
 set -euo pipefail
 live=$1
+manager=$2
+if [[ "$manager" == "docker" ]]; then
+  sudo -n systemctl start orvex-stack.service
+  exit 0
+fi
+[[ "$manager" == "pm2" ]] || { echo "unknown process manager: $manager" >&2; exit 1; }
 if [[ -f "$live/ecosystem.config.cjs" ]]; then
   pm2 startOrRestart "$live/ecosystem.config.cjs" --update-env >/dev/null
 else
@@ -481,9 +543,15 @@ rsync -a --checksum --delete \
 REMOTE_BACKUP
   then
     echo "[deploy] backup failed; restarting the unchanged live apps" >&2
-    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_RESTART_UNCHANGED'
+    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" "$PROCESS_MANAGER" <<'REMOTE_RESTART_UNCHANGED'
 set -euo pipefail
 live=$1
+manager=$2
+if [[ "$manager" == "docker" ]]; then
+  sudo -n systemctl start orvex-stack.service
+  exit 0
+fi
+[[ "$manager" == "pm2" ]] || { echo "unknown process manager: $manager" >&2; exit 1; }
 if [[ -f "$live/ecosystem.config.cjs" ]]; then
   pm2 startOrRestart "$live/ecosystem.config.cjs" --update-env >/dev/null
 else
@@ -535,9 +603,22 @@ REMOTE_APPLY
   }
 
   restart_release() {
-    "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_RESTART'
+    "${SSH[@]}" bash -s -- "$REMOTE_DIR" "$PROCESS_MANAGER" <<'REMOTE_RESTART'
 set -euo pipefail
 live=$1
+manager=$2
+if [[ "$manager" == "docker" ]]; then
+  sudo -n systemctl start orvex-stack.service
+  attempts=${ORVEX_STACK_START_ATTEMPTS:-30}
+  sleep_s=${ORVEX_STACK_START_SLEEP_S:-2}
+  for i in $(seq 1 "$attempts"); do
+    if sudo -n systemctl is-active --quiet orvex-stack.service; then exit 0; fi
+    if ((i < attempts)); then sleep "$sleep_s"; fi
+  done
+  echo "Docker Orvex systemd unit did not become active after $attempts checks" >&2
+  exit 1
+fi
+[[ "$manager" == "pm2" ]] || { echo "unknown process manager: $manager" >&2; exit 1; }
 [[ -f "$live/ecosystem.config.cjs" ]] || {
   echo "release is missing ecosystem.config.cjs" >&2
   exit 1
@@ -582,9 +663,15 @@ REMOTE_BACKUP_SCHEDULE
       echo "[deploy] CRITICAL: could not re-enable the drain before rollback" >&2
       return 1
     fi
-    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" <<'REMOTE_STOP_APPS'
+    if ! "${SSH[@]}" bash -s -- "$REMOTE_DIR" "$PROCESS_MANAGER" <<'REMOTE_STOP_APPS'
 set -euo pipefail
 live=$1
+manager=$2
+if [[ "$manager" == "docker" ]]; then
+  sudo -n systemctl stop orvex-stack.service
+  exit 0
+fi
+[[ "$manager" == "pm2" ]] || { echo "unknown process manager: $manager" >&2; exit 1; }
 pm2 stop velatrix-api >/dev/null 2>&1 || true
 pm2 stop velatrix-scheduler >/dev/null 2>&1 || true
 pm2 stop /velatrix-worker-/ >/dev/null 2>&1 || true

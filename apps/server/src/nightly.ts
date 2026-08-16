@@ -106,7 +106,9 @@ export async function enqueueNightlyScans(
       pr: 0,
       headSha: 'nightly',
       scanDay,
-      ...reviewJobAdmissionFields(t.owner, t.plan),
+      ...reviewJobAdmissionFields(t.owner, t.plan, undefined, {
+        slug: config.store.getTenantById(t.tenantId)?.slug,
+      }),
       enqueuedAt: new Date().toISOString(),
     });
     enqueued++;

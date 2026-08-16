@@ -90,11 +90,12 @@ export function reviewJobAdmissionFields(
   owner: string,
   planId: string | null | undefined,
   config: TenantRuntimeConfig = loadTenantRuntimeConfig(),
+  identity: Omit<OperatorIdentity, 'owner'> = {},
 ): { priority: number; quotaUnlimited: boolean } {
-  const plan = planFeaturesForAccount(planId, owner, config);
+  const plan = planFeaturesForAccount(planId, owner, config, identity);
   return {
     priority: plan.priority,
     // Redis tenant-claim Lua skips the fleet tenant ceiling for these jobs.
-    quotaUnlimited: isUnlimitedGithubOwner(owner, config),
+    quotaUnlimited: isUnlimitedOperator({ owner, ...identity }, config),
   };
 }

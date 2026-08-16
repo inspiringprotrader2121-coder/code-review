@@ -6,6 +6,7 @@ import {
   returnLateDequeuedJob,
   resolveMaxJobRetries,
   resolveWorkerConcurrency,
+  resolveWorkerPollerCount,
   recoverOrphansAsLeader,
   shouldReturnDequeuedJob,
   startWorkerLoop,
@@ -21,6 +22,76 @@ import { activeReviewSignal } from './active-reviews.js';
 import { AppDatabase } from '@orvex-review/store';
 import type { WorkerConfig } from './pipeline.js';
 import { testServerConfig } from './bootstrap/test-config.js';
+
+test('a huge review ceiling uses one dequeue poller per worker', () => {
+  assert.equal(resolveWorkerPollerCount(1), 1);
+  assert.equal(resolveWorkerPollerCount(8), 1);
+  assert.equal(resolveWorkerPollerCount(32), 1);
+  assert.equal(resolveWorkerPollerCount(10_000), 1);
+});
+
+test('a high ceiling yields before it can pre-claim work past a new host admission block', async () => {
+  const queue = new MemoryReviewQueue();
+  const db = new AppDatabase(':memory:');
+  for (const pr of [1, 2, 3]) {
+    await queue.enqueue({
+      installationId: 1,
+      tenantId: 'tenant',
+      owner: 'owner',
+      repo: 'repo',
+      pr,
+      headSha: `sha-${pr}`,
+      action: 'opened',
+      enqueuedAt: new Date(0).toISOString(),
+    });
+  }
+  let canAdmitHost = true;
+  let resolveHostBlocked!: () => void;
+  const hostBlocked = new Promise<void>((resolve) => {
+    resolveHostBlocked = resolve;
+  });
+  // Host resource samples arrive on a later event-loop turn. A poller must
+  // yield after launching a job so that this new signal can stop the next
+  // claim instead of prefetching the entire nominal ceiling.
+  setImmediate(() => {
+    canAdmitHost = false;
+    resolveHostBlocked();
+  });
+  let resolveReview!: () => void;
+  let markReviewStarted!: () => void;
+  const reviewStarted = new Promise<void>((resolve) => {
+    markReviewStarted = resolve;
+  });
+  const reviewGate = new Promise<void>((resolve) => {
+    resolveReview = resolve;
+  });
+  const stop = startWorkerLoop(queue, {
+    config: testServerConfig({ ORVEX_MAX_CONCURRENT_REVIEWS: '10000' }),
+    db,
+    maxConcurrent: 10_000,
+    pollMs: 1,
+    shutdownDrainMs: 100,
+    isDraining: () => false,
+    canAdmitHost: () => canAdmitHost,
+    loadConfig: () => ({ store: db }) as WorkerConfig,
+    processReview: async () => {
+      markReviewStarted();
+      await reviewGate;
+      return { findingCount: 0, newCount: 0, fixedCount: 0 };
+    },
+  });
+  try {
+    await Promise.all([hostBlocked, reviewStarted]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const depth = await queue.depth();
+    assert.equal(depth.queued, 2);
+    assert.equal(depth.inFlight, 1);
+  } finally {
+    resolveReview();
+    await stop();
+    db.close();
+  }
+});
 
 test('worker concurrency remains an explicit operator ceiling', () => {
   assert.equal(resolveWorkerConcurrency(testServerConfig({})), 8);
@@ -182,6 +253,7 @@ test('forced shutdown aborts an active API review before durable cleanup', async
     maxConcurrent: 1,
     pollMs: 1,
     isDraining: () => false,
+    canAdmitHost: () => true,
     shutdownDrainMs: 1,
     shutdownCancelMs: 250,
     loadConfig: () => ({ store: {} }) as unknown as WorkerConfig,

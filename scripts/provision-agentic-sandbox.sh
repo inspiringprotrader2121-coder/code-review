@@ -236,14 +236,14 @@ start_broker() {
   as_service_user docker run --detach --name "$BROKER_NAME" --pull never \
     --label orvex.managed=true --label orvex.agentic-egress=true \
     --network "$INTERNAL_NETWORK" --read-only --tmpfs /tmp:size=16m,noexec,nosuid,nodev \
-    --cap-drop ALL --security-opt no-new-privileges --ipc none --pids-limit 64 \
-    --memory 256m --memory-swap 256m --cpus 0.50 --ulimit nofile=128:128 \
+    --cap-drop ALL --security-opt no-new-privileges --ipc none --pids-limit 512 \
+    --memory 2g --memory-swap 2g --cpus 2.00 --ulimit nofile=65536:65536 \
     --mount "type=bind,src=$SECRET_FILE,dst=/run/secrets/openai_api_key,readonly,bind-propagation=rprivate" \
     --mount "type=bind,src=$SIGNING_KEY_FILE,dst=/run/secrets/broker_signing_key,readonly,bind-propagation=rprivate" \
     --env OPENAI_API_KEY_FILE=/run/secrets/openai_api_key \
     --env EGRESS_SIGNING_KEY_FILE=/run/secrets/broker_signing_key \
     --env EGRESS_LISTEN_PORT=8080 --env EGRESS_ALLOWED_HOST="$BROKER_NAME" \
-    --env EGRESS_MAX_CONTENT_BYTES=1048576 --env EGRESS_MAX_OUTPUT_TOKENS=65536 \
+    --env EGRESS_MAX_CONTENT_BYTES=1048576 --env EGRESS_MAX_OUTPUT_TOKENS=128000 \
     --env EGRESS_MAX_CONCURRENT=10000 --env EGRESS_MAX_REQUESTS_PER_WINDOW=10000 \
     --env EGRESS_RATE_WINDOW_MS=60000 --env EGRESS_BODY_READ_TIMEOUT_MS=30000 \
     --env EGRESS_UPSTREAM_TIMEOUT_MS=300000 \

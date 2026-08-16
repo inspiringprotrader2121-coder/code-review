@@ -42,15 +42,29 @@ export function jsonFinishPrefix(text: string, contractPrefix = '{"findings":'):
   return slice || contractPrefix;
 }
 
-export function jsonContractMissing(text: string): boolean {
+export type JsonContractKey = 'findings' | 'issues' | 'verdicts' | 'action';
+
+const DEFAULT_JSON_CONTRACT_KEYS: readonly JsonContractKey[] = [
+  'findings',
+  'issues',
+  'verdicts',
+];
+
+function hasJsonContractKey(root: Record<string, unknown>, key: JsonContractKey): boolean {
+  if (key === 'action') return typeof root.action === 'string' && root.action.trim().length > 0;
+  return Array.isArray(root[key]);
+}
+
+export function jsonContractMissing(
+  text: string,
+  acceptedKeys: readonly JsonContractKey[] = DEFAULT_JSON_CONTRACT_KEYS,
+): boolean {
   try {
     const parsed = extractJsonLoose(text);
     if (Array.isArray(parsed)) return false;
     if (!parsed || typeof parsed !== 'object') return true;
     const root = parsed as Record<string, unknown>;
-    return (
-      !Array.isArray(root.findings) && !Array.isArray(root.issues) && !Array.isArray(root.verdicts)
-    );
+    return !acceptedKeys.some((key) => hasJsonContractKey(root, key));
   } catch {
     return true;
   }

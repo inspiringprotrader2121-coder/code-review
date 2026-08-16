@@ -136,6 +136,64 @@ process.stdout.write(match[1]);
 NODE
 }
 
+node <<'NODE'
+const { readFileSync } = require('node:fs');
+const source = readFileSync('scripts/deploy-safe.sh', 'utf8');
+if (source.includes('is-enabled orvex-stack.service')) {
+  throw new Error('an enabled but inactive systemd unit must not select the live process manager');
+}
+if (!source.includes('detect_process_manager') || !source.includes('PROCESS_MANAGER=$(detect_process_manager)')) {
+  throw new Error('deploy must identify the active process manager before draining');
+}
+if (!source.includes('refusing split-brain deploy')) {
+  throw new Error('deploy must refuse a simultaneously active Docker and PM2 fleet');
+}
+NODE
+
+MANAGER_FIXTURE=$(mktemp -d)
+trap 'rm -rf -- "$MANAGER_FIXTURE"' EXIT
+mkdir -p "$MANAGER_FIXTURE/bin" "$MANAGER_FIXTURE/home/.pm2"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "$1" == "-n" ]]; then shift; fi' \
+  'exec "$@"' >"$MANAGER_FIXTURE/bin/sudo"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'if [[ "$1" == "start" ]]; then [[ -n "${DEPLOY_TEST_STATE:-}" ]] && : >"$DEPLOY_TEST_STATE/systemctl-started"; exit 0; fi' \
+  'if [[ "$1" == "is-active" ]]; then' \
+  '  if [[ -n "${DEPLOY_TEST_STATE:-}" && -e "$DEPLOY_TEST_STATE/systemctl-started" ]]; then' \
+  '    count_file="$DEPLOY_TEST_STATE/systemctl-active-count"' \
+  '    count=0; [[ -f "$count_file" ]] && count=$(cat "$count_file")' \
+  '    count=$((count + 1)); printf "%s" "$count" >"$count_file"' \
+  '    ((count >= 2)) && exit 0; exit 3' \
+  '  fi' \
+  '  [[ "${DEPLOY_TEST_DOCKER_ACTIVE:-0}" == 1 ]] && exit 0; exit 3' \
+  'fi' \
+  'exit 0' >"$MANAGER_FIXTURE/bin/systemctl"
+chmod +x "$MANAGER_FIXTURE/bin/"*
+
+if [[ "$(extract_remote_block REMOTE_DETECT_PROCESS_MANAGER | env \
+  PATH="$MANAGER_FIXTURE/bin:$PATH" HOME="$MANAGER_FIXTURE/home" DEPLOY_TEST_DOCKER_ACTIVE=1 bash)" != "docker" ]]; then
+  echo "active Docker stack was not selected as the process manager" >&2
+  exit 1
+fi
+if extract_remote_block REMOTE_DETECT_PROCESS_MANAGER | env \
+  PATH="$MANAGER_FIXTURE/bin:$PATH" HOME="$MANAGER_FIXTURE/home" bash >/dev/null 2>&1; then
+  echo "deploy guessed a process manager when neither runtime was active" >&2
+  exit 1
+fi
+mkdir -p "$MANAGER_FIXTURE/state"
+extract_remote_block REMOTE_RESTART | env \
+  PATH="$MANAGER_FIXTURE/bin:$PATH" DEPLOY_TEST_STATE="$MANAGER_FIXTURE/state" \
+  ORVEX_STACK_START_ATTEMPTS=2 ORVEX_STACK_START_SLEEP_S=0 \
+  bash -s -- /srv/orvex docker
+if [[ "$(cat "$MANAGER_FIXTURE/state/systemctl-active-count")" != "2" ]]; then
+  echo "Docker restart did not wait for the systemd unit to become active" >&2
+  exit 1
+fi
+rm -rf -- "$MANAGER_FIXTURE"
+trap - EXIT
+
 TRANSFER_FIXTURE=$(mktemp -d)
 trap 'rm -rf -- "$TRANSFER_FIXTURE"' EXIT
 TRANSFER_LIVE="$TRANSFER_FIXTURE/live"
@@ -223,17 +281,17 @@ if (names.filter((name) => name.startsWith('velatrix-worker-')).length !== 13) {
 const workerArgs = config.apps?.find((app) => app.name === 'velatrix-worker-01')?.args ?? '';
 const schedulerArgs = config.apps?.find((app) => app.name === 'velatrix-scheduler')?.args ?? '';
 for (const [variable, expected] of Object.entries({
-  ORVEX_MAX_CONCURRENT_REVIEWS: 32,
-  ORVEX_CODEX_APIKEY_CONCURRENCY: 32,
-  ORVEX_PROVIDER_CONCURRENCY_LUNA: 32,
-  ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 32,
-  ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 32,
+  ORVEX_MAX_CONCURRENT_REVIEWS: 10000,
+  ORVEX_CODEX_APIKEY_CONCURRENCY: 10000,
+  ORVEX_PROVIDER_CONCURRENCY_LUNA: 10000,
+  ORVEX_PROVIDER_CONCURRENCY_DEEPSEEK: 10000,
+  ORVEX_PROVIDER_CONCURRENCY_MINIMAX: 10000,
   ORVEX_FLEET_PROVIDER_CONCURRENCY_LUNA: 10000,
   ORVEX_FLEET_PROVIDER_CONCURRENCY_DEEPSEEK: 10000,
   ORVEX_FLEET_PROVIDER_CONCURRENCY_MINIMAX: 10000,
   ORVEX_FLEET_TENANT_CONCURRENCY: 8,
   ORVEX_PROVIDER_LEASE_WAIT_MS: 600000,
-  ORVEX_VERIFY_CONCURRENCY: 32,
+  ORVEX_VERIFY_CONCURRENCY: 10000,
   ORVEX_MAX_SANDBOXES: 10000,
 })) {
   if (!workerArgs.includes(`${variable}=${expected}`)) {
@@ -259,7 +317,7 @@ if (
 ) {
   throw new Error('production profile does not pin the operator tenant slugs');
 }
-if (workerArgs.indexOf('. ./.env') > workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=32')) {
+if (workerArgs.indexOf('. ./.env') > workerArgs.indexOf('ORVEX_MAX_CONCURRENT_REVIEWS=10000')) {
   throw new Error('immutable .env would override the code-owned production profile');
 }
 if (!String(require('fs').readFileSync('ecosystem.config.cjs', 'utf8')).includes('deploy-safe')) {

@@ -73,7 +73,9 @@ export async function enqueueManualReview(
     pr: input.pr,
     headSha: input.headSha ?? pr.headSha,
     action: 'manual',
-    ...reviewJobAdmissionFields(input.owner, config.store.getTenantPlan(tenantId)),
+    ...reviewJobAdmissionFields(input.owner, config.store.getTenantPlan(tenantId), undefined, {
+      slug: config.store.getTenantById(tenantId)?.slug,
+    }),
     enqueuedAt: new Date().toISOString(),
   };
   await queue.enqueue(job);

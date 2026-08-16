@@ -42,6 +42,7 @@ export {
   jsonFinishPrefix,
   stripThinking,
 } from './llm/parsing.js';
+export type { JsonContractKey } from './llm/parsing.js';
 export type {
   LlmAttemptEvent,
   LlmAttemptOutcome,

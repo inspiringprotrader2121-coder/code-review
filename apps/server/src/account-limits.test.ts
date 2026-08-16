@@ -417,6 +417,35 @@ test('operator-unlimited github owners skip every account quota including COGS',
   }
 });
 
+test('operator-unlimited tenant slug skips account quotas for a different github owner', () => {
+  const previous = process.env.ORVEX_UNLIMITED_TENANT_SLUGS;
+  process.env.ORVEX_UNLIMITED_TENANT_SLUGS = 'org-inspiringprotrader2121-coder';
+  const d = db();
+  const tenant = d.createTenant('org-inspiringprotrader2121-coder');
+  d.setTenantPlan(tenant.id, 'review');
+  const plan = planFeatures('review');
+  for (let i = 0; i < 20; i++) {
+    d.startReviewRun({
+      tenantId: tenant.id,
+      installationId: 1,
+      owner: 'some-other-org',
+      repo: 'app',
+      pr: 400 + i,
+      headSha: `slug-unlimited${i}`,
+      action: 'opened',
+    });
+  }
+  try {
+    assert.equal(
+      accountLimitReason(d, 'some-other-org', plan, 1, 0, { tenantId: tenant.id }),
+      null,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ORVEX_UNLIMITED_TENANT_SLUGS;
+    else process.env.ORVEX_UNLIMITED_TENANT_SLUGS = previous;
+  }
+});
+
 test('COGS admission uses the injected monthly cap, not the legacy plan-id default', () => {
   const d = db();
   const tenantId = defaultTenant(d);

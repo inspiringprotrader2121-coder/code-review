@@ -111,6 +111,23 @@ test('formatLimitBlockedComment for rate_limited is explicit about used/limit an
   assert.match(body, /Run on each commit/);
 });
 
+test('operator tenant slug reports unlimited concurrent and monthly quota', () => {
+  const previous = process.env.ORVEX_UNLIMITED_TENANT_SLUGS;
+  process.env.ORVEX_UNLIMITED_TENANT_SLUGS = 'org-inspiringprotrader2121-coder';
+  const d = db();
+  const tenant = d.createTenant('org-inspiringprotrader2121-coder');
+  try {
+    const status = loadAccountQuotaStatus(d, 'some-other-org', tenant.id, planFeatures('review'));
+    assert.equal(status.concurrent.limit, null);
+    assert.equal(status.hourly.limit, null);
+    assert.equal(status.monthly.kind, 'unlimited');
+    assert.equal(status.cost.limitUsd, Number.POSITIVE_INFINITY);
+  } finally {
+    if (previous === undefined) delete process.env.ORVEX_UNLIMITED_TENANT_SLUGS;
+    else process.env.ORVEX_UNLIMITED_TENANT_SLUGS = previous;
+  }
+});
+
 test('formatLimitBlockedComment for trial_exhausted points at upgrade', () => {
   const d = db();
   const plan = planFeatures('free');

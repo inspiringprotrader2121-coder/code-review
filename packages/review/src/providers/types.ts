@@ -1,4 +1,5 @@
 import type { ChildProcessWithoutNullStreams, SpawnOptions } from 'node:child_process';
+import type { JsonContractKey } from '../llm/parsing.js';
 
 /** Provider transport is part of the review-stage contract, never guessed by an adapter. */
 export type ModelTransport = 'responses' | 'compatible-chat' | 'anthropic' | 'codex-cli';
@@ -196,6 +197,7 @@ export interface TextModelRunRequest {
   onAttempt?: (event: ModelAttemptEvent) => void;
   attemptLineage?: ModelAttemptLineage;
   jsonContractPrefix?: string;
+  jsonContractKeys?: readonly JsonContractKey[];
 }
 
 export interface ModelRunner<TRequest = TextModelRunRequest, TResult = string> {

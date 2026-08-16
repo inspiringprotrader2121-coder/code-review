@@ -124,6 +124,7 @@ test(
       pollMs: 1,
       shutdownDrainMs: 100,
       isDraining: () => false,
+      canAdmitHost: () => true,
       loadConfig: () => ({ store: db, providerDependencies: {} }) as WorkerConfig,
       processReview: async (job) => {
         activeModelCalls++;

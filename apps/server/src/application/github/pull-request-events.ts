@@ -129,7 +129,9 @@ export async function handlePullRequestEvent(
     pr,
     headSha,
     action: action as 'opened' | 'synchronize' | 'reopened' | 'ready_for_review',
-    ...reviewJobAdmissionFields(owner, context.db.getTenantPlan(installation.tenantId)),
+    ...reviewJobAdmissionFields(owner, context.db.getTenantPlan(installation.tenantId), undefined, {
+      slug: context.db.getTenantById?.(installation.tenantId)?.slug,
+    }),
     enqueuedAt: new Date().toISOString(),
   });
   console.log(

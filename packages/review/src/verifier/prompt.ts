@@ -138,11 +138,25 @@ export function buildVerifierPrompt(
     'with the best line anchor and set "duplicateOf": <kept id> on each other copy. Two findings',
     'that are DISTINCT bugs must never be marked duplicates, even if they look similar.',
     '',
-    'Respond with JSON only: { "verdicts": [{ "id": <number>, "verdict": "confirmed"|"rejected"|"unverified", "reason": "<short>", "severity"?: "P1"|"P2"|"P3"|"info", "severityEvidence"?: "<required when lowering P1→P2>", "duplicateOf"?: <number> }] }',
+    `Respond with JSON only: { "verdicts": [{ "id": <number>, "verdict": ${options.strict ? '"confirmed"|"rejected"' : '"confirmed"|"rejected"|"unverified"'}, "reason": "<short>", "severity"?: "P1"|"P2"|"P3"|"info", "severityEvidence"?: "<required when lowering P1→P2>", "duplicateOf"?: <number> }] }`,
     'Include a verdict for every id.',
+    ...(options.strict
+      ? [
+          'STRICT COMPLETION: resolve every id as "confirmed" or "rejected". Do not return',
+          '"unverified" in this precision gate.',
+        ]
+      : []),
     'Every "rejected" MUST cite concrete evidence — the line number, file, or quoted code that',
-    'disproves the claim (never a bare "rejected by verification"). If you cannot point at the',
-    'code that makes it wrong, say so plainly or use verdict "unverified"; an unevidenced rejection will not be honoured.',
+    'disproves the claim (never a bare "rejected by verification").',
+    ...(options.strict
+      ? [
+          'If you cannot point at code that makes a candidate wrong, do not reject it. Resolve it',
+          'as confirmed only when the candidate itself is supported by the supplied code.',
+        ]
+      : [
+          'If you cannot point at the code that makes it wrong, say so plainly or use verdict',
+          '"unverified"; an unevidenced rejection will not be honoured.',
+        ]),
   ].join('\n');
   return {
     system:

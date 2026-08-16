@@ -8,6 +8,19 @@ export function resolveWorkerConcurrency(config: Pick<ServerConfig, 'worker'>): 
   return config.worker.concurrency;
 }
 
+/**
+ * One poller can fill the entire local in-flight capacity. More pollers only
+ * multiply empty-queue Redis Lua checks across every worker process, which
+ * burns CPU while no review is running.
+ */
+export const MAX_WORKER_DEQUEUE_POLLERS = 1;
+
+export function resolveWorkerPollerCount(capacity: number): number {
+  const n = Math.floor(Number(capacity));
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.min(MAX_WORKER_DEQUEUE_POLLERS, n);
+}
+
 /** Whole-review retries are deliberately opt-in and capped to one. */
 export function resolveMaxJobRetries(config: Pick<ServerConfig, 'worker'>): number {
   return config.worker.maxJobRetries;

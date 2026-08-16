@@ -86,6 +86,7 @@ test(
       maxConcurrent: PRS.length,
       pollMs: 1,
       isDraining: () => false,
+      canAdmitHost: () => true,
       loadConfig: () => ({ store: db }) as WorkerConfig,
       processReview: async (job, config): Promise<ProcessResult> => {
         assert.equal(db.getTenantPlan(job.tenantId), 'verify');

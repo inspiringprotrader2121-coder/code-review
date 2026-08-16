@@ -152,6 +152,7 @@ export async function runLlmReview(
         user,
         target: opts.target,
         json: true,
+        jsonContractKeys: ['findings', 'issues'],
         thinking,
         temperature,
         signal: opts.signal,
@@ -172,6 +173,7 @@ export async function runLlmReview(
       // has room for full reasoning + detailed findings with fix code
       maxTokens: opts.maxTokens,
       json: true,
+      jsonContractKeys: ['findings', 'issues'],
       thinking,
       signal: opts.signal,
       onUsage: opts.onUsage,

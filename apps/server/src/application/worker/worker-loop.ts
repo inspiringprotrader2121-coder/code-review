@@ -9,6 +9,7 @@ import {
   fleetProvidersSaturated,
   returnLateDequeuedJob,
   resolveWorkerConcurrency,
+  resolveWorkerPollerCount,
   shouldReturnDequeuedJob,
   waitForReservedDequeues,
 } from './queue-policy.js';
@@ -21,10 +22,9 @@ const DEFAULT_POLL_MS = 500;
 const HOST_ADMISSION_LOG_EVERY_MS = 30_000;
 
 /**
- * Starts a fixed number of long-lived worker loops. A claimed job occupies one
- * slot through durable finalization, while provider-specific admission is left
- * to the review layer. This keeps the eight-review ceiling structural without
- * turning the queue into a global provider mutex.
+ * Starts one dequeue poller. Capacity is the max in-flight reviews, not the
+ * number of loops — one poller can fill all slots, while extra idle pollers
+ * multiply Redis work across the fleet.
  */
 export function startBoundedWorkerLoop(
   queue: ReviewQueue,
@@ -56,6 +56,7 @@ export function startBoundedWorkerLoop(
       const timer = setTimeout(resolve, pollMs);
       timer.unref?.();
     });
+  const yieldForAdmission = () => new Promise<void>((resolve) => setImmediate(resolve));
 
   registerWorkerMetrics({
     active: () => active,
@@ -84,11 +85,7 @@ export function startBoundedWorkerLoop(
 
   const workerLoop = async (workerIndex: number): Promise<void> => {
     while (running) {
-      if (draining()) {
-        await waitForPoll();
-        continue;
-      }
-      if (!canAdmitHost()) {
+      if (draining() || !canAdmitHost() || active >= capacity) {
         await waitForPoll();
         continue;
       }
@@ -98,39 +95,53 @@ export function startBoundedWorkerLoop(
         await waitForPoll();
         continue;
       }
-      active++;
-      let job: ReviewJobPayload | null = null;
-      try {
-        job = await queue.dequeue();
-      } catch (error) {
-        console.error(`[worker:${workerIndex}] dequeue error`, error);
-      }
-      if (!job) {
-        active--;
-        await waitForPoll();
-        continue;
-      }
-      if (shouldReturnDequeuedJob(running, draining())) {
+
+      let claimed = 0;
+      while (running && active < capacity && !draining() && canAdmitHost()) {
+        if (await fleetProvidersSaturated(providerAdmissionFor(queue))) break;
+        active++;
+        let job: ReviewJobPayload | null = null;
         try {
-          await returnLateDequeuedJob(queue, job);
+          job = await queue.dequeue();
         } catch (error) {
-          console.error(`[worker:${workerIndex}] could not return late-dequeued job`, error);
-        } finally {
-          active--;
+          console.error(`[worker:${workerIndex}] dequeue error`, error);
         }
-        continue;
+        if (!job) {
+          active--;
+          break;
+        }
+        if (shouldReturnDequeuedJob(running, draining())) {
+          try {
+            await returnLateDequeuedJob(queue, job);
+          } catch (error) {
+            console.error(`[worker:${workerIndex}] could not return late-dequeued job`, error);
+          } finally {
+            active--;
+          }
+          continue;
+        }
+        claimed += 1;
+        void processOne(job)
+          .catch((error) => {
+            console.error(`[worker:${workerIndex}] processOne error`, error);
+          })
+          .finally(() => {
+            active--;
+          });
+        // Give the newly launched job an event-loop turn to reserve provider
+        // capacity or start its sandbox before the next host/provider admission
+        // decision. Without this yield, a high nominal ceiling can synchronously
+        // pre-claim thousands of jobs before RAM, disk, or Redis leases reflect
+        // the work that has just started.
+        await yieldForAdmission();
       }
-      try {
-        await processOne(job);
-      } catch (error) {
-        console.error(`[worker:${workerIndex}] processOne error`, error);
-      } finally {
-        active--;
-      }
+      if (claimed === 0) await waitForPoll();
     }
   };
 
-  void Promise.all(Array.from({ length: capacity }, (_, index) => workerLoop(index + 1))).catch(
+  const pollers = resolveWorkerPollerCount(capacity);
+  console.log(`[worker] dequeue pollers=${pollers} review_capacity=${capacity}`);
+  void Promise.all(Array.from({ length: pollers }, (_, index) => workerLoop(index + 1))).catch(
     (error) => console.error('[worker] worker loop error', error),
   );
   const stopRecovery =

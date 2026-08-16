@@ -7,7 +7,7 @@ import { BillingPeriod } from '@orvex-review/billing';
 import {
   publicPlanLabel,
   uncapPlan,
-  isUnlimitedGithubOwner,
+  isUnlimitedOperator,
   type PlanFeatures,
 } from '@orvex-review/tenants';
 import { commandTrigger } from '@orvex-review/review';
@@ -67,7 +67,9 @@ export type QuotaStatusStore = Pick<
   | 'getCreditBalanceCents'
   | 'oldestAccountReviewCreatedAt'
   | 'sumAccountCost'
->;
+> & {
+  getTenantById?: (id: string) => { slug: string } | null;
+};
 
 export function loadAccountQuotaStatus(
   store: QuotaStatusStore,
@@ -77,7 +79,11 @@ export function loadAccountQuotaStatus(
   config?: Pick<ServerConfig, 'quota'>,
   _now = Date.now(),
 ): AccountQuotaStatus {
-  const resolved = isUnlimitedGithubOwner(owner) ? uncapPlan(plan) : plan;
+  const unlimited = isUnlimitedOperator({
+    owner,
+    slug: store.getTenantById?.(tenantId)?.slug,
+  });
+  const resolved = unlimited ? uncapPlan(plan) : plan;
   const hourlyUsed =
     resolved.reviewsPerHour !== null
       ? store.countAccountReviews(owner, { sinceMs: MS_PER_HOUR })
@@ -117,9 +123,7 @@ export function loadAccountQuotaStatus(
     monthly = { kind: 'unlimited' };
   }
   const cost = store.sumAccountCost(owner, MS_PER_30_DAYS);
-  const costLimit = isUnlimitedGithubOwner(owner)
-    ? Number.POSITIVE_INFINITY
-    : monthlyCogsCapUsd(config);
+  const costLimit = unlimited ? Number.POSITIVE_INFINITY : monthlyCogsCapUsd(config);
 
   let trial: AccountQuotaStatus['trial'] = null;
   if (resolved.trialReviewLimit !== null) {

@@ -46,6 +46,13 @@ test('jsonContractMissing continues when parseable JSON is missing the review co
   assert.equal(jsonContractMissing('{"summary":"looks good"}'), true);
 });
 
+test('jsonContractMissing accepts an investigation tool action only when requested', () => {
+  const action = '{"action":"tool","tool":{"name":"read_file","path":"src/a.ts"}}';
+  assert.equal(jsonContractMissing(action), true);
+  assert.equal(jsonContractMissing(action, ['action']), false);
+  assert.equal(jsonContractMissing('{"findings":[]}', ['verdicts']), true);
+});
+
 test('strips <think> reasoning before parsing', () => {
   const reply = '<think>let me consider the diff</think>{"findings":[],"summary":"s"}';
   assert.deepEqual(extractJsonLoose(reply), { findings: [], summary: 's' });

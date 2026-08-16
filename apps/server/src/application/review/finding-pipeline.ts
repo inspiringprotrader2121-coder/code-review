@@ -23,6 +23,7 @@ import {
   type ReviewConfig,
 } from '@orvex-review/rules';
 import type { StoredFinding } from '@orvex-review/store';
+import { runAgainstHeadFiles } from './semgrep-checkout.js';
 
 type LineIndexEntry = { added: Set<number>; context: Set<number> };
 type AddedLineMap = Map<string, LineIndexEntry>;
@@ -330,9 +331,18 @@ export async function runDeterministicRules(
 
   if (config.run_semgrep) {
     const paths = files
-      .map((f) => f.filename)
-      .filter((p) => !shouldIgnorePath(p, config) && /\.(js|ts|jsx|tsx|py|go)$/.test(p));
-    const semgrep = await runSemgrepOnPaths(paths);
+      .filter(
+        (file) =>
+          file.status !== 'removed' &&
+          !shouldIgnorePath(file.filename, config) &&
+          /\.(js|ts|jsx|tsx|py|go)$/.test(file.filename),
+      )
+      .map((file) => file.filename);
+    const semgrep = await runAgainstHeadFiles(
+      paths,
+      (filename) => fetchFileContent(octokit, owner, repo, filename, headSha),
+      (materializedPaths, cwd) => runSemgrepOnPaths(materializedPaths, cwd),
+    );
     findings.push(
       ...semgrep.map((f) => ({
         ...f,

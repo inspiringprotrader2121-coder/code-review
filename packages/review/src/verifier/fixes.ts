@@ -70,6 +70,7 @@ export async function verifyFixes(
         onUsage: options.onUsage,
         onAttempt: options.onAttempt,
         jsonContractPrefix: '{"verdicts":',
+        jsonContractKeys: ['verdicts'],
       },
     );
     const parsed = VerdictSchema.parse(extractJsonLoose(text));

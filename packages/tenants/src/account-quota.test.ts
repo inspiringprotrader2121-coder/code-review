@@ -52,6 +52,14 @@ test('review enqueue fields mark the operator owner as quota-unlimited', () => {
   const other = reviewJobAdmissionFields('acme', 'enterprise', config);
   assert.equal(other.quotaUnlimited, false);
   assert.equal(planFeaturesForAccount('enterprise', 'acme', config).maxConcurrentReviews, 8);
+  const bySlug = reviewJobAdmissionFields('acme', 'review', config, {
+    slug: 'org-inspiringprotrader2121-coder',
+  });
+  assert.equal(bySlug.quotaUnlimited, true);
+  const byEmail = reviewJobAdmissionFields('acme', 'review', config, {
+    email: 'inspiringprotrader2121@gmail.com',
+  });
+  assert.equal(byEmail.quotaUnlimited, true);
 });
 
 test('operator github owner and email stay uncapped at the plan overlay', () => {

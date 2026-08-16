@@ -6,6 +6,7 @@ import type {
   ProviderAdmission,
   ProviderDependencies,
 } from '../providers/types.js';
+import type { JsonContractKey } from './parsing.js';
 
 export type LlmAttemptOutcome = ModelAttemptOutcome;
 export type LlmAttemptEvent = ModelAttemptEvent;
@@ -72,6 +73,8 @@ export interface LlmClientOptions {
   };
   /** Seed used when a JSON call returns reasoning-only / empty assistant text. */
   jsonContractPrefix?: string;
+  /** Accepted top-level keys for a valid JSON response contract. */
+  jsonContractKeys?: readonly JsonContractKey[];
   /** Internal per-request wall cap; public review calls use the configured LLM max-total cap. */
   hardLimitMs?: number;
   dependencies?: LlmClientDependencies;

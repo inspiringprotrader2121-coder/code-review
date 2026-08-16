@@ -103,7 +103,12 @@ export class AdmissionService {
       }
     }
 
-    const plan = planFeaturesForAccount(config.store.getTenantPlan(job.tenantId), job.owner);
+    const plan = planFeaturesForAccount(
+      config.store.getTenantPlan(job.tenantId),
+      job.owner,
+      undefined,
+      { slug: config.store.getTenantById?.(job.tenantId)?.slug },
+    );
     const providerIssue = this.dependencies.providerIssue(
       plan,
       config,

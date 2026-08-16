@@ -797,6 +797,33 @@ test('a prose-only JSON contract is finished by one answer-only continuation', a
   assert.match(messages.at(-1)?.content ?? '', /complete the json object/i);
 });
 
+test('a valid investigation action does not trigger a findings continuation', async () => {
+  let calls = 0;
+  const action = '{"action":"tool","tool":{"name":"read_file","path":"src/worker.ts"}}';
+  const captured = await withStubbedFetch(
+    () => {
+      calls++;
+      return chatStream(action);
+    },
+    async () => {
+      const result = await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.com/v1',
+        api: 'chat',
+        reasoningEffort: 'max',
+        json: true,
+        jsonContractKeys: ['action'],
+        jsonContractPrefix: '{"action":',
+      });
+      assert.equal(result, action);
+    },
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(captured.length, 1);
+});
+
 test('MiniMax keeps thinking enabled without consuming its answer budget', () => {
   assert.equal(resolveAnthropicThinkingBudget('MiniMax-M3', 20_000, 20_000), 6_000);
   assert.equal(resolveAnthropicThinkingBudget('other-model', 32_000, 20_000), 20_000);

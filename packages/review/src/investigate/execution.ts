@@ -112,6 +112,10 @@ export async function runInvestigateReview(
     maxTokens: options.maxTokens,
     signal: options.signal,
     json: true as const,
+    // Tool turns are valid JSON responses. Do not force a findings continuation
+    // onto `{"action":"tool",...}`, which corrupts the investigation protocol.
+    jsonContractKeys: ['action', 'findings', 'issues'] as const,
+    jsonContractPrefix: '{"action":',
     onUsage: options.onUsage,
     onAttempt: options.onAttempt,
   };

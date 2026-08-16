@@ -18,8 +18,10 @@ export {
 export {
   failInterruptedJobs,
   finalizeQueueJob,
+  MAX_WORKER_DEQUEUE_POLLERS,
   resolveMaxJobRetries,
   resolveWorkerConcurrency,
+  resolveWorkerPollerCount,
   returnLateDequeuedJob,
   shouldReturnDequeuedJob,
   waitForReservedDequeues,

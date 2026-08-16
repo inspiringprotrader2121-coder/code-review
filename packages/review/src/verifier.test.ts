@@ -466,6 +466,209 @@ test('host-selected verifier concurrency runs independent candidate batches in p
   assert.equal(peak, 2);
 });
 
+test('verifier concurrency does not silently clamp a configured high ceiling', async () => {
+  const batchCount = 101;
+  const candidates = Array.from({ length: batchCount }, (_, index) =>
+    finding({ line: index + 1, message: `candidate ${index + 1}` }),
+  );
+  let active = 0;
+  let peak = 0;
+  let started = 0;
+  let release!: () => void;
+  let allStarted!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const startedAll = new Promise<void>((resolve) => {
+    allStarted = resolve;
+  });
+  const review = verifyFindings(
+    candidates,
+    [{ path: 'a.js', content: 'function reviewed() {}' }],
+    {
+      apiKey: 'test-key',
+      model: 'test-verifier',
+      maxFindingsPerBatch: 1,
+      concurrency: batchCount,
+      runner: {
+        transport: 'compatible-chat',
+        async run() {
+          active++;
+          peak = Math.max(peak, active);
+          started++;
+          if (started === batchCount) allStarted();
+          try {
+            await gate;
+            return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+          } finally {
+            active--;
+          }
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'test-verifier',
+      },
+    },
+  );
+
+  await startedAll;
+  assert.equal(peak, batchCount);
+  release();
+  const result = await review;
+  assert.equal(result.status, 'verified');
+  assert.equal(result.kept.length, batchCount);
+});
+
+test('strict verification retries an unresolved verdict instead of aborting the review', async () => {
+  let calls = 0;
+  const candidates = [
+    finding({ line: 1, severity: 'P2', message: 'candidate one' }),
+    finding({ line: 2, severity: 'P2', message: 'candidate two' }),
+  ];
+  const result = await verifyFindings(
+    candidates,
+    [{ path: 'a.js', content: 'function reviewed() {}' }],
+    {
+      apiKey: 'test-key',
+      model: 'test-verifier',
+      strict: true,
+      runner: {
+        transport: 'compatible-chat',
+        async run() {
+          calls++;
+          return calls === 1
+            ? '{"verdicts":[{"id":0,"verdict":"confirmed"},{"id":1,"verdict":"unverified"}]}'
+            : '{"verdicts":[{"id":0,"verdict":"confirmed"},{"id":1,"verdict":"confirmed"}]}';
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'test-verifier',
+      },
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(result.status, 'verified');
+  assert.equal(result.kept.length, 2);
+  assert.equal(result.unverified.length, 0);
+});
+
+test('strict verification preserves resolved verdicts when its bounded retry remains unresolved', async () => {
+  let calls = 0;
+  const candidates = [
+    finding({ line: 1, severity: 'P2', message: 'candidate that is refuted' }),
+    finding({ line: 2, severity: 'P2', message: 'candidate that remains unresolved' }),
+  ];
+  const result = await verifyFindings(
+    candidates,
+    [{ path: 'a.js', content: 'function reviewed() {}' }],
+    {
+      apiKey: 'test-key',
+      model: 'test-verifier',
+      strict: true,
+      runner: {
+        transport: 'compatible-chat',
+        async run() {
+          calls++;
+          return JSON.stringify({
+            verdicts: [
+              { id: 0, verdict: 'rejected', reason: 'a.js:1 disproves the candidate' },
+              { id: 1, verdict: 'unverified', reason: 'insufficient source context' },
+            ],
+          });
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'test-verifier',
+      },
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(result.status, 'verified');
+  assert.deepEqual(result.dropped.map(({ finding }) => finding.line), [1]);
+  assert.deepEqual(result.unverified.map((finding) => finding.line), [2]);
+  const disposition = partitionVerifiedFindings(candidates, [], result);
+  assert.deepEqual(disposition.toPost.map((finding) => finding.line), [2]);
+});
+
+test('a complete verifier response ignores extraneous ids without a paid retry', async () => {
+  let calls = 0;
+  const candidates = [
+    finding({ line: 1, severity: 'P2', message: 'candidate one' }),
+    finding({ line: 2, severity: 'P2', message: 'candidate two' }),
+  ];
+  const result = await verifyFindings(
+    candidates,
+    [{ path: 'a.js', content: 'function reviewed() {}' }],
+    {
+      apiKey: 'test-key',
+      model: 'test-verifier',
+      runner: {
+        transport: 'compatible-chat',
+        async run() {
+          calls++;
+          return JSON.stringify({
+            verdicts: [
+              { id: 0, verdict: 'confirmed' },
+              { id: 1, verdict: 'rejected', reason: 'a.js:2 disproves the candidate' },
+              { id: 99, verdict: 'confirmed' },
+            ],
+          });
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'test-verifier',
+      },
+    },
+  );
+
+  assert.equal(calls, 1);
+  assert.deepEqual(result.kept.map((finding) => finding.line), [1]);
+  assert.deepEqual(result.dropped.map(({ finding }) => finding.line), [2]);
+});
+
+test('a bounded format retry retains usable siblings when ids remain missing', async () => {
+  let calls = 0;
+  const candidates = [
+    finding({ line: 1, severity: 'P2', message: 'candidate that is confirmed' }),
+    finding({ line: 2, severity: 'P3', message: 'candidate still absent' }),
+  ];
+  const result = await verifyFindings(
+    candidates,
+    [{ path: 'a.js', content: 'function reviewed() {}' }],
+    {
+      apiKey: 'test-key',
+      model: 'test-verifier',
+      runner: {
+        transport: 'compatible-chat',
+        async run() {
+          calls++;
+          return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'test-verifier',
+      },
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(result.status, 'verified');
+  assert.deepEqual(result.kept.map((finding) => finding.line), [1]);
+  assert.deepEqual(result.unverified.map((finding) => finding.line), [2]);
+});
+
 test('verification finishes a JSON-contract miss with one parent-linked continuation', async (t) => {
   const originalFetch = globalThis.fetch;
   const encoder = new TextEncoder();

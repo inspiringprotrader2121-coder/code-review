@@ -161,18 +161,22 @@ test('ResponsesRunner passes injected HTTP, clock, retry policy, and observer to
   assert.ok(timerCalls >= 2, 'the injected clock owns both hard and inactivity timers');
 });
 
-test('text runners forward jsonContractPrefix to llmChat', async () => {
+test('text runners forward JSON contract settings to llmChat', async () => {
   let seen: string | undefined;
+  let keys: readonly string[] | undefined;
   const runner = new CompatibleChatRunner({}, async (_system, _user, options) => {
     seen = options.jsonContractPrefix;
+    keys = options.jsonContractKeys;
     return 'ok';
   });
   assert.equal(
     await runner.run({
       ...textRequest('compatible-chat'),
       jsonContractPrefix: '{"verdicts":',
+      jsonContractKeys: ['verdicts'],
     }),
     'ok',
   );
   assert.equal(seen, '{"verdicts":');
+  assert.deepEqual(keys, ['verdicts']);
 });

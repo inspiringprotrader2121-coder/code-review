@@ -97,7 +97,9 @@ export class GitHubWebhookEventContext {
       action: 'command',
       fix,
       sourceEventId: extra?.sourceEventId ?? fix?.sourceEventId,
-      ...reviewJobAdmissionFields(owner, this.db.getTenantPlan(installation.tenantId)),
+      ...reviewJobAdmissionFields(owner, this.db.getTenantPlan(installation.tenantId), undefined, {
+        slug: this.db.getTenantById?.(installation.tenantId)?.slug,
+      }),
       enqueuedAt: new Date().toISOString(),
     };
     const result = await this.queue.enqueue(job);

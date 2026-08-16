@@ -166,7 +166,7 @@ async function llmChatHoldingProviderSlot(
         current.keyIndex,
         lineage,
       );
-      if (opts.json && jsonContractMissing(text)) {
+      if (opts.json && jsonContractMissing(text, opts.jsonContractKeys)) {
         if (continuationCount >= MAX_PREFIX_CONTINUATIONS) {
           throw new Error('LLM response contained no parseable JSON');
         }
