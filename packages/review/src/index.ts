@@ -166,6 +166,7 @@ export {
   isReviewCancelledError,
   isRateLimitOrQuotaError,
   isOversizedModelRequest,
+  isTpmWindowError,
   llmChat,
   configureLlmProviderCoordinator,
   commitProviderTpm,

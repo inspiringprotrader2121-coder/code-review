@@ -2,7 +2,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolveProviderConcurrency } from '../runtime-limits.js';
 import type { LlmClientOptions, LlmProviderCoordinator } from './contracts.js';
 import { ReviewCancelledError, throwIfCancelled } from './cancellation.js';
-import { isRetryableRateLimit, providerCooldownForFailure, sleep } from './retry-policy.js';
+import {
+  isRetryableRateLimit,
+  isTpmWindowError,
+  providerCooldownForFailure,
+  sleep,
+} from './retry-policy.js';
 import { providerName } from './support.js';
 import { localProviderTpm, type TpmReserveInput } from './tpm-window.js';
 
@@ -563,7 +568,13 @@ export function isProviderCapacityError(message: string): boolean {
 }
 
 export function shouldRequeueAdmissionFailure(message: string, attempts = 0): boolean {
-  if (/refusing to publish an incomplete review/i.test(message)) return false;
+  if (
+    /refusing to publish an incomplete review/i.test(message) &&
+    !isTpmWindowError(message) &&
+    !isProviderAdmissionError(message)
+  ) {
+    return false;
+  }
   return (
     isProviderCapacityError(message) &&
     Math.max(0, Math.floor(attempts)) < ADMISSION_JOB_REQUEUE_CAP

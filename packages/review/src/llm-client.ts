@@ -32,7 +32,9 @@ export {
   isRateLimitOrQuotaError,
   isRetryableEmptyProviderResponse,
   isRetryableRateLimit,
+  isTpmWindowError,
   parseRetryAfterMs,
+  rateLimitRetryWaitMs,
 } from './llm/retry-policy.js';
 export { llmChat } from './llm/client.js';
 export { estimateTokens, resolveMaxOutputTokens } from './llm/support.js';

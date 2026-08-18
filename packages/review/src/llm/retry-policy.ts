@@ -35,6 +35,31 @@ export function isRetryableRateLimit(message: string): boolean {
   );
 }
 
+/** True when the provider is in a recoverable rolling token window, not a hard quota. */
+export function isTpmWindowError(message: string): boolean {
+  return (
+    isRetryableRateLimit(message) &&
+    /\bTPM\b|tokens? per min/i.test(message) &&
+    !isOversizedModelRequest(message)
+  );
+}
+
+/**
+ * How long to pause before retrying a 429. A TPM window advertised as a few
+ * hundred milliseconds still needs a floor so concurrent reviews do not
+ * stampede back into the same exhausted minute.
+ */
+export function rateLimitRetryWaitMs(
+  message: string,
+  backoffMs: number,
+  maxWaitMs: number,
+): number {
+  const advertised = parseRetryAfterMs(message);
+  const floor = isTpmWindowError(message) ? 2_000 : 0;
+  const cap = Math.max(1, Math.floor(maxWaitMs));
+  return Math.min(Math.max(advertised ?? backoffMs, floor), cap);
+}
+
 export const RETRYABLE_EMPTY_PROVIDER_RESPONSE =
   'LLM provider returned empty response with zero usage';
 

@@ -27,7 +27,9 @@ import {
 import {
   isRetryableEmptyProviderResponse,
   isRetryableRateLimit,
+  isTpmWindowError,
   parseRetryAfterMs,
+  rateLimitRetryWaitMs,
   sleep,
 } from './retry-policy.js';
 import { clockFor, estimateTokens, maxTotalMs } from './support.js';
@@ -240,15 +242,29 @@ export async function llmChat(
   );
   const maxWaitMs = Math.min(
     300_000,
-    Math.max(1_000, injectedPolicy?.maxWaitMs ?? runtime.rateLimitMaxWaitMs),
+    Math.max(
+      1,
+      Math.floor(injectedPolicy?.maxWaitMs ?? Math.max(1_000, runtime.rateLimitMaxWaitMs)),
+    ),
   );
-  const baseMs = Math.min(60_000, Math.max(250, injectedPolicy?.baseMs ?? runtime.rateLimitBaseMs));
+  const baseMs = Math.min(
+    60_000,
+    Math.max(1, Math.floor(injectedPolicy?.baseMs ?? Math.max(250, runtime.rateLimitBaseMs))),
+  );
   // Long TPM windows (30–120s) must be waitable via config; do not silently clamp to 60s.
+  // Injected test budgets may be smaller than the 5s production floor.
   const totalWaitBudgetMs = Math.min(
     900_000,
-    Math.max(5_000, injectedPolicy?.totalWaitBudgetMs ?? runtime.rateLimitTotalWaitMs),
+    Math.max(
+      1,
+      Math.floor(
+        injectedPolicy?.totalWaitBudgetMs ?? Math.max(5_000, runtime.rateLimitTotalWaitMs),
+      ),
+    ),
   );
   const provider = providerBucketForTarget(opts);
+  const providerLabel =
+    provider === 'deepseek' ? 'DeepSeek' : provider === 'luna' ? 'Luna' : provider;
   const keys = splitApiKeys(opts.apiKey);
   if (keys.length === 0) throw new Error('LLM API key is required');
   const lineage: AttemptLineage = opts.attemptLineage ?? {};
@@ -258,40 +274,46 @@ export async function llmChat(
   let waitRetries = 0;
   let lastLane = provider;
   const triedLanes = new Set<string>();
-  let dispatches = 0;
-  const tpmBudget = runtime.deepseekTpmPerAccount;
+  const tpmBudget =
+    provider === 'luna'
+      ? runtime.lunaTpmPerAccount
+      : provider === 'deepseek'
+        ? runtime.deepseekTpmPerAccount
+        : 0;
+  const tpmReserveOutput =
+    provider === 'luna' ? runtime.lunaTpmReserveOutput : runtime.deepseekTpmReserveOutput;
+  const tpmWindowMs = provider === 'luna' ? runtime.lunaTpmWindowMs : runtime.deepseekTpmWindowMs;
   const tpmPolicy =
-    provider === 'deepseek' && Number.isFinite(tpmBudget) && tpmBudget > 0
+    (provider === 'deepseek' || provider === 'luna') && Number.isFinite(tpmBudget) && tpmBudget > 0
       ? {
           budget: tpmBudget,
           reserveTokens:
             estimateTokens(system.length + user.length) +
-            Math.min(opts.maxTokens ?? runtime.maxOutputTokens, runtime.deepseekTpmReserveOutput),
-          windowMs: runtime.deepseekTpmWindowMs,
+            Math.min(opts.maxTokens ?? runtime.maxOutputTokens, tpmReserveOutput),
+          windowMs: tpmWindowMs,
           reserveTtlMs: Math.max(runtime.llmMaxTotalMs, 60_000),
         }
       : undefined;
-  const maxDispatches = Math.max(waitRetryCeiling, keys.length);
-  while (dispatches < maxDispatches) {
+  while (true) {
     throwIfCancelled(opts.signal);
     const tpm = tpmPolicy ? { ...tpmPolicy, reservationId: randomUUID() } : undefined;
     let selection = await selectProviderKey(provider, keys, keyCursor++, coordinator, tpm);
-    // Never dispatch Flash without a reservation. Cool-key TPM misses wait
+    // Never dispatch Luna/Flash without a reservation. Cool-key TPM misses wait
     // for the rolling minute; cooldown misses wait until a key is cool enough
-    // to reserve so a 429 wake cannot stampede past 2M.
+    // to reserve so a 429 wake cannot stampede the account.
     while (tpm && selection.tpmReserved !== true) {
       if (sleptMs + 2_000 > totalWaitBudgetMs) {
         throw new Error(
           selection.cooldownMs > 0
-            ? `429 DeepSeek account cooldown active across ${keys.length} account(s); retry-after: ${Math.max(1, Math.ceil(selection.cooldownMs / 1000))}`
-            : `429 DeepSeek TPM ${tpm.budget}/min exhausted across ${keys.length} account(s); retry-after: 60`,
+            ? `429 ${providerLabel} account cooldown active across ${keys.length} account(s); retry-after: ${Math.max(1, Math.ceil(selection.cooldownMs / 1000))}`
+            : `429 ${providerLabel} TPM ${tpm.budget}/min exhausted across ${keys.length} account(s); retry-after: 60`,
         );
       }
       const waitMs = selection.cooldownMs > 0 ? Math.min(selection.cooldownMs, 2_000) : 2_000;
       console.warn(
         selection.cooldownMs > 0
-          ? `[llm] DeepSeek TPM: ${selection.lane} is cooling (${Math.ceil(selection.cooldownMs / 1000)}s) — waiting before reserving`
-          : `[llm] DeepSeek TPM: every account is near ${tpm.budget}/min (${selection.tpmUsed ?? 0} used on ${selection.lane}) — waiting for the rolling window to drain`,
+          ? `[llm] ${providerLabel} TPM: ${selection.lane} is cooling (${Math.ceil(selection.cooldownMs / 1000)}s) — waiting before reserving`
+          : `[llm] ${providerLabel} TPM: every account is near ${tpm.budget}/min (${selection.tpmUsed ?? 0} used on ${selection.lane}) — waiting for the rolling window to drain`,
       );
       await sleep(waitMs, opts.signal, clockFor(opts));
       sleptMs += waitMs;
@@ -300,7 +322,6 @@ export async function llmChat(
         reservationId: randomUUID(),
       });
     }
-    dispatches++;
     lastLane = selection.lane;
     triedLanes.add(selection.lane);
     let enteredProviderCall = false;
@@ -394,6 +415,7 @@ export async function llmChat(
       }
       const retryableEmptyResponse = isRetryableEmptyProviderResponse(lastError.message);
       const retryable429 = isRetryableRateLimit(lastError.message);
+      const tpmWindow = retryable429 && isTpmWindowError(lastError.message);
       if (!retryable429 && !retryableEmptyResponse) throw lastError;
       const advertised = parseRetryAfterMs(lastError.message);
       const cooldownMs = Math.min(
@@ -425,7 +447,9 @@ export async function llmChat(
         continue;
       }
 
-      if (retryable429 && triedLanes.size >= keys.length && keys.length > 1) {
+      // Generic multi-key 429 fails over to a job requeue. A rolling TPM window
+      // is recoverable in-process: pause until the minute drains, then resume.
+      if (retryable429 && !tpmWindow && triedLanes.size >= keys.length && keys.length > 1) {
         console.warn(
           `[llm] rate-limited on every ${provider} key (${keys.length}) — failing so the job requeues instead of waiting on a hot account`,
         );
@@ -433,29 +457,30 @@ export async function llmChat(
       }
 
       waitRetries++;
-      if (waitRetries >= waitRetryCeiling) {
+      if (!tpmWindow && waitRetries >= waitRetryCeiling) {
         throw retryable429 ? rateLimitAdmissionError(provider, keys.length, lastError) : lastError;
       }
-      if (advertised !== undefined && advertised > maxWaitMs) {
+      if (!tpmWindow && advertised !== undefined && advertised > maxWaitMs) {
         console.warn(
           `[llm] rate limit window ${Math.round(advertised / 1000)}s exceeds max wait ${Math.round(maxWaitMs / 1000)}s — failing fast instead of retrying into it`,
         );
         throw retryable429 ? rateLimitAdmissionError(provider, keys.length, lastError) : lastError;
       }
-      const backoff = Math.min(baseMs * 2 ** (waitRetries - 1), maxWaitMs);
+      const backoff = Math.min(baseMs * 2 ** Math.max(0, waitRetries - 1), maxWaitMs);
       const jitter = Math.floor(Math.random() * 1_000);
-      const waitMs = Math.min((advertised ?? backoff) + jitter, maxWaitMs);
-      if (sleptMs + waitMs > totalWaitBudgetMs) {
+      const waitMs = rateLimitRetryWaitMs(lastError.message, backoff + jitter, maxWaitMs);
+      const neededMs = tpmWindow ? Math.max(waitMs, 2_000) : waitMs;
+      if (sleptMs + neededMs > totalWaitBudgetMs) {
         console.warn(
-          `[llm] rate-limit wait budget exhausted (${Math.round(sleptMs / 1000)}s slept of ${Math.round(totalWaitBudgetMs / 1000)}s) — failing so the job requeues instead of holding a worker slot`,
+          `[llm] ${tpmWindow ? 'TPM' : 'rate-limit'} wait budget exhausted (${Math.round(sleptMs / 1000)}s slept of ${Math.round(totalWaitBudgetMs / 1000)}s) — failing so the job requeues instead of holding a worker slot`,
         );
         throw retryable429 ? rateLimitAdmissionError(provider, keys.length, lastError) : lastError;
       }
-      sleptMs += waitMs;
+      sleptMs += neededMs;
       console.warn(
-        `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : 'rate-limited'} — holding ${Math.round(waitMs / 1000)}s then retrying (attempt ${waitRetries}/${waitRetryCeiling}): ${lastError.message.slice(0, 140)}`,
+        `[llm] ${retryableEmptyResponse ? 'empty zero-usage response' : tpmWindow ? 'TPM window' : 'rate-limited'} — holding ${Math.round(neededMs / 1000)}s then retrying when free (attempt ${waitRetries}${tpmWindow ? '' : `/${waitRetryCeiling}`}): ${lastError.message.slice(0, 140)}`,
       );
-      await sleep(waitMs, opts.signal, clockFor(opts));
+      await sleep(neededMs, opts.signal, clockFor(opts));
       await waitForProviderAvailability([lastLane], opts.signal, coordinator);
     } finally {
       const actual =

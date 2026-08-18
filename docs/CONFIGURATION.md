@@ -99,6 +99,9 @@ Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenti
 | `ORVEX_DEEPSEEK_TPM_PER_ACCOUNT` | integer; 1000..100000000 tokens / minute; default 2000000 | `2000000` | no / none | - | Rolling-minute token budget per DeepSeek account key. The Flash load balancer skips a key before this ceiling and sends the call to another account. |
 | `ORVEX_DEEPSEEK_TPM_WINDOW_MS` | integer; 1000..600000 ms; default 60000 | `60000` | no / none | - | Token-window length for DeepSeek TPM load balancing. Default is one minute. |
 | `ORVEX_DEEPSEEK_TPM_RESERVE_OUTPUT` | integer; 1000..384000 tokens; default 70000 | `70000` | no / none | - | Output tokens reserved against a DeepSeek account before the call starts, so in-flight Flash work counts toward the 2M TPM cap. |
+| `ORVEX_LUNA_TPM_PER_ACCOUNT` | integer; 1000..100000000 tokens / minute; default 2000000 | `4000000` | no / none | - | Rolling-minute token budget per Luna/OpenAI account. Review calls reserve against this ceiling and wait for the window to drain instead of aborting a required pass. |
+| `ORVEX_LUNA_TPM_WINDOW_MS` | integer; 1000..600000 ms; default 60000 | `60000` | no / none | - | Token-window length for Luna TPM admission. Default is one minute. |
+| `ORVEX_LUNA_TPM_RESERVE_OUTPUT` | integer; 1000..384000 tokens; default 128000 | `128000` | no / none | - | Output tokens reserved against the Luna account before the call starts, so in-flight reviews count toward the TPM cap. |
 | `ORVEX_DEEPSEEK_BASE_URL` | URL; HTTPS provider base URL | `https://api.deepseek.com` | no / connection | - | DeepSeek endpoint; public Flash stages retain the fixed model and max-reasoning contract. |
 | `ORVEX_DEEPSEEK_MODEL` | string; provider model ID | `deepseek-v4-pro` | no / none | - | DeepSeek v4 Pro model identifier. |
 | `ORVEX_DEEPSEEK_EFFORT` | enum; max | `max` | no / none | - | DeepSeek v4 Pro reasoning effort. Production must remain maximum. |

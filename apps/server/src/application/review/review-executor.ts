@@ -544,7 +544,7 @@ export async function executeReviewCore(
           );
           if (
             firstDegradation &&
-            firstDegradation.transient &&
+            (firstDegradation.transient || firstDegradation.admissionBlocked) &&
             finalOutcomes.some((outcome) => outcome.ok && !outcome.bestEffort)
           ) {
             const retryCalls = requiredCalls.filter((call) =>
@@ -566,10 +566,10 @@ export async function executeReviewCore(
                   if (isReviewCancelledError(error) || reviewAbortController.signal.aborted) {
                     throw error;
                   }
-                  // Paid required work already succeeded. A capacity wait must not
-                  // surface "timed out" and replay the whole review.
-                  throw new Error(
-                    `review aborted: ${firstDegradation.reason}; refusing to publish an incomplete review`,
+                  // Paid required work already succeeded. A capacity wait timeout
+                  // must not abort the review: retry the missing pass when free.
+                  console.warn(
+                    `[worker] ${buckets.join(', ')} wait timed out; retrying missing required coverage anyway: ${(error as Error).message.slice(0, 160)}`,
                   );
                 }
               }

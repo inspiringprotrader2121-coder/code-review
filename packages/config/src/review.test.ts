@@ -31,6 +31,9 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.deepseekTpmPerAccount, 2_000_000);
   assert.equal(config.deepseekTpmWindowMs, 60_000);
   assert.equal(config.deepseekTpmReserveOutput, 70_000);
+  assert.equal(config.lunaTpmPerAccount, 2_000_000);
+  assert.equal(config.lunaTpmWindowMs, 60_000);
+  assert.equal(config.lunaTpmReserveOutput, 128_000);
   assert.equal(config.promptChangedChars, 16_000);
   assert.equal(config.promptRelatedChars, 6_000);
   assert.equal(config.promptOtherChars, 2_000);
@@ -293,6 +296,10 @@ test('rate-limit wait defaults cover multi-minute TPM windows', () => {
   assert.equal(
     loadReviewRuntimeConfig({ ORVEX_RATELIMIT_TOTAL_WAIT_MS: '300000' }).rateLimitTotalWaitMs,
     300_000,
+  );
+  assert.equal(
+    loadReviewRuntimeConfig({ ORVEX_LUNA_TPM_PER_ACCOUNT: '4000000' }).lunaTpmPerAccount,
+    4_000_000,
   );
 });
 

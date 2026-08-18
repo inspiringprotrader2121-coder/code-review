@@ -8,6 +8,8 @@ import {
   isRetryableRateLimit,
   isOversizedModelRequest,
   shouldRequeueAdmissionFailure,
+  isTpmWindowError,
+  rateLimitRetryWaitMs,
 } from './llm-client.js';
 
 test('same-provider key rotation uses rate-limit/quota errors specifically', () => {
@@ -103,6 +105,11 @@ test('isOversizedModelRequest: fail-fast, never sleep-retry as TPM', () => {
     ),
     true,
   );
+  const reconnectTpm =
+    'Reconnecting... 1/1 (stream disconnected before completion: Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 2000000, Used 2000000. Please try again in 643ms)';
+  assert.equal(isTpmWindowError(reconnectTpm), true);
+  assert.equal(isRetryableRateLimit(reconnectTpm), true);
+  assert.equal(rateLimitRetryWaitMs(reconnectTpm, 250, 120_000), 2_000);
 });
 
 test('clamps an oversized ceiling to the safe cap (the 200k prod misconfig)', (t) => {

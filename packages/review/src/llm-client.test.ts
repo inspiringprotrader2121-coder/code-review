@@ -17,6 +17,8 @@ import {
   ADMISSION_JOB_REQUEUE_CAP,
   withProviderCallSlot,
   waitForProviderAvailability,
+  isTpmWindowError,
+  rateLimitRetryWaitMs,
   type LlmAttemptEvent,
   type LlmProviderCoordinator,
 } from './llm-client.js';
@@ -1331,6 +1333,7 @@ test('an empty zero-usage provider response receives one bounded retry', async (
 });
 
 test('a single Luna key 429 becomes an admission requeue after in-slot retries', async () => {
+  resetLocalProviderTpm();
   const calls: string[] = [];
   await assert.rejects(
     llmChat('sys', 'user', {
@@ -1363,6 +1366,56 @@ test('a single Luna key 429 becomes an admission requeue after in-slot retries',
     /rate-limited on every luna key \(1\)/,
   );
   assert.equal(calls.length, 1);
+});
+
+test('a Luna TPM 429 pauses until the window drains then resumes the same pass', async () => {
+  resetLocalProviderTpm();
+  const originalRandom = Math.random;
+  Math.random = () => 0;
+  let calls = 0;
+  const clock: Clock = {
+    now: () => Date.now(),
+    setTimeout: (callback) => setTimeout(callback, 0),
+    clearTimeout: (timer) => clearTimeout(timer),
+  };
+  try {
+    const output = await llmChat('sys', 'user', {
+      apiKey: 'luna-only-key',
+      model: 'gpt-5.6-luna',
+      baseUrl: 'https://api.openai.com/v1',
+      api: 'chat',
+      dependencies: {
+        retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 5_000, totalWaitBudgetMs: 30_000 },
+        clock,
+        admission: {
+          async acquireProviderLease() {
+            return 'luna-tpm-wait';
+          },
+          async releaseProviderLease() {},
+          async getProviderCooldownMs() {
+            return 0;
+          },
+          async setProviderCooldown() {},
+        },
+        http: {
+          async fetch() {
+            calls++;
+            if (calls === 1) {
+              return new Response(
+                'Rate limit reached for gpt-5.6-luna. tokens per min (TPM): Limit 2000000, Used 2000000, Requested 21000. Please try again in 643ms',
+                { status: 429 },
+              );
+            }
+            return new Response(chatStream('{"findings":[]}'), { status: 200 });
+          },
+        },
+      },
+    });
+    assert.equal(output, '{"findings":[]}');
+    assert.equal(calls, 2, 'Luna must wait out TPM instead of aborting the required pass');
+  } finally {
+    Math.random = originalRandom;
+  }
 });
 
 test('a MiniMax token-plan limit becomes an admission requeue instead of dropping MiniMax', async () => {
@@ -1503,9 +1556,23 @@ test('isProviderAdmissionError treats TPM exhaustion and every-key 429 as requeu
   );
   assert.equal(
     isProviderAdmissionError(
-      'Rate limit reached for gpt-5.6-luna in organization org. Limit 2000000 TPM, Used 2000000',
+      'Reconnecting... 1/1 (stream disconnected before completion: Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 2000000, Used 2000000. Please try again in 643ms)',
     ),
     true,
+  );
+  assert.equal(
+    isTpmWindowError(
+      'Reconnecting... 1/1 (stream disconnected before completion: Rate limit reached for gpt-5.6-luna ... tokens per min (TPM): Limit 2000000, Used 2000000. Please try again in 643ms)',
+    ),
+    true,
+  );
+  assert.equal(
+    rateLimitRetryWaitMs(
+      'Rate limit reached for gpt-5.6-luna. tokens per min (TPM): Limit 2000000. Please try again in 643ms',
+      250,
+      120_000,
+    ),
+    2_000,
   );
   assert.equal(
     isProviderAdmissionError(

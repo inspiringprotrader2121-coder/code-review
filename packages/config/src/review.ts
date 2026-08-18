@@ -17,6 +17,10 @@ export interface ReviewRuntimeConfig {
   readonly deepseekTpmPerAccount: number;
   readonly deepseekTpmWindowMs: number;
   readonly deepseekTpmReserveOutput: number;
+  /** Luna/OpenAI account TPM ceiling. Calls wait for this rolling window instead of aborting. */
+  readonly lunaTpmPerAccount: number;
+  readonly lunaTpmWindowMs: number;
+  readonly lunaTpmReserveOutput: number;
   readonly anthropicThinkingBudgetTokens: number | undefined;
   readonly responsesTimeoutMs: number;
   readonly openAiReasoningEffort: string;
@@ -355,6 +359,18 @@ export function loadReviewRuntimeConfig(
     ),
     deepseekTpmReserveOutput: Math.min(
       Math.max(positive(env.ORVEX_DEEPSEEK_TPM_RESERVE_OUTPUT, 70_000), 1_000),
+      384_000,
+    ),
+    lunaTpmPerAccount: Math.min(
+      Math.max(positive(env.ORVEX_LUNA_TPM_PER_ACCOUNT, 2_000_000), 1_000),
+      100_000_000,
+    ),
+    lunaTpmWindowMs: Math.min(
+      Math.max(positive(env.ORVEX_LUNA_TPM_WINDOW_MS, 60_000), 1_000),
+      600_000,
+    ),
+    lunaTpmReserveOutput: Math.min(
+      Math.max(positive(env.ORVEX_LUNA_TPM_RESERVE_OUTPUT, 128_000), 1_000),
       384_000,
     ),
     anthropicThinkingBudgetTokens: optionalPositive(env.ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS),

@@ -740,6 +740,36 @@
           "deprecatedAliases": []
         },
         {
+          "name": "ORVEX_LUNA_TPM_PER_ACCOUNT",
+          "example": "4000000",
+          "type": "integer",
+          "range": "1000..100000000 tokens / minute; default 2000000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Rolling-minute token budget per Luna/OpenAI account. Review calls reserve against this ceiling and wait for the window to drain instead of aborting a required pass.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LUNA_TPM_WINDOW_MS",
+          "example": "60000",
+          "type": "integer",
+          "range": "1000..600000 ms; default 60000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Token-window length for Luna TPM admission. Default is one minute.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_LUNA_TPM_RESERVE_OUTPUT",
+          "example": "128000",
+          "type": "integer",
+          "range": "1000..384000 tokens; default 128000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Output tokens reserved against the Luna account before the call starts, so in-flight reviews count toward the TPM cap.",
+          "deprecatedAliases": []
+        },
+        {
           "name": "ORVEX_DEEPSEEK_BASE_URL",
           "example": "https://api.deepseek.com",
           "type": "URL",
