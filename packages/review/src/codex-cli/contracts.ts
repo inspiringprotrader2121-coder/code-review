@@ -17,6 +17,8 @@ export interface CodexCliReviewOptions {
   cwd?: string;
   repoId?: string;
   promptMode?: CodexPromptMode;
+  /** Adapter/test seam: override the Codex home used for API-key auth. */
+  codexHome?: string;
   onUsage?: (usage: {
     inputTokens: number;
     cachedInputTokens?: number;

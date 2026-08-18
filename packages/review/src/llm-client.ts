@@ -26,6 +26,7 @@ export {
   splitApiKeys,
   tryReserveProviderTpm,
   waitForProviderAvailability,
+  waitToReserveProviderTpm,
   withProviderCallSlot,
 } from './llm/provider-admission.js';
 export {

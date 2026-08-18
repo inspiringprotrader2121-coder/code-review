@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { resolveProviderConcurrency } from '../runtime-limits.js';
 import type { LlmClientOptions, LlmProviderCoordinator } from './contracts.js';
@@ -223,6 +224,63 @@ export async function commitProviderTpm(
     return;
   }
   localProviderTpm.commit(input);
+}
+
+/**
+ * Stall until this lane can reserve `policy.reserveTokens` against the rolling
+ * TPM window. Callers must not dispatch the paid model until this resolves.
+ */
+export async function waitToReserveProviderTpm(input: {
+  providerLabel: string;
+  lane: string;
+  policy: Omit<ProviderTpmPolicy, 'reservationId'>;
+  totalWaitBudgetMs: number;
+  sleptMs?: number;
+  signal?: AbortSignal;
+  coordinator?: LlmProviderCoordinator;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  logPrefix?: string;
+}): Promise<{ reservationId: string; sleptMs: number; used: number }> {
+  const coordinator = input.coordinator ?? providerCoordinator;
+  const delay = input.sleep ?? ((ms: number, signal?: AbortSignal) => sleep(ms, signal));
+  const logPrefix = input.logPrefix ?? '[llm]';
+  let sleptMs = Math.max(0, Math.floor(input.sleptMs ?? 0));
+  for (;;) {
+    throwIfCancelled(input.signal);
+    const reservationId = randomUUID();
+    const reserved = await tryReserveProviderTpm(
+      {
+        lane: input.lane,
+        tokens: input.policy.reserveTokens,
+        budget: input.policy.budget,
+        windowMs: input.policy.windowMs,
+        reservationId,
+        reserveTtlMs: input.policy.reserveTtlMs,
+      },
+      coordinator,
+    );
+    if (reserved.ok) return { reservationId, sleptMs, used: reserved.used };
+    const cooldownMs = await getProviderCooldownMs(input.lane, coordinator);
+    if (sleptMs + 2_000 > input.totalWaitBudgetMs) {
+      throw new Error(
+        cooldownMs > 0
+          ? `429 ${input.providerLabel} account cooldown active across 1 account(s); retry-after: ${Math.max(1, Math.ceil(cooldownMs / 1000))}`
+          : `429 ${input.providerLabel} TPM ${input.policy.budget}/min exhausted across 1 account(s); retry-after: 60`,
+      );
+    }
+    const waitMs = cooldownMs > 0 ? Math.min(cooldownMs, 2_000) : 2_000;
+    const pct =
+      input.policy.budget > 0
+        ? Math.min(100, Math.round((reserved.used / input.policy.budget) * 100))
+        : 100;
+    console.warn(
+      cooldownMs > 0
+        ? `${logPrefix} ${input.providerLabel} TPM: ${input.lane} is cooling (${Math.ceil(cooldownMs / 1000)}s) — waiting before reserving`
+        : `${logPrefix} ${input.providerLabel} TPM: near limit on 1 account(s) (${pct}% of ${input.policy.budget}/min used on ${input.lane}) — stalling until free room`,
+    );
+    await delay(waitMs, input.signal);
+    sleptMs += waitMs;
+  }
 }
 
 export function resetLocalProviderTpm(): void {

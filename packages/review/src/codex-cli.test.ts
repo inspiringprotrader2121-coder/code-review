@@ -29,7 +29,12 @@ import {
   trimCodexPrompt,
   withCodexHomeLockForTest,
 } from './codex-cli.js';
-import type { CodexContainerRequest, CodexContainerRuntime } from './providers/types.js';
+import {
+  clearLocalProviderCooldown,
+  resetLocalProviderTpm,
+  tryReserveProviderTpm,
+} from './llm-client.js';
+import type { Clock, CodexContainerRequest, CodexContainerRuntime } from './providers/types.js';
 
 function withRepos(value: string | undefined, fn: () => void) {
   const prev = process.env.ORVEX_CODEX_CLI_REPOS;
@@ -936,3 +941,249 @@ spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], {stdio:['ignore',
     );
   },
 );
+
+const instantClock: Clock = {
+  now: () => Date.now(),
+  setTimeout: (callback) => setTimeout(callback, 0),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
+function tpmAdmission(tryReserve: () => Promise<{ ok: boolean; used: number }>) {
+  return {
+    async acquireProviderLease() {
+      return 'codex-luna-tpm';
+    },
+    async releaseProviderLease() {},
+    async getProviderCooldownMs() {
+      return 0;
+    },
+    async setProviderCooldown() {},
+    tryReserveProviderTpm: tryReserve,
+    async commitProviderTpm() {},
+  };
+}
+
+async function withCodexTpmHarness<T>(
+  run: (ctx: { home: string; checkout: string }) => Promise<T>,
+): Promise<T> {
+  const home = mkdtempSync(path.join(tmpdir(), 'orvex-codex-tpm-home-'));
+  const checkout = mkdtempSync(path.join(tmpdir(), 'orvex-codex-tpm-checkout-'));
+  chmodSync(checkout, 0o700);
+  writeFileSync(
+    path.join(home, 'auth.json'),
+    JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-test' }),
+  );
+  clearCodexAuthModeCache();
+  try {
+    return await run({ home, checkout });
+  } finally {
+    clearCodexAuthModeCache();
+    clearLocalProviderCooldown('luna');
+    rmSync(home, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  }
+}
+
+test('Codex stalls before Luna dispatch when the shared TPM window is full', async () => {
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    let runs = 0;
+    await assert.rejects(
+      runCodexCliReview([{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }], {
+        repoId: 'trusted/repo',
+        cwd: checkout,
+        codexHome: home,
+        dependencies: {
+          retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+          admission: tpmAdmission(async () => ({ ok: false, used: 4_000_000 })),
+          codexContainer: {
+            assertReady: async () => {},
+            run: async () => {
+              runs++;
+              return {
+                exitCode: 0,
+                stdout: `${JSON.stringify({ type: 'thread.started', thread_id: 'should-not-run' })}\n`,
+                stderr: '',
+                lastMessage: '{"findings":[],"summary":"ok"}',
+                timedOut: false,
+                durationMs: 1,
+              };
+            },
+          },
+        },
+      }),
+      /TPM .*exhausted|near limit|cooldown active/i,
+    );
+    assert.equal(runs, 0, 'must not start Codex until Luna TPM has free room');
+  });
+});
+
+test('Codex and HTTP Luna share the same TPM lane', async (t) => {
+  resetLocalProviderTpm();
+  t.after(() => resetLocalProviderTpm());
+  const filled = await tryReserveProviderTpm({
+    lane: 'luna',
+    tokens: 2_000_000,
+    budget: 2_000_000,
+    reservationId: 'prefill-codex-luna',
+    windowMs: 60_000,
+  });
+  assert.equal(filled.ok, true);
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    let runs = 0;
+    await assert.rejects(
+      runCodexCliReview([{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }], {
+        repoId: 'trusted/repo',
+        cwd: checkout,
+        codexHome: home,
+        dependencies: {
+          retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+          codexContainer: {
+            assertReady: async () => {},
+            run: async () => {
+              runs++;
+              return {
+                exitCode: 0,
+                stdout: `${JSON.stringify({ type: 'thread.started', thread_id: 'should-not-run' })}\n`,
+                stderr: '',
+                lastMessage: '{"findings":[],"summary":"ok"}',
+                timedOut: false,
+                durationMs: 1,
+              };
+            },
+          },
+        },
+      }),
+      /TPM .*exhausted|near limit|cooldown active/i,
+    );
+    assert.equal(runs, 0, 'Codex must see HTTP Luna reservations on lane luna');
+  });
+});
+
+test('a Codex Luna TPM 429 pauses then resumes the same required pass', async () => {
+  const originalRandom = Math.random;
+  Math.random = () => 0;
+  try {
+    await withCodexTpmHarness(async ({ home, checkout }) => {
+      let runs = 0;
+      const result = await runCodexCliReview(
+        [{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }],
+        {
+          repoId: 'trusted/repo',
+          cwd: checkout,
+          codexHome: home,
+          dependencies: {
+            retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 5_000, totalWaitBudgetMs: 30_000 },
+            clock: instantClock,
+            admission: tpmAdmission(async () => ({ ok: true, used: 0 })),
+            codexContainer: {
+              assertReady: async () => {},
+              run: async () => {
+                runs++;
+                if (runs === 1) {
+                  return {
+                    exitCode: 1,
+                    stdout: `${JSON.stringify({
+                      type: 'error',
+                      message:
+                        'Rate limit reached for gpt-5.6-luna. tokens per min (TPM): Limit 4000000, Used 4000000, Requested 21000. Please try again in 643ms',
+                    })}\n`,
+                    stderr: '',
+                    lastMessage: '',
+                    timedOut: false,
+                    durationMs: 1,
+                  };
+                }
+                return {
+                  exitCode: 0,
+                  stdout: `${JSON.stringify({ type: 'thread.started', thread_id: 'luna-tpm-resume' })}\n`,
+                  stderr: '',
+                  lastMessage: '{"findings":[],"summary":"ok"}',
+                  timedOut: false,
+                  durationMs: 1,
+                };
+              },
+            },
+          },
+        },
+      );
+      assert.equal(runs, 2, 'Codex must wait out Luna TPM instead of aborting the required pass');
+      assert.equal(result.response.summary, 'ok');
+    });
+  } finally {
+    Math.random = originalRandom;
+  }
+});
+
+test('Codex still bounds a non-TPM 429 to one retry', async () => {
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    let runs = 0;
+    await assert.rejects(
+      runCodexCliReview([{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }], {
+        repoId: 'trusted/repo',
+        cwd: checkout,
+        codexHome: home,
+        dependencies: {
+          retryPolicy: { maxAttempts: 2, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 10_000 },
+          clock: instantClock,
+          admission: tpmAdmission(async () => ({ ok: true, used: 0 })),
+          codexContainer: {
+            assertReady: async () => {},
+            run: async () => {
+              runs++;
+              return {
+                exitCode: 1,
+                stdout: `${JSON.stringify({ type: 'error', message: 'LLM request failed (429): rate limited' })}\n`,
+                stderr: '',
+                lastMessage: '',
+                timedOut: false,
+                durationMs: 1,
+              };
+            },
+          },
+        },
+      }),
+      /429|rate limited/i,
+    );
+    assert.equal(runs, 2, 'generic Codex 429s still get one bounded retry, not an unbounded wait');
+  });
+});
+
+test('Codex Luna TPM reservation commits billed tokens on success', async () => {
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    const commits: Array<{ lane: string; actualTokens: number }> = [];
+    await runCodexCliReview([{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }], {
+      repoId: 'trusted/repo',
+      cwd: checkout,
+      codexHome: home,
+      dependencies: {
+        retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+        admission: {
+          ...tpmAdmission(async () => ({ ok: true, used: 0 })),
+          async commitProviderTpm(input) {
+            commits.push({ lane: input.lane, actualTokens: input.actualTokens });
+          },
+        },
+        codexContainer: {
+          assertReady: async () => {},
+          run: async () => ({
+            exitCode: 0,
+            stdout: [
+              JSON.stringify({ type: 'thread.started', thread_id: 'luna-tpm-commit' }),
+              JSON.stringify({
+                type: 'turn.completed',
+                usage: { input_tokens: 100, output_tokens: 20 },
+              }),
+            ].join('\n'),
+            stderr: '',
+            lastMessage: '{"findings":[],"summary":"ok"}',
+            timedOut: false,
+            durationMs: 1,
+          }),
+        },
+      },
+    });
+    assert.equal(commits.length, 1);
+    assert.equal(commits[0]?.lane, 'luna');
+    assert.equal(commits[0]?.actualTokens, 120);
+  });
+});

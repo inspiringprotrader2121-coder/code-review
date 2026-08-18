@@ -186,6 +186,7 @@ export {
   splitApiKeys,
   tryReserveProviderTpm,
   waitForProviderAvailability,
+  waitToReserveProviderTpm,
   withProviderCallSlot,
   type LlmClientOptions,
   type LlmAttemptEvent,
