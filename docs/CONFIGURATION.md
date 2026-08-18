@@ -102,6 +102,9 @@ Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenti
 | `ORVEX_LUNA_TPM_PER_ACCOUNT` | integer; 1000..100000000 tokens / minute; default 2000000 | `4000000` | no / none | - | Rolling-minute token budget per Luna/OpenAI account. Review calls reserve against this ceiling and wait for the window to drain instead of aborting a required pass. |
 | `ORVEX_LUNA_TPM_WINDOW_MS` | integer; 1000..600000 ms; default 60000 | `60000` | no / none | - | Token-window length for Luna TPM admission. Default is one minute. |
 | `ORVEX_LUNA_TPM_RESERVE_OUTPUT` | integer; 1000..384000 tokens; default 128000 | `128000` | no / none | - | Output tokens reserved against the Luna account before the call starts, so in-flight reviews count toward the TPM cap. |
+| `ORVEX_MINIMAX_TPM_PER_ACCOUNT` | integer; 1000..100000000 tokens / minute; default 10000000 | `10000000` | no / none | - | Rolling-minute token budget per MiniMax account. Review calls reserve against this 10M ceiling and wait for the window to drain instead of aborting a required pass. |
+| `ORVEX_MINIMAX_TPM_WINDOW_MS` | integer; 1000..600000 ms; default 60000 | `60000` | no / none | - | Token-window length for MiniMax TPM admission. Default is one minute. |
+| `ORVEX_MINIMAX_TPM_RESERVE_OUTPUT` | integer; 1000..384000 tokens; default 128000 | `128000` | no / none | - | Output tokens reserved against the MiniMax account before the call starts, so in-flight reviews count toward the 10M TPM cap. |
 | `ORVEX_DEEPSEEK_BASE_URL` | URL; HTTPS provider base URL | `https://api.deepseek.com` | no / connection | - | DeepSeek endpoint; public Flash stages retain the fixed model and max-reasoning contract. |
 | `ORVEX_DEEPSEEK_MODEL` | string; provider model ID | `deepseek-v4-pro` | no / none | - | DeepSeek v4 Pro model identifier. |
 | `ORVEX_DEEPSEEK_EFFORT` | enum; max | `max` | no / none | - | DeepSeek v4 Pro reasoning effort. Production must remain maximum. |
@@ -293,7 +296,7 @@ These values bound retry delays and supporting context. The diff remains first a
 | `ORVEX_RATELIMIT_MAX_RETRIES` | integer; non-negative; default 2 | `2` | no / none | - | Maximum recoverable provider rate-limit retry rounds. |
 | `ORVEX_RATELIMIT_MAX_WAIT_MS` | integer; milliseconds; default 120000 | `120000` | no / none | - | Maximum per-rate-limit retry sleep (covers multi-minute TPM windows). |
 | `ORVEX_RATELIMIT_BASE_MS` | integer; milliseconds; default 2000 | `2000` | no / none | - | Base retry-backoff duration. |
-| `ORVEX_RATELIMIT_TOTAL_WAIT_MS` | integer; milliseconds; default 180000 | `180000` | no / none | - | Total retry sleep budget per provider call (covers multi-minute TPM windows). |
+| `ORVEX_RATELIMIT_TOTAL_WAIT_MS` | integer; milliseconds; default 360000 | `360000` | no / none | - | Total retry sleep budget per provider call. Required passes stall in this window until a Luna, DeepSeek, or MiniMax account has TPM room. |
 | `ORVEX_MAX_DIFF_CHARS` | integer; positive chars; default 96000 | `96000` | no / none | - | Primary diff context budget. |
 | `ORVEX_MAX_CHANGED_CHARS` | integer; positive chars; default and maximum 16000 | `16000` | no / none | - | Changed-file supporting context budget. |
 | `ORVEX_MAX_RELATED_CHARS` | integer; positive chars; default and maximum 6000 | `6000` | no / none | - | Related-file context budget. |

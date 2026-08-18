@@ -39,7 +39,7 @@ export function isRetryableRateLimit(message: string): boolean {
 export function isTpmWindowError(message: string): boolean {
   return (
     isRetryableRateLimit(message) &&
-    /\bTPM\b|tokens? per min/i.test(message) &&
+    /\bTPM\b|tokens? per min|token plan|usage limit reached/i.test(message) &&
     !isOversizedModelRequest(message)
   );
 }

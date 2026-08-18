@@ -84,20 +84,27 @@ function chatStream(text: string): ReadableStream<Uint8Array> {
 }
 
 let lunaLaneChain = Promise.resolve();
-async function withIsolatedLunaLane<T>(run: () => Promise<T>): Promise<T> {
+const isolatedLaneChains = new Map<string, Promise<void>>();
+async function withIsolatedLane<T>(lane: string, run: () => Promise<T>): Promise<T> {
   let release = (): void => {};
-  const previous = lunaLaneChain;
-  lunaLaneChain = new Promise<void>((resolve) => {
-    release = resolve;
-  });
+  const previous = isolatedLaneChains.get(lane) ?? Promise.resolve();
+  isolatedLaneChains.set(
+    lane,
+    new Promise<void>((resolve) => {
+      release = resolve;
+    }),
+  );
   await previous;
-  clearLocalProviderCooldown('luna');
+  clearLocalProviderCooldown(lane);
   try {
     return await run();
   } finally {
-    clearLocalProviderCooldown('luna');
+    clearLocalProviderCooldown(lane);
     release();
   }
+}
+async function withIsolatedLunaLane<T>(run: () => Promise<T>): Promise<T> {
+  return withIsolatedLane('luna', run);
 }
 
 test('compatible streams process a final SSE event without a trailing newline', async () => {
@@ -1447,36 +1454,42 @@ test('a Luna TPM 429 pauses until the window drains then resumes the same pass',
 });
 
 test('a MiniMax token-plan limit becomes an admission requeue instead of dropping MiniMax', async () => {
-  const calls: string[] = [];
-  await assert.rejects(
-    llmChat('sys', 'user', {
-      apiKey: 'minimax-only-key',
-      model: 'MiniMax-M3',
-      baseUrl: 'https://api.minimax.io/v1',
-      api: 'chat',
-      dependencies: {
-        retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
-        admission: {
-          async acquireProviderLease() {
-            return 'minimax-test';
+  await withIsolatedLane('minimax', async () => {
+    const calls: string[] = [];
+    await assert.rejects(
+      llmChat('sys', 'user', {
+        apiKey: 'minimax-only-key',
+        model: 'MiniMax-M3',
+        baseUrl: 'https://api.minimax.io/v1',
+        api: 'chat',
+        dependencies: {
+          retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+          admission: {
+            async acquireProviderLease() {
+              return 'minimax-test';
+            },
+            async releaseProviderLease() {},
+            async getProviderCooldownMs() {
+              return 0;
+            },
+            async setProviderCooldown() {},
+            async tryReserveProviderTpm() {
+              return { ok: true, used: 0 };
+            },
+            async commitProviderTpm() {},
           },
-          async releaseProviderLease() {},
-          async getProviderCooldownMs() {
-            return 0;
+          http: {
+            async fetch(_input, init) {
+              calls.push(String(new Headers(init?.headers).get('Authorization')));
+              return new Response('Token Plan usage limit reached (2056)', { status: 429 });
+            },
           },
-          async setProviderCooldown() {},
         },
-        http: {
-          async fetch(_input, init) {
-            calls.push(String(new Headers(init?.headers).get('Authorization')));
-            return new Response('Token Plan usage limit reached (2056)', { status: 429 });
-          },
-        },
-      },
-    }),
-    /rate-limited on every minimax key \(1\)/,
-  );
-  assert.equal(calls.length, 1);
+      }),
+      /rate-limited on every minimax key \(1\)/,
+    );
+    assert.equal(calls.length, 1);
+  });
 });
 
 test('comma-separated API keys walk every cool key on 429 then fail', async () => {
@@ -1563,6 +1576,176 @@ test('DeepSeek load balancer skips an account at 2M TPM and uses a sibling key',
     'Bearer ds-cool',
     'Flash must skip the account already at 2M TPM and use a sibling key',
   );
+});
+
+test('DeepSeek three-key TPM skips two full accounts and uses the free key', async () => {
+  clearLocalProviderCooldown('deepseek:k0');
+  clearLocalProviderCooldown('deepseek:k1');
+  clearLocalProviderCooldown('deepseek:k2');
+  let fetches = 0;
+  const auths: string[] = [];
+  const output = await llmChat('sys', 'user', {
+    apiKey: 'ds-a, ds-b, ds-c',
+    model: 'deepseek-v4-flash',
+    baseUrl: 'https://api.deepseek.com',
+    api: 'chat',
+    dependencies: {
+      retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+      admission: {
+        async acquireProviderLease() {
+          return 'ds-3key';
+        },
+        async releaseProviderLease() {},
+        async getProviderCooldownMs() {
+          return 0;
+        },
+        async setProviderCooldown() {},
+        async tryReserveProviderTpm(input) {
+          if (input.lane === 'deepseek:k2') return { ok: true, used: 10_000 };
+          return { ok: false, used: 2_000_000 };
+        },
+        async commitProviderTpm() {},
+      },
+      http: {
+        async fetch(_input: unknown, init?: { headers?: HeadersInit }) {
+          fetches++;
+          auths.push(String(new Headers(init?.headers).get('Authorization')));
+          return new Response(chatStream('{"findings":[]}'), { status: 200 });
+        },
+      },
+    },
+  });
+  assert.match(output, /findings/);
+  assert.equal(fetches, 1);
+  assert.equal(auths[0], 'Bearer ds-c');
+});
+
+test('DeepSeek stalls with no request when all three accounts are near TPM', async () => {
+  let fetches = 0;
+  await assert.rejects(
+    llmChat('sys', 'user', {
+      apiKey: 'ds-a, ds-b, ds-c',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.com',
+      api: 'chat',
+      dependencies: {
+        retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+        admission: {
+          async acquireProviderLease() {
+            return 'ds-full';
+          },
+          async releaseProviderLease() {},
+          async getProviderCooldownMs() {
+            return 0;
+          },
+          async setProviderCooldown() {},
+          async tryReserveProviderTpm() {
+            return { ok: false, used: 2_000_000 };
+          },
+          async commitProviderTpm() {},
+        },
+        http: {
+          async fetch() {
+            fetches++;
+            return new Response(chatStream('{"findings":[]}'), { status: 200 });
+          },
+        },
+      },
+    }),
+    /TPM .*exhausted|near limit|cooldown active/i,
+  );
+  assert.equal(fetches, 0, 'must not hit DeepSeek until a key has free TPM room');
+});
+
+test('MiniMax stalls with no request when the 10M TPM window is full', async () => {
+  await withIsolatedLane('minimax', async () => {
+    let fetches = 0;
+    await assert.rejects(
+      llmChat('sys', 'user', {
+        apiKey: 'minimax-only-key',
+        model: 'MiniMax-M3',
+        baseUrl: 'https://api.minimax.io/v1',
+        api: 'chat',
+        dependencies: {
+          retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 20, totalWaitBudgetMs: 50 },
+          admission: {
+            async acquireProviderLease() {
+              return 'minimax-full';
+            },
+            async releaseProviderLease() {},
+            async getProviderCooldownMs() {
+              return 0;
+            },
+            async setProviderCooldown() {},
+            async tryReserveProviderTpm() {
+              return { ok: false, used: 10_000_000 };
+            },
+            async commitProviderTpm() {},
+          },
+          http: {
+            async fetch() {
+              fetches++;
+              return new Response(chatStream('{"findings":[]}'), { status: 200 });
+            },
+          },
+        },
+      }),
+      /TPM .*exhausted|near limit|cooldown active/i,
+    );
+    assert.equal(fetches, 0, 'must not hit MiniMax until the 10M window has free room');
+  });
+});
+
+test('a MiniMax token-plan 429 pauses then resumes the same pass', async () => {
+  await withIsolatedLane('minimax', async () => {
+    const originalRandom = Math.random;
+    Math.random = () => 0;
+    let calls = 0;
+    const clock: Clock = {
+      now: () => Date.now(),
+      setTimeout: (callback) => setTimeout(callback, 0),
+      clearTimeout: (timer) => clearTimeout(timer),
+    };
+    try {
+      const output = await llmChat('sys', 'user', {
+        apiKey: 'minimax-only-key',
+        model: 'MiniMax-M3',
+        baseUrl: 'https://api.minimax.io/v1',
+        api: 'chat',
+        dependencies: {
+          retryPolicy: { maxAttempts: 1, baseMs: 1, maxWaitMs: 5_000, totalWaitBudgetMs: 30_000 },
+          clock,
+          admission: {
+            async acquireProviderLease() {
+              return 'minimax-tpm-wait';
+            },
+            async releaseProviderLease() {},
+            async getProviderCooldownMs() {
+              return 0;
+            },
+            async setProviderCooldown() {},
+            async tryReserveProviderTpm() {
+              return { ok: true, used: 0 };
+            },
+            async commitProviderTpm() {},
+          },
+          http: {
+            async fetch() {
+              calls++;
+              if (calls === 1) {
+                return new Response('Token Plan usage limit reached (2056)', { status: 429 });
+              }
+              return new Response(chatStream('{"findings":[]}'), { status: 200 });
+            },
+          },
+        },
+      });
+      assert.equal(output, '{"findings":[]}');
+      assert.equal(calls, 2, 'MiniMax must wait out TPM instead of aborting the required pass');
+    } finally {
+      Math.random = originalRandom;
+    }
+  });
 });
 
 test('isProviderAdmissionError treats TPM exhaustion and every-key 429 as requeue', () => {

@@ -34,6 +34,9 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.lunaTpmPerAccount, 2_000_000);
   assert.equal(config.lunaTpmWindowMs, 60_000);
   assert.equal(config.lunaTpmReserveOutput, 128_000);
+  assert.equal(config.minimaxTpmPerAccount, 10_000_000);
+  assert.equal(config.minimaxTpmWindowMs, 60_000);
+  assert.equal(config.minimaxTpmReserveOutput, 128_000);
   assert.equal(config.promptChangedChars, 16_000);
   assert.equal(config.promptRelatedChars, 6_000);
   assert.equal(config.promptOtherChars, 2_000);
@@ -292,7 +295,7 @@ test('review runtime preserves legacy empty-string and invalid-value fallbacks',
 test('rate-limit wait defaults cover multi-minute TPM windows', () => {
   const defaults = loadReviewRuntimeConfig({});
   assert.equal(defaults.rateLimitMaxWaitMs, 120_000);
-  assert.equal(defaults.rateLimitTotalWaitMs, 180_000);
+  assert.equal(defaults.rateLimitTotalWaitMs, 360_000);
   assert.equal(
     loadReviewRuntimeConfig({ ORVEX_RATELIMIT_TOTAL_WAIT_MS: '300000' }).rateLimitTotalWaitMs,
     300_000,
@@ -300,6 +303,10 @@ test('rate-limit wait defaults cover multi-minute TPM windows', () => {
   assert.equal(
     loadReviewRuntimeConfig({ ORVEX_LUNA_TPM_PER_ACCOUNT: '4000000' }).lunaTpmPerAccount,
     4_000_000,
+  );
+  assert.equal(
+    loadReviewRuntimeConfig({ ORVEX_MINIMAX_TPM_PER_ACCOUNT: '10000000' }).minimaxTpmPerAccount,
+    10_000_000,
   );
 });
 

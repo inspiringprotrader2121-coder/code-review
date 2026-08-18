@@ -770,6 +770,36 @@
           "deprecatedAliases": []
         },
         {
+          "name": "ORVEX_MINIMAX_TPM_PER_ACCOUNT",
+          "example": "10000000",
+          "type": "integer",
+          "range": "1000..100000000 tokens / minute; default 10000000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Rolling-minute token budget per MiniMax account. Review calls reserve against this 10M ceiling and wait for the window to drain instead of aborting a required pass.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MINIMAX_TPM_WINDOW_MS",
+          "example": "60000",
+          "type": "integer",
+          "range": "1000..600000 ms; default 60000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Token-window length for MiniMax TPM admission. Default is one minute.",
+          "deprecatedAliases": []
+        },
+        {
+          "name": "ORVEX_MINIMAX_TPM_RESERVE_OUTPUT",
+          "example": "128000",
+          "type": "integer",
+          "range": "1000..384000 tokens; default 128000",
+          "secret": false,
+          "redaction": "none",
+          "description": "Output tokens reserved against the MiniMax account before the call starts, so in-flight reviews count toward the 10M TPM cap.",
+          "deprecatedAliases": []
+        },
+        {
           "name": "ORVEX_DEEPSEEK_BASE_URL",
           "example": "https://api.deepseek.com",
           "type": "URL",
@@ -2530,12 +2560,12 @@
         },
         {
           "name": "ORVEX_RATELIMIT_TOTAL_WAIT_MS",
-          "example": "180000",
+          "example": "360000",
           "type": "integer",
-          "range": "milliseconds; default 180000",
+          "range": "milliseconds; default 360000",
           "secret": false,
           "redaction": "none",
-          "description": "Total retry sleep budget per provider call (covers multi-minute TPM windows).",
+          "description": "Total retry sleep budget per provider call. Required passes stall in this window until a Luna, DeepSeek, or MiniMax account has TPM room.",
           "deprecatedAliases": []
         },
         {

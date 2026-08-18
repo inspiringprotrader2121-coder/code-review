@@ -21,6 +21,10 @@ export interface ReviewRuntimeConfig {
   readonly lunaTpmPerAccount: number;
   readonly lunaTpmWindowMs: number;
   readonly lunaTpmReserveOutput: number;
+  /** MiniMax account TPM ceiling. Calls wait for this rolling window instead of aborting. */
+  readonly minimaxTpmPerAccount: number;
+  readonly minimaxTpmWindowMs: number;
+  readonly minimaxTpmReserveOutput: number;
   readonly anthropicThinkingBudgetTokens: number | undefined;
   readonly responsesTimeoutMs: number;
   readonly openAiReasoningEffort: string;
@@ -345,10 +349,11 @@ export function loadReviewRuntimeConfig(
     maxOutputTokens: positive(env.ORVEX_MAX_OUTPUT_TOKENS, 128_000),
     maxOutputTokensCap: Math.min(positive(env.ORVEX_MAX_OUTPUT_TOKENS_CAP, 128_000), 1_000_000),
     rateLimitMaxRetries: finite(env.ORVEX_RATELIMIT_MAX_RETRIES, 2),
-    // Defaults cover common TPM windows (up to ~2 minutes) without cutting passes.
+    // Defaults cover several rolling TPM minutes so required passes can stall
+    // until a key has room instead of aborting the review.
     rateLimitMaxWaitMs: finite(env.ORVEX_RATELIMIT_MAX_WAIT_MS, 120_000),
     rateLimitBaseMs: finite(env.ORVEX_RATELIMIT_BASE_MS, 2_000),
-    rateLimitTotalWaitMs: finite(env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 180_000),
+    rateLimitTotalWaitMs: finite(env.ORVEX_RATELIMIT_TOTAL_WAIT_MS, 360_000),
     deepseekTpmPerAccount: Math.min(
       Math.max(positive(env.ORVEX_DEEPSEEK_TPM_PER_ACCOUNT, 2_000_000), 1_000),
       100_000_000,
@@ -371,6 +376,18 @@ export function loadReviewRuntimeConfig(
     ),
     lunaTpmReserveOutput: Math.min(
       Math.max(positive(env.ORVEX_LUNA_TPM_RESERVE_OUTPUT, 128_000), 1_000),
+      384_000,
+    ),
+    minimaxTpmPerAccount: Math.min(
+      Math.max(positive(env.ORVEX_MINIMAX_TPM_PER_ACCOUNT, 10_000_000), 1_000),
+      100_000_000,
+    ),
+    minimaxTpmWindowMs: Math.min(
+      Math.max(positive(env.ORVEX_MINIMAX_TPM_WINDOW_MS, 60_000), 1_000),
+      600_000,
+    ),
+    minimaxTpmReserveOutput: Math.min(
+      Math.max(positive(env.ORVEX_MINIMAX_TPM_RESERVE_OUTPUT, 128_000), 1_000),
       384_000,
     ),
     anthropicThinkingBudgetTokens: optionalPositive(env.ORVEX_ANTHROPIC_THINKING_BUDGET_TOKENS),

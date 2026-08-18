@@ -110,6 +110,9 @@ test('isOversizedModelRequest: fail-fast, never sleep-retry as TPM', () => {
   assert.equal(isTpmWindowError(reconnectTpm), true);
   assert.equal(isRetryableRateLimit(reconnectTpm), true);
   assert.equal(rateLimitRetryWaitMs(reconnectTpm, 250, 120_000), 2_000);
+  const minimaxTpm = 'Token Plan usage limit reached (2056)';
+  assert.equal(isTpmWindowError(minimaxTpm), true);
+  assert.equal(rateLimitRetryWaitMs(minimaxTpm, 250, 120_000), 2_000);
 });
 
 test('clamps an oversized ceiling to the safe cap (the 200k prod misconfig)', (t) => {

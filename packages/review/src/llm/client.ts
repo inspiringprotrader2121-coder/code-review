@@ -65,6 +65,51 @@ function rateLimitAdmissionError(provider: string, keyCount: number, cause: Erro
   );
 }
 
+function providerDisplayName(provider: string): string {
+  if (provider === 'deepseek') return 'DeepSeek';
+  if (provider === 'luna') return 'Luna';
+  if (provider === 'minimax') return 'MiniMax';
+  return provider;
+}
+
+function tpmPolicyForCall(
+  provider: string,
+  runtime: ReturnType<typeof loadReviewRuntimeConfig>,
+  system: string,
+  user: string,
+  maxTokens: number | undefined,
+): Omit<ProviderTpmPolicy, 'reservationId'> | undefined {
+  const spec =
+    provider === 'luna'
+      ? {
+          budget: runtime.lunaTpmPerAccount,
+          windowMs: runtime.lunaTpmWindowMs,
+          reserveOutput: runtime.lunaTpmReserveOutput,
+        }
+      : provider === 'deepseek'
+        ? {
+            budget: runtime.deepseekTpmPerAccount,
+            windowMs: runtime.deepseekTpmWindowMs,
+            reserveOutput: runtime.deepseekTpmReserveOutput,
+          }
+        : provider === 'minimax'
+          ? {
+              budget: runtime.minimaxTpmPerAccount,
+              windowMs: runtime.minimaxTpmWindowMs,
+              reserveOutput: runtime.minimaxTpmReserveOutput,
+            }
+          : undefined;
+  if (!spec || !Number.isFinite(spec.budget) || spec.budget <= 0) return undefined;
+  return {
+    budget: spec.budget,
+    reserveTokens:
+      estimateTokens(system.length + user.length) +
+      Math.min(maxTokens ?? runtime.maxOutputTokens, spec.reserveOutput),
+    windowMs: spec.windowMs,
+    reserveTtlMs: Math.max(runtime.llmMaxTotalMs, 60_000),
+  };
+}
+
 interface ActiveProviderKey {
   apiKey: string;
   keyIndex: number;
@@ -263,8 +308,7 @@ export async function llmChat(
     ),
   );
   const provider = providerBucketForTarget(opts);
-  const providerLabel =
-    provider === 'deepseek' ? 'DeepSeek' : provider === 'luna' ? 'Luna' : provider;
+  const providerLabel = providerDisplayName(provider);
   const keys = splitApiKeys(opts.apiKey);
   if (keys.length === 0) throw new Error('LLM API key is required');
   const lineage: AttemptLineage = opts.attemptLineage ?? {};
@@ -274,33 +318,14 @@ export async function llmChat(
   let waitRetries = 0;
   let lastLane = provider;
   const triedLanes = new Set<string>();
-  const tpmBudget =
-    provider === 'luna'
-      ? runtime.lunaTpmPerAccount
-      : provider === 'deepseek'
-        ? runtime.deepseekTpmPerAccount
-        : 0;
-  const tpmReserveOutput =
-    provider === 'luna' ? runtime.lunaTpmReserveOutput : runtime.deepseekTpmReserveOutput;
-  const tpmWindowMs = provider === 'luna' ? runtime.lunaTpmWindowMs : runtime.deepseekTpmWindowMs;
-  const tpmPolicy =
-    (provider === 'deepseek' || provider === 'luna') && Number.isFinite(tpmBudget) && tpmBudget > 0
-      ? {
-          budget: tpmBudget,
-          reserveTokens:
-            estimateTokens(system.length + user.length) +
-            Math.min(opts.maxTokens ?? runtime.maxOutputTokens, tpmReserveOutput),
-          windowMs: tpmWindowMs,
-          reserveTtlMs: Math.max(runtime.llmMaxTotalMs, 60_000),
-        }
-      : undefined;
+  const tpmPolicy = tpmPolicyForCall(provider, runtime, system, user, opts.maxTokens);
   while (true) {
     throwIfCancelled(opts.signal);
     const tpm = tpmPolicy ? { ...tpmPolicy, reservationId: randomUUID() } : undefined;
     let selection = await selectProviderKey(provider, keys, keyCursor++, coordinator, tpm);
-    // Never dispatch Luna/Flash without a reservation. Cool-key TPM misses wait
-    // for the rolling minute; cooldown misses wait until a key is cool enough
-    // to reserve so a 429 wake cannot stampede the account.
+    // Never dispatch Luna/Flash/MiniMax without a reservation. A key near its
+    // rolling TPM ceiling is skipped; when every key is near the cap we stall
+    // until the minute drains instead of sending a 429.
     while (tpm && selection.tpmReserved !== true) {
       if (sleptMs + 2_000 > totalWaitBudgetMs) {
         throw new Error(
@@ -310,10 +335,12 @@ export async function llmChat(
         );
       }
       const waitMs = selection.cooldownMs > 0 ? Math.min(selection.cooldownMs, 2_000) : 2_000;
+      const used = selection.tpmUsed ?? 0;
+      const pct = tpm.budget > 0 ? Math.min(100, Math.round((used / tpm.budget) * 100)) : 100;
       console.warn(
         selection.cooldownMs > 0
           ? `[llm] ${providerLabel} TPM: ${selection.lane} is cooling (${Math.ceil(selection.cooldownMs / 1000)}s) — waiting before reserving`
-          : `[llm] ${providerLabel} TPM: every account is near ${tpm.budget}/min (${selection.tpmUsed ?? 0} used on ${selection.lane}) — waiting for the rolling window to drain`,
+          : `[llm] ${providerLabel} TPM: near limit on ${keys.length} account(s) (${pct}% of ${tpm.budget}/min used on ${selection.lane}) — stalling until free room`,
       );
       await sleep(waitMs, opts.signal, clockFor(opts));
       sleptMs += waitMs;
