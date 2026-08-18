@@ -229,6 +229,10 @@ export function resetLocalProviderTpm(): void {
   localProviderTpm.reset();
 }
 
+export function clearLocalProviderCooldown(lane: string): void {
+  localProviderCooldownUntil.delete(lane);
+}
+
 function gateFor(provider: string): ProviderGate {
   let gate = providerGates.get(provider);
   if (!gate) {

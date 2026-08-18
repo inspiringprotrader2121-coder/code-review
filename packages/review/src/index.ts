@@ -179,6 +179,7 @@ export {
   providerBucketForTarget,
   providerKeyLane,
   resetLocalProviderTpm,
+  clearLocalProviderCooldown,
   runWithProviderAdmissionPriority,
   selectProviderKey,
   setProviderCooldown,

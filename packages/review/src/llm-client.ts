@@ -19,6 +19,7 @@ export {
   providerConcurrency,
   providerKeyLane,
   resetLocalProviderTpm,
+  clearLocalProviderCooldown,
   runWithProviderAdmissionPriority,
   selectProviderKey,
   setProviderCooldown,
