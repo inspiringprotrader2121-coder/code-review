@@ -69,7 +69,11 @@ test('jsonFinishPrefix continues from a truncated object and does not rewrite co
   assert.equal(jsonFinishPrefix('no json here'), '{"findings":');
   assert.equal(jsonFinishPrefix('no json here', ''), null);
   assert.equal(jsonFinishPrefix('<think>x</think>{"findings":[{"file":'), '{"findings":[{"file":');
-  assert.equal(jsonFinishPrefix('{"findings":[],"summary":"ok"}'), null);
+  assert.equal(
+    jsonFinishPrefix('{"action":"final","findings":', ''),
+    '{"action":"final","findings":',
+  );
+  assert.equal(jsonFinishPrefix('{"action":"final","findings":[]}', ''), null);
   assert.equal(
     jsonFinishPrefix('{"action":"final","findings":[],"summary":"ok"}', '{"step":{"action":'),
     null,

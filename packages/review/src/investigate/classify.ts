@@ -1,5 +1,6 @@
 import { extractJsonLoose } from '../llm-client.js';
 import { normalizeLlmResponse, parseReviewJson } from '../llm.js';
+import type { AgenticTurn } from '../agentic/types.js';
 import { LlmReviewResponseSchema, type LlmReviewResponse } from '../types.js';
 import { StepSchema, type InvestigateStep } from './contracts.js';
 
@@ -63,7 +64,7 @@ function asToolStep(value: unknown): Extract<InvestigateStep, { action: 'tool' }
   return parsed.data;
 }
 
-/** Classify an investigate model reply. Final results win over tool steps. */
+/** Classify an investigate model reply. An explicit tool action wins over leftover findings fields. */
 export function classifyInvestigateResponse(text: string): ClassifiedInvestigateResponse {
   const trimmed = text.trim();
   if (!trimmed) return { type: 'invalid', shape: 'empty' };
@@ -78,4 +79,26 @@ export function classifyInvestigateResponse(text: string): ClassifiedInvestigate
   const step = asToolStep(parsed);
   if (step) return { type: 'step', value: step, shape: 'tool_call' };
   return { type: 'invalid', shape: 'schema_mismatch' };
+}
+
+export type InvestigateToolStep = Extract<InvestigateStep, { action: 'tool' }>;
+
+/** Map the investigate classifier onto the shared agentic TOOL | FINAL | invalid states. */
+export function toAgenticTurn(
+  classified: ClassifiedInvestigateResponse,
+): AgenticTurn<InvestigateToolStep, LlmReviewResponse> {
+  if (classified.type === 'step') {
+    return { type: 'tool', value: classified.value, shape: classified.shape };
+  }
+  if (classified.type === 'final') {
+    return { type: 'final', value: classified.value, shape: classified.shape };
+  }
+  return { type: 'invalid', shape: classified.shape };
+}
+
+/** Shared agentic classifier used by normal and recovery investigate turns. */
+export function classifyAgenticTurn(
+  text: string,
+): AgenticTurn<InvestigateToolStep, LlmReviewResponse> {
+  return toAgenticTurn(classifyInvestigateResponse(text));
 }

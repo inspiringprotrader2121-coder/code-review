@@ -122,9 +122,18 @@ export {
 } from './llm-fix.js';
 export { runAgent, type AgentFile, type AgentOptions, type AgentResponse } from './agent.js';
 export {
+  runAgenticReviewLoop,
+  agenticRecoveryInstruction,
+  classifyAgenticProviderFailure,
+  type AgenticTurn,
+  type AgenticGenerateRequest,
+  type AgenticLoopFailure,
+} from './agentic.js';
+export {
   runInvestigateReview,
   investigateThinkingEnabled,
   classifyInvestigateResponse,
+  classifyAgenticTurn,
   resolveUnderRoot,
   isSafeGrepPattern,
   isSafeGlob,

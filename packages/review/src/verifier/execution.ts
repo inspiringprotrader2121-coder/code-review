@@ -1,3 +1,7 @@
+/**
+ * Structured final-only verification runner.
+ * Legal state is a verdicts object. Tools are not part of this protocol.
+ */
 import { randomBytes } from 'node:crypto';
 import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { extractJsonLoose, JsonContractMismatchError, llmChat } from '../llm-client.js';
@@ -187,7 +191,14 @@ function classifyVerifierText(
 }
 
 function logVerifyTurn(entry: Record<string, unknown>): void {
-  console.log(`[verify] ${JSON.stringify(entry)}`);
+  const repairAttempt = typeof entry.repairAttempt === 'number' ? entry.repairAttempt : 0;
+  console.log(
+    `[verify] ${JSON.stringify({
+      runnerType: 'structured_final',
+      source: repairAttempt > 0 ? 'recovery' : 'normal',
+      ...entry,
+    })}`,
+  );
 }
 
 async function verifyFindingsBatch(

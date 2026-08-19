@@ -1,8 +1,6 @@
 export const INVESTIGATE_SYSTEM_EXTRA = `
 ## Investigate mode (tool loop) — OUTPUT FORMAT OVERRIDE
 Ignore any instruction elsewhere to return bare {"findings":...} JSON as your first reply.
-You MUST use the tool protocol below until you finish investigating.
-
 You have READ-ONLY tools over a full checkout of the repository at HEAD of this PR.
 Your job is P1/P2 recall via multi-hop search — not breadth nits.
 
@@ -22,7 +20,7 @@ Hunt these miss classes first (historically where single-shot reviews go blind):
 Procedure: grep deleted/renamed symbols for remaining callers; read full changed
 functions + callers/callees; compare success vs failure paths; kill false hypotheses.
 
-Respond with STRICT JSON only — one of:
+Respond with STRICT JSON only — exactly one of a tool request or a complete final review:
 {"action":"tool","tool":{"name":"list_dir","path":"src"},"reason":"..."}
 {"action":"tool","tool":{"name":"read_file","path":"src/foo.ts","offset":0,"limit":80},"reason":"..."}
 {"action":"tool","tool":{"name":"grep","pattern":"functionName","path":"src","glob":"*.ts"},"reason":"..."}
@@ -31,6 +29,7 @@ Respond with STRICT JSON only — one of:
 {"action":"done","findings":[...],"summary":"..."}
 
 Rules:
+- Each turn is either one tool request or one complete final review. Immediate final (including empty findings) is a completed pass; a tool is never required first.
 - Prefer 3–8 tool calls, then done. Use find_callers and find_tests when a changed symbol or contract needs proof. Do not loop forever.
 - Paths are relative to the repo root. Never use absolute paths.
 - Only report findings INTRODUCED or EXPOSED by this PR, with concrete failure scenarios.

@@ -663,5 +663,381 @@ test('malformed investigate JSON uses a fresh repair without a guessed step pref
     false,
   );
   assert.match(bodies[1] ?? '', /PREVIOUS RESPONSE/);
+  assert.match(bodies[1] ?? '', /request another tool/);
+  assert.doesNotMatch(bodies[1] ?? '', /Do not call another tool|No more tools/);
   assert.deepEqual(result, { findings: [], summary: 'Repaired.' });
+});
+
+test('truncated investigate JSON continues from the received slice without a guessed step prefix', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-truncated-'));
+  const originalFetch = globalThis.fetch;
+  const bodies: string[] = [];
+  let calls = 0;
+  const truncated = '{"action":"final","findings":';
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    bodies.push(String(init?.body));
+    return calls === 1
+      ? compatibleChatStream(truncated)
+      : compatibleChatStream(
+          '{"action":"final","findings":[],"summary":"Finished truncated JSON."}',
+        );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://compatible.test/v1',
+      api: 'chat',
+      maxSteps: 3,
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(
+    bodies.some((body) => body.includes('{"step":{"action":')),
+    false,
+  );
+  const continuation = JSON.parse(bodies[1] ?? '{}') as {
+    messages?: Array<{ role?: string; content?: string }>;
+  };
+  const assistant = continuation.messages?.find((message) => message.role === 'assistant');
+  assert.equal(assistant?.content, truncated);
+  assert.match(bodies[1] ?? '', /Complete the JSON object now/);
+  assert.doesNotMatch(bodies[1] ?? '', /FORMAT REPAIR/);
+  assert.deepEqual(result, { findings: [], summary: 'Finished truncated JSON.' });
+});
+
+function captureInvestigateLogs(): { logs: Array<Record<string, unknown>>; restore: () => void } {
+  const logs: Array<Record<string, unknown>> = [];
+  const originalLog = console.log;
+  console.log = ((message?: unknown, ...rest: unknown[]) => {
+    if (typeof message === 'string' && message.startsWith('[investigate] ')) {
+      try {
+        logs.push(JSON.parse(message.slice('[investigate] '.length)) as Record<string, unknown>);
+      } catch {
+        // Keep test spies from crashing on unrelated log lines.
+      }
+    }
+    originalLog(message as never, ...rest);
+  }) as typeof console.log;
+  return {
+    logs,
+    restore: () => {
+      console.log = originalLog;
+    },
+  };
+}
+
+function requestUserText(body: Record<string, unknown>): string {
+  if (typeof body.input === 'string') return body.input;
+  const messages = body.messages as Array<{ role?: string; content?: string }> | undefined;
+  const user = messages?.find((message) => message.role === 'user');
+  return typeof user?.content === 'string' ? user.content : JSON.stringify(body);
+}
+
+function jsonSchemaName(body: Record<string, unknown>): string | undefined {
+  return (body.text as { format?: { name?: string } } | undefined)?.format?.name;
+}
+
+test('#315 tool then schema-mismatch then repair second tool then final completes', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-315-'));
+  fs.mkdirSync(path.join(root, 'auth'));
+  fs.writeFileSync(
+    path.join(root, 'auth/middleware.ts'),
+    'export function authorize() { return true; }\n',
+  );
+  const originalFetch = globalThis.fetch;
+  const { logs, restore } = captureInvestigateLogs();
+  const requests: Array<Record<string, unknown>> = [];
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    if (calls === 1) {
+      return responsesApiStream(
+        '{"action":"tool","tool":{"name":"grep","pattern":"authorize","path":"auth"},"reason":"find authorize"}',
+      );
+    }
+    if (calls === 2) {
+      return responsesApiStream(
+        '{"action":"done","findings":[{"file":"auth/middleware.ts","severity":"P2"}],"summary":"schema mismatch"}',
+      );
+    }
+    if (calls === 3) {
+      return responsesApiStream(
+        '{"action":"tool","tool":{"name":"read_file","path":"auth/middleware.ts"},"reason":"read authorize implementation"}',
+      );
+    }
+    return responsesApiStream('{"action":"final","findings":[],"summary":"No actionable issues."}');
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    restore();
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'auth/middleware.ts',
+        status: 'modified',
+        patch:
+          '@@ -1 +1 @@\n-export function authorize() { return false; }\n+export function authorize() { return true; }',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.test',
+      api: 'responses',
+      reasoningEffort: 'max',
+      maxTokens: 28_000,
+      maxSteps: 5,
+    },
+  );
+
+  assert.equal(calls, 4, 'tool, malformed, repaired tool, then final');
+  assert.equal(jsonSchemaName(requests[0] ?? {}), 'orvex_investigate_turn');
+  assert.equal(jsonSchemaName(requests[2] ?? {}), 'orvex_investigate_turn');
+  assert.equal(jsonSchemaName(requests[3] ?? {}), 'orvex_investigate_turn');
+  const repairUser = requestUserText(requests[2] ?? {});
+  assert.match(repairUser, /FORMAT REPAIR/);
+  assert.match(repairUser, /request another tool/);
+  assert.match(repairUser, /CURRENT investigation state/);
+  assert.doesNotMatch(repairUser, /Do not call another tool|No more tools|FINAL TURN/);
+  assert.match(repairUser, /authorize/);
+  const afterSecondTool = requestUserText(requests[3] ?? {});
+  assert.match(afterSecondTool, /### Tool grep/);
+  assert.match(afterSecondTool, /### Tool read_file/);
+  assert.match(afterSecondTool, /export function authorize/);
+  assert.equal(
+    afterSecondTool.split('### Tool grep').length - 1,
+    1,
+    'already-executed grep must not rerun during repair',
+  );
+  const repairToolLog = logs.find(
+    (entry) => entry.kind === 'recovery_tool' && entry.source === 'recovery',
+  );
+  assert.equal(repairToolLog?.stage, 'investigate');
+  assert.equal(repairToolLog?.responseShape, 'tool');
+  assert.equal(repairToolLog?.accepted, true);
+  assert.equal(repairToolLog?.reenteredAgentLoop, true);
+  assert.deepEqual(result, { findings: [], summary: 'No actionable issues.' });
+});
+
+test('tool then malformed then repair final completes', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-315-final-'));
+  fs.writeFileSync(path.join(root, 'a.ts'), 'export const currentValue = 1;\n');
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    if (calls === 1) {
+      return compatibleChatStream(
+        '{"action":"tool","tool":{"name":"read_file","path":"a.ts"},"reason":"inspect"}',
+      );
+    }
+    if (calls === 2) return compatibleChatStream('this is not json at all');
+    return compatibleChatStream(
+      '{"action":"final","findings":[],"summary":"Repaired after tool."}',
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://compatible.test/v1',
+      api: 'chat',
+      maxSteps: 5,
+    },
+  );
+
+  assert.equal(calls, 3);
+  assert.deepEqual(result, { findings: [], summary: 'Repaired after tool.' });
+});
+
+test('tool then malformed then repair tool then another tool then final completes', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-315-loop-'));
+  fs.writeFileSync(path.join(root, 'a.ts'), 'export const currentValue = 1;\n');
+  fs.writeFileSync(path.join(root, 'b.ts'), 'export const nextValue = 2;\n');
+  fs.writeFileSync(path.join(root, 'c.ts'), 'export const laterValue = 3;\n');
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, unknown>> = [];
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    if (calls === 1) {
+      return compatibleChatStream(
+        '{"action":"tool","tool":{"name":"read_file","path":"a.ts"},"reason":"first"}',
+      );
+    }
+    if (calls === 2) {
+      return compatibleChatStream(
+        '{"action":"done","findings":[{"file":"a.ts","severity":"P2"}],"summary":"schema mismatch"}',
+      );
+    }
+    if (calls === 3) {
+      return compatibleChatStream(
+        '{"action":"tool","tool":{"name":"read_file","path":"b.ts"},"reason":"repaired"}',
+      );
+    }
+    if (calls === 4) {
+      return compatibleChatStream(
+        '{"action":"tool","tool":{"name":"read_file","path":"c.ts"},"reason":"continue"}',
+      );
+    }
+    return compatibleChatStream(
+      '{"action":"done","findings":[],"summary":"Re-entered agent loop."}',
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://compatible.test/v1',
+      api: 'chat',
+      maxSteps: 6,
+    },
+  );
+
+  assert.equal(calls, 5, 'tool, malformed, repair tool, another tool, final');
+  const repairUser = requestUserText(requests[2] ?? {});
+  assert.match(repairUser, /FORMAT REPAIR/);
+  assert.match(repairUser, /request another tool/);
+  const continued = requestUserText(requests[4] ?? {});
+  assert.match(continued, /currentValue/);
+  assert.match(continued, /nextValue/);
+  assert.match(continued, /laterValue/);
+  assert.deepEqual(result, { findings: [], summary: 'Re-entered agent loop.' });
+});
+
+test('tool then malformed then repair malformed is bounded and fail-closed', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-315-bound-'));
+  fs.writeFileSync(path.join(root, 'a.ts'), 'export const currentValue = 1;\n');
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    if (calls === 1) {
+      return compatibleChatStream(
+        '{"action":"tool","tool":{"name":"read_file","path":"a.ts"},"reason":"inspect"}',
+      );
+    }
+    return compatibleChatStream('still not parseable json');
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://compatible.test/v1',
+      api: 'chat',
+      maxSteps: 8,
+    },
+  );
+
+  assert.equal(calls, 3, 'one tool hop plus one bounded repair, no infinite loop');
+  assert.deepEqual(result.findings, []);
+  assert.match(result.summary ?? '', /could not be completed/i);
+});
+
+test('repair may return a valid empty final after a prior tool', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-315-empty-'));
+  fs.writeFileSync(path.join(root, 'a.ts'), 'export const currentValue = 1;\n');
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    if (calls === 1) {
+      return compatibleChatStream(
+        '{"action":"tool","tool":{"name":"read_file","path":"a.ts"},"reason":"inspect"}',
+      );
+    }
+    if (calls === 2) return compatibleChatStream('{"unexpected":true}');
+    return compatibleChatStream(
+      '{"action":"final","findings":[],"summary":"No actionable issues."}',
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://compatible.test/v1',
+      api: 'chat',
+      maxSteps: 5,
+    },
+  );
+
+  assert.equal(calls, 3);
+  assert.deepEqual(result, {
+    findings: [],
+    summary: 'No actionable issues.',
+  });
 });
