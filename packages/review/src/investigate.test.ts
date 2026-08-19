@@ -658,7 +658,10 @@ test('malformed investigate JSON uses a fresh repair without a guessed step pref
   );
 
   assert.equal(calls, 2);
-  assert.equal(bodies.some((body) => body.includes('{"step":{"action":')), false);
+  assert.equal(
+    bodies.some((body) => body.includes('{"step":{"action":')),
+    false,
+  );
   assert.match(bodies[1] ?? '', /PREVIOUS RESPONSE/);
   assert.deepEqual(result, { findings: [], summary: 'Repaired.' });
 });

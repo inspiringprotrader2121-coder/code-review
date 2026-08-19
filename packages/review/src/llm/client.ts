@@ -33,7 +33,12 @@ import {
   sleep,
 } from './retry-policy.js';
 import { clockFor, estimateTokens, maxTotalMs } from './support.js';
-import { extractJsonLoose, jsonContractMissing, jsonFinishPrefix, JsonContractMismatchError } from './parsing.js';
+import {
+  extractJsonLoose,
+  jsonContractMissing,
+  jsonFinishPrefix,
+  JsonContractMismatchError,
+} from './parsing.js';
 import { DeepSeekContinuationRequiredError } from './transports.js';
 
 function workerKeyCursorSeed(id = loadReviewRuntimeConfig().workerId ?? ''): number {

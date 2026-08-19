@@ -37,10 +37,7 @@ export function extractJsonLoose(text: string): unknown {
  * null so callers must not seed a guessed contract fragment onto a finished reply.
  * An omitted/empty contractPrefix disables guessed seeds such as `{"step":{"action":`.
  */
-export function jsonFinishPrefix(
-  text: string,
-  contractPrefix = '{"findings":',
-): string | null {
+export function jsonFinishPrefix(text: string, contractPrefix = '{"findings":'): string | null {
   const stripped = stripThinking(text);
   const start = stripped.indexOf('{');
   if (start === -1) return contractPrefix || null;

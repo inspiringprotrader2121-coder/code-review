@@ -174,7 +174,9 @@ function isVerifierContractError(error: unknown): boolean {
   );
 }
 
-function classifyVerifierText(text: string): 'final' | 'invalid_json' | 'schema_mismatch' | 'empty' {
+function classifyVerifierText(
+  text: string,
+): 'final' | 'invalid_json' | 'schema_mismatch' | 'empty' {
   if (!text.trim()) return 'empty';
   try {
     const parsed = extractJsonLoose(text);
@@ -208,12 +210,7 @@ async function verifyFindingsBatch(
   let parsed;
   let previousText = '';
   try {
-    previousText = await invokeVerifier(
-      prompt.system,
-      prompt.user,
-      trackedOptions,
-      attemptLineage,
-    );
+    previousText = await invokeVerifier(prompt.system, prompt.user, trackedOptions, attemptLineage);
     parsed = parseVerifierResponse(previousText, findings.length, options.strict === true);
     logVerifyTurn({
       stage: 'verify',
