@@ -390,6 +390,7 @@ export async function anthropicChat(
   console.log(
     `[llm] model=${opts.model} api=anthropic thinking=${think ? 'on' : 'off'} reasoning=${reasoningChars}c answer=${text.length}c ${Math.round((Date.now() - startedAt) / 1000)}s stop=${response.stop_reason ?? 'end_turn'}`,
   );
+  opts.generationStopReason = response.stop_reason ?? 'end_turn';
   if (response.stop_reason === 'max_tokens') {
     if (opts.json) {
       throw new DeepSeekContinuationRequiredError({
@@ -588,6 +589,7 @@ export async function openAiResponsesStreamChat(
   console.log(
     `[llm] model=${opts.model} api=responses format=${responseFormat} effort=${effectiveEffort} reasoning=${reasoningTokens}tok answer=${content.length}c ${Math.round((clock.now() - startedAt) / 1000)}s${responseMetadata ? ` ${responseMetadata}` : ''}`,
   );
+  opts.generationStopReason = incomplete ?? terminalEvent ?? responseStatus ?? 'completed';
   opts.onUsage?.({
     inputTokens: inTok || estimateTokens(requestChars),
     cachedInputTokens: inTok ? Math.min(inTok, cachedInTok) : 0,
@@ -803,6 +805,7 @@ export async function openAiCompatStreamChat(
   console.log(
     `[llm] model=${opts.model} thinking=${thinkingEnabled(opts) ? 'on' : 'off'} reasoning=${totalReasoning}c answer=${answerChars}c ${Math.round((clock.now() - startedAt) / 1000)}s finish=${finishReason ?? 'stop'}`,
   );
+  opts.generationStopReason = finishReason ?? 'stop';
   opts.onUsage?.(
     providerUsage
       ? {
@@ -821,7 +824,7 @@ export async function openAiCompatStreamChat(
         },
   );
   if (finishReason === 'length') {
-    if (opts.json && (thinkingEnabled(opts) || Boolean(continuation))) {
+    if (opts.json) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
         contentPrefix: truncatedJsonPrefix(text || streamedText, opts),

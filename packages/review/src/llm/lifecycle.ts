@@ -94,10 +94,12 @@ export async function trackedLlmAttempt(
   });
   lineage.lastAttemptId = attemptId;
   try {
-    const result = await llmChatSingle(system, user, {
+    const callOpts: LlmClientOptions = {
       ...opts,
       onUsage: opts.onUsage ? (usage) => opts.onUsage?.({ ...usage, attemptId }) : undefined,
-    });
+    };
+    const result = await llmChatSingle(system, user, callOpts);
+    opts.generationStopReason = callOpts.generationStopReason;
     emitAttempt(opts, {
       phase: 'finished',
       attemptId,

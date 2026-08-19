@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractJsonLoose, jsonContractMissing, jsonFinishPrefix } from './llm-client.js';
+import {
+  extractJsonLoose,
+  jsonContractMissing,
+  jsonFinishPrefix,
+  classifyStructuredOutput,
+  isTruncationStopReason,
+} from './llm-client.js';
 
 test('extracts a plain JSON object', () => {
   assert.deepEqual(extractJsonLoose('{"findings":[],"summary":"ok"}'), {
@@ -79,4 +85,57 @@ test('jsonFinishPrefix continues from a truncated object and does not rewrite co
     null,
   );
   assert.equal(jsonFinishPrefix('no json here', '{"verdicts":'), '{"verdicts":');
+});
+
+test('classifyStructuredOutput treats end_turn contract misses as semantic repair, not truncation', () => {
+  assert.equal(isTruncationStopReason('end_turn'), false);
+  assert.equal(isTruncationStopReason('stop'), false);
+  assert.equal(isTruncationStopReason('max_tokens'), true);
+  assert.equal(isTruncationStopReason('length'), true);
+
+  assert.deepEqual(
+    classifyStructuredOutput('{"findings":[],"summary":"ok"}', undefined, 'end_turn'),
+    {
+      parseResult: 'ok',
+      failureClass: 'valid_final',
+      recoveryMode: 'none',
+    },
+  );
+  assert.equal(
+    classifyStructuredOutput('This change looks safe...', undefined, 'end_turn').recoveryMode,
+    'fresh_semantic_repair',
+  );
+  assert.equal(
+    classifyStructuredOutput('This change looks safe...', undefined, 'end_turn').failureClass,
+    'complete_non_json',
+  );
+  assert.equal(
+    classifyStructuredOutput('{"result":"looks good"}', undefined, 'end_turn').failureClass,
+    'schema_mismatch',
+  );
+  assert.equal(
+    classifyStructuredOutput('{"result":"looks good"}', undefined, 'end_turn').recoveryMode,
+    'fresh_semantic_repair',
+  );
+  assert.equal(
+    classifyStructuredOutput('{"findings":[', undefined, 'end_turn').failureClass,
+    'complete_invalid_json',
+  );
+  assert.equal(
+    classifyStructuredOutput('{"findings":[', undefined, 'end_turn').recoveryMode,
+    'fresh_semantic_repair',
+  );
+  assert.equal(
+    classifyStructuredOutput('{"findings":[', undefined, 'max_tokens').failureClass,
+    'truncated_json',
+  );
+  assert.equal(
+    classifyStructuredOutput('{"findings":[', undefined, 'max_tokens').recoveryMode,
+    'continuation',
+  );
+  assert.equal(
+    classifyStructuredOutput('', undefined, 'end_turn').recoveryMode,
+    'fresh_semantic_repair',
+  );
+  assert.equal(classifyStructuredOutput('', undefined, 'length').recoveryMode, 'continuation');
 });

@@ -14,7 +14,7 @@ import {
   classifyInvestigateResponse,
 } from './investigate.js';
 
-function compatibleChatStream(content: string): Response {
+function compatibleChatStream(content: string, finishReason = 'stop'): Response {
   const encoder = new TextEncoder();
   return new Response(
     new ReadableStream({
@@ -24,7 +24,7 @@ function compatibleChatStream(content: string): Response {
         );
         controller.enqueue(
           encoder.encode(
-            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n`,
           ),
         );
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
@@ -678,7 +678,7 @@ test('truncated investigate JSON continues from the received slice without a gue
     calls++;
     bodies.push(String(init?.body));
     return calls === 1
-      ? compatibleChatStream(truncated)
+      ? compatibleChatStream(truncated, 'length')
       : compatibleChatStream(
           '{"action":"final","findings":[],"summary":"Finished truncated JSON."}',
         );

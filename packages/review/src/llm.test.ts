@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FindingJsonSchema, LlmReviewResponseSchema } from './types.js';
 import { normalizeLlmResponse, parseReviewJson, runLlmReview } from './llm.js';
+import { JsonContractMismatchError } from './llm-client.js';
 import type { TextModelRunRequest } from './providers/types.js';
 
 test('normalizeLlmResponse maps MiniMax severity vocabulary to P-levels', () => {
@@ -198,7 +199,7 @@ test('normalizeLlmResponse defaults unknown severity to info (fail toward nitpic
   assert.equal(parsed.findings[0].category, 'general');
 });
 
-test('an invalid discovery response uses bounded JSON-finish continuations then fails the pass', async (t) => {
+test('an invalid discovery response uses bounded fresh semantic repairs then fails the pass', async (t) => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   const bodies: Array<Record<string, unknown>> = [];
@@ -240,15 +241,100 @@ test('an invalid discovery response uses bounded JSON-finish continuations then 
           maxTokens: 16_000,
         },
       ),
-    /no parseable JSON/,
+    /JSON contract mismatch/,
   );
 
-  assert.equal(calls, 3, 'primary plus two bounded JSON-finish continuations');
+  assert.equal(calls, 3, 'primary plus two bounded fresh semantic repairs');
   const thinkingMode = (body: Record<string, unknown>) =>
     (body.chat_template_kwargs as { thinking_mode?: string } | undefined)?.thinking_mode;
   assert.equal(thinkingMode(bodies[0]!), 'enabled');
   assert.equal(thinkingMode(bodies[1]!), 'disabled');
   assert.equal(thinkingMode(bodies[2]!), 'disabled');
+  const repairMessages = bodies[1]?.messages as Array<{ role: string; content: string }>;
+  assert.equal(
+    repairMessages.some((message) => message.role === 'assistant'),
+    false,
+  );
+  assert.match(
+    repairMessages.at(-1)?.content ?? '',
+    /did not satisfy the required review JSON schema/i,
+  );
+});
+
+test('#323 MiniMax end_turn prose is repaired with a fresh final object, not continuation', async () => {
+  const users: string[] = [];
+  let calls = 0;
+  const result = await runLlmReview(
+    [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
+    {
+      apiKey: 'test-key',
+      model: 'MiniMax-M3',
+      target: {
+        transport: 'anthropic',
+        apiKey: 'test-key',
+        model: 'MiniMax-M3',
+      },
+      runner: {
+        transport: 'anthropic',
+        async run(request) {
+          users.push(request.user);
+          calls++;
+          if (calls === 1) {
+            throw new JsonContractMismatchError(
+              'This change looks safe overall. No blocking issues.',
+              {
+                failureClass: 'complete_non_json',
+                recoveryMode: 'fresh_semantic_repair',
+                parseResult: 'invalid',
+                stopReason: 'end_turn',
+              },
+            );
+          }
+          assert.equal(request.thinking, false, 'repair is answer-only');
+          return '{"findings":[],"summary":"No actionable issues found."}';
+        },
+      },
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.summary, 'No actionable issues found.');
+  assert.doesNotMatch(users[0] ?? '', /did not satisfy the required review JSON schema/i);
+  assert.match(users[1] ?? '', /did not satisfy the required review JSON schema/i);
+  assert.match(users[1] ?? '', /Do not continue the previous response/i);
+  assert.match(users[1] ?? '', /This change looks safe overall/);
+});
+
+test('#323 empty MiniMax findings after semantic repair still complete the required pass', async () => {
+  const result = await runLlmReview(
+    [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
+    {
+      apiKey: 'test-key',
+      model: 'MiniMax-M3',
+      target: {
+        transport: 'anthropic',
+        apiKey: 'test-key',
+        model: 'MiniMax-M3',
+      },
+      runner: {
+        transport: 'anthropic',
+        async run(request) {
+          if (!request.user.includes('did not satisfy the required review JSON schema')) {
+            throw new JsonContractMismatchError('{"result":"looks good"}', {
+              failureClass: 'schema_mismatch',
+              recoveryMode: 'fresh_semantic_repair',
+              parseResult: 'schema_mismatch',
+              stopReason: 'end_turn',
+            });
+          }
+          return '{"findings":[],"summary":"clean"}';
+        },
+      },
+    },
+  );
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.summary, 'clean');
 });
 
 test('required complete-diff context reaches the provider prompt unchanged', async () => {

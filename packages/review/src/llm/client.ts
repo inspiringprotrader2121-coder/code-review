@@ -34,6 +34,7 @@ import {
 } from './retry-policy.js';
 import { clockFor, estimateTokens, maxTotalMs } from './support.js';
 import {
+  classifyStructuredOutput,
   extractJsonLoose,
   jsonContractMissing,
   jsonFinishPrefix,
@@ -238,21 +239,34 @@ async function llmChatHoldingProviderSlot(
         lineage,
       );
       if (opts.json && jsonContractMissing(text, opts.jsonContractKeys)) {
-        let completeObject = false;
-        try {
-          extractJsonLoose(text);
-          completeObject = true;
-        } catch {
-          completeObject = false;
-        }
-        if (completeObject) {
-          console.warn(`[llm] JSON contract mismatch; ${jsonContractDiagnostic(text)}`);
-          throw new JsonContractMismatchError(text);
+        const stopReason = attemptOpts.generationStopReason;
+        const classified = classifyStructuredOutput(text, opts.jsonContractKeys, stopReason);
+        if (classified.recoveryMode !== 'continuation') {
+          console.warn(
+            `[llm] ${JSON.stringify({
+              stage: 'structured_output',
+              model: opts.model,
+              provider: pool.provider,
+              api: opts.api,
+              stopReason: stopReason ?? 'completed',
+              responseShape: classified.failureClass,
+              parseResult: classified.parseResult,
+              failureClass: classified.failureClass,
+              recoveryMode: classified.recoveryMode,
+              continuationAttempt: continuationCount,
+              semanticRepairAttempt: 0,
+              diagnostic: jsonContractDiagnostic(text),
+            })}`,
+          );
+          console.warn(
+            `[llm] JSON contract missing; ${jsonContractDiagnostic(text)} stop=${stopReason ?? 'completed'} failureClass=${classified.failureClass} recovery=${classified.recoveryMode}`,
+          );
+          throw new JsonContractMismatchError(text, { ...classified, stopReason });
         }
         const contentPrefix = jsonFinishPrefix(text, opts.jsonContractPrefix);
         if (contentPrefix === null) {
           console.warn(`[llm] JSON contract mismatch; ${jsonContractDiagnostic(text)}`);
-          throw new JsonContractMismatchError(text);
+          throw new JsonContractMismatchError(text, { ...classified, stopReason });
         }
         // Some compatible providers ignore the assistant prefix and return the
         // same schema-wrong object verbatim. A second identical continuation
@@ -275,7 +289,22 @@ async function llmChatHoldingProviderSlot(
         continuationCount++;
         continuationRateLimitAttempt = 0;
         console.warn(
-          `[llm] JSON contract missing; ${jsonContractDiagnostic(text)}; continuing the same response (${continuationCount}/${MAX_PREFIX_CONTINUATIONS})`,
+          `[llm] ${JSON.stringify({
+            stage: 'structured_output',
+            model: opts.model,
+            provider: pool.provider,
+            api: opts.api,
+            stopReason: stopReason ?? 'truncated',
+            parseResult: classified.parseResult,
+            failureClass: classified.failureClass,
+            recoveryMode: 'continuation',
+            continuationAttempt: continuationCount,
+            semanticRepairAttempt: 0,
+            diagnostic: jsonContractDiagnostic(text),
+          })}`,
+        );
+        console.warn(
+          `[llm] JSON contract missing; ${jsonContractDiagnostic(text)}; truncated stop=${stopReason ?? 'unknown'}; continuing the same response (${continuationCount}/${MAX_PREFIX_CONTINUATIONS})`,
         );
         continue;
       }
@@ -296,6 +325,20 @@ async function llmChatHoldingProviderSlot(
         continuation = lastError.continuation;
         continuationCount++;
         continuationRateLimitAttempt = 0;
+        console.warn(
+          `[llm] ${JSON.stringify({
+            stage: 'structured_output',
+            model: opts.model,
+            provider: pool.provider,
+            api: opts.api,
+            stopReason: attemptOpts.generationStopReason ?? 'truncated',
+            parseResult: 'invalid',
+            failureClass: 'truncated_json',
+            recoveryMode: 'continuation',
+            continuationAttempt: continuationCount,
+            semanticRepairAttempt: 0,
+          })}`,
+        );
         console.warn(
           `[llm] max-reasoning output exhausted; continuing the same response (${continuationCount}/${MAX_PREFIX_CONTINUATIONS})`,
         );

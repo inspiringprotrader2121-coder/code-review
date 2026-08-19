@@ -45,9 +45,22 @@ export {
   jsonContractMissing,
   jsonFinishPrefix,
   JsonContractMismatchError,
+  classifyStructuredOutput,
+  isTruncationStopReason,
   stripThinking,
 } from './llm/parsing.js';
-export type { JsonContractKey } from './llm/parsing.js';
+export type {
+  JsonContractKey,
+  StructuredFailureClass,
+  StructuredOutputClassification,
+  StructuredRecoveryMode,
+} from './llm/parsing.js';
+export {
+  recoverStructuredFinal,
+  wrapStructuredFinalRepairUser,
+  structuredFinalRepairInstruction,
+  MAX_STRUCTURED_FINAL_REPAIR_ATTEMPTS,
+} from './llm/structured-final.js';
 export type {
   LlmAttemptEvent,
   LlmAttemptOutcome,

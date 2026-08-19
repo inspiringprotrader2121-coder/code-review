@@ -10,7 +10,13 @@ import {
   type LlmAttemptEvent,
 } from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
-import type { ModelRunner, ModelTarget, TextModelRunRequest } from './providers/types.js';
+import type {
+  ModelAttemptLineage,
+  ModelRunner,
+  ModelTarget,
+  TextModelRunRequest,
+} from './providers/types.js';
+import { recoverStructuredFinal, wrapStructuredFinalRepairUser } from './llm/structured-final.js';
 import {
   LlmReviewResponseJsonSchema,
   LlmReviewResponseSchema,
@@ -28,8 +34,8 @@ const REVIEW_JSON_SCHEMA_CONTRACT = {
  * retryable, and crucially NOT a clean review. Callers should FAIL the review on
  * these (so it retries when quota recovers) rather than posting an empty result.
  * Truncation and missing JSON are finished in-request with a cheap answer-only
- * continuation. They must not trigger another max-reasoning pass or a whole
- * review replay — that is how spend explodes under load.
+ * continuation only when the provider signals truncated generation. Completed
+ * contract misses get a bounded fresh semantic repair at the review stage.
  */
 export function isTransientLlmError(message: string): boolean {
   if (/refusing to publish an incomplete review/i.test(message)) return false;
@@ -154,12 +160,13 @@ export async function runLlmReview(
 
   const system = loadOrvexRules(context?.promptProfile);
   const user = buildUserPrompt(redactedFiles, context);
+  const attemptLineage: ModelAttemptLineage = {};
 
-  const call = (thinking: boolean, temperature = opts.temperature) => {
+  const invoke = (thinking: boolean, userText: string, temperature = opts.temperature) => {
     if (opts.runner && opts.target) {
       return opts.runner.run({
         system,
-        user,
+        user: userText,
         target: opts.target,
         json: true,
         jsonSchema: opts.target.transport === 'responses' ? REVIEW_JSON_SCHEMA_CONTRACT : undefined,
@@ -170,11 +177,12 @@ export async function runLlmReview(
         signal: opts.signal,
         onUsage: opts.onUsage,
         onAttempt: opts.onAttempt,
+        attemptLineage,
       });
     }
     // The old option shape remains only for non-migrated callers. Public plan
     // stages use the explicit runner/target branch above.
-    return llmChat(system, user, {
+    return llmChat(system, userText, {
       apiKey: opts.apiKey,
       model: opts.model,
       baseUrl: opts.baseUrl,
@@ -192,26 +200,36 @@ export async function runLlmReview(
       signal: opts.signal,
       onUsage: opts.onUsage,
       onAttempt: opts.onAttempt,
+      attemptLineage,
     });
   };
 
   // Production review targets are configured at max effort.
   const reviewThinking = true;
-  // One discovery request only. llmChat owns bounded same-provider rate-limit
-  // retries and answer-only JSON/prefix continuations; replaying a complete
-  // max-reasoning call for malformed JSON doubled spend without adding evidence.
-  // Invalid output after those bounded continuations degrades visibly and the
+  // One discovery request plus bounded fresh semantic repairs for completed
+  // contract misses. Truncated JSON is finished in-request by llmChat.
+  // Invalid output after those bounded recoveries degrades visibly and the
   // required-lens gate prevents it from being reported as a clean review.
   let parsed: LlmReviewResponse;
   try {
-    parsed = parseReviewJson(await call(reviewThinking));
+    parsed = await recoverStructuredFinal({
+      stage: 'review',
+      model: opts.model,
+      provider: opts.api ?? opts.target?.transport,
+      api: opts.api ?? opts.target?.transport,
+      generate: ({ source, previousText }) =>
+        invoke(
+          source === 'recovery' ? false : reviewThinking,
+          source === 'recovery' ? wrapStructuredFinalRepairUser(user, previousText) : user,
+        ),
+      parse: parseReviewJson,
+      log: (entry) => console.log(`[review] ${JSON.stringify(entry)}`),
+    });
   } catch (err) {
     if (isReviewCancelledError(err) || opts.signal?.aborted) throw err;
     const message = (err as Error).message;
     if (isTransientLlmError(message) || isRetryableRateLimit(message)) throw err;
-    // Invalid JSON after in-slot continuations is not a clean empty review.
-    // Callers must fail the required pass, not publish a partial sign-off.
-    console.error('[llm] review response invalid after in-slot continuations:', message);
+    console.error('[llm] review response invalid after structured recovery:', message);
     throw err;
   }
 

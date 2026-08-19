@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   configureLlmProviderCoordinator,
   llmChat,
+  JsonContractMismatchError,
   providerConcurrency,
   providerKeyLane,
   ReviewCancelledError,
@@ -1106,53 +1107,47 @@ test('DeepSeek prefix recovery is bounded without replaying the review', async (
   assert.equal(calls, 3);
 });
 
-test('a prose-only JSON contract is finished by one answer-only continuation', async () => {
+test('a completed prose JSON contract miss is not prefix-continued', async () => {
   const encoder = new TextEncoder();
   let call = 0;
-  const captured = await withStubbedFetch(
-    () => {
-      call++;
-      const content =
-        call === 1 ? 'I reviewed the diff and found nothing.' : '{"findings":[],"summary":"clean"}';
-      return new ReadableStream({
-        start(controller) {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`),
-          );
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
-            ),
-          );
-          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-          controller.close();
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () => {
+          call++;
+          const content = 'I reviewed the diff and found nothing.';
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`,
+                ),
+              );
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+                ),
+              );
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              controller.close();
+            },
+          });
         },
-      });
-    },
-    async () => {
-      const result = await llmChat('sys', 'user', {
-        apiKey: 'test-key',
-        model: 'MiniMax-M3',
-        baseUrl: 'https://minimax.test/v1',
-        api: 'chat',
-        json: true,
-        maxTokens: 16_000,
-      });
-      assert.equal(result, '{"findings":[],"summary":"clean"}');
-    },
+        async () => {
+          await llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'MiniMax-M3',
+            baseUrl: 'https://minimax.test/v1',
+            api: 'chat',
+            json: true,
+            maxTokens: 16_000,
+          });
+        },
+      ),
+    /JSON contract mismatch/,
   );
 
-  assert.equal(captured.length, 2);
-  assert.equal(captured[1]?.url, 'https://minimax.test/v1/chat/completions');
-  assert.deepEqual(
-    (captured[1]?.body.chat_template_kwargs as { thinking_mode?: string } | undefined)
-      ?.thinking_mode,
-    'disabled',
-  );
-  const messages = captured[1]?.body.messages as Array<{ role: string; content: string }>;
-  assert.equal(messages.at(-2)?.role, 'assistant');
-  assert.equal(messages.at(-2)?.content, '{"findings":');
-  assert.match(messages.at(-1)?.content ?? '', /complete the json object/i);
+  assert.equal(call, 1, 'completed non-JSON must not enter same-response continuation');
 });
 
 test('an identical schema-wrong complete object is not prefix-continued', async () => {
@@ -2468,6 +2463,90 @@ test('MiniMax max_tokens continues as answer-only JSON instead of marking the le
   const continuationMessages = requests[1]?.messages as Array<{ role: string; content: string }>;
   assert.equal(continuationMessages.at(-1)?.role, 'assistant');
   assert.equal(continuationMessages.at(-1)?.content, '{"findings":[');
+});
+
+test('MiniMax end_turn prose does not continue the same response', async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const anthropic = {
+    messages: {
+      stream(params: Record<string, unknown>) {
+        requests.push(params);
+        const message = {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'This change looks safe overall. No blocking issues.',
+            },
+          ],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 12, output_tokens: 40 },
+        };
+        const stream = new FakeAnthropicStream(message);
+        queueMicrotask(() => stream.resolve(message));
+        return stream;
+      },
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'MiniMax-M3',
+        api: 'anthropic',
+        json: true,
+        jsonContractPrefix: '{"findings":',
+        maxTokens: 48_000,
+        dependencies: { anthropic },
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof JsonContractMismatchError);
+      assert.equal(error.failureClass, 'complete_non_json');
+      assert.equal(error.recoveryMode, 'fresh_semantic_repair');
+      assert.equal(error.stopReason, 'end_turn');
+      return true;
+    },
+  );
+  assert.equal(requests.length, 1, 'end_turn prose must not seed a findings prefix continuation');
+});
+
+test('MiniMax end_turn open JSON is a complete schema failure, not truncation', async () => {
+  let calls = 0;
+  const anthropic = {
+    messages: {
+      stream() {
+        calls++;
+        const message = {
+          content: [{ type: 'text' as const, text: '{"findings":[' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 12, output_tokens: 40 },
+        };
+        const stream = new FakeAnthropicStream(message);
+        queueMicrotask(() => stream.resolve(message));
+        return stream;
+      },
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'MiniMax-M3',
+        api: 'anthropic',
+        json: true,
+        jsonContractPrefix: '{"findings":',
+        maxTokens: 48_000,
+        dependencies: { anthropic },
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof JsonContractMismatchError);
+      assert.equal(error.failureClass, 'complete_invalid_json');
+      assert.equal(error.recoveryMode, 'fresh_semantic_repair');
+      return true;
+    },
+  );
+  assert.equal(calls, 1);
 });
 
 test('Anthropic max_tokens continuation uses jsonContractPrefix for verifier JSON', async () => {

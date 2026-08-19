@@ -83,6 +83,11 @@ export interface LlmClientOptions {
   jsonSchema?: JsonSchemaContract;
   /** Internal per-request wall cap; public review calls use the configured LLM max-total cap. */
   hardLimitMs?: number;
+  /**
+   * Last provider stop/finish reason for this attempt. Transports write this
+   * so structured-output recovery can distinguish truncation from completion.
+   */
+  generationStopReason?: string | null;
   dependencies?: LlmClientDependencies;
 }
 
