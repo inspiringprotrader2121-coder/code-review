@@ -119,6 +119,7 @@ export const APP_DATABASE_COMPATIBILITY_METHODS = [
   'completeReviewRun',
   'startReviewRunAttempt',
   'completeReviewRunAttempt',
+  'recordReviewRunAttemptCoverage',
   'listReviewRunAttempts',
   'recordReviewRunUsage',
   'listReviewRunUsage',

@@ -167,6 +167,8 @@ export type ReviewRunAttemptOutcome =
   | 'cancelled'
   | 'rate_limited';
 
+export type ReviewRunAttemptCoverageStatus = 'pending' | 'succeeded' | 'failed';
+
 export interface ReviewRunAttempt {
   id: string;
   runId: string;
@@ -183,6 +185,10 @@ export interface ReviewRunAttempt {
   outcome: ReviewRunAttemptOutcome;
   /** Whether this attempt reached provider-side execution after admission. */
   dispatched: boolean;
+  /** Whether this attempt produced a legal review object. Independent of `outcome`. */
+  coverageStatus: ReviewRunAttemptCoverageStatus;
+  coverageFailure?: string;
+  parseResult?: string;
   error?: string;
   durationMs: number;
   startedAt: string;

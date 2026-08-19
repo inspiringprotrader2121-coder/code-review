@@ -49,6 +49,12 @@ export interface ReviewAttemptStore {
     completedAt: string;
     error?: string;
   }): boolean;
+  recordReviewRunAttemptCoverage(input: {
+    id: string;
+    coverageStatus: 'succeeded' | 'failed';
+    coverageFailure?: string;
+    parseResult?: string;
+  }): boolean;
 }
 
 export interface ReviewUsageAccountingDependencies {
@@ -149,6 +155,16 @@ export function createReviewUsageAccounting(
         startedAt: event.startedAt,
       });
       if (!started) dependencies.onOwnershipLoss();
+      return;
+    }
+    if (event.phase === 'coverage') {
+      const recorded = dependencies.store.recordReviewRunAttemptCoverage({
+        id: event.attemptId,
+        coverageStatus: event.coverageStatus,
+        coverageFailure: event.coverageFailure,
+        parseResult: event.parseResult,
+      });
+      if (!recorded) dependencies.onOwnershipLoss();
       return;
     }
     const completed = dependencies.store.completeReviewRunAttempt({

@@ -8,6 +8,11 @@
 import { JsonContractMismatchError } from './parsing.js';
 import { isReviewCancelledError } from './cancellation.js';
 import { safePromptData } from '../prompt-safety.js';
+import {
+  coverageFailureFromError,
+  failureClassFromError,
+  parseResultFromError,
+} from './review-contract.js';
 
 export const MAX_STRUCTURED_FINAL_REPAIR_ATTEMPTS = 2;
 
@@ -20,6 +25,9 @@ export function structuredFinalRepairInstruction(): string {
     'Do not wrap the object in markdown.',
     'Return only the complete structured review result.',
     'An empty findings array is valid if there are no actionable findings.',
+    'Preserve any legitimate findings from your previous analysis, but correct their structure and required fields.',
+    'Do not emit placeholder findings with empty file or message fields.',
+    'If there are no issues, return {"findings":[],"summary":"No actionable issues"}.',
   ].join('\n');
 }
 
@@ -49,7 +57,7 @@ export function isStructuredFinalContractError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
     name === 'ZodError' ||
-    /no parseable JSON|JSON contract mismatch|missing findings\/issues|no usable findings|review JSON was missing/i.test(
+    /no parseable JSON|JSON contract mismatch|missing findings\/issues|no usable findings|review JSON was missing|summary claims findings/i.test(
       message,
     )
   );
@@ -110,9 +118,12 @@ export async function recoverStructuredFinal<T>(
       if (!isContractError(error) || repairAttempt >= maxRepairAttempts) {
         emit({
           source,
-          parseResult: 'invalid',
-          failureClass:
-            error instanceof JsonContractMismatchError ? error.failureClass : 'complete_non_json',
+          parseResult: parseResultFromError(error),
+          failureClass: failureClassFromError(error),
+          coverageStatus: 'failed',
+          coverageFailure: isContractError(error)
+            ? coverageFailureFromError(error)
+            : 'process_failed',
           recoveryMode: 'fresh_semantic_repair',
           continuationAttempt: 0,
           semanticRepairAttempt: repairAttempt,
@@ -124,9 +135,10 @@ export async function recoverStructuredFinal<T>(
       previousText = previousTextFrom(error) || previousText;
       emit({
         source,
-        parseResult: error instanceof JsonContractMismatchError ? error.parseResult : 'invalid',
-        failureClass:
-          error instanceof JsonContractMismatchError ? error.failureClass : 'complete_non_json',
+        parseResult: parseResultFromError(error),
+        failureClass: failureClassFromError(error),
+        coverageStatus: 'failed',
+        coverageFailure: coverageFailureFromError(error),
         recoveryMode: 'fresh_semantic_repair',
         continuationAttempt: 0,
         semanticRepairAttempt: repairAttempt,
@@ -144,6 +156,7 @@ export async function recoverStructuredFinal<T>(
         responseShape: 'final',
         parseResult: 'ok',
         failureClass: 'valid_final',
+        coverageStatus: 'succeeded',
         recoveryMode: repairAttempt > 0 ? 'fresh_semantic_repair' : 'none',
         continuationAttempt: 0,
         semanticRepairAttempt: repairAttempt,
@@ -154,8 +167,10 @@ export async function recoverStructuredFinal<T>(
       if (!isContractError(error) || repairAttempt >= maxRepairAttempts) {
         emit({
           source,
-          parseResult: 'invalid',
-          failureClass: 'schema_mismatch',
+          parseResult: parseResultFromError(error),
+          failureClass: failureClassFromError(error),
+          coverageStatus: 'failed',
+          coverageFailure: coverageFailureFromError(error),
           recoveryMode: 'fresh_semantic_repair',
           continuationAttempt: 0,
           semanticRepairAttempt: repairAttempt,
@@ -166,8 +181,10 @@ export async function recoverStructuredFinal<T>(
       previousText = text || previousTextFrom(error);
       emit({
         source,
-        parseResult: 'schema_mismatch',
-        failureClass: 'schema_mismatch',
+        parseResult: parseResultFromError(error),
+        failureClass: failureClassFromError(error),
+        coverageStatus: 'failed',
+        coverageFailure: coverageFailureFromError(error),
         recoveryMode: 'fresh_semantic_repair',
         continuationAttempt: 0,
         semanticRepairAttempt: repairAttempt,

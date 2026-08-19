@@ -44,6 +44,8 @@ export interface CodexCliReviewResult {
 
 export const DEFAULT_CODEX_CLI_MODEL = 'gpt-5.6-luna';
 export const DEFAULT_CODEX_CLI_REASONING_EFFORT = 'max';
+/** Repair generations are answer-only; they must not resume the malformed thread. */
+export const CODEX_CLI_REPAIR_REASONING_EFFORT = 'low';
 
 export type CodexAuthMode = 'apikey' | 'oauth' | 'unknown';
 

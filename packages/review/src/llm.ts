@@ -20,9 +20,16 @@ import { recoverStructuredFinal, wrapStructuredFinalRepairUser } from './llm/str
 import {
   LlmReviewResponseJsonSchema,
   LlmReviewResponseSchema,
+  FindingSchema,
   type LlmReviewResponse,
   type ReviewableFile,
 } from './types.js';
+import {
+  coverageFailureFromError,
+  rawFindingCount,
+  summaryClaimsIssues,
+  type ReviewCoverageFailure,
+} from './llm/review-contract.js';
 
 const REVIEW_JSON_SCHEMA_CONTRACT = {
   name: 'orvex_review',
@@ -110,12 +117,110 @@ function hasDiscoveryContract(json: unknown): boolean {
   return Array.isArray(root.findings) || Array.isArray(root.issues);
 }
 
-export function parseReviewJson(text: string): LlmReviewResponse {
-  const extracted = extractJsonLoose(text);
-  if (!hasDiscoveryContract(extracted)) {
-    throw new Error('LLM review JSON was missing findings/issues');
+export interface ReviewContractInterpretation {
+  ok: boolean;
+  response?: LlmReviewResponse;
+  error?: Error;
+  usableFindingCount: number;
+  rejectedFindingCount: number;
+  coverageFailure?: ReviewCoverageFailure;
+}
+
+export function interpretReviewContract(text: string): ReviewContractInterpretation {
+  let extracted: unknown;
+  try {
+    extracted = extractJsonLoose(text);
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    return {
+      ok: false,
+      error: err,
+      usableFindingCount: 0,
+      rejectedFindingCount: 0,
+      coverageFailure: coverageFailureFromError(err),
+    };
   }
-  return LlmReviewResponseSchema.parse(normalizeLlmResponse(extracted));
+  if (!hasDiscoveryContract(extracted)) {
+    const error = new Error('LLM review JSON was missing findings/issues');
+    return {
+      ok: false,
+      error,
+      usableFindingCount: 0,
+      rejectedFindingCount: 0,
+      coverageFailure: 'invalid_review_contract',
+    };
+  }
+  let normalized: { findings: unknown[]; summary?: string };
+  try {
+    normalized = normalizeLlmResponse(extracted) as {
+      findings: unknown[];
+      summary?: string;
+    };
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    return {
+      ok: false,
+      error: err,
+      usableFindingCount: 0,
+      rejectedFindingCount: rawFindingCount(extracted),
+      coverageFailure: coverageFailureFromError(err),
+    };
+  }
+  const kept: LlmReviewResponse['findings'] = [];
+  let droppedAfterNormalize = 0;
+  for (const raw of normalized.findings) {
+    const parsed = FindingSchema.safeParse(raw);
+    if (parsed.success && parsed.data.file.trim() && parsed.data.message.trim()) {
+      kept.push(parsed.data);
+    } else {
+      droppedAfterNormalize += 1;
+    }
+  }
+  const droppedDuringNormalize = Math.max(
+    0,
+    rawFindingCount(extracted) - normalized.findings.length,
+  );
+  const rejectedFindingCount = droppedDuringNormalize + droppedAfterNormalize;
+  const summary = typeof normalized.summary === 'string' ? normalized.summary : undefined;
+  if (kept.length === 0 && rejectedFindingCount > 0) {
+    const error = new Error('LLM review JSON had no usable findings');
+    return {
+      ok: false,
+      error,
+      usableFindingCount: 0,
+      rejectedFindingCount,
+      coverageFailure: 'all_findings_unusable',
+    };
+  }
+  if (kept.length === 0 && summaryClaimsIssues(summary)) {
+    const error = new Error('LLM review JSON summary claims findings without valid items');
+    return {
+      ok: false,
+      error,
+      usableFindingCount: 0,
+      rejectedFindingCount,
+      coverageFailure: 'summary_claims_findings_without_valid_items',
+    };
+  }
+  return {
+    ok: true,
+    response: LlmReviewResponseSchema.parse({ findings: kept, summary }),
+    usableFindingCount: kept.length,
+    rejectedFindingCount,
+  };
+}
+
+export function parseReviewJson(text: string): LlmReviewResponse {
+  const interpreted = interpretReviewContract(text);
+  if (!interpreted.ok || !interpreted.response) {
+    throw interpreted.error ?? new Error('LLM review JSON was missing findings/issues');
+  }
+  if (interpreted.rejectedFindingCount > 0) {
+    console.warn(
+      `[review] dropped ${interpreted.rejectedFindingCount} malformed finding(s); kept ${interpreted.usableFindingCount}`,
+    );
+  }
+  return interpreted.response;
 }
 
 export async function runLlmReview(
@@ -223,7 +328,19 @@ export async function runLlmReview(
           source === 'recovery' ? wrapStructuredFinalRepairUser(user, previousText) : user,
         ),
       parse: parseReviewJson,
-      log: (entry) => console.log(`[review] ${JSON.stringify(entry)}`),
+      log: (entry) => {
+        console.log(`[review] ${JSON.stringify(entry)}`);
+        const attemptId = attemptLineage.lastAttemptId;
+        if (!attemptId || !opts.onAttempt) return;
+        opts.onAttempt({
+          phase: 'coverage',
+          attemptId,
+          coverageStatus: entry.accepted ? 'succeeded' : 'failed',
+          coverageFailure:
+            typeof entry.coverageFailure === 'string' ? entry.coverageFailure : undefined,
+          parseResult: typeof entry.parseResult === 'string' ? entry.parseResult : undefined,
+        });
+      },
     });
   } catch (err) {
     if (isReviewCancelledError(err) || opts.signal?.aborted) throw err;

@@ -51,6 +51,14 @@ export const REVIEW_ATTEMPT_ROLE_ARTIFACT: ExecutableMigrationArtifact = Object.
   ]),
 });
 
+export const REVIEW_ATTEMPT_COVERAGE_ARTIFACT: ExecutableMigrationArtifact = Object.freeze({
+  format: 'sqlite-program-v1',
+  operations: Object.freeze([
+    'add review_run_attempts.coverage_status distinct from process outcome',
+    'add review_run_attempts.coverage_failure and parse_result',
+  ]),
+});
+
 export const REVIEW_USAGE_LUNA_REPRICE_ARTIFACT: ExecutableMigrationArtifact = Object.freeze({
   format: 'sqlite-sql-v1',
   sql: `
@@ -347,6 +355,12 @@ export const STORE_MIGRATIONS: readonly StoreMigrationMetadata[] = Object.freeze
     timestamp: '2026-08-11T00:00:00.000Z',
     name: 'reprice-gpt-5-6-luna-usage',
     artifact: REVIEW_USAGE_LUNA_REPRICE_ARTIFACT,
+  }),
+  defineExecutableMigration({
+    version: 23,
+    timestamp: '2026-08-19T00:00:00.000Z',
+    name: 'review-attempt-coverage-status',
+    artifact: REVIEW_ATTEMPT_COVERAGE_ARTIFACT,
   }),
 ]);
 

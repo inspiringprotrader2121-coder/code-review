@@ -15,11 +15,13 @@ export {
 export {
   runLlmReview,
   parseReviewJson,
+  interpretReviewContract,
   llmFindingsToReviewFindings,
   formatReviewComment,
   isTransientLlmError,
   REVIEW_INCOMPLETE_SUMMARY,
   type LlmReviewOptions,
+  type ReviewContractInterpretation,
 } from './llm.js';
 export {
   runCodexCliReview,
@@ -39,6 +41,7 @@ export {
   resolveCodexRateLimitPolicy,
   DEFAULT_CODEX_CLI_MODEL,
   DEFAULT_CODEX_CLI_REASONING_EFFORT,
+  CODEX_CLI_REPAIR_REASONING_EFFORT,
   type CodexAuthMode,
   type CodexCliReviewOptions,
   type CodexCliReviewResult,

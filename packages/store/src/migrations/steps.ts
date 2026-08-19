@@ -2,6 +2,7 @@ import type { SqliteConnection } from '../connection.js';
 import {
   REVIEW_ATTEMPT_DISPATCH_ARTIFACT,
   REVIEW_ATTEMPT_ROLE_ARTIFACT,
+  REVIEW_ATTEMPT_COVERAGE_ARTIFACT,
   REVIEW_USAGE_LUNA_REPRICE_ARTIFACT,
   REVIEW_USAGE_CACHE_PRICING_ARTIFACT,
   REVIEW_USAGE_CACHE_WRITE_PRICING_ARTIFACT,
@@ -304,6 +305,18 @@ function migrateReviewAttemptRoleColumn(db: SqliteConnection): void {
     );
 }
 
+function migrateReviewAttemptCoverageColumns(db: SqliteConnection): void {
+  const current = columns(db, 'review_run_attempts');
+  if (!current.has('coverage_status'))
+    db.exec(
+      `ALTER TABLE review_run_attempts ADD COLUMN coverage_status TEXT NOT NULL DEFAULT 'pending' CHECK (coverage_status IN ('pending', 'succeeded', 'failed'))`,
+    );
+  if (!current.has('coverage_failure'))
+    db.exec(`ALTER TABLE review_run_attempts ADD COLUMN coverage_failure TEXT`);
+  if (!current.has('parse_result'))
+    db.exec(`ALTER TABLE review_run_attempts ADD COLUMN parse_result TEXT`);
+}
+
 function migrateCanonicalMigrationArtifacts(db: SqliteConnection): void {
   if (!columns(db, 'orvex_schema_migrations').has('artifact_timestamp'))
     db.exec(`ALTER TABLE orvex_schema_migrations ADD COLUMN artifact_timestamp TEXT`);
@@ -461,6 +474,11 @@ export const STORE_MIGRATION_STEPS: readonly ExecutableMigrationStep[] = Object.
         if (typeof statement !== 'string') throw new Error('Luna reprice migration is missing SQL');
         db.exec(statement);
       },
+    },
+    {
+      version: 23,
+      artifact: REVIEW_ATTEMPT_COVERAGE_ARTIFACT,
+      apply: migrateReviewAttemptCoverageColumns,
     },
   ].map((step) => Object.freeze(step)),
 );

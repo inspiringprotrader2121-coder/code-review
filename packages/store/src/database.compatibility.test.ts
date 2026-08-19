@@ -120,6 +120,7 @@ test('all AppDatabase public methods are thin declared repository delegates', ()
     ['completeReviewRun', 'reviewState'],
     ['startReviewRunAttempt', 'reviewState'],
     ['completeReviewRunAttempt', 'reviewState'],
+    ['recordReviewRunAttemptCoverage', 'reviewState'],
     ['listReviewRunAttempts', 'reviewState'],
     ['recordReviewRunUsage', 'reviewState'],
     ['listReviewRunUsage', 'reviewState'],

@@ -15,6 +15,7 @@ import {
   CountingSemaphore,
   codexAllowedRepos,
   DEFAULT_CODEX_CLI_MODEL,
+  CODEX_CLI_REPAIR_REASONING_EFFORT,
   detectCodexAuthMode,
   isCodexRepoAllowed,
   isRecoverableSandboxLaunchFailure,
@@ -34,7 +35,12 @@ import {
   resetLocalProviderTpm,
   tryReserveProviderTpm,
 } from './llm-client.js';
-import type { Clock, CodexContainerRequest, CodexContainerRuntime } from './providers/types.js';
+import type {
+  Clock,
+  CodexContainerRequest,
+  CodexContainerRuntime,
+  ModelAttemptEvent,
+} from './providers/types.js';
 
 function withRepos(value: string | undefined, fn: () => void) {
   const prev = process.env.ORVEX_CODEX_CLI_REPOS;
@@ -1186,4 +1192,287 @@ test('Codex Luna TPM reservation commits billed tokens on success', async () => 
     assert.equal(commits[0]?.lane, 'luna');
     assert.equal(commits[0]?.actualTokens, 120);
   });
+});
+
+function lunaOk(threadId: string, lastMessage: string) {
+  return {
+    exitCode: 0,
+    stdout: `${JSON.stringify({ type: 'thread.started', thread_id: threadId })}\n`,
+    stderr: '',
+    lastMessage,
+    timedOut: false,
+    durationMs: 1,
+  };
+}
+
+async function runLunaWithMessages(
+  messages: string[],
+  extras: {
+    onAttempt?: (event: ModelAttemptEvent) => void;
+    inspect?: (request: CodexContainerRequest, run: number) => void;
+  } = {},
+) {
+  return withCodexTpmHarness(async ({ home, checkout }) => {
+    let runs = 0;
+    const result = await runCodexCliReview(
+      [{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }],
+      {
+        repoId: 'trusted/repo',
+        cwd: checkout,
+        codexHome: home,
+        onAttempt: extras.onAttempt,
+        dependencies: {
+          clock: instantClock,
+          admission: tpmAdmission(async () => ({ ok: true, used: 0 })),
+          codexContainer: {
+            assertReady: async () => {},
+            run: async (request) => {
+              runs++;
+              extras.inspect?.(request, runs);
+              const message =
+                messages[Math.min(runs, messages.length) - 1] ?? messages.at(-1) ?? '';
+              return lunaOk(`luna-${runs}`, message);
+            },
+          },
+        },
+      },
+    );
+    return { result, runs };
+  });
+}
+
+test('Luna empty findings with a no-issues summary is successful coverage', async () => {
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    const coverage: Array<Record<string, unknown>> = [];
+    const result = await runCodexCliReview(
+      [{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }],
+      {
+        repoId: 'trusted/repo',
+        cwd: checkout,
+        codexHome: home,
+        onAttempt: (event) => {
+          if (event.phase === 'coverage') coverage.push(event);
+        },
+        dependencies: {
+          clock: instantClock,
+          admission: tpmAdmission(async () => ({ ok: true, used: 0 })),
+          codexContainer: {
+            assertReady: async () => {},
+            run: async () =>
+              lunaOk('luna-empty', '{"findings":[],"summary":"No actionable issues"}'),
+          },
+        },
+      },
+    );
+    assert.equal(result.response.findings.length, 0);
+    assert.equal(result.response.summary, 'No actionable issues');
+    assert.equal(coverage.at(-1)?.coverageStatus, 'succeeded');
+  });
+});
+
+test('Luna keeps mixed valid findings and does not repair the whole object', async () => {
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    let runs = 0;
+    const result = await runCodexCliReview(
+      [{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }],
+      {
+        repoId: 'trusted/repo',
+        cwd: checkout,
+        codexHome: home,
+        dependencies: {
+          clock: instantClock,
+          admission: tpmAdmission(async () => ({ ok: true, used: 0 })),
+          codexContainer: {
+            assertReady: async () => {},
+            run: async () => {
+              runs++;
+              return lunaOk(
+                'luna-mixed',
+                JSON.stringify({
+                  findings: [
+                    { file: 'a.ts', line: 1, message: 'keep', severity: 'P2', confidence: 0.8 },
+                    { file: '', message: '' },
+                    { message: 'orphan' },
+                    { file: 'b.ts', message: 'also keep', severity: 'P3', confidence: 0.7 },
+                    { file: 'c.ts' },
+                  ],
+                  summary: 'two real issues',
+                }),
+              );
+            },
+          },
+        },
+      },
+    );
+    assert.equal(runs, 1);
+    assert.equal(result.response.findings.length, 2);
+    assert.deepEqual(
+      result.response.findings.map((finding) => finding.file),
+      ['a.ts', 'b.ts'],
+    );
+  });
+});
+
+test('#311 Luna JSON with unusable findings is repaired, not treated as empty', async () => {
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    const prompts: string[] = [];
+    const efforts: string[] = [];
+    let runs = 0;
+    const result = await runCodexCliReview(
+      [{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }],
+      {
+        repoId: 'trusted/repo',
+        cwd: checkout,
+        codexHome: home,
+        dependencies: {
+          clock: instantClock,
+          admission: tpmAdmission(async () => ({ ok: true, used: 0 })),
+          codexContainer: {
+            assertReady: async () => {},
+            run: async (request) => {
+              runs++;
+              prompts.push(request.prompt);
+              const effort = request.args.find((arg) => arg.includes('model_reasoning_effort='));
+              if (effort) efforts.push(effort);
+              if (runs === 1) {
+                return lunaOk(
+                  'luna-unusable',
+                  '{"findings":[{"file":"","line":null,"message":""}],"summary":"Found 1 P1"}',
+                );
+              }
+              assert.equal(request.args.includes('resume'), false, 'repair uses a fresh thread');
+              return lunaOk(
+                'luna-unusable-repair',
+                '{"findings":[{"file":"a.ts","line":3,"message":"use after free","severity":"P1","confidence":0.9}],"summary":"1 issue"}',
+              );
+            },
+          },
+        },
+      },
+    );
+    assert.equal(runs, 2);
+    assert.match(prompts[1] ?? '', /did not satisfy the required review JSON schema/i);
+    assert.doesNotMatch(prompts[1] ?? '', /Complete the JSON object now/);
+    assert.ok(efforts[0]?.includes('"max"'));
+    assert.ok(efforts[1]?.includes(`"${CODEX_CLI_REPAIR_REASONING_EFFORT}"`));
+    assert.equal(result.response.findings.length, 1);
+    assert.equal(result.response.findings[0]?.file, 'a.ts');
+  });
+});
+
+test('#319 Luna no parseable JSON: repair #1 invalid, repair #2 valid', async () => {
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    let runs = 0;
+    const coverage: Array<Record<string, unknown>> = [];
+    const result = await runCodexCliReview(
+      [{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }],
+      {
+        repoId: 'trusted/repo',
+        cwd: checkout,
+        codexHome: home,
+        onAttempt: (event) => {
+          if (event.phase === 'coverage') coverage.push(event);
+        },
+        dependencies: {
+          clock: instantClock,
+          admission: tpmAdmission(async () => ({ ok: true, used: 0 })),
+          codexContainer: {
+            assertReady: async () => {},
+            run: async () => {
+              runs++;
+              if (runs < 3) return lunaOk(`luna-prose-${runs}`, 'This change looks safe overall.');
+              return lunaOk('luna-prose-fixed', '{"findings":[],"summary":"No actionable issues"}');
+            },
+          },
+        },
+      },
+    );
+    assert.equal(runs, 3, 'primary plus two bounded semantic repairs');
+    assert.equal(result.response.findings.length, 0);
+    assert.equal(coverage.filter((event) => event.coverageStatus === 'failed').length, 2);
+    assert.equal(coverage.at(-1)?.coverageStatus, 'succeeded');
+    assert.equal(coverage.at(-1)?.coverageFailure, undefined);
+  });
+});
+
+test('Luna fail-closes after two repairs stay unparseable and records coverage failure', async () => {
+  await withCodexTpmHarness(async ({ home, checkout }) => {
+    let runs = 0;
+    const coverage: Array<Record<string, unknown>> = [];
+    const finished: Array<Record<string, unknown>> = [];
+    await assert.rejects(
+      () =>
+        runCodexCliReview([{ filename: 'src/a.ts', status: 'modified', patch: '+safe\n' }], {
+          repoId: 'trusted/repo',
+          cwd: checkout,
+          codexHome: home,
+          onAttempt: (event) => {
+            if (event.phase === 'finished') finished.push(event);
+            if (event.phase === 'coverage') coverage.push(event);
+          },
+          dependencies: {
+            clock: instantClock,
+            admission: tpmAdmission(async () => ({ ok: true, used: 0 })),
+            codexContainer: {
+              assertReady: async () => {},
+              run: async () => {
+                runs++;
+                return lunaOk(`luna-miss-${runs}`, 'still prose, no review object');
+              },
+            },
+          },
+        }),
+      /no parseable JSON/,
+    );
+    assert.equal(runs, 3, 'primary plus two bounded repairs');
+    assert.ok(finished.every((event) => event.outcome === 'succeeded'));
+    assert.ok(coverage.every((event) => event.coverageStatus === 'failed'));
+    assert.equal(coverage.at(-1)?.coverageFailure, 'no_parseable_review_json');
+  });
+});
+
+test('Luna valid findings complete coverage without repair', async () => {
+  const { result, runs } = await runLunaWithMessages([
+    '{"findings":[{"file":"src/a.ts","line":4,"message":"null deref","severity":"P2","confidence":0.9}],"summary":"1 issue"}',
+  ]);
+  assert.equal(runs, 1);
+  assert.equal(result.response.findings.length, 1);
+  assert.equal(result.response.findings[0]?.file, 'src/a.ts');
+});
+
+test('Luna malformed complete JSON is repaired with a fresh object, not continuation', async () => {
+  const prompts: string[] = [];
+  const { result, runs } = await runLunaWithMessages(
+    [
+      '{"findings":[{"file":"src/a.ts","message":"broken"',
+      '{"findings":[{"file":"src/a.ts","line":2,"message":"use after free","severity":"P1","confidence":0.9}],"summary":"1 issue"}',
+    ],
+    {
+      inspect: (request) => prompts.push(request.prompt),
+    },
+  );
+  assert.equal(runs, 2);
+  assert.match(prompts[1] ?? '', /did not satisfy the required review JSON schema/i);
+  assert.doesNotMatch(prompts[1] ?? '', /Complete the JSON object now/);
+  assert.equal(result.response.findings[0]?.file, 'src/a.ts');
+});
+
+test('Luna wrong-schema JSON is a completed contract miss and is repaired', async () => {
+  const { result, runs } = await runLunaWithMessages([
+    '{"verdicts":[],"result":"looks good"}',
+    '{"findings":[],"summary":"No actionable issues found."}',
+  ]);
+  assert.equal(runs, 2);
+  assert.equal(result.response.findings.length, 0);
+  assert.match(result.response.summary ?? '', /no actionable issues/i);
+});
+
+test('#311 Luna repair may legitimately conclude there are no actionable findings', async () => {
+  const { result, runs } = await runLunaWithMessages([
+    '{"findings":[{"file":"","line":null,"message":""}],"summary":"There is a serious issue."}',
+    '{"findings":[],"summary":"After correction, there are no actionable findings."}',
+  ]);
+  assert.equal(runs, 2);
+  assert.equal(result.response.findings.length, 0);
+  assert.match(result.response.summary ?? '', /no actionable findings/i);
 });

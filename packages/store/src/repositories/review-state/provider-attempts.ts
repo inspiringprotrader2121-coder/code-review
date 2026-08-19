@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { SqliteConnection } from '../../connection.js';
 import type {
   ReviewRunAttempt,
+  ReviewRunAttemptCoverageStatus,
   ReviewRunAttemptOutcome,
   ReviewRunStatus,
   ReviewRunUsage,
@@ -19,7 +20,14 @@ export class SqliteReviewAttemptRepository {
   startReviewRunAttempt(
     input: Omit<
       ReviewRunAttempt,
-      'role' | 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'
+      | 'role'
+      | 'outcome'
+      | 'dispatched'
+      | 'durationMs'
+      | 'completedAt'
+      | 'coverageStatus'
+      | 'coverageFailure'
+      | 'parseResult'
     > & { role?: ReviewRunAttempt['role'] },
   ): boolean {
     const run = this.db
@@ -77,7 +85,9 @@ export class SqliteReviewAttemptRepository {
     return (
       this.db
         .prepare(
-          `UPDATE review_run_attempts SET outcome = ?, dispatched = ?, error = ?, duration_ms = ?, completed_at = ?
+          `UPDATE review_run_attempts SET outcome = ?, dispatched = ?, error = ?, duration_ms = ?, completed_at = ?,
+            coverage_status = CASE WHEN ? = 'succeeded' THEN coverage_status ELSE 'failed' END,
+            coverage_failure = CASE WHEN ? = 'succeeded' THEN coverage_failure ELSE COALESCE(coverage_failure, 'process_failed') END
        WHERE id = ? AND outcome = 'running' AND EXISTS (
          SELECT 1 FROM review_runs WHERE review_runs.id = review_run_attempts.run_id
          AND review_runs.status = 'running' AND review_runs.worker_id = ?
@@ -89,6 +99,8 @@ export class SqliteReviewAttemptRepository {
           input.error ?? null,
           Math.floor(input.durationMs),
           input.completedAt,
+          input.outcome,
+          input.outcome,
           input.id,
           this.workerId,
         ).changes > 0
@@ -114,6 +126,9 @@ export class SqliteReviewAttemptRepository {
       keyIndex: Number(row.key_index),
       outcome: row.outcome as ReviewRunAttemptOutcome,
       dispatched: Number(row.dispatched) === 1,
+      coverageStatus: (row.coverage_status as ReviewRunAttemptCoverageStatus) ?? 'pending',
+      coverageFailure: row.coverage_failure ? String(row.coverage_failure) : undefined,
+      parseResult: row.parse_result ? String(row.parse_result) : undefined,
       error: row.error ? String(row.error) : undefined,
       durationMs: Number(row.duration_ms),
       startedAt: String(row.started_at),
@@ -250,9 +265,37 @@ export class SqliteReviewAttemptRepository {
     this.db
       .prepare(
         `UPDATE review_run_attempts SET outcome = ?, error = COALESCE(error, ?), completed_at = ?,
-       duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER))
+       duration_ms = MAX(0, CAST((julianday(?) - julianday(started_at)) * 86400000 AS INTEGER)),
+       coverage_status = CASE WHEN coverage_status = 'pending' THEN 'failed' ELSE coverage_status END,
+       coverage_failure = COALESCE(coverage_failure, 'process_failed')
        WHERE run_id = ? AND outcome = 'running'`,
       )
       .run(outcome, error, completedAt, completedAt, runId);
+  }
+
+  recordReviewRunAttemptCoverage(input: {
+    id: string;
+    coverageStatus: Exclude<ReviewRunAttemptCoverageStatus, 'pending'>;
+    coverageFailure?: string;
+    parseResult?: string;
+  }): boolean {
+    return (
+      this.db
+        .prepare(
+          `UPDATE review_run_attempts
+       SET coverage_status = ?, coverage_failure = ?, parse_result = ?
+       WHERE id = ? AND outcome != 'running' AND EXISTS (
+         SELECT 1 FROM review_runs WHERE review_runs.id = review_run_attempts.run_id
+         AND review_runs.status = 'running' AND review_runs.worker_id = ?
+       )`,
+        )
+        .run(
+          input.coverageStatus,
+          input.coverageFailure ?? null,
+          input.parseResult ?? null,
+          input.id,
+          this.workerId,
+        ).changes > 0
+    );
   }
 }

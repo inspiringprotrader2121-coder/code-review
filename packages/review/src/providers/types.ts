@@ -43,6 +43,16 @@ export type ModelAttemptEvent =
       durationMs: number;
       completedAt: string;
       error?: string;
+    }
+  | {
+      phase: 'coverage';
+      attemptId: string;
+      /** Whether this attempt produced a legal review object. Independent of process outcome. */
+      coverageStatus: 'succeeded' | 'failed';
+      coverageFailure?: string;
+      parseResult?: string;
+      keptFindings?: number;
+      droppedFindings?: number;
     };
 
 export interface AttemptObserver {

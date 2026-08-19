@@ -17,6 +17,7 @@ export type {
   ReviewRunUsage,
   ReviewRunAttempt,
   ReviewRunAttemptOutcome,
+  ReviewRunAttemptCoverageStatus,
   ScorecardRun,
   StripeRevenueEvent,
   StripeMeterEvent,

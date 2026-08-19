@@ -655,6 +655,10 @@ test('usage accounting records provider lifecycle through its narrow store port'
         attempts.push(event);
         return true;
       },
+      recordReviewRunAttemptCoverage: (event) => {
+        attempts.push(event);
+        return true;
+      },
     },
     onOwnershipLoss: () => assert.fail('the fake store retains ownership'),
   });
@@ -721,6 +725,43 @@ test('usage accounting records provider lifecycle through its narrow store port'
     out: 5,
     costUsd: 0.0000066,
   });
+});
+
+test('usage accounting stores coverage status separately from process outcome', () => {
+  const coverage: unknown[] = [];
+  const accounting = createReviewUsageAccounting({
+    runId: 'run-1',
+    tenantId: 'tenant-1',
+    policy: DEFAULT_USAGE_COST_POLICY,
+    store: {
+      recordReviewRunUsage: () => ({}),
+      startReviewRunAttempt: () => true,
+      completeReviewRunAttempt: () => true,
+      recordReviewRunAttemptCoverage: (event) => {
+        coverage.push(event);
+        return true;
+      },
+    },
+    onOwnershipLoss: () => assert.fail('the fake store retains ownership'),
+  });
+  accounting.onAttemptFor(
+    'openai',
+    'breadth',
+  )({
+    phase: 'coverage',
+    attemptId: 'attempt-1',
+    coverageStatus: 'failed',
+    coverageFailure: 'invalid_review_contract',
+    parseResult: 'schema_mismatch',
+  });
+  assert.deepEqual(coverage, [
+    {
+      id: 'attempt-1',
+      coverageStatus: 'failed',
+      coverageFailure: 'invalid_review_contract',
+      parseResult: 'schema_mismatch',
+    },
+  ]);
 });
 
 test('verification does not call a provider when the feature is disabled', async () => {

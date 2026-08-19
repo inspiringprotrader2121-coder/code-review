@@ -188,7 +188,7 @@ test('Luna pricing migration repairs only usage recorded at the known bad rate',
         db: { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } };
       }
     ).db;
-    raw.prepare('DELETE FROM orvex_schema_migrations WHERE version = 22').run();
+    raw.prepare('DELETE FROM orvex_schema_migrations WHERE version >= 22').run();
     legacy.close();
 
     const upgraded = new AppDatabase(dbPath, 'upgraded-worker');
@@ -537,6 +537,8 @@ test('provider attempts persist retry lineage and terminal review cleanup', () =
 
   const attempts = db.listReviewRunAttempts(runId);
   assert.equal(attempts[0]?.outcome, 'rate_limited');
+  assert.equal(attempts[0]?.coverageStatus, 'failed');
+  assert.equal(attempts[0]?.coverageFailure, 'process_failed');
   assert.equal(attempts[1]?.parentAttemptId, 'attempt-1');
   assert.equal(attempts[0]?.role, 'primary');
   assert.equal(attempts[1]?.role, 'continuation');
@@ -560,6 +562,65 @@ test('provider attempts persist retry lineage and terminal review cleanup', () =
       }),
     /lineage mismatch/,
   );
+});
+
+test('provider attempt process success is distinct from coverage success', () => {
+  const db = freshDb();
+  const tenant = db.createTenant('coverage');
+  const runId = db.startReviewRun({
+    tenantId: tenant.id,
+    installationId: 1,
+    owner: 'coverage',
+    repo: 'api',
+    pr: 3,
+    headSha: 'sha',
+    action: 'manual',
+  });
+  const startedAt = new Date().toISOString();
+  db.startReviewRunAttempt({
+    id: 'attempt-ok-process',
+    runId,
+    tenantId: tenant.id,
+    provider: 'openai',
+    model: 'gpt-5.6-luna',
+    tier: 'openai',
+    passName: 'breadth',
+    transport: 'codex-cli',
+    retryIndex: 0,
+    keyIndex: 0,
+    startedAt,
+  });
+  assert.equal(
+    db.completeReviewRunAttempt({
+      id: 'attempt-ok-process',
+      outcome: 'succeeded',
+      durationMs: 114_000,
+      completedAt: new Date().toISOString(),
+    }),
+    true,
+  );
+  const afterProcess = db.listReviewRunAttempts(runId)[0];
+  assert.equal(afterProcess?.outcome, 'succeeded');
+  assert.equal(afterProcess?.coverageStatus, 'pending');
+  assert.equal(
+    db.recordReviewRunAttemptCoverage({
+      id: 'attempt-ok-process',
+      coverageStatus: 'failed',
+      coverageFailure: 'all_findings_unusable',
+      parseResult: 'schema_mismatch',
+    }),
+    true,
+  );
+  const afterParse = db.listReviewRunAttempts(runId)[0];
+  assert.equal(afterParse?.outcome, 'succeeded');
+  assert.equal(afterParse?.coverageStatus, 'failed');
+  assert.equal(afterParse?.coverageFailure, 'all_findings_unusable');
+  assert.equal(afterParse?.parseResult, 'schema_mismatch');
+  db.completeReviewRun(runId, {
+    status: 'failed',
+    durationMs: 20,
+    error: 'invalid_review_contract',
+  });
 });
 
 test('usage and retry lineage cannot cross review-run boundaries', () => {

@@ -134,7 +134,14 @@ export class SqliteReviewStateRepository {
   startReviewRunAttempt(
     input: Omit<
       ReviewRunAttempt,
-      'role' | 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'
+      | 'role'
+      | 'outcome'
+      | 'dispatched'
+      | 'durationMs'
+      | 'completedAt'
+      | 'coverageStatus'
+      | 'coverageFailure'
+      | 'parseResult'
     > & { role?: ReviewRunAttempt['role'] },
   ): boolean {
     return this.attempts.startReviewRunAttempt(input);
@@ -148,6 +155,14 @@ export class SqliteReviewStateRepository {
     error?: string;
   }): boolean {
     return this.attempts.completeReviewRunAttempt(input);
+  }
+  recordReviewRunAttemptCoverage(input: {
+    id: string;
+    coverageStatus: Exclude<ReviewRunAttempt['coverageStatus'], 'pending'>;
+    coverageFailure?: string;
+    parseResult?: string;
+  }): boolean {
+    return this.attempts.recordReviewRunAttemptCoverage(input);
   }
   listReviewRunAttempts(runId: string): ReviewRunAttempt[] {
     return this.attempts.listReviewRunAttempts(runId);
@@ -184,6 +199,7 @@ export type ReviewStateRepository = Pick<
   | 'completeReviewRun'
   | 'startReviewRunAttempt'
   | 'completeReviewRunAttempt'
+  | 'recordReviewRunAttemptCoverage'
   | 'listReviewRunAttempts'
   | 'recordReviewRunUsage'
   | 'listReviewRunUsage'

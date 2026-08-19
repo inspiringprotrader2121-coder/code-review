@@ -14,7 +14,9 @@ import {
   type LlmAttemptEvent,
 } from '../llm-client.js';
 import { estimateTokens } from '../llm/support.js';
-import { parseReviewJson } from '../llm.js';
+import { interpretReviewContract } from '../llm.js';
+import { recoverStructuredFinal, wrapStructuredFinalRepairUser } from '../llm/structured-final.js';
+import { reviewResponseFingerprint } from '../llm/review-contract.js';
 import type { ReviewableFile } from '../types.js';
 import type { AttemptObserver, Clock } from '../providers/types.js';
 import type { ProviderTpmPolicy } from '../llm/provider-admission.js';
@@ -31,6 +33,7 @@ import {
 import {
   DEFAULT_CODEX_CLI_MODEL,
   DEFAULT_CODEX_CLI_REASONING_EFFORT,
+  CODEX_CLI_REPAIR_REASONING_EFFORT,
   type CodexCliReviewOptions,
   type CodexCliReviewResult,
 } from './contracts.js';
@@ -119,6 +122,7 @@ async function executeAttempt(
   homeIndex: number,
   threadId: string | undefined,
   waitState: WaitState,
+  reasoningEffort = DEFAULT_CODEX_CLI_REASONING_EFFORT,
 ): Promise<{ text: string; threadId: string }> {
   const homePath = attemptHome(options, homeIndex);
   const authMode = detectCodexAuthMode(homePath);
@@ -183,7 +187,7 @@ async function executeAttempt(
             emitStarted();
             return executeCodex(prompt, {
               model: DEFAULT_CODEX_CLI_MODEL,
-              reasoningEffort: DEFAULT_CODEX_CLI_REASONING_EFFORT,
+              reasoningEffort,
               threadId,
               cwd: options.cwd,
               home: homePath,
@@ -262,12 +266,29 @@ async function executeWithStaleThreadRecovery(
   homeIndex: number,
   threadId: string | undefined,
   waitState: WaitState,
+  reasoningEffort = DEFAULT_CODEX_CLI_REASONING_EFFORT,
 ): Promise<{ text: string; threadId: string }> {
   try {
-    return await executeAttempt(prompt, options, state, homeIndex, threadId, waitState);
+    return await executeAttempt(
+      prompt,
+      options,
+      state,
+      homeIndex,
+      threadId,
+      waitState,
+      reasoningEffort,
+    );
   } catch (error) {
     if (threadId && isStaleThreadError((error as Error).message)) {
-      return executeAttempt(prompt, options, state, homeIndex, undefined, waitState);
+      return executeAttempt(
+        prompt,
+        options,
+        state,
+        homeIndex,
+        undefined,
+        waitState,
+        reasoningEffort,
+      );
     }
     throw error;
   }
@@ -290,6 +311,7 @@ async function executeWithRateLimitRecovery(
   homeIndex: number,
   threadId: string | undefined,
   waitState: WaitState,
+  reasoningEffort = DEFAULT_CODEX_CLI_REASONING_EFFORT,
 ): Promise<{ text: string; threadId: string }> {
   const policy = resolveCodexRateLimitPolicy(
     currentEnvironment(),
@@ -306,6 +328,7 @@ async function executeWithRateLimitRecovery(
         homeIndex,
         threadId,
         waitState,
+        reasoningEffort,
       );
     } catch (error) {
       const message = (error as Error).message;
@@ -344,6 +367,7 @@ async function executeWithSandboxLaunchRecovery(
   homeIndex: number,
   threadId: string | undefined,
   waitState: WaitState,
+  reasoningEffort = DEFAULT_CODEX_CLI_REASONING_EFFORT,
 ): Promise<{ text: string; threadId: string }> {
   let retryThreadId = threadId;
   for (let launchAttempt = 0; launchAttempt < 2; launchAttempt++) {
@@ -355,6 +379,7 @@ async function executeWithSandboxLaunchRecovery(
         homeIndex,
         retryThreadId,
         waitState,
+        reasoningEffort,
       );
     } catch (error) {
       const message = (error as Error).message;
@@ -402,16 +427,131 @@ export async function runCodexCliReview(
   let threadId = stored.homeIdx === homeIndex ? stored.threadId : undefined;
   let usedSlimRetry = promptMode === 'slim';
   let result: { text: string; threadId: string } | undefined;
+  let parsed: NonNullable<ReturnType<typeof interpretReviewContract>['response']> | undefined;
   for (let homeAttempts = 0; ; homeAttempts++) {
     try {
-      result = await executeWithSandboxLaunchRecovery(
-        prompt,
-        options,
-        state,
-        homeIndex,
-        threadId,
-        waitState,
-      );
+      let lastRaw = '';
+      let lastInterpretation: ReturnType<typeof interpretReviewContract> | undefined;
+      parsed = await recoverStructuredFinal({
+        stage: 'luna',
+        model: DEFAULT_CODEX_CLI_MODEL,
+        provider: 'codex-cli',
+        api: 'codex-cli',
+        generate: async ({ source, previousText }) => {
+          const userPrompt =
+            source === 'recovery' ? wrapStructuredFinalRepairUser(prompt, previousText) : prompt;
+          const exec = await executeWithSandboxLaunchRecovery(
+            userPrompt,
+            options,
+            state,
+            homeIndex,
+            source === 'recovery' ? undefined : threadId,
+            waitState,
+            source === 'recovery'
+              ? CODEX_CLI_REPAIR_REASONING_EFFORT
+              : DEFAULT_CODEX_CLI_REASONING_EFFORT,
+          );
+          result = exec;
+          lastRaw = exec.text;
+          lastInterpretation = undefined;
+          console.log(
+            `[luna] ${JSON.stringify({
+              event: 'codex_process_success',
+              stage: 'luna',
+              model: 'luna',
+              apiCall: 'success',
+              codexProcess: 'success',
+              processExitStatus: 0,
+              rawResponseReceived: Boolean(exec.text),
+              ...reviewResponseFingerprint(exec.text),
+              source,
+            })}`,
+          );
+          return exec.text;
+        },
+        parse: (text) => {
+          lastInterpretation = interpretReviewContract(text);
+          if (!lastInterpretation.ok || !lastInterpretation.response) {
+            throw (
+              lastInterpretation.error ?? new Error('LLM review JSON was missing findings/issues')
+            );
+          }
+          if (lastInterpretation.rejectedFindingCount > 0) {
+            console.warn(
+              `[luna] dropped ${lastInterpretation.rejectedFindingCount} malformed finding(s); kept ${lastInterpretation.usableFindingCount}`,
+            );
+          }
+          return lastInterpretation.response;
+        },
+        log: (entry) => {
+          const repair = Number(entry.semanticRepairAttempt ?? 0);
+          const accepted = Boolean(entry.accepted);
+          const reason =
+            typeof entry.coverageFailure === 'string'
+              ? entry.coverageFailure
+              : lastInterpretation?.coverageFailure;
+          const parseEvent = accepted
+            ? 'review_parse_success'
+            : reason === 'all_findings_unusable'
+              ? 'review_no_usable_findings'
+              : reason === 'no_parseable_review_json'
+                ? 'review_parse_failure'
+                : 'review_schema_failure';
+          const repairEvent = repair > 0 ? `semantic_repair_${repair}` : undefined;
+          const coverageEvent = accepted ? 'coverage_complete' : 'coverage_failed';
+          const events = [
+            'codex_process_success',
+            parseEvent,
+            ...(repairEvent ? [repairEvent] : []),
+            ...(accepted || repair >= 2 ? [coverageEvent] : []),
+          ];
+          console.log(
+            `[luna] ${JSON.stringify({
+              event: accepted ? coverageEvent : parseEvent,
+              events,
+              stage: 'luna',
+              model: 'luna',
+              ...reviewResponseFingerprint(lastRaw),
+              ...entry,
+              apiCall: 'success',
+              codexProcess: 'success',
+              processExitStatus: 0,
+              rawResponseReceived: lastRaw.length > 0,
+              contractParse: accepted ? 'ok' : 'failed',
+              usableFindingCount: lastInterpretation?.usableFindingCount ?? 0,
+              rejectedFindingCount: lastInterpretation?.rejectedFindingCount ?? 0,
+              coverageStatus: accepted ? 'complete' : 'failed',
+              coverageFailureReason: accepted ? undefined : reason,
+              repairExhausted: !accepted && repair >= 2,
+              recoveryMode: entry.recoveryMode,
+              semanticRepairAttempt: repair,
+            })}`,
+          );
+          if (repair > 0) {
+            console.log(`[luna] Semantic repair #${repair}: ${accepted ? 'ok' : 'failed'}`);
+          } else {
+            console.log(`[luna] Contract parse: ${accepted ? 'ok' : 'failed'}`);
+          }
+          if (!accepted && repair >= 2) {
+            console.log(
+              `[luna] Coverage unit: failed | Reason: ${reason ?? 'invalid_review_contract'}`,
+            );
+          } else if (accepted) {
+            console.log('[luna] Coverage unit: succeeded');
+          }
+          const attemptId = state.lastAttemptId;
+          if (!attemptId) return;
+          emitAttempt(options, {
+            phase: 'coverage',
+            attemptId,
+            coverageStatus: accepted ? 'succeeded' : 'failed',
+            coverageFailure: accepted ? undefined : reason,
+            parseResult: typeof entry.parseResult === 'string' ? entry.parseResult : undefined,
+            keptFindings: lastInterpretation?.usableFindingCount,
+            droppedFindings: lastInterpretation?.rejectedFindingCount,
+          });
+        },
+      });
       break;
     } catch (error) {
       const message = (error as Error).message;
@@ -434,7 +574,7 @@ export async function runCodexCliReview(
     }
   }
   if (!result?.threadId && !threadId) throw new Error('codex-cli did not return a session id');
-  const parsed = parseReviewJson(result!.text);
+  if (!parsed) throw new Error('codex-cli did not return a parseable review');
   const maxFindings = loadReviewRuntimeConfig().maxFindings;
   return {
     response: {

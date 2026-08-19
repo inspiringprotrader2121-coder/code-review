@@ -1,7 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FindingJsonSchema, LlmReviewResponseSchema } from './types.js';
-import { normalizeLlmResponse, parseReviewJson, runLlmReview } from './llm.js';
+import {
+  interpretReviewContract,
+  normalizeLlmResponse,
+  parseReviewJson,
+  runLlmReview,
+} from './llm.js';
 import { JsonContractMismatchError } from './llm-client.js';
 import type { TextModelRunRequest } from './providers/types.js';
 
@@ -163,6 +168,55 @@ test('parseReviewJson requires a findings or issues array', () => {
     findings: [],
     summary: 'clean',
   });
+});
+
+test('parseReviewJson keeps a valid empty pass distinct from unusable findings', () => {
+  assert.deepEqual(parseReviewJson('{"findings":[],"summary":"No actionable issues"}'), {
+    findings: [],
+    summary: 'No actionable issues',
+  });
+  assert.throws(
+    () => parseReviewJson('{"findings":[{"file":"","line":null,"message":""}]}'),
+    /no usable findings/,
+  );
+  assert.throws(
+    () => parseReviewJson('{"findings":[],"summary":"Found 1 P1 SQL injection in auth.ts"}'),
+    /summary claims findings/,
+  );
+});
+
+test('parseReviewJson keeps usable findings when one sibling is malformed', () => {
+  const parsed = parseReviewJson(
+    JSON.stringify({
+      findings: [
+        { file: 'a.ts', line: 1, message: 'real bug', severity: 'high', confidence: 0.9 },
+        { file: '', message: '', severity: 'high' },
+        { message: 'orphan without a file', severity: 'high' },
+      ],
+      summary: 'one real issue',
+    }),
+  );
+  assert.equal(parsed.findings.length, 1);
+  assert.equal(parsed.findings[0]?.file, 'a.ts');
+});
+
+test('interpretReviewContract separates #311 unusable findings from a valid empty pass', () => {
+  const empty = interpretReviewContract('{"findings":[],"summary":"No actionable issues found."}');
+  assert.equal(empty.ok, true);
+  assert.equal(empty.usableFindingCount, 0);
+  assert.equal(empty.rejectedFindingCount, 0);
+
+  const unusable = interpretReviewContract(
+    '{"findings":[{"file":"","line":null,"message":""}],"summary":"There is a serious issue."}',
+  );
+  assert.equal(unusable.ok, false);
+  assert.match(unusable.error?.message ?? '', /no usable findings/);
+  assert.equal(unusable.coverageFailure, 'all_findings_unusable');
+  assert.equal(unusable.rejectedFindingCount, 1);
+
+  const missing = interpretReviewContract('This change looks safe overall.');
+  assert.equal(missing.ok, false);
+  assert.equal(missing.coverageFailure, 'no_parseable_review_json');
 });
 
 test('verifier-shaped JSON is not a successful discovery pass', async () => {

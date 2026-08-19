@@ -966,7 +966,14 @@ export class AppDatabase {
   startReviewRunAttempt(
     input: Omit<
       ReviewRunAttempt,
-      'role' | 'outcome' | 'dispatched' | 'durationMs' | 'completedAt'
+      | 'role'
+      | 'outcome'
+      | 'dispatched'
+      | 'durationMs'
+      | 'completedAt'
+      | 'coverageStatus'
+      | 'coverageFailure'
+      | 'parseResult'
     > & { role?: ReviewRunAttempt['role'] },
   ): boolean {
     return this.reviewState.startReviewRunAttempt(input);
@@ -981,6 +988,15 @@ export class AppDatabase {
     error?: string;
   }): boolean {
     return this.reviewState.completeReviewRunAttempt(input);
+  }
+
+  recordReviewRunAttemptCoverage(input: {
+    id: string;
+    coverageStatus: Exclude<ReviewRunAttempt['coverageStatus'], 'pending'>;
+    coverageFailure?: string;
+    parseResult?: string;
+  }): boolean {
+    return this.reviewState.recordReviewRunAttemptCoverage(input);
   }
 
   listReviewRunAttempts(runId: string): ReviewRunAttempt[] {
