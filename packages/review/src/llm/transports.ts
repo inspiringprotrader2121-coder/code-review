@@ -440,46 +440,96 @@ export async function openAiResponsesStreamChat(
   let cacheWriteTok = 0;
   let outTok = 0;
   let failed: string | undefined;
+  let failedCode: string | undefined;
   let incomplete: string | undefined;
+  let responseId: string | undefined;
+  let responseStatus: string | undefined;
+  let systemFingerprint: string | undefined;
+  let terminalEvent: 'completed' | 'incomplete' | 'failed' | 'error' | undefined;
+  const continuation = opts.compatibleContinuation;
+  const continuationInstruction =
+    'Return the complete corrected JSON object from the beginning. Do not return only a suffix. Return JSON only.';
+  const input = continuation
+    ? [
+        { type: 'message', role: 'user', content: user },
+        { type: 'message', role: 'assistant', content: continuation.contentPrefix },
+        {
+          type: 'message',
+          role: 'user',
+          content: continuationInstruction,
+        },
+      ]
+    : user;
+  const requestChars =
+    system.length +
+    user.length +
+    (continuation?.contentPrefix.length ?? 0) +
+    (continuation ? continuationInstruction.length : 0);
+  const reasoning = thinkingEnabled(opts)
+    ? { effort }
+    : /deepseek-v4/i.test(opts.model)
+      ? { effort: 'none' }
+      : undefined;
   const startedAt = clock.now();
-  await openStream(
-    `${base}/responses`,
-    {
-      model: opts.model,
-      instructions: system,
-      input: user,
-      ...(thinkingEnabled(opts) ? { reasoning: { effort } } : {}),
-      max_output_tokens: resolveMaxOutputTokens(opts.maxTokens),
-      stream: true,
-      ...(opts.json ? { text: { format: { type: 'json_object' } } } : {}),
-    },
-    opts,
-    timeoutMs,
-    { request: `LLM responses request stalled (no data for ${timeoutMs}ms)`, stream: 'responses' },
-    (data) => {
-      try {
-        const event = JSON.parse(data) as {
-          type?: string;
-          delta?: string;
-          response?: {
-            incomplete_details?: { reason?: string };
-            error?: { message?: string };
-            usage?: {
-              input_tokens?: number;
-              input_tokens_details?: {
-                cached_tokens?: number;
-                cache_write_tokens?: number;
-                cache_creation_tokens?: number;
+  let streamFailure: unknown;
+  try {
+    await openStream(
+      `${base}/responses`,
+      {
+        model: opts.model,
+        instructions: system,
+        input,
+        ...(reasoning ? { reasoning } : {}),
+        max_output_tokens: resolveMaxOutputTokens(opts.maxTokens),
+        stream: true,
+        ...(opts.json
+          ? {
+              text: {
+                format: opts.jsonSchema
+                  ? {
+                      type: 'json_schema',
+                      name: opts.jsonSchema.name,
+                      schema: opts.jsonSchema.schema,
+                    }
+                  : { type: 'json_object' },
+              },
+            }
+          : {}),
+      },
+      opts,
+      timeoutMs,
+      {
+        request: `LLM responses request stalled (no data for ${timeoutMs}ms)`,
+        stream: 'responses',
+      },
+      (data) => {
+        try {
+          const event = JSON.parse(data) as {
+            type?: string;
+            code?: string;
+            delta?: string;
+            response?: {
+              id?: string;
+              status?: string;
+              system_fingerprint?: string;
+              incomplete_details?: { reason?: string };
+              error?: { code?: string; message?: string };
+              usage?: {
+                input_tokens?: number;
+                input_tokens_details?: {
+                  cached_tokens?: number;
+                  cache_write_tokens?: number;
+                  cache_creation_tokens?: number;
+                };
+                output_tokens?: number;
+                output_tokens_details?: { reasoning_tokens?: number };
               };
-              output_tokens?: number;
-              output_tokens_details?: { reasoning_tokens?: number };
             };
+            message?: string;
           };
-          message?: string;
-        };
-        if (event.type === 'response.output_text.delta' && typeof event.delta === 'string')
-          content += event.delta;
-        else if (event.type === 'response.completed' || event.type === 'response.incomplete') {
+          responseId = event.response?.id ?? responseId;
+          responseStatus = event.response?.status ?? responseStatus;
+          systemFingerprint = event.response?.system_fingerprint ?? systemFingerprint;
           const usage = event.response?.usage;
           if (usage) {
             inTok = usage.input_tokens ?? 0;
@@ -491,20 +541,51 @@ export async function openAiResponsesStreamChat(
             outTok = usage.output_tokens ?? 0;
             reasoningTokens = usage.output_tokens_details?.reasoning_tokens ?? 0;
           }
-          if (event.type === 'response.incomplete')
-            incomplete = event.response?.incomplete_details?.reason ?? 'incomplete';
-        } else if (event.type === 'response.failed' || event.type === 'error')
-          failed = event.response?.error?.message ?? event.message ?? 'response failed';
-      } catch {
-        /* partial/keepalive line */
-      }
-    },
-  );
+          if (event.type === 'response.output_text.delta' && typeof event.delta === 'string')
+            content += event.delta;
+          else if (event.type === 'response.completed' || event.type === 'response.incomplete') {
+            terminalEvent = event.type === 'response.completed' ? 'completed' : 'incomplete';
+            if (event.type === 'response.incomplete')
+              incomplete = event.response?.incomplete_details?.reason ?? 'incomplete';
+          } else if (event.type === 'response.failed' || event.type === 'error') {
+            terminalEvent = event.type === 'response.failed' ? 'failed' : 'error';
+            failedCode = event.response?.error?.code ?? event.code;
+            failed = event.response?.error?.message ?? event.message ?? 'response failed';
+          }
+        } catch {
+          /* partial/keepalive line */
+        }
+      },
+    );
+  } catch (error) {
+    if (error instanceof ReviewCancelledError || opts.signal?.aborted) throw error;
+    streamFailure = error;
+  }
+  if (streamFailure && !terminalEvent && !content && inTok === 0 && outTok === 0) {
+    const detail = streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
+    throw new Error(`LLM responses stream terminated prematurely before output: ${detail}`);
+  }
+  const responseText = continuation
+    ? combineContinuationText(continuation.contentPrefix, content)
+    : content;
+  const responseMetadata = [
+    responseId ? `request=${responseId}` : '',
+    responseStatus ? `status=${responseStatus}` : '',
+    systemFingerprint ? `fingerprint=${systemFingerprint}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const responseFormat = opts.jsonSchema
+    ? `json_schema:${opts.jsonSchema.name}`
+    : opts.json
+      ? 'json_object'
+      : 'text';
+  const effectiveEffort = reasoning?.effort ?? 'none';
   console.log(
-    `[llm] model=${opts.model} api=responses effort=${effort} reasoning=${reasoningTokens}tok answer=${content.length}c ${Math.round((clock.now() - startedAt) / 1000)}s`,
+    `[llm] model=${opts.model} api=responses format=${responseFormat} effort=${effectiveEffort} reasoning=${reasoningTokens}tok answer=${content.length}c ${Math.round((clock.now() - startedAt) / 1000)}s${responseMetadata ? ` ${responseMetadata}` : ''}`,
   );
   opts.onUsage?.({
-    inputTokens: inTok || estimateTokens(system.length + user.length),
+    inputTokens: inTok || estimateTokens(requestChars),
     cachedInputTokens: inTok ? Math.min(inTok, cachedInTok) : 0,
     cacheWriteTokens: inTok ? Math.min(Math.max(0, inTok - cachedInTok), cacheWriteTok) : 0,
     outputTokens: outTok || estimateTokens(content.length),
@@ -512,20 +593,39 @@ export async function openAiResponsesStreamChat(
     provider: providerName(opts.baseUrl, opts.api),
     model: opts.model,
   });
-  if (failed) throw new Error(`LLM responses stream failed: ${failed}`);
+  const continuationRequired = () =>
+    new DeepSeekContinuationRequiredError({
+      reasoningContent: continuation?.reasoningContent ?? '',
+      contentPrefix: jsonFinishPrefix(responseText, opts.jsonContractPrefix),
+    });
+  if (failed)
+    throw new Error(
+      `LLM responses stream failed${responseId ? ` (${responseId})` : ''}${failedCode ? ` [${failedCode}]` : ''}: ${failed}`,
+    );
+  if (streamFailure && !terminalEvent) {
+    if (opts.json && (content.length > 0 || inTok > 0 || outTok > 0)) {
+      throw continuationRequired();
+    }
+    throw streamFailure;
+  }
+  if (!terminalEvent) {
+    if (opts.json && (content.length > 0 || inTok > 0 || outTok > 0)) {
+      throw continuationRequired();
+    }
+    if (!content && inTok === 0 && outTok === 0) throw new Error(RETRYABLE_EMPTY_PROVIDER_RESPONSE);
+    throw new Error('LLM responses stream terminated prematurely before terminal event');
+  }
+  if (incomplete === 'max_output_tokens' && opts.json) throw continuationRequired();
   if (incomplete)
-    throw new Error(`LLM responses truncated (${incomplete}); increase ORVEX_MAX_OUTPUT_TOKENS`);
+    throw new Error(
+      `LLM responses incomplete (${incomplete})${responseId ? ` [${responseId}]` : ''}${incomplete === 'max_output_tokens' ? '; increase ORVEX_MAX_OUTPUT_TOKENS' : ''}`,
+    );
   if (!content) {
     if (inTok === 0 && outTok === 0) throw new Error(RETRYABLE_EMPTY_PROVIDER_RESPONSE);
-    if (opts.json) {
-      throw new DeepSeekContinuationRequiredError({
-        reasoningContent: '',
-        contentPrefix: jsonFinishPrefix(content, opts.jsonContractPrefix),
-      });
-    }
+    if (opts.json) throw continuationRequired();
     throw new Error('LLM responses returned no text');
   }
-  return content;
+  return responseText;
 }
 
 export async function openAiCompatStreamChat(

@@ -145,6 +145,20 @@ test('a malformed or cross-file LLM merge cannot erase candidates', async () => 
   assert.equal(result.reviewOnly.length, 2, 'every rejected merge member remains visible');
 });
 
+test('a schema-valid empty cluster is ignored without rejecting the paid merge response', async () => {
+  const entries: RepeatedFinding[] = [{ sample: 0, finding: finding() }];
+  const result = await aggregateRepeatedFindings(entries, {
+    minOccurrences: 2,
+    maxCandidates: 20,
+    mergeWithLlm: async () => JSON.stringify({ clusters: [{ representative: 0, members: [] }] }),
+  });
+
+  assert.equal(result.usedLlmMerge, true);
+  assert.equal(result.findings.length, 0);
+  assert.equal(result.reviewOnly.length, 1);
+  assert.equal(result.clusterCount, 1);
+});
+
 test('an exact match beyond the bounded merger input still counts toward recurrence', async () => {
   const entries: RepeatedFinding[] = [
     { sample: 0, finding: finding() },

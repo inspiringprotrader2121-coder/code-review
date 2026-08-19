@@ -38,9 +38,9 @@ test('one immutable bootstrap snapshot compiles both public plan contracts exact
     ]),
     [
       ['gpt-5.6-luna', 'codex-cli', 'max'],
-      ['deepseek-v4-flash', 'compatible-chat', 'max'],
+      ['deepseek-v4-flash', 'responses', 'max'],
       ['MiniMax-M3', 'anthropic', undefined],
-      ['deepseek-v4-flash', 'compatible-chat', 'max'],
+      ['deepseek-v4-flash', 'responses', 'max'],
     ],
   );
 

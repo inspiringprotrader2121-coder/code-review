@@ -839,7 +839,7 @@
           "range": "provider model ID",
           "secret": false,
           "redaction": "none",
-          "description": "DeepSeek Flash model for reviewer and fixed verifier stages.",
+          "description": "DeepSeek Flash model for reviewer and fixed verifier stages. These stages use the provider's Responses API with explicit JSON Schema structured output.",
           "deprecatedAliases": []
         },
         {

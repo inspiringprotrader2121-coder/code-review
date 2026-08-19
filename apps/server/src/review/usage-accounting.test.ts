@@ -13,7 +13,8 @@ const flashTarget: LlmTarget = {
   apiKey: 'deepseek-key',
   baseUrl: 'https://api.deepseek.com',
   model: 'deepseek-v4-flash',
-  transport: 'compatible-chat',
+  api: 'responses',
+  transport: 'responses',
   admissionBucket: 'deepseek',
   thinking: true,
 };
@@ -21,6 +22,8 @@ const flashTarget: LlmTarget = {
 const proTarget: LlmTarget = {
   ...flashTarget,
   model: 'deepseek-v4-pro',
+  api: 'chat',
+  transport: 'compatible-chat',
 };
 
 const flashTokens = {

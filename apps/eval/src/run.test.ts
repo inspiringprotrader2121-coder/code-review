@@ -27,6 +27,7 @@ test('evaluation pass targets mirror the fixed model lineup at max effort', () =
   assert.ok(standard);
   assert.equal(targets.length, 3);
   assert.equal(flash.target.reasoningEffort, 'max');
+  assert.equal(flash.target.api, 'responses');
   assert.equal(flash.tier, 'deepseek-flash');
   assert.match(flash.focus ?? '', /REMOVED \/ WEAKENED BEHAVIOUR/);
   assert.match(flash.focus ?? '', /CALLER & CONTRACT AUDIT/);
@@ -45,6 +46,7 @@ test('evaluation combined deep-dive ignores stale Pro overrides and stays on Fla
   assert.ok(flash);
   assert.equal(flash.tier, 'deepseek-flash');
   assert.equal(flash.target.model, 'deepseek-v4-flash');
+  assert.equal(flash.target.api, 'responses');
 });
 
 test('evaluationVerifier defaults to DeepSeek Flash and passes the tier for peer-hedge partitioning', () => {
@@ -55,6 +57,7 @@ test('evaluationVerifier defaults to DeepSeek Flash and passes the tier for peer
   });
   assert.equal(flash.tier, 'deepseek-flash');
   assert.equal(flash.target.model, 'deepseek-v4-flash');
+  assert.equal(flash.target.api, 'responses');
 
   const stillFlash = evaluationVerifier({
     ORVEX_STANDARD_API_KEY: 'standard-test-key',
@@ -64,6 +67,7 @@ test('evaluationVerifier defaults to DeepSeek Flash and passes the tier for peer
   });
   assert.equal(stillFlash.tier, 'deepseek-flash');
   assert.equal(stillFlash.target.model, 'deepseek-v4-flash');
+  assert.equal(stillFlash.target.api, 'responses');
 });
 
 test('evaluationInvestigateEnabled mirrors production kill-switch + target resolution', () => {
@@ -82,6 +86,7 @@ test('evaluationInvestigateEnabled mirrors production kill-switch + target resol
   assert.ok(target);
   assert.equal(target.tier, 'deepseek-flash');
   assert.equal(target.target.model, 'deepseek-v4-flash');
+  assert.equal(target.target.api, 'responses');
   assert.equal(target.target.reasoningEffort, 'max');
 
   const pro = evaluationInvestigateTarget({
@@ -91,6 +96,7 @@ test('evaluationInvestigateEnabled mirrors production kill-switch + target resol
   assert.ok(pro);
   assert.equal(pro.tier, 'deepseek');
   assert.equal(pro.target.model, 'deepseek-v4-pro');
+  assert.equal(pro.target.api, 'chat');
 });
 
 test('evaluationRiskHuntTarget requires Flash and explicit opt-in', () => {
@@ -107,6 +113,7 @@ test('evaluationRiskHuntTarget requires Flash and explicit opt-in', () => {
   assert.ok(target);
   assert.equal(target.tier, 'deepseek-flash');
   assert.equal(target.target.model, 'deepseek-v4-flash');
+  assert.equal(target.target.api, 'responses');
 });
 
 test('evaluation records model, transport, and production partition provenance without credentials', () => {

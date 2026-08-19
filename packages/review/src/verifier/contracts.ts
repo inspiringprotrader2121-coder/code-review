@@ -40,13 +40,56 @@ export const VerdictSchema = z.object({
     z.object({
       id: z.number().int(),
       verdict: z.enum(['confirmed', 'rejected', 'unverified']),
-      reason: z.string().optional(),
-      severity: SeveritySchema.optional(),
-      severityEvidence: z.string().optional(),
-      duplicateOf: z.number().int().optional(),
+      reason: z
+        .string()
+        .nullish()
+        .transform((value) => value ?? undefined),
+      severity: SeveritySchema.nullish().transform((value) => value ?? undefined),
+      severityEvidence: z
+        .string()
+        .nullish()
+        .transform((value) => value ?? undefined),
+      duplicateOf: z
+        .number()
+        .int()
+        .nullish()
+        .transform((value) => value ?? undefined),
     }),
   ),
 });
+
+export function verifierJsonSchema(strict: boolean): Record<string, unknown> {
+  return {
+    type: 'object',
+    properties: {
+      verdicts: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', minimum: 0 },
+            verdict: {
+              type: 'string',
+              enum: strict ? ['confirmed', 'rejected'] : ['confirmed', 'rejected', 'unverified'],
+            },
+            reason: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+            severity: {
+              anyOf: [{ type: 'string', enum: ['P1', 'P2', 'P3', 'info'] }, { type: 'null' }],
+            },
+            severityEvidence: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+            duplicateOf: {
+              anyOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }],
+            },
+          },
+          required: ['id', 'verdict', 'reason', 'severity', 'severityEvidence', 'duplicateOf'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['verdicts'],
+    additionalProperties: false,
+  };
+}
 
 export type Verdicts = z.infer<typeof VerdictSchema>;
 export type VerificationStatus = 'verified' | 'partial' | 'unavailable' | 'skipped';

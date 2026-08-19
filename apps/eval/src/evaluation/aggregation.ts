@@ -3,6 +3,7 @@ import {
   fingerprintFinding,
   llmChat,
   mergeFindingProvenance,
+  RepeatedFindingAggregationJsonSchema,
   type ReviewFinding,
   type ReviewSurfaceFinding,
 } from '@orvex-review/review';
@@ -64,6 +65,15 @@ export async function aggregateEvaluationFindings(input: {
         ...verifier.target,
         temperature: input.temperature,
         json: true,
+        jsonSchema:
+          verifier.target.api === 'responses'
+            ? {
+                name: 'orvex_aggregation',
+                schema: RepeatedFindingAggregationJsonSchema,
+              }
+            : undefined,
+        jsonContractPrefix: '{"clusters":',
+        jsonContractKeys: ['clusters'],
       });
     },
   });

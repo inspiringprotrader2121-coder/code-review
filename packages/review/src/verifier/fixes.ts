@@ -2,7 +2,12 @@ import { randomBytes } from 'node:crypto';
 import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { extractJsonLoose, llmChat } from '../llm-client.js';
 import { redactSecrets } from '../redact.js';
-import { VerdictSchema, type FixCandidate, type VerifierOptions } from './contracts.js';
+import {
+  VerdictSchema,
+  verifierJsonSchema,
+  type FixCandidate,
+  type VerifierOptions,
+} from './contracts.js';
 
 const runtimeConfig = loadReviewRuntimeConfig();
 const FIX_FILE_CHARS = runtimeConfig.verifyFileChars;
@@ -67,6 +72,10 @@ export async function verifyFixes(
         reasoningEffort: options.reasoningEffort,
         signal: options.signal,
         json: true,
+        jsonSchema:
+          options.api === 'responses'
+            ? { name: 'orvex_fix_verifier', schema: verifierJsonSchema(true) }
+            : undefined,
         onUsage: options.onUsage,
         onAttempt: options.onAttempt,
         jsonContractPrefix: '{"verdicts":',

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LlmReviewResponseSchema } from './types.js';
+import { FindingJsonSchema, LlmReviewResponseSchema } from './types.js';
 import { normalizeLlmResponse, parseReviewJson, runLlmReview } from './llm.js';
+import type { TextModelRunRequest } from './providers/types.js';
 
 test('normalizeLlmResponse maps MiniMax severity vocabulary to P-levels', () => {
   const raw = {
@@ -85,6 +86,18 @@ test('normalizeLlmResponse rejects garbage JSON that drops every finding', () =>
   });
 });
 
+test('structured finding schema rejects blank file and message values', () => {
+  const properties = FindingJsonSchema.properties as
+    | { file?: { pattern?: string }; message?: { pattern?: string } }
+    | undefined;
+  const filePattern = new RegExp(properties?.file?.pattern ?? '');
+  const messagePattern = new RegExp(properties?.message?.pattern ?? '');
+  assert.equal(filePattern.test('   '), false);
+  assert.equal(messagePattern.test('\n\t'), false);
+  assert.equal(filePattern.test('src/a.ts'), true);
+  assert.equal(messagePattern.test('Concrete failure'), true);
+});
+
 test('deleted files with patches are sent to discovery instead of faking an empty pass', async () => {
   let user = '';
   const result = await runLlmReview(
@@ -108,6 +121,37 @@ test('deleted files with patches are sent to discovery instead of faking an empt
   );
   assert.match(user, /gone.ts/);
   assert.equal(result.summary, 'deleted');
+});
+
+test('Flash discovery sends the review schema through Responses', async () => {
+  let request: TextModelRunRequest | undefined;
+  const result = await runLlmReview(
+    [{ filename: 'a.ts', status: 'modified', patch: '@@ -1 +1 @@\n-old\n+new' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      target: {
+        transport: 'responses',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+      },
+      runner: {
+        transport: 'responses',
+        async run(value) {
+          request = value;
+          return '{"findings":[],"summary":"clean"}';
+        },
+      },
+    },
+  );
+
+  assert.equal(result.summary, 'clean');
+  assert.equal(request?.jsonSchema?.name, 'orvex_review');
+  assert.deepEqual((request?.jsonSchema?.schema as { required?: string[] } | undefined)?.required, [
+    'findings',
+    'summary',
+  ]);
+  assert.equal(request?.jsonContractPrefix, '{"findings":');
 });
 
 test('parseReviewJson requires a findings or issues array', () => {

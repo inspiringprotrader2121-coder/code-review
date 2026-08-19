@@ -74,6 +74,7 @@ function deepseekTarget(env: NodeJS.ProcessEnv, flash: boolean): PassTarget | nu
     model: flash
       ? (env.ORVEX_DEEPSEEK_FLASH_MODEL ?? 'deepseek-v4-flash')
       : (env.ORVEX_DEEPSEEK_MODEL ?? 'deepseek-v4-pro'),
+    api: flash ? 'responses' : 'chat',
     reasoningEffort: 'max',
   };
 }

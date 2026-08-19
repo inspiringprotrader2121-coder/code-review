@@ -11,7 +11,17 @@ import {
 } from './llm-client.js';
 import type { ReviewFinding } from './finding.js';
 import type { ModelRunner, ModelTarget, TextModelRunRequest } from './providers/types.js';
-import { LlmReviewResponseSchema, type LlmReviewResponse, type ReviewableFile } from './types.js';
+import {
+  LlmReviewResponseJsonSchema,
+  LlmReviewResponseSchema,
+  type LlmReviewResponse,
+  type ReviewableFile,
+} from './types.js';
+
+const REVIEW_JSON_SCHEMA_CONTRACT = {
+  name: 'orvex_review',
+  schema: LlmReviewResponseJsonSchema,
+} as const;
 
 /**
  * A rate-limit / transport failure (429, token-plan quota, network, timeout) —
@@ -36,7 +46,7 @@ export function isTransientLlmError(message: string): boolean {
   // than misreporting the missing pass as a clean, empty review.
   if (status === '402' && /credit|quota|payment required|insufficient/i.test(message)) return true;
   if (status && !['408', '425', '429'].includes(status)) return false;
-  return /\b(408|425|429|5\d\d)\b|rate.?limit|quota|token plan|request failed|fetch failed|stalled|timed?\s?out|wall-clock cap|produced no output|econn|socket hang/i.test(
+  return /\b(408|425|429|5\d\d)\b|rate.?limit|quota|token plan|request failed|fetch failed|stalled|timed?\s?out|wall-clock cap|produced no output|terminated prematurely|server_error|temporarily_unavailable|econn|socket hang/i.test(
     message,
   );
 }
@@ -152,6 +162,8 @@ export async function runLlmReview(
         user,
         target: opts.target,
         json: true,
+        jsonSchema: opts.target.transport === 'responses' ? REVIEW_JSON_SCHEMA_CONTRACT : undefined,
+        jsonContractPrefix: '{"findings":',
         jsonContractKeys: ['findings', 'issues'],
         thinking,
         temperature,
@@ -173,6 +185,8 @@ export async function runLlmReview(
       // has room for full reasoning + detailed findings with fix code
       maxTokens: opts.maxTokens,
       json: true,
+      jsonSchema: opts.api === 'responses' ? REVIEW_JSON_SCHEMA_CONTRACT : undefined,
+      jsonContractPrefix: '{"findings":',
       jsonContractKeys: ['findings', 'issues'],
       thinking,
       signal: opts.signal,

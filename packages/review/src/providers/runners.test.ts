@@ -164,9 +164,11 @@ test('ResponsesRunner passes injected HTTP, clock, retry policy, and observer to
 test('text runners forward JSON contract settings to llmChat', async () => {
   let seen: string | undefined;
   let keys: readonly string[] | undefined;
+  let schemaName: string | undefined;
   const runner = new CompatibleChatRunner({}, async (_system, _user, options) => {
     seen = options.jsonContractPrefix;
     keys = options.jsonContractKeys;
+    schemaName = options.jsonSchema?.name;
     return 'ok';
   });
   assert.equal(
@@ -174,9 +176,14 @@ test('text runners forward JSON contract settings to llmChat', async () => {
       ...textRequest('compatible-chat'),
       jsonContractPrefix: '{"verdicts":',
       jsonContractKeys: ['verdicts'],
+      jsonSchema: {
+        name: 'orvex_verifier',
+        schema: { type: 'object', properties: {}, additionalProperties: false },
+      },
     }),
     'ok',
   );
   assert.equal(seen, '{"verdicts":');
   assert.deepEqual(keys, ['verdicts']);
+  assert.equal(schemaName, 'orvex_verifier');
 });

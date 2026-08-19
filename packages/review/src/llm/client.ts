@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import type { RetryPolicy } from '../providers/types.js';
 import type { LlmClientOptions, LlmProviderCoordinator } from './contracts.js';
@@ -33,11 +33,10 @@ import {
   sleep,
 } from './retry-policy.js';
 import { clockFor, estimateTokens, maxTotalMs } from './support.js';
-import { jsonContractMissing, jsonFinishPrefix } from './parsing.js';
+import { extractJsonLoose, jsonContractMissing, jsonFinishPrefix } from './parsing.js';
 import { DeepSeekContinuationRequiredError } from './transports.js';
 
-function workerKeyCursorSeed(): number {
-  const id = process.env.ORVEX_WORKER_ID ?? '';
+function workerKeyCursorSeed(id = loadReviewRuntimeConfig().workerId ?? ''): number {
   let hash = 0;
   for (let index = 0; index < id.length; index++) {
     hash = (hash * 33 + id.charCodeAt(index)) >>> 0;
@@ -54,6 +53,25 @@ const MAX_PREFIX_CONTINUATIONS = 2;
 const PREFIX_CONTINUATION_MAX_MS = 180_000;
 const PREFIX_CONTINUATION_MAX_TOKENS = 24_000;
 const MAX_CONTINUATION_RATE_LIMIT_RETRIES = 2;
+
+function jsonContractDiagnostic(text: string): string {
+  const digest = createHash('sha256').update(text).digest('hex').slice(0, 12);
+  let parsed: unknown;
+  try {
+    parsed = extractJsonLoose(text);
+  } catch {
+    parsed = undefined;
+  }
+  let shape = 'unparseable';
+  if (Array.isArray(parsed)) shape = 'array';
+  else if (parsed && typeof parsed === 'object') {
+    const keys = Object.keys(parsed)
+      .slice(0, 12)
+      .map((key) => key.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 40));
+    shape = `object keys=${keys.join(',') || '(none)'}`;
+  } else if (parsed !== undefined) shape = typeof parsed;
+  return `chars=${text.length} sha256=${digest} shape=${shape}`;
+}
 
 function rateLimitAdmissionError(provider: string, keyCount: number, cause: Error): Error {
   const retryAfterSec = Math.max(
@@ -151,6 +169,7 @@ async function llmChatHoldingProviderSlot(
   let continuationCount = 0;
   let continuation: LlmClientOptions['compatibleContinuation'];
   let continuationRateLimitAttempt = 0;
+  let lastContractMissText: string | undefined;
 
   const rotateContinuationKey = async (): Promise<boolean> => {
     if (pool.keys.length <= 1) return false;
@@ -214,9 +233,20 @@ async function llmChatHoldingProviderSlot(
         lineage,
       );
       if (opts.json && jsonContractMissing(text, opts.jsonContractKeys)) {
+        // Some compatible providers ignore the assistant prefix and return the
+        // same schema-wrong object verbatim. A second identical continuation
+        // cannot make progress; stop paying for copies so the stage-specific
+        // caller can make its one cheap semantic-format repair instead.
+        if (continuation && text.trim() === lastContractMissText?.trim()) {
+          console.warn(`[llm] repeated JSON contract miss; ${jsonContractDiagnostic(text)}`);
+          throw new Error(
+            'LLM response contained no parseable JSON; answer-only continuation made no progress',
+          );
+        }
         if (continuationCount >= MAX_PREFIX_CONTINUATIONS) {
           throw new Error('LLM response contained no parseable JSON');
         }
+        lastContractMissText = text;
         continuation = {
           reasoningContent: continuation?.reasoningContent ?? '',
           contentPrefix: jsonFinishPrefix(text, opts.jsonContractPrefix),
@@ -224,7 +254,7 @@ async function llmChatHoldingProviderSlot(
         continuationCount++;
         continuationRateLimitAttempt = 0;
         console.warn(
-          `[llm] JSON contract missing; continuing the same response (${continuationCount}/${MAX_PREFIX_CONTINUATIONS})`,
+          `[llm] JSON contract missing; ${jsonContractDiagnostic(text)}; continuing the same response (${continuationCount}/${MAX_PREFIX_CONTINUATIONS})`,
         );
         continue;
       }

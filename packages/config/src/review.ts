@@ -71,6 +71,7 @@ export interface ReviewRuntimeConfig {
   readonly fleetTenantConcurrency: number;
   readonly codexApiKeyConcurrency: number;
   readonly reviewWorkerConcurrency: number;
+  readonly workerId: string | undefined;
   readonly codexCliEnabled: boolean;
   readonly promptTreePaths: number;
   readonly promptDiffChars: number;
@@ -332,6 +333,7 @@ export function loadReviewRuntimeConfig(
     10_000,
   );
   const config: ReviewRuntimeConfig = {
+    workerId: env.ORVEX_WORKER_ID?.trim() || undefined,
     llmTimeoutMs: Math.min(Math.max(positive(env.ORVEX_LLM_TIMEOUT_MS, 240_000), 1_000), 900_000),
     // DeepSeek/MiniMax review chunks regularly need 4–8 minutes under concurrent
     // enterprise load. The old 300s hard clamp made required lenses fail as

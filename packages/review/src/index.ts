@@ -1,5 +1,10 @@
 export type { Finding, LlmReviewResponse, ReviewableFile } from './types.js';
-export { FindingSchema, LlmReviewResponseSchema } from './types.js';
+export {
+  FindingSchema,
+  LlmReviewResponseSchema,
+  FindingJsonSchema,
+  LlmReviewResponseJsonSchema,
+} from './types.js';
 export { redactSecrets, redactPatch } from './redact.js';
 export {
   loadOrvexRules,
@@ -209,6 +214,7 @@ export type {
   CodexContainerResult,
   CodexContainerRuntime,
   HttpTransport,
+  JsonSchemaContract,
   ModelAttemptEvent,
   ModelAttemptOutcome,
   ModelAttemptTransport,
@@ -226,6 +232,7 @@ export {
   createReviewAggregationConfig,
   fitReviewAggregationToBudget,
   readReviewAggregationConfig,
+  RepeatedFindingAggregationJsonSchema,
   type EffectiveReviewAggregation,
   type RepeatedFinding,
   type RepeatedFindingAggregation,

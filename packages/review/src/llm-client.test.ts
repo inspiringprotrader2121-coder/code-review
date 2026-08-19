@@ -205,6 +205,337 @@ test('the responses API never sends temperature, even when a sample requests one
   assert.equal(captured[0].body.model, 'gpt-5.6-luna');
 });
 
+test('DeepSeek Responses requests send the explicit review JSON Schema', async () => {
+  const schema = {
+    type: 'object',
+    properties: { verdicts: { type: 'array' } },
+    required: ['verdicts'],
+    additionalProperties: false,
+  };
+  const captured = await withStubbedFetch(
+    () => responsesStream('{"verdicts":[]}'),
+    async () => {
+      const out = await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.test',
+        api: 'responses',
+        json: true,
+        jsonSchema: { name: 'orvex_verifier', schema },
+        jsonContractKeys: ['verdicts'],
+      });
+      assert.equal(out, '{"verdicts":[]}');
+    },
+  );
+
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0].url, 'https://api.deepseek.test/responses');
+  assert.deepEqual(captured[0].body.text, {
+    format: {
+      type: 'json_schema',
+      name: 'orvex_verifier',
+      schema,
+    },
+  });
+  assert.equal('response_format' in captured[0].body, false);
+});
+
+test('DeepSeek Responses continues a partial stream that omitted its terminal event', async () => {
+  let calls = 0;
+  const encoder = new TextEncoder();
+  const captured = await withStubbedFetch(
+    () => {
+      calls++;
+      if (calls > 1) return responsesStream('{"verdicts":[]}');
+      return new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: 'response.output_text.delta',
+                delta: '{"verdicts":',
+              })}\n\n`,
+            ),
+          );
+          controller.close();
+        },
+      });
+    },
+    async () => {
+      const out = await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.test',
+        api: 'responses',
+        reasoningEffort: 'max',
+        json: true,
+        jsonSchema: {
+          name: 'orvex_verifier',
+          schema: {
+            type: 'object',
+            properties: { verdicts: { type: 'array' } },
+            required: ['verdicts'],
+            additionalProperties: false,
+          },
+        },
+        jsonContractPrefix: '{"verdicts":',
+        jsonContractKeys: ['verdicts'],
+      });
+      assert.equal(out, '{"verdicts":[]}');
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(captured.length, 2);
+  assert.deepEqual(captured[0]?.body.reasoning, { effort: 'max' });
+  assert.deepEqual(captured[1]?.body.reasoning, { effort: 'none' });
+  const continuedInput = captured[1]?.body.input as
+    | Array<{ role?: string; content?: string }>
+    | undefined;
+  assert.equal(continuedInput?.[1]?.role, 'assistant');
+  assert.equal(continuedInput?.[1]?.content, '{"verdicts":');
+});
+
+test('DeepSeek Responses preserves paid partial JSON when the stream reader fails', async () => {
+  let calls = 0;
+  const encoder = new TextEncoder();
+  const captured = await withStubbedFetch(
+    () => {
+      calls++;
+      if (calls > 1) return responsesStream('[]}');
+      let sent = false;
+      return new ReadableStream({
+        async pull(controller) {
+          if (!sent) {
+            sent = true;
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  type: 'response.output_text.delta',
+                  delta: '{"verdicts":',
+                })}\n\n`,
+              ),
+            );
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            return;
+          }
+          controller.error(new Error('socket reset during response body'));
+        },
+      });
+    },
+    async () => {
+      const out = await llmChat('sys', 'user', {
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        baseUrl: 'https://api.deepseek.test',
+        api: 'responses',
+        reasoningEffort: 'max',
+        json: true,
+        jsonContractPrefix: '{"verdicts":',
+        jsonContractKeys: ['verdicts'],
+      });
+      assert.equal(out, '{"verdicts":[]}');
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(captured.length, 2);
+  assert.deepEqual(captured[1]?.body.reasoning, { effort: 'none' });
+  const continuedInput = captured[1]?.body.input as
+    | Array<{ role?: string; content?: string }>
+    | undefined;
+  assert.equal(continuedInput?.[1]?.content, '{"verdicts":');
+});
+
+test('Responses reader failures before output surface as known transient errors', async () => {
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () =>
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error('connection reset'));
+            },
+          }),
+        () =>
+          llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.test',
+            api: 'responses',
+            json: true,
+          }),
+      ),
+    /responses stream terminated prematurely before output: connection reset/,
+  );
+});
+
+test('DeepSeek Responses does not retry content-filtered JSON', async () => {
+  let calls = 0;
+  const encoder = new TextEncoder();
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () => {
+          calls++;
+          return new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: 'response.incomplete',
+                    response: {
+                      id: 'resp_filtered',
+                      status: 'incomplete',
+                      incomplete_details: { reason: 'content_filter' },
+                      usage: { input_tokens: 10, output_tokens: 2 },
+                    },
+                  })}\n\n`,
+                ),
+              );
+              controller.close();
+            },
+          });
+        },
+        () =>
+          llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.test',
+            api: 'responses',
+            json: true,
+            jsonContractPrefix: '{"verdicts":',
+            jsonContractKeys: ['verdicts'],
+          }),
+      ),
+    /responses incomplete \(content_filter\)/,
+  );
+  assert.equal(calls, 1);
+});
+
+test('Responses failures retain the provider error code for retry classification', async () => {
+  const encoder = new TextEncoder();
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: 'response.failed',
+                    response: {
+                      id: 'resp_failed',
+                      status: 'failed',
+                      error: { code: 'server_error', message: 'provider unavailable' },
+                    },
+                  })}\n\n`,
+                ),
+              );
+              controller.close();
+            },
+          }),
+        () =>
+          llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.test',
+            api: 'responses',
+          }),
+      ),
+    /\[server_error\]: provider unavailable/,
+  );
+});
+
+test('Responses top-level error events retain their provider code', async () => {
+  const encoder = new TextEncoder();
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: 'error',
+                    code: 'server_error',
+                    message: 'provider unavailable',
+                  })}\n\n`,
+                ),
+              );
+              controller.close();
+            },
+          }),
+        () =>
+          llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.test',
+            api: 'responses',
+          }),
+      ),
+    /\[server_error\]: provider unavailable/,
+  );
+});
+
+test('Responses failed events retain provider usage for billing', async () => {
+  let usage:
+    | {
+        inputTokens: number;
+        cachedInputTokens?: number;
+        outputTokens: number;
+        tokenSource?: string;
+      }
+    | undefined;
+  const encoder = new TextEncoder();
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: 'response.failed',
+                    response: {
+                      id: 'resp_failed_usage',
+                      status: 'failed',
+                      error: { code: 'server_error', message: 'provider unavailable' },
+                      usage: {
+                        input_tokens: 123,
+                        input_tokens_details: { cached_tokens: 23 },
+                        output_tokens: 45,
+                        output_tokens_details: { reasoning_tokens: 30 },
+                      },
+                    },
+                  })}\n\n`,
+                ),
+              );
+              controller.close();
+            },
+          }),
+        () =>
+          llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.test',
+            api: 'responses',
+            onUsage: (event) => {
+              usage = event;
+            },
+          }),
+      ),
+    /\[server_error\]: provider unavailable/,
+  );
+  assert.equal(usage?.inputTokens, 123);
+  assert.equal(usage?.cachedInputTokens, 23);
+  assert.equal(usage?.outputTokens, 45);
+  assert.equal(usage?.tokenSource, 'provider');
+});
+
 test('the OpenAI-compatible chat API still honours an explicit sample temperature', async () => {
   const captured = await withStubbedFetch(
     () => chatStream('{"findings":[]}'),
@@ -822,6 +1153,34 @@ test('a prose-only JSON contract is finished by one answer-only continuation', a
   assert.equal(messages.at(-2)?.role, 'assistant');
   assert.equal(messages.at(-2)?.content, '{"findings":');
   assert.match(messages.at(-1)?.content ?? '', /complete the json object/i);
+});
+
+test('an identical schema-wrong continuation stops before paying for another copy', async () => {
+  let calls = 0;
+  await assert.rejects(
+    () =>
+      withStubbedFetch(
+        () => {
+          calls++;
+          return chatStream('{"summary":"wrong top-level contract"}');
+        },
+        async () => {
+          await llmChat('sys', 'user', {
+            apiKey: 'test-key',
+            model: 'deepseek-v4-flash',
+            baseUrl: 'https://compatible.test/v1',
+            api: 'chat',
+            json: true,
+            jsonContractKeys: ['verdicts'],
+            jsonContractPrefix: '{"verdicts":',
+            maxTokens: 16_000,
+          });
+        },
+      ),
+    /answer-only continuation made no progress/,
+  );
+
+  assert.equal(calls, 2, 'the repeated invalid answer must not consume a second continuation');
 });
 
 test('a valid investigation action does not trigger a findings continuation', async () => {

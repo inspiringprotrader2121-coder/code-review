@@ -1,5 +1,6 @@
 import type {
   Clock,
+  JsonSchemaContract,
   ModelAttemptEvent,
   ModelAttemptLineage,
   ModelAttemptOutcome,
@@ -75,6 +76,8 @@ export interface LlmClientOptions {
   jsonContractPrefix?: string;
   /** Accepted top-level keys for a valid JSON response contract. */
   jsonContractKeys?: readonly JsonContractKey[];
+  /** Strict structured-output contract for Responses API providers. */
+  jsonSchema?: JsonSchemaContract;
   /** Internal per-request wall cap; public review calls use the configured LLM max-total cap. */
   hardLimitMs?: number;
   dependencies?: LlmClientDependencies;

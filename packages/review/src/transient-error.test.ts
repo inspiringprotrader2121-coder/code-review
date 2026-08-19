@@ -35,6 +35,15 @@ test('detects rate-limit / token-plan / transport errors as transient (retryable
   assert.ok(isTransientLlmError('Token Plan rate limit reached: Upgrade your Token Plan (2062)'));
   assert.ok(isTransientLlmError('fetch failed'));
   assert.ok(isTransientLlmError('LLM stream stalled (no data for 240000ms)'));
+  assert.ok(
+    isTransientLlmError('LLM responses stream terminated prematurely before terminal event'),
+  );
+  assert.ok(
+    isTransientLlmError(
+      'LLM responses stream terminated prematurely before output: connection reset',
+    ),
+  );
+  assert.ok(isTransientLlmError('LLM responses stream failed [server_error]: unavailable'));
   assert.ok(isTransientLlmError('ECONNRESET'));
   assert.ok(isTransientLlmError('LLM request failed (402): requires more credits'));
 });
@@ -164,6 +173,11 @@ test('all permanent 4xx statuses are non-transient; retry-later statuses remain 
 
 test('does NOT treat a genuine parse/model failure as a whole-review retry', () => {
   assert.ok(!isTransientLlmError('LLM response contained no parseable JSON'));
+  assert.ok(
+    !isTransientLlmError(
+      'LLM response contained no parseable JSON; answer-only continuation made no progress',
+    ),
+  );
   assert.ok(
     !isTransientLlmError('LLM response truncated (stop_reason=max_tokens); increase max tokens'),
   );

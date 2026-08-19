@@ -14,6 +14,7 @@ import {
 } from './verifier.js';
 import type { ReviewFinding } from './finding.js';
 import type { LlmAttemptEvent } from './llm-client.js';
+import type { TextModelRunRequest } from './providers/types.js';
 
 const finding = (over: Partial<ReviewFinding>): ReviewFinding => ({
   file: 'a.js',
@@ -429,6 +430,103 @@ test('verification does not replay a failed paid provider call', async (t) => {
   assert.equal(calls, 1);
 });
 
+test('verification retries only the failed contract-exhausted batch at full strict settings', async () => {
+  let calls = 0;
+  let failedBatchCalls = 0;
+  const requests: Array<{ candidate: string; thinking?: boolean; maxTokens?: number }> = [];
+  const healthy = finding({ line: 1, severity: 'P2', message: 'healthy candidate' });
+  const failed = finding({ line: 2, severity: 'P2', message: 'format-failing candidate' });
+  const result = await verifyFindings(
+    [healthy, failed],
+    [{ path: 'a.js', content: 'function broken() { throw new Error(); }' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      maxTokens: 32_000,
+      maxFindingsPerBatch: 1,
+      concurrency: 1,
+      strict: true,
+      runner: {
+        transport: 'compatible-chat',
+        async run(request) {
+          calls++;
+          const candidate = request.user.includes('format-failing candidate')
+            ? 'failed'
+            : 'healthy';
+          requests.push({
+            candidate,
+            thinking: request.thinking,
+            maxTokens: request.target.maxTokens,
+          });
+          if (candidate === 'failed' && failedBatchCalls++ === 0)
+            throw new Error(
+              'LLM response contained no parseable JSON; answer-only continuation made no progress',
+            );
+          return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+        maxTokens: 32_000,
+      },
+    },
+  );
+
+  assert.equal(calls, 3, 'the healthy sibling runs once and only the failed batch retries');
+  assert.deepEqual(requests, [
+    { candidate: 'healthy', thinking: undefined, maxTokens: 32_000 },
+    { candidate: 'failed', thinking: undefined, maxTokens: 32_000 },
+    { candidate: 'failed', thinking: undefined, maxTokens: 32_000 },
+  ]);
+  assert.equal(result.status, 'verified');
+  assert.deepEqual(result.kept, [healthy, failed]);
+});
+
+test('verification leaves a twice-invalid batch partial without replaying its healthy sibling', async () => {
+  let calls = 0;
+  let healthyCalls = 0;
+  let failedCalls = 0;
+  const healthy = finding({ line: 1, severity: 'P2', message: 'healthy candidate' });
+  const failed = finding({ line: 2, severity: 'P2', message: 'twice-invalid candidate' });
+  const result = await verifyFindings(
+    [healthy, failed],
+    [{ path: 'a.js', content: 'function broken() { throw new Error(); }' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      maxFindingsPerBatch: 1,
+      concurrency: 1,
+      strict: true,
+      runner: {
+        transport: 'compatible-chat',
+        async run(request) {
+          calls++;
+          if (request.user.includes('twice-invalid candidate')) {
+            failedCalls++;
+            throw new Error('LLM response contained no parseable JSON');
+          }
+          healthyCalls++;
+          return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+      },
+    },
+  );
+
+  assert.equal(calls, 3);
+  assert.equal(healthyCalls, 1);
+  assert.equal(failedCalls, 2);
+  assert.equal(result.status, 'partial');
+  assert.deepEqual(result.kept, [healthy]);
+  assert.deepEqual(result.unverified, [failed]);
+});
+
 test('host-selected verifier concurrency runs independent candidate batches in parallel', async () => {
   let active = 0;
   let peak = 0;
@@ -684,6 +782,78 @@ test('a bounded format retry retains usable siblings when ids remain missing', a
     result.unverified.map((finding) => finding.line),
     [2],
   );
+});
+
+test('Flash verification sends a strict verdict schema through Responses', async () => {
+  let request: TextModelRunRequest | undefined;
+  const candidate = finding({ line: 3, severity: 'P2', message: 'schema candidate' });
+  const result = await verifyFindings(
+    [candidate],
+    [{ path: 'a.js', content: 'function reviewed() {}' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      strict: true,
+      runner: {
+        transport: 'responses',
+        async run(value) {
+          request = value;
+          return '{"verdicts":[{"id":0,"verdict":"confirmed","reason":null,"severity":null,"severityEvidence":null,"duplicateOf":null}]}';
+        },
+      },
+      target: {
+        transport: 'responses',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+      },
+    },
+  );
+
+  assert.equal(result.status, 'verified');
+  assert.equal(request?.jsonSchema?.name, 'orvex_verifier');
+  const schema = request?.jsonSchema?.schema as {
+    required?: string[];
+    properties?: { verdicts?: { items?: { properties?: { verdict?: { enum?: string[] } } } } };
+  };
+  assert.deepEqual(schema.properties?.verdicts?.items?.properties?.verdict?.enum, [
+    'confirmed',
+    'rejected',
+  ]);
+  assert.deepEqual(schema.required, ['verdicts']);
+});
+
+test('Flash verification retries one Responses truncation within the failed batch', async () => {
+  let calls = 0;
+  const candidate = finding({ line: 4, severity: 'P2', message: 'truncated candidate' });
+  const result = await verifyFindings(
+    [candidate],
+    [{ path: 'a.js', content: 'function reviewed() {}' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      strict: true,
+      runner: {
+        transport: 'responses',
+        async run() {
+          calls++;
+          if (calls === 1)
+            throw new Error(
+              'LLM responses truncated (max_output_tokens); increase ORVEX_MAX_OUTPUT_TOKENS',
+            );
+          return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+        },
+      },
+      target: {
+        transport: 'responses',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+      },
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(result.status, 'verified');
+  assert.deepEqual(result.kept, [candidate]);
 });
 
 test('verification finishes a JSON-contract miss with one parent-linked continuation', async (t) => {

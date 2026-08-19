@@ -62,7 +62,8 @@ export class ProviderCatalog {
         );
         if (
           target.model.toLowerCase() !== 'deepseek-v4-flash' ||
-          target.transport !== 'compatible-chat' ||
+          target.transport !== 'responses' ||
+          target.api !== 'responses' ||
           target.admissionBucket !== 'deepseek' ||
           !target.thinking ||
           target.reasoningEffort !== 'max' ||

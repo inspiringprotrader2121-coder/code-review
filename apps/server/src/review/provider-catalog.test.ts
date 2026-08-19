@@ -32,8 +32,8 @@ function config(): WorkerConfig {
       apiKey: 'deepseek-key',
       baseUrl: 'https://api.deepseek.com',
       model: 'deepseek-v4-flash',
-      api: 'chat',
-      transport: 'compatible-chat',
+      api: 'responses',
+      transport: 'responses',
       admissionBucket: 'deepseek',
       thinking: true,
       reasoningEffort: 'max',
@@ -58,7 +58,7 @@ test('catalog compiles exact public-plan targets without URL or api inference', 
     ]),
     [
       ['gpt-5.6-luna', 'codex-cli', 'max', 'luna', true],
-      ['deepseek-v4-flash', 'compatible-chat', 'max', 'deepseek', true],
+      ['deepseek-v4-flash', 'responses', 'max', 'deepseek', true],
       ['MiniMax-M3', 'anthropic', undefined, 'minimax', true],
     ],
   );
@@ -67,7 +67,7 @@ test('catalog compiles exact public-plan targets without URL or api inference', 
   assert.equal(high.discovery[2]?.mode, 'api');
   assert.equal(high.verification.target.model, 'deepseek-v4-flash');
   assert.equal(high.verification.mode, 'api');
-  assert.equal(high.verification.target.transport, 'compatible-chat');
+  assert.equal(high.verification.target.transport, 'responses');
   assert.equal(high.discovery.filter((stage) => stage.required).length, 3);
   assert.equal(high.verification.required, true);
 
@@ -117,7 +117,15 @@ test('catalog refuses substitutions and incomplete reasoning contracts before a 
     () =>
       createProviderCatalog({
         ...workerConfig,
-        deepseekFlashModel: { ...workerConfig.deepseekFlashModel!, transport: 'responses' },
+        deepseekFlashModel: { ...workerConfig.deepseekFlashModel!, transport: 'compatible-chat' },
+      }).compilePublicPlan('dual-model', { agenticLuna: false }),
+    /DeepSeek v4 Flash at max reasoning/,
+  );
+  assert.throws(
+    () =>
+      createProviderCatalog({
+        ...workerConfig,
+        deepseekFlashModel: { ...workerConfig.deepseekFlashModel!, api: 'chat' },
       }).compilePublicPlan('dual-model', { agenticLuna: false }),
     /DeepSeek v4 Flash at max reasoning/,
   );

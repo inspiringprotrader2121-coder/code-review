@@ -5,6 +5,7 @@ import type { ReviewFinding } from '../finding.js';
 import type { ModelAttemptLineage } from '../providers/types.js';
 import {
   VerdictSchema,
+  verifierJsonSchema,
   type Verdicts,
   type VerifierOptions,
   type VerifiedFindings,
@@ -33,12 +34,17 @@ async function invokeVerifier(
   options: VerifierOptions,
   attemptLineage: ModelAttemptLineage,
 ): Promise<string> {
+  const jsonSchema = {
+    name: 'orvex_verifier',
+    schema: verifierJsonSchema(options.strict === true),
+  } as const;
   if (options.runner && options.target) {
     return options.runner.run({
       system,
       user,
       target: options.target,
       json: true,
+      jsonSchema: options.target.transport === 'responses' ? jsonSchema : undefined,
       signal: options.signal,
       onUsage: options.onUsage,
       onAttempt: options.onAttempt,
@@ -57,6 +63,7 @@ async function invokeVerifier(
       maxTokens: options.maxTokens,
       signal: options.signal,
       json: true,
+      jsonSchema: options.api === 'responses' ? jsonSchema : undefined,
       onUsage: options.onUsage,
       onAttempt: options.onAttempt,
       attemptLineage,
@@ -64,9 +71,25 @@ async function invokeVerifier(
       jsonContractKeys: ['verdicts'],
     });
   } catch (error) {
-    console.warn('[verifier] call failed (no whole-call replay):', (error as Error).message);
+    console.warn('[verifier] provider/continuation call failed:', (error as Error).message);
     throw error;
   }
+}
+
+function verifierFormatRetryPrompt(user: string, strict: boolean): string {
+  return [
+    user,
+    '',
+    'FORMAT RETRY: the previous response could not be validated. Re-evaluate only this',
+    'verifier batch and return ONLY the exact JSON object requested above. Do not use',
+    'Markdown, prose outside the JSON, or omit any candidate id.',
+    ...(strict
+      ? [
+          'For this strict precision check, resolve every candidate as "confirmed" or',
+          '"rejected"; do not return "unverified".',
+        ]
+      : []),
+  ].join('\n');
 }
 
 class VerifierContractError extends Error {
@@ -134,7 +157,9 @@ function isVerifierContractError(error: unknown): boolean {
   return (
     error instanceof VerifierContractError ||
     name === 'ZodError' ||
-    /no parseable JSON|returned no text/i.test(message)
+    /no parseable JSON|returned no text|responses? (?:stream )?(?:remained )?truncated|bounded prefix continuation/i.test(
+      message,
+    )
   );
 }
 
@@ -146,30 +171,18 @@ async function verifyFindingsBatch(
   const sentinel = `ORVEX_DATA_${randomBytes(9).toString('hex')}`;
   const prompt = buildVerifierPrompt(findings, files, sentinel, options);
   const attemptLineage: ModelAttemptLineage = {};
-  let text = await invokeVerifier(prompt.system, prompt.user, options, attemptLineage);
   let parsed;
   try {
+    const text = await invokeVerifier(prompt.system, prompt.user, options, attemptLineage);
     parsed = parseVerifierResponse(text, findings.length, options.strict === true);
   } catch (error) {
     if (!isVerifierContractError(error) || MAX_VERIFIER_FORMAT_ATTEMPTS < 2) throw error;
     console.warn(
-      '[verifier] response violated the verdict JSON contract; making one bounded semantic retry',
+      '[verifier] response violated the verdict JSON contract; making one bounded semantic retry of this batch',
     );
-    text = await invokeVerifier(
+    const text = await invokeVerifier(
       prompt.system,
-      [
-        prompt.user,
-        '',
-        'FORMAT RETRY: the previous response could not be validated. Re-evaluate the same',
-        'candidates once and return ONLY the exact JSON object requested above. Do not use',
-        'Markdown, prose outside the JSON, or omit any candidate id.',
-        ...(options.strict
-          ? [
-              'For this strict precision check, resolve every candidate as "confirmed" or',
-              '"rejected"; do not return "unverified".',
-            ]
-          : []),
-      ].join('\n'),
+      verifierFormatRetryPrompt(prompt.user, options.strict === true),
       options,
       attemptLineage,
     );

@@ -108,7 +108,7 @@ Normal plans use MiniMax and DeepSeek Flash. High tiers require API-key-authenti
 | `ORVEX_DEEPSEEK_BASE_URL` | URL; HTTPS provider base URL | `https://api.deepseek.com` | no / connection | - | DeepSeek endpoint; public Flash stages retain the fixed model and max-reasoning contract. |
 | `ORVEX_DEEPSEEK_MODEL` | string; provider model ID | `deepseek-v4-pro` | no / none | - | DeepSeek v4 Pro model identifier. |
 | `ORVEX_DEEPSEEK_EFFORT` | enum; max | `max` | no / none | - | DeepSeek v4 Pro reasoning effort. Production must remain maximum. |
-| `ORVEX_DEEPSEEK_FLASH_MODEL` | string; provider model ID | `deepseek-v4-flash` | no / none | - | DeepSeek Flash model for reviewer and fixed verifier stages. |
+| `ORVEX_DEEPSEEK_FLASH_MODEL` | string; provider model ID | `deepseek-v4-flash` | no / none | - | DeepSeek Flash model for reviewer and fixed verifier stages. These stages use the provider's Responses API with explicit JSON Schema structured output. |
 | `ORVEX_DEEPSEEK_FLASH_EFFORT` | enum; max | `max` | no / none | - | DeepSeek Flash reasoning effort. Production must remain maximum. |
 | `ORVEX_OPENAI_API_KEY` | string; OpenAI API key | `(unset)` | yes / secret | - | OpenAI API key used through the isolated Luna broker/CLI flow. |
 | `ORVEX_OPENAI_BASE_URL` | URL; OpenAI /v1 endpoint | `https://api.openai.com/v1` | no / none | - | OpenAI endpoint for explicit diagnostics and evaluation; it must not substitute for Luna CLI stages. |

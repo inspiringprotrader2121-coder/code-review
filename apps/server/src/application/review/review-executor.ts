@@ -3,6 +3,7 @@ import {
   assertCodexRuntimeReady,
   fingerprintFinding,
   mergeFindingProvenance,
+  RepeatedFindingAggregationJsonSchema,
   summarizeModelContribution,
   tagFindingProvenance,
   formatModelContribution,
@@ -799,6 +800,15 @@ export async function executeReviewCore(
                 user,
                 temperature: aggregation.temperature,
                 json: true,
+                jsonSchema:
+                  llm.transport === 'responses'
+                    ? {
+                        name: 'orvex_aggregation',
+                        schema: RepeatedFindingAggregationJsonSchema,
+                      }
+                    : undefined,
+                jsonContractPrefix: '{"clusters":',
+                jsonContractKeys: ['clusters'],
                 signal: reviewAbortController.signal,
                 onUsage: onUsageFor(verificationTier, llm, 'aggregation'),
                 onAttempt: onAttemptFor(verificationTier, 'aggregation'),

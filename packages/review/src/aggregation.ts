@@ -134,10 +134,30 @@ const MergeSchema = z.object({
   clusters: z.array(
     z.object({
       representative: z.number().int(),
-      members: z.array(z.number().int()).min(1),
+      members: z.array(z.number().int()),
     }),
   ),
 });
+
+export const RepeatedFindingAggregationJsonSchema: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    clusters: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          representative: { type: 'integer', minimum: 0 },
+          members: { type: 'array', items: { type: 'integer', minimum: 0 } },
+        },
+        required: ['representative', 'members'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['clusters'],
+  additionalProperties: false,
+};
 
 export interface RepeatedFindingAggregationOptions {
   minOccurrences: number;

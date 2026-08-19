@@ -176,6 +176,12 @@ export interface ModelTarget {
   maxTokens?: number;
 }
 
+export interface JsonSchemaContract {
+  /** Provider-safe identifier for the structured output contract. */
+  name: string;
+  schema: Record<string, unknown>;
+}
+
 export interface TextModelRunRequest {
   system: string;
   user: string;
@@ -198,6 +204,8 @@ export interface TextModelRunRequest {
   attemptLineage?: ModelAttemptLineage;
   jsonContractPrefix?: string;
   jsonContractKeys?: readonly JsonContractKey[];
+  /** Responses API structured-output schema. Ignored by non-Responses transports. */
+  jsonSchema?: JsonSchemaContract;
 }
 
 export interface ModelRunner<TRequest = TextModelRunRequest, TResult = string> {

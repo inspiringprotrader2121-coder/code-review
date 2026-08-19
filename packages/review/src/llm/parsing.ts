@@ -42,12 +42,13 @@ export function jsonFinishPrefix(text: string, contractPrefix = '{"findings":'):
   return slice || contractPrefix;
 }
 
-export type JsonContractKey = 'findings' | 'issues' | 'verdicts' | 'action';
+export type JsonContractKey = 'findings' | 'issues' | 'verdicts' | 'action' | 'clusters' | 'step';
 
 const DEFAULT_JSON_CONTRACT_KEYS: readonly JsonContractKey[] = ['findings', 'issues', 'verdicts'];
 
 function hasJsonContractKey(root: Record<string, unknown>, key: JsonContractKey): boolean {
   if (key === 'action') return typeof root.action === 'string' && root.action.trim().length > 0;
+  if (key === 'step') return Boolean(root.step && typeof root.step === 'object');
   return Array.isArray(root[key]);
 }
 

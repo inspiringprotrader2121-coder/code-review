@@ -21,6 +21,7 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.equal(config.codexInactivityTimeoutMs, 300_000);
   assert.equal(config.maxFindings, 25);
   assert.equal(config.reviewWorkerConcurrency, 8);
+  assert.equal(config.workerId, undefined);
   assert.equal(config.execution.concurrency, 8);
   assert.equal(config.codexApiKeyConcurrency, 8);
   assert.equal(config.providerConcurrency('luna'), 8);
@@ -45,6 +46,10 @@ test('review runtime defaults preserve production safety limits', () => {
   assert.deepEqual(config.codexAllowedRepos, []);
   assert.ok(Object.isFrozen(config));
   assert.ok(Object.isFrozen(config.childProcessEnvironment));
+});
+
+test('review runtime snapshots the worker identity used for deterministic key rotation', () => {
+  assert.equal(loadReviewRuntimeConfig({ ORVEX_WORKER_ID: ' worker-a ' }).workerId, 'worker-a');
 });
 
 test('pinned DeepSeek pricing cannot inherit stale env rates', () => {

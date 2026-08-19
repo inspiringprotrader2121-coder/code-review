@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { LlmAttemptEvent } from '../llm-client.js';
 import type { ReviewPromptContext } from '../prompt.js';
+import { FindingJsonSchema } from '../types.js';
 
 export interface InvestigateOptions {
   /** Absolute path to a repo checkout. All tool paths are confined under this. */
@@ -70,9 +71,108 @@ export const StepSchema = z.union([
   }),
   z.object({
     action: z.literal('done'),
-    findings: z.array(z.unknown()).optional(),
+    findings: z.array(z.unknown()),
     summary: z.string().optional(),
   }),
 ]);
+
+const InvestigateToolJsonSchema: Record<string, unknown> = {
+  anyOf: [
+    {
+      type: 'object',
+      properties: {
+        name: { type: 'string', enum: ['list_dir'] },
+        path: { type: 'string' },
+      },
+      required: ['name', 'path'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        offset: { anyOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }] },
+        limit: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'null' }] },
+        path: { type: 'string', pattern: '^[\\s\\S]+$' },
+        name: { type: 'string', enum: ['read_file'] },
+      },
+      required: ['name', 'path', 'offset', 'limit'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', pattern: '^[\\s\\S]{1,400}$' },
+        path: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+        glob: {
+          anyOf: [{ type: 'string', pattern: '^[\\s\\S]{0,120}$' }, { type: 'null' }],
+        },
+        caseInsensitive: { anyOf: [{ type: 'boolean' }, { type: 'null' }] },
+        name: { type: 'string', enum: ['grep'] },
+      },
+      required: ['name', 'pattern', 'path', 'glob', 'caseInsensitive'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', pattern: '^[\\s\\S]{1,160}$' },
+        path: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+        name: { type: 'string', enum: ['find_callers'] },
+      },
+      required: ['name', 'symbol', 'path'],
+      additionalProperties: false,
+    },
+    {
+      type: 'object',
+      properties: {
+        path: { type: 'string', pattern: '^[\\s\\S]+$' },
+        name: { type: 'string', enum: ['find_tests'] },
+      },
+      required: ['name', 'path'],
+      additionalProperties: false,
+    },
+  ],
+};
+
+/** Final investigate turn cannot degrade into a tool call or summary-only object. */
+export const InvestigateFinalJsonSchema: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    findings: { type: 'array', items: FindingJsonSchema },
+    action: { type: 'string', enum: ['done'] },
+    summary: { type: 'string' },
+  },
+  required: ['action', 'findings', 'summary'],
+  additionalProperties: false,
+};
+
+const InvestigateStepPayloadJsonSchema: Record<string, unknown> = {
+  anyOf: [
+    {
+      type: 'object',
+      properties: {
+        tool: InvestigateToolJsonSchema,
+        action: { type: 'string', enum: ['tool'] },
+        reason: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+      },
+      required: ['action', 'tool', 'reason'],
+      additionalProperties: false,
+    },
+    InvestigateFinalJsonSchema,
+  ],
+};
+
+/**
+ * Structured tool-loop envelope. Responses structured output requires a root
+ * object, so the discriminated alternatives live under `step`.
+ */
+export const InvestigateStepJsonSchema: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    step: InvestigateStepPayloadJsonSchema,
+  },
+  required: ['step'],
+  additionalProperties: false,
+};
 
 export type InvestigateStep = z.infer<typeof StepSchema>;
