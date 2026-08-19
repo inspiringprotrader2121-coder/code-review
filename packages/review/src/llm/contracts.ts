@@ -72,7 +72,10 @@ export interface LlmClientOptions {
     reasoningContent: string;
     contentPrefix: string;
   };
-  /** Seed used when a JSON call returns reasoning-only / empty assistant text. */
+  /**
+   * Seed used only to finish truncated JSON. Empty string disables guessed
+   * prefixes; complete objects must not be rewritten into a different contract.
+   */
   jsonContractPrefix?: string;
   /** Accepted top-level keys for a valid JSON response contract. */
   jsonContractKeys?: readonly JsonContractKey[];

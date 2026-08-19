@@ -78,7 +78,7 @@ export async function verifyFixes(
             : undefined,
         onUsage: options.onUsage,
         onAttempt: options.onAttempt,
-        jsonContractPrefix: '{"verdicts":',
+        jsonContractPrefix: '',
         jsonContractKeys: ['verdicts'],
       },
     );

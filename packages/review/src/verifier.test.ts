@@ -856,13 +856,47 @@ test('Flash verification retries one Responses truncation within the failed batc
   assert.deepEqual(result.kept, [candidate]);
 });
 
-test('verification finishes a JSON-contract miss with one parent-linked continuation', async (t) => {
+test('valid verifier verdict object succeeds without a repair', async () => {
+  let calls = 0;
+  const candidate = finding({ severity: 'P2', message: 'concrete failure' });
+  const result = await verifyFindings(
+    [candidate],
+    [{ path: 'a.js', content: 'function broken() { throw new Error(); }' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      maxFindingsPerBatch: 1,
+      concurrency: 1,
+      strict: true,
+      runner: {
+        transport: 'compatible-chat',
+        async run() {
+          calls++;
+          return '{"verdicts":[{"id":0,"verdict":"confirmed","reason":"throw is reachable"}]}';
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+      },
+    },
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(result.status, 'verified');
+  assert.deepEqual(result.kept, [candidate]);
+});
+
+test('verification repairs a JSON-contract miss with one fresh generation', async (t) => {
   const originalFetch = globalThis.fetch;
   const encoder = new TextEncoder();
   const events: LlmAttemptEvent[] = [];
+  const bodies: string[] = [];
   let calls = 0;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (_input, init) => {
     calls++;
+    bodies.push(String(init?.body));
     const content =
       calls === 1
         ? 'I confirmed the finding but forgot the required object.'
@@ -907,15 +941,34 @@ test('verification finishes a JSON-contract miss with one parent-linked continua
   assert.equal(result.status, 'verified');
   assert.equal(result.kept.length, 1);
   assert.equal(calls, 2);
+  const parsedBodies = bodies.map(
+    (body) =>
+      JSON.parse(body) as {
+        messages?: Array<{ role?: string; content?: string; prefix?: boolean }>;
+      },
+  );
+  assert.equal(
+    parsedBodies.some((body) =>
+      (body.messages ?? []).some(
+        (message) =>
+          message.role === 'assistant' &&
+          (message.prefix === true || message.content === '{"verdicts":'),
+      ),
+    ),
+    false,
+    'malformed verifier JSON must not be prefix-continued',
+  );
+  assert.match(bodies[1] ?? '', /FORMAT RETRY/);
+  assert.match(bodies[1] ?? '', /PREVIOUS RESPONSE/);
   const starts = events.filter((event) => event.phase === 'started');
   assert.deepEqual(
     starts.map((event) => event.role),
-    ['primary', 'continuation'],
+    ['primary', 'primary'],
   );
-  assert.equal(starts[1]?.parentAttemptId, starts[0]?.attemptId);
+  assert.equal(starts[1]?.parentAttemptId, undefined);
   assert.deepEqual(
     starts.map((event) => event.retryIndex),
-    [0, 1],
+    [0, 0],
   );
 });
 
@@ -932,4 +985,41 @@ test('the verifier keeps the promotion rules for classes it measurably under-rat
     assert.match(text, cls);
   }
   assert.match(text, /you may RAISE severity/);
+});
+
+test('#305 malformed verifier JSON is repaired from a clean generation', async () => {
+  const users: string[] = [];
+  const candidate = finding({ severity: 'P2', message: 'concrete failure' });
+  const result = await verifyFindings(
+    [candidate],
+    [{ path: 'a.js', content: 'function broken() { throw new Error(); }' }],
+    {
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      maxFindingsPerBatch: 1,
+      concurrency: 1,
+      strict: true,
+      runner: {
+        transport: 'compatible-chat',
+        async run(request) {
+          users.push(request.user);
+          if (users.length === 1) return '{"summary":"LLM returned no verdicts"}';
+          return '{"verdicts":[{"id":0,"verdict":"confirmed"}]}';
+        },
+      },
+      target: {
+        transport: 'compatible-chat',
+        apiKey: 'test-key',
+        model: 'deepseek-v4-flash',
+      },
+    },
+  );
+
+  assert.equal(users.length, 2);
+  assert.match(users[1] ?? '', /FORMAT RETRY/);
+  assert.match(users[1] ?? '', /PREVIOUS RESPONSE/);
+  assert.match(users[1] ?? '', /LLM returned no verdicts/);
+  assert.doesNotMatch(users[1] ?? '', /complete the json object/i);
+  assert.equal(result.status, 'verified');
+  assert.deepEqual(result.kept, [candidate]);
 });

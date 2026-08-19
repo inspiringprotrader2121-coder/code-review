@@ -18,6 +18,10 @@ import { RETRYABLE_EMPTY_PROVIDER_RESPONSE } from './retry-policy.js';
 // is ever opened, rather than producing a timer that fires immediately.
 const COMPATIBLE_CHAT_INACTIVITY_MS = loadReviewRuntimeConfig().llmTimeoutMs;
 
+function truncatedJsonPrefix(text: string, opts: LlmClientOptions): string {
+  return jsonFinishPrefix(text, opts.jsonContractPrefix) ?? text;
+}
+
 /** Absolute paid-call ceiling; progress grace cannot exceed this. */
 const ABSOLUTE_LLM_WALL_CAP_MS = 900_000;
 /** Extra wall time granted while a live stream keeps emitting bytes/events. */
@@ -390,7 +394,7 @@ export async function anthropicChat(
     if (opts.json) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: continuation?.reasoningContent ?? '',
-        contentPrefix: jsonFinishPrefix(text || rawText, opts.jsonContractPrefix),
+        contentPrefix: truncatedJsonPrefix(text || rawText, opts),
       });
     }
     throw new Error('LLM response truncated (stop_reason=max_tokens); increase max tokens');
@@ -401,7 +405,7 @@ export async function anthropicChat(
     if (opts.json) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: continuation?.reasoningContent ?? '',
-        contentPrefix: jsonFinishPrefix(rawText, opts.jsonContractPrefix),
+        contentPrefix: truncatedJsonPrefix(rawText, opts),
       });
     }
     throw new Error('LLM returned no text content');
@@ -596,7 +600,7 @@ export async function openAiResponsesStreamChat(
   const continuationRequired = () =>
     new DeepSeekContinuationRequiredError({
       reasoningContent: continuation?.reasoningContent ?? '',
-      contentPrefix: jsonFinishPrefix(responseText, opts.jsonContractPrefix),
+      contentPrefix: truncatedJsonPrefix(responseText, opts),
     });
   if (failed)
     throw new Error(
@@ -778,7 +782,7 @@ export async function openAiCompatStreamChat(
       const streamedText = stripThinking(content);
       const contentPrefix = continuationPrefix
         ? combineContinuationText(continuationPrefix, streamedText)
-        : jsonFinishPrefix(streamedText, opts.jsonContractPrefix);
+        : truncatedJsonPrefix(streamedText, opts);
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
         contentPrefix,
@@ -820,7 +824,7 @@ export async function openAiCompatStreamChat(
     if (opts.json && (thinkingEnabled(opts) || Boolean(continuation))) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
-        contentPrefix: jsonFinishPrefix(text || streamedText, opts.jsonContractPrefix),
+        contentPrefix: truncatedJsonPrefix(text || streamedText, opts),
       });
     }
     throw new Error('LLM response truncated (finish_reason=length); increase max tokens');
@@ -829,7 +833,7 @@ export async function openAiCompatStreamChat(
     if (opts.json) {
       throw new DeepSeekContinuationRequiredError({
         reasoningContent: `${continuation?.reasoningContent ?? ''}${reasoningContent}`,
-        contentPrefix: jsonFinishPrefix(streamedText, opts.jsonContractPrefix),
+        contentPrefix: truncatedJsonPrefix(streamedText, opts),
       });
     }
     throw new Error('LLM returned no text content');

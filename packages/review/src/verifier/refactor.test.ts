@@ -51,7 +51,7 @@ test('verdict normalization keeps a rejected candidate distinct from a same-file
   assert.equal(result.dropped.length, 1);
 });
 
-test('verifier runner path continues from the verdicts JSON contract prefix', async () => {
+test('verifier runner path does not seed a guessed verdicts JSON prefix', async () => {
   let seen: string | undefined;
   const result = await verifyFindings(
     [finding()],
@@ -74,7 +74,7 @@ test('verifier runner path continues from the verdicts JSON contract prefix', as
     },
   );
 
-  assert.equal(seen, '{"verdicts":');
+  assert.equal(seen, '');
   assert.equal(result.status, 'verified');
   assert.equal(result.kept.length, 1);
 });

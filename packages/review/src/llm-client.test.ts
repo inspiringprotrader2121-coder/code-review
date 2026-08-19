@@ -1155,7 +1155,7 @@ test('a prose-only JSON contract is finished by one answer-only continuation', a
   assert.match(messages.at(-1)?.content ?? '', /complete the json object/i);
 });
 
-test('an identical schema-wrong continuation stops before paying for another copy', async () => {
+test('an identical schema-wrong complete object is not prefix-continued', async () => {
   let calls = 0;
   await assert.rejects(
     () =>
@@ -1177,10 +1177,10 @@ test('an identical schema-wrong continuation stops before paying for another cop
           });
         },
       ),
-    /answer-only continuation made no progress/,
+    /JSON contract mismatch/,
   );
 
-  assert.equal(calls, 2, 'the repeated invalid answer must not consume a second continuation');
+  assert.equal(calls, 1, 'complete JSON with the wrong keys must not be prefix-continued');
 });
 
 test('a valid investigation action does not trigger a findings continuation', async () => {

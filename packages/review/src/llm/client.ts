@@ -33,7 +33,7 @@ import {
   sleep,
 } from './retry-policy.js';
 import { clockFor, estimateTokens, maxTotalMs } from './support.js';
-import { extractJsonLoose, jsonContractMissing, jsonFinishPrefix } from './parsing.js';
+import { extractJsonLoose, jsonContractMissing, jsonFinishPrefix, JsonContractMismatchError } from './parsing.js';
 import { DeepSeekContinuationRequiredError } from './transports.js';
 
 function workerKeyCursorSeed(id = loadReviewRuntimeConfig().workerId ?? ''): number {
@@ -233,6 +233,22 @@ async function llmChatHoldingProviderSlot(
         lineage,
       );
       if (opts.json && jsonContractMissing(text, opts.jsonContractKeys)) {
+        let completeObject = false;
+        try {
+          extractJsonLoose(text);
+          completeObject = true;
+        } catch {
+          completeObject = false;
+        }
+        if (completeObject) {
+          console.warn(`[llm] JSON contract mismatch; ${jsonContractDiagnostic(text)}`);
+          throw new JsonContractMismatchError(text);
+        }
+        const contentPrefix = jsonFinishPrefix(text, opts.jsonContractPrefix);
+        if (contentPrefix === null) {
+          console.warn(`[llm] JSON contract mismatch; ${jsonContractDiagnostic(text)}`);
+          throw new JsonContractMismatchError(text);
+        }
         // Some compatible providers ignore the assistant prefix and return the
         // same schema-wrong object verbatim. A second identical continuation
         // cannot make progress; stop paying for copies so the stage-specific
@@ -249,7 +265,7 @@ async function llmChatHoldingProviderSlot(
         lastContractMissText = text;
         continuation = {
           reasoningContent: continuation?.reasoningContent ?? '',
-          contentPrefix: jsonFinishPrefix(text, opts.jsonContractPrefix),
+          contentPrefix,
         };
         continuationCount++;
         continuationRateLimitAttempt = 0;
@@ -464,7 +480,7 @@ export async function llmChat(
       // Errors that already consumed the held-slot continuation path must not
       // restart the expensive primary attempt under a fresh admission.
       if (
-        /continuation rate-limited|response remained truncated|bounded prefix continuation/i.test(
+        /continuation rate-limited|response remained truncated|bounded prefix continuation|JSON contract mismatch/i.test(
           lastError.message,
         )
       ) {

@@ -65,9 +65,11 @@ test('throws (does not return garbage) when nothing parses', () => {
   assert.throws(() => extractJsonLoose('```bash\nNGINX -s reload\n```'), /no parseable JSON/);
 });
 
-test('jsonFinishPrefix continues from a truncated object or starts a findings contract', () => {
+test('jsonFinishPrefix continues from a truncated object and does not rewrite complete JSON', () => {
   assert.equal(jsonFinishPrefix('no json here'), '{"findings":');
+  assert.equal(jsonFinishPrefix('no json here', ''), null);
   assert.equal(jsonFinishPrefix('<think>x</think>{"findings":[{"file":'), '{"findings":[{"file":');
-  assert.equal(jsonFinishPrefix('{"findings":[],"summary":"ok"}'), '{"findings":');
+  assert.equal(jsonFinishPrefix('{"findings":[],"summary":"ok"}'), null);
+  assert.equal(jsonFinishPrefix('{"action":"final","findings":[],"summary":"ok"}', '{"step":{"action":'), null);
   assert.equal(jsonFinishPrefix('no json here', '{"verdicts":'), '{"verdicts":');
 });

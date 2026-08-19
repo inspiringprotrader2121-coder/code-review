@@ -124,12 +124,14 @@ export { runAgent, type AgentFile, type AgentOptions, type AgentResponse } from 
 export {
   runInvestigateReview,
   investigateThinkingEnabled,
+  classifyInvestigateResponse,
   resolveUnderRoot,
   isSafeGrepPattern,
   isSafeGlob,
   runInvestigateTool,
   extractDeletedSymbols,
   type InvestigateOptions,
+  type ClassifiedInvestigateResponse,
 } from './investigate.js';
 export {
   verifyFindings,

@@ -44,6 +44,7 @@ export {
   extractJsonLoose,
   jsonContractMissing,
   jsonFinishPrefix,
+  JsonContractMismatchError,
   stripThinking,
 } from './llm/parsing.js';
 export type { JsonContractKey } from './llm/parsing.js';

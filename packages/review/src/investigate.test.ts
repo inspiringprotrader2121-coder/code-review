@@ -11,6 +11,7 @@ import {
   runInvestigateTool,
   extractDeletedSymbols,
   investigateThinkingEnabled,
+  classifyInvestigateResponse,
 } from './investigate.js';
 
 function compatibleChatStream(content: string): Response {
@@ -344,15 +345,22 @@ test('Flash investigate uses step and final JSON schemas on the Responses API', 
     (request) => (request.body.text as { format?: Record<string, unknown> } | undefined)?.format,
   );
   assert.equal(formats[0]?.type, 'json_schema');
-  assert.equal(formats[0]?.name, 'orvex_investigate_step');
+  assert.equal(formats[0]?.name, 'orvex_investigate_turn');
   assert.equal(formats[1]?.type, 'json_schema');
   assert.equal(formats[1]?.name, 'orvex_investigate_final');
   const stepSchema = formats[0]?.schema as
-    | { type?: string; required?: string[]; anyOf?: unknown }
+    | { type?: string; required?: string[]; anyOf?: unknown[] }
     | undefined;
-  assert.equal(stepSchema?.type, 'object');
-  assert.deepEqual(stepSchema?.required, ['step']);
-  assert.equal(stepSchema?.anyOf, undefined);
+  assert.ok(Array.isArray(stepSchema?.anyOf));
+  assert.ok(
+    (stepSchema?.anyOf ?? []).some(
+      (entry) =>
+        entry &&
+        typeof entry === 'object' &&
+        Array.isArray((entry as { required?: string[] }).required) &&
+        (entry as { required?: string[] }).required?.includes('step'),
+    ),
+  );
   assert.deepEqual(requests[0]?.body.reasoning, { effort: 'none' });
   assert.deepEqual(requests[1]?.body.reasoning, { effort: 'max' });
   assert.deepEqual((formats[1]?.schema as { required?: string[] } | undefined)?.required, [
@@ -489,7 +497,168 @@ test('investigate never treats summary-only JSON as a completed empty review', a
     },
   );
 
-  assert.equal(calls, 4, 'primary and repair each stop after one no-progress continuation');
+  assert.equal(calls, 2, 'primary mismatch plus one fresh repair, no prefix continuations');
   assert.deepEqual(result.findings, []);
   assert.match(result.summary ?? '', /could not be completed/i);
+});
+
+test('classifyInvestigateResponse accepts immediate finals before tool steps', () => {
+  const emptyFinal = classifyInvestigateResponse(
+    '{"action":"final","findings":[],"summary":"No actionable issues."}',
+  );
+  assert.equal(emptyFinal.type, 'final');
+  if (emptyFinal.type === 'final') {
+    assert.deepEqual(emptyFinal.value.findings, []);
+    assert.equal(emptyFinal.value.summary, 'No actionable issues.');
+  }
+  const tool = classifyInvestigateResponse(
+    '{"action":"tool","tool":{"name":"read_file","path":"a.ts"},"reason":"look"}',
+  );
+  assert.equal(tool.type, 'step');
+  const wrapped = classifyInvestigateResponse(
+    '{"step":{"action":"done","findings":[],"summary":"ok"}}',
+  );
+  assert.equal(wrapped.type, 'final');
+  const incompleteFindings = classifyInvestigateResponse(
+    '{"action":"done","findings":[{"file":"a.ts","severity":"P2"}],"summary":"done"}',
+  );
+  assert.equal(incompleteFindings.type, 'invalid');
+  if (incompleteFindings.type === 'invalid') {
+    assert.equal(incompleteFindings.shape, 'schema_mismatch');
+  }
+});
+
+test('#318 immediate Flash final with zero findings completes without tools or continuations', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-318-'));
+  const originalFetch = globalThis.fetch;
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = (async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return responsesApiStream(
+      '{"action":"final","findings":[],"summary":"No actionable issues found."}',
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.test',
+      api: 'responses',
+      reasoningEffort: 'max',
+      maxTokens: 28_000,
+      maxSteps: 4,
+    },
+  );
+
+  assert.equal(bodies.length, 1);
+  assert.equal(JSON.stringify(bodies).includes('{"step":{"action":'), false);
+  assert.deepEqual(result, {
+    findings: [],
+    summary: 'No actionable issues found.',
+  });
+});
+
+test('immediate investigate final with findings does not call tools', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-final-findings-'));
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return compatibleChatStream(
+      JSON.stringify({
+        action: 'final',
+        findings: [
+          {
+            file: 'a.ts',
+            severity: 'P2',
+            category: 'correctness',
+            message: 'newValue is unused',
+            confidence: 0.8,
+          },
+        ],
+        summary: 'Found an issue.',
+      }),
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://compatible.test/v1',
+      api: 'chat',
+      maxSteps: 4,
+    },
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0]?.file, 'a.ts');
+  assert.equal(result.summary, 'Found an issue.');
+});
+
+test('malformed investigate JSON uses a fresh repair without a guessed step prefix', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-malformed-'));
+  const originalFetch = globalThis.fetch;
+  const bodies: string[] = [];
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    bodies.push(String(init?.body));
+    return calls === 1
+      ? compatibleChatStream('this is not json at all')
+      : compatibleChatStream('{"action":"done","findings":[],"summary":"Repaired."}');
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://compatible.test/v1',
+      api: 'chat',
+      maxSteps: 3,
+    },
+  );
+
+  assert.equal(calls, 2);
+  assert.equal(bodies.some((body) => body.includes('{"step":{"action":')), false);
+  assert.match(bodies[1] ?? '', /PREVIOUS RESPONSE/);
+  assert.deepEqual(result, { findings: [], summary: 'Repaired.' });
 });

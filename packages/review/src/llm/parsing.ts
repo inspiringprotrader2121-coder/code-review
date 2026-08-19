@@ -32,14 +32,30 @@ export function extractJsonLoose(text: string): unknown {
   throw new Error('LLM response contained no parseable JSON');
 }
 
-/** Assistant prefix used to finish a truncated or prose-only JSON contract. */
-export function jsonFinishPrefix(text: string, contractPrefix = '{"findings":'): string {
+/**
+ * Prefix used only to finish truncated JSON. Complete parseable objects return
+ * null so callers must not seed a guessed contract fragment onto a finished reply.
+ * An omitted/empty contractPrefix disables guessed seeds such as `{"step":{"action":`.
+ */
+export function jsonFinishPrefix(
+  text: string,
+  contractPrefix = '{"findings":',
+): string | null {
   const stripped = stripThinking(text);
   const start = stripped.indexOf('{');
-  if (start === -1) return contractPrefix;
+  if (start === -1) return contractPrefix || null;
   const slice = stripped.slice(start);
-  if (tryParse(slice) !== undefined) return contractPrefix;
-  return slice || contractPrefix;
+  if (tryParse(slice) !== undefined) return null;
+  return slice || contractPrefix || null;
+}
+
+export class JsonContractMismatchError extends Error {
+  readonly text: string;
+  constructor(text: string) {
+    super('LLM response JSON contract mismatch');
+    this.name = 'JsonContractMismatchError';
+    this.text = text;
+  }
 }
 
 export type JsonContractKey = 'findings' | 'issues' | 'verdicts' | 'action' | 'clusters' | 'step';

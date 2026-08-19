@@ -70,7 +70,7 @@ export const StepSchema = z.union([
     reason: z.string().optional(),
   }),
   z.object({
-    action: z.literal('done'),
+    action: z.enum(['done', 'final']),
     findings: z.array(z.unknown()),
     summary: z.string().optional(),
   }),
@@ -139,10 +139,20 @@ export const InvestigateFinalJsonSchema: Record<string, unknown> = {
   type: 'object',
   properties: {
     findings: { type: 'array', items: FindingJsonSchema },
-    action: { type: 'string', enum: ['done'] },
+    action: { type: 'string', enum: ['done', 'final'] },
     summary: { type: 'string' },
   },
   required: ['action', 'findings', 'summary'],
+  additionalProperties: false,
+};
+
+const InvestigateBareFinalJsonSchema: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    findings: { type: 'array', items: FindingJsonSchema },
+    summary: { type: 'string' },
+  },
+  required: ['findings', 'summary'],
   additionalProperties: false,
 };
 
@@ -162,17 +172,25 @@ const InvestigateStepPayloadJsonSchema: Record<string, unknown> = {
   ],
 };
 
-/**
- * Structured tool-loop envelope. Responses structured output requires a root
- * object, so the discriminated alternatives live under `step`.
- */
-export const InvestigateStepJsonSchema: Record<string, unknown> = {
+const InvestigateStepEnvelopeJsonSchema: Record<string, unknown> = {
   type: 'object',
   properties: {
     step: InvestigateStepPayloadJsonSchema,
   },
   required: ['step'],
   additionalProperties: false,
+};
+
+/**
+ * Any investigate turn may be a tool step or an immediate final review.
+ * Structured output must allow both; turn 1 is not required to wrap `step`.
+ */
+export const InvestigateStepJsonSchema: Record<string, unknown> = {
+  anyOf: [
+    InvestigateStepEnvelopeJsonSchema,
+    ...(InvestigateStepPayloadJsonSchema.anyOf as Record<string, unknown>[]),
+    InvestigateBareFinalJsonSchema,
+  ],
 };
 
 export type InvestigateStep = z.infer<typeof StepSchema>;
