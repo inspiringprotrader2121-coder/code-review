@@ -7,6 +7,11 @@
 export { runInvestigateTool } from './investigate/dispatcher.js';
 export { runInvestigateReview, investigateThinkingEnabled } from './investigate/execution.js';
 export { classifyInvestigateResponse, classifyAgenticTurn } from './investigate/classify.js';
+export {
+  buildInvestigateGeneration,
+  investigateJsonSchema,
+  investigateOutputContract,
+} from './investigate/request.js';
 export { isSafeGlob, isSafeGrepPattern, resolveUnderRoot } from './investigate/policy.js';
 export { extractDeletedSymbols } from './investigate/symbols.js';
 export type { InvestigateOptions } from './investigate/contracts.js';

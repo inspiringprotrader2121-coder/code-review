@@ -39,6 +39,7 @@ import {
   jsonContractMissing,
   jsonFinishPrefix,
   JsonContractMismatchError,
+  stripThinking,
 } from './parsing.js';
 import { DeepSeekContinuationRequiredError } from './transports.js';
 
@@ -62,6 +63,10 @@ const MAX_CONTINUATION_RATE_LIMIT_RETRIES = 2;
 
 function jsonContractDiagnostic(text: string): string {
   const digest = createHash('sha256').update(text).digest('hex').slice(0, 12);
+  const stripped = stripThinking(text);
+  const fence = /```/.test(stripped);
+  const objectStart = stripped.indexOf('{');
+  const prosePrefix = objectStart > 0 && stripped.slice(0, objectStart).trim().length > 0;
   let parsed: unknown;
   try {
     parsed = extractJsonLoose(text);
@@ -76,7 +81,19 @@ function jsonContractDiagnostic(text: string): string {
       .map((key) => key.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 40));
     shape = `object keys=${keys.join(',') || '(none)'}`;
   } else if (parsed !== undefined) shape = typeof parsed;
-  return `chars=${text.length} sha256=${digest} shape=${shape}`;
+  else if (!stripped) shape = 'empty';
+  else if (fence) shape = 'markdown_fence';
+  else if (prosePrefix) shape = 'prose_prefix';
+  return `chars=${text.length} sha256=${digest} shape=${shape} fence=${fence} prosePrefix=${prosePrefix}`;
+}
+
+function structuredOutputLogFields(opts: LlmClientOptions, continuationCount: number) {
+  return {
+    schemaEnforced: Boolean(opts.jsonSchema),
+    schemaName: opts.jsonSchema?.name ?? null,
+    semanticRepairAttempt: opts.semanticRepairAttempt ?? 0,
+    continuationAttempt: continuationCount,
+  };
 }
 
 function rateLimitAdmissionError(provider: string, keyCount: number, cause: Error): Error {
@@ -253,8 +270,7 @@ async function llmChatHoldingProviderSlot(
               parseResult: classified.parseResult,
               failureClass: classified.failureClass,
               recoveryMode: classified.recoveryMode,
-              continuationAttempt: continuationCount,
-              semanticRepairAttempt: 0,
+              ...structuredOutputLogFields(opts, continuationCount),
               diagnostic: jsonContractDiagnostic(text),
             })}`,
           );
@@ -298,8 +314,7 @@ async function llmChatHoldingProviderSlot(
             parseResult: classified.parseResult,
             failureClass: classified.failureClass,
             recoveryMode: 'continuation',
-            continuationAttempt: continuationCount,
-            semanticRepairAttempt: 0,
+            ...structuredOutputLogFields(opts, continuationCount),
             diagnostic: jsonContractDiagnostic(text),
           })}`,
         );
@@ -335,8 +350,7 @@ async function llmChatHoldingProviderSlot(
             parseResult: 'invalid',
             failureClass: 'truncated_json',
             recoveryMode: 'continuation',
-            continuationAttempt: continuationCount,
-            semanticRepairAttempt: 0,
+            ...structuredOutputLogFields(opts, continuationCount),
           })}`,
         );
         console.warn(

@@ -81,6 +81,8 @@ export interface LlmClientOptions {
   jsonContractKeys?: readonly JsonContractKey[];
   /** Strict structured-output contract for Responses API providers. */
   jsonSchema?: JsonSchemaContract;
+  /** 0 for a normal generation; 1 or 2 for a fresh semantic repair. */
+  semanticRepairAttempt?: number;
   /** Internal per-request wall cap; public review calls use the configured LLM max-total cap. */
   hardLimitMs?: number;
   /**

@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import { loadReviewRuntimeConfig } from '@orvex-review/config';
 import { runAgenticReviewLoop } from '../agentic/runner.js';
-import { wrapAgenticRecoveryUser } from '../agentic/recovery.js';
 import { buildUserPrompt, loadOrvexRules } from '../prompt.js';
 import { redactPatch, redactSecrets } from '../redact.js';
 import { llmChat } from '../llm-client.js';
@@ -10,15 +9,11 @@ import { safePromptData } from '../prompt-safety.js';
 import type { ModelAttemptLineage } from '../providers/types.js';
 import type { LlmReviewResponse, ReviewableFile } from '../types.js';
 import type { InvestigateOptions } from './contracts.js';
-import { InvestigateFinalJsonSchema, InvestigateStepJsonSchema } from './contracts.js';
 import { classifyAgenticTurn, type InvestigateToolStep } from './classify.js';
 import { runInvestigateTool } from './dispatcher.js';
-import { clip } from './output.js';
 import { INVESTIGATE_SYSTEM_EXTRA, stripOutputFormatInstructions } from './prompt.js';
+import { buildInvestigateGeneration } from './request.js';
 import { extractDeletedSymbols } from './symbols.js';
-
-const FINAL_FORMAT_REPAIR_MAX_TOKENS = 8_000;
-const INVESTIGATE_CONTRACT_KEYS = ['step', 'action', 'findings', 'issues'] as const;
 
 function incomplete(summary?: string): LlmReviewResponse {
   return { findings: [], summary: summary ?? REVIEW_INCOMPLETE_SUMMARY };
@@ -81,17 +76,6 @@ function buildInvestigationPrompt(files: ReviewableFile[], options: InvestigateO
   ];
 }
 
-/** Responses-API structured output for the investigate protocol — not a provider state machine. */
-function investigateJsonSchema(
-  api: InvestigateOptions['api'],
-  lastTurn: boolean,
-): { name: string; schema: Record<string, unknown> } | undefined {
-  if (api !== 'responses') return undefined;
-  return lastTurn
-    ? { name: 'orvex_investigate_final', schema: InvestigateFinalJsonSchema }
-    : { name: 'orvex_investigate_turn', schema: InvestigateStepJsonSchema };
-}
-
 /** Run a sandboxed investigate review: iterative tool use, then final findings. */
 export async function runInvestigateReview(
   files: ReviewableFile[],
@@ -127,9 +111,6 @@ export async function runInvestigateReview(
     maxTokens: options.maxTokens,
     signal: options.signal,
     json: true as const,
-    jsonContractKeys: INVESTIGATE_CONTRACT_KEYS,
-    jsonContractPrefix: '',
-    jsonSchema: investigateJsonSchema(options.api, false),
     onUsage: options.onUsage,
     onAttempt: (event: Parameters<NonNullable<InvestigateOptions['onAttempt']>>[0]) => {
       if (event.phase === 'started') lastKeyIndex = event.keyIndex;
@@ -140,6 +121,7 @@ export async function runInvestigateReview(
 
   return runAgenticReviewLoop({
     maxTurns: maxSteps,
+    maxSemanticRepairsPerTurn: 2,
     lastTurnForcesFinal: true,
     stage: 'investigate',
     model: options.model,
@@ -149,40 +131,46 @@ export async function runInvestigateReview(
     classify: classifyAgenticTurn,
     log: (entry) => console.log(`[investigate] ${JSON.stringify(entry)}`),
     generate: async (request) => {
-      const baseUser = request.lastTurn
-        ? `${transcript.join('\n')}\n\nFINAL TURN — you MUST respond with {"action":"done",...} or {"action":"final",...} now. No more tools. Empty findings is a completed pass.`
-        : transcript.join('\n');
-      const user =
-        request.source === 'recovery'
-          ? wrapAgenticRecoveryUser(
-              baseUser,
-              request.lastTurn,
-              request.previousText,
-              (text) => safePromptData(clip(text, 4_000)),
-              request.previousKind ?? 'malformed',
-            )
-          : baseUser;
+      const generation = buildInvestigateGeneration({
+        request,
+        transcript,
+        api: options.api,
+        maxTokens: options.maxTokens,
+      });
+      const { contract } = generation;
+      console.log(
+        `[investigate] ${JSON.stringify({
+          stage: 'request_contract',
+          source: request.source,
+          sourceLabel: generation.sourceLabel,
+          turn: request.turn,
+          lastTurn: request.lastTurn,
+          repairAttempt: generation.repairAttempt,
+          semanticRepairAttempt: generation.repairAttempt,
+          schemaEnforced: contract.schemaEnforced,
+          schemaName: contract.schemaName,
+          toolsEnabled: contract.toolsEnabled,
+          toolChoice: contract.toolChoice,
+          api: contract.api ?? options.api ?? 'chat',
+          thinking: generation.thinking,
+          maxTokens: generation.maxTokens ?? null,
+          model: options.model,
+        })}`,
+      );
       if (request.source === 'recovery') {
         console.warn(
-          '[investigate] response violated the review JSON contract; making one bounded fresh format repair',
+          `[investigate] response violated the review JSON contract; making bounded fresh format repair ${generation.repairAttempt}/2`,
         );
       }
-      return llmChat(system, user, {
+      return llmChat(system, generation.user, {
         ...llmOptions,
-        thinking: request.thinking,
-        maxTokens:
-          request.source === 'recovery'
-            ? Math.max(
-                1,
-                Math.min(
-                  options.maxTokens ?? FINAL_FORMAT_REPAIR_MAX_TOKENS,
-                  FINAL_FORMAT_REPAIR_MAX_TOKENS,
-                ),
-              )
-            : options.maxTokens,
-        jsonSchema: investigateJsonSchema(options.api, request.lastTurn),
-        jsonContractKeys: INVESTIGATE_CONTRACT_KEYS,
-        jsonContractPrefix: '',
+        thinking: generation.thinking,
+        maxTokens: generation.maxTokens,
+        json: contract.json,
+        jsonSchema: contract.jsonSchema,
+        jsonContractKeys: contract.jsonContractKeys,
+        jsonContractPrefix: contract.jsonContractPrefix,
+        semanticRepairAttempt: generation.repairAttempt,
         attemptLineage: request.lastTurn ? finalAttemptLineage : undefined,
       });
     },

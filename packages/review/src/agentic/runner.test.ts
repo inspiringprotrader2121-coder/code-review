@@ -36,6 +36,7 @@ async function runScript(
     maxTurns?: number;
     lastTurnForcesFinal?: boolean;
     maxTotalRepairAttempts?: number;
+    maxSemanticRepairsPerTurn?: number;
     isTransientError?: (error: unknown) => boolean;
   } = {},
 ): Promise<{
@@ -52,6 +53,7 @@ async function runScript(
     maxTurns: extras.maxTurns ?? 6,
     lastTurnForcesFinal: extras.lastTurnForcesFinal ?? false,
     maxTotalRepairAttempts: extras.maxTotalRepairAttempts,
+    maxSemanticRepairsPerTurn: extras.maxSemanticRepairsPerTurn,
     classify: classifyAgenticTurn,
     generate: async (request) => {
       requests.push(request);
@@ -77,6 +79,8 @@ test('agentic recovery instruction allows tools unless it is the last turn', () 
   assert.match(agenticRecoveryInstruction(true), /No more tools/);
   assert.match(agenticRecoveryInstruction(true, 'last_turn_tool'), /valid tool call/);
   assert.doesNotMatch(agenticRecoveryInstruction(true, 'last_turn_tool'), /malformed JSON/);
+  assert.match(agenticRecoveryInstruction(false, 'malformed', 2), /FORMAT REPAIR #2/);
+  assert.match(agenticRecoveryInstruction(false, 'malformed', 2), /request another tool/);
 });
 
 test('classifyAgenticProviderFailure distinguishes timeout and rate limit', () => {
@@ -195,10 +199,16 @@ test('shared runner: empty final after repair succeeds', async () => {
 });
 
 test('shared runner: repeated malformed output is a bounded parse failure', async () => {
-  const { result, requests } = await runScript([malformed, malformed, malformed], { maxTurns: 4 });
+  const { result, requests } = await runScript([malformed, malformed, malformed, malformed], {
+    maxTurns: 4,
+  });
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, 'parse_failure');
-  assert.equal(requests.length, 2, 'one normal miss plus one recovery, no infinite loop');
+  assert.equal(requests.length, 3, 'one normal miss plus two bounded recoveries, no infinite loop');
+  assert.equal(requests[1]?.repairAttempt, 1);
+  assert.equal(requests[2]?.repairAttempt, 2);
+  assert.equal(requests[1]?.source, 'recovery');
+  assert.equal(requests[2]?.source, 'recovery');
 });
 
 test('shared runner: tool-loop exhaustion is an explicit failure', async () => {
@@ -276,6 +286,80 @@ test('shared runner: last-turn forced-final provider errors are logged', async (
         entry.lastTurnForcesFinal === true,
     ),
   );
+});
+
+test('shared runner: last-turn tool then recovery still tool is explicit failure', async () => {
+  const { result, tools, requests, logs } = await runScript([tool('a.ts'), tool('b.ts')], {
+    maxTurns: 1,
+    lastTurnForcesFinal: true,
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'tool_loop_exhaustion');
+  assert.equal(tools.length, 0, 'forceDone must not execute a tool');
+  assert.equal(requests[1]?.lastTurn, true);
+  assert.equal(requests[1]?.previousKind, 'last_turn_tool');
+  assert.equal(requests[1]?.repairAttempt, 1);
+  assert.ok(logs.some((entry) => entry.lastTurnForcesFinal === true && entry.accepted === false));
+});
+
+test('shared runner #303: two completed invalid replies then repair #2 final', async () => {
+  const { result, requests, logs } = await runScript([malformed, malformed, emptyFinal]);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.deepEqual(result.value.findings, []);
+  assert.equal(requests.length, 3);
+  assert.equal(requests[1]?.source, 'recovery');
+  assert.equal(requests[1]?.repairAttempt, 1);
+  assert.equal(requests[2]?.source, 'recovery');
+  assert.equal(requests[2]?.repairAttempt, 2);
+  assert.equal(requests[2]?.thinking, false);
+  assert.ok(
+    logs.some((entry) => entry.sourceLabel === 'repair_2' && entry.kind === 'recovery_final'),
+  );
+});
+
+test('shared runner #303: two completed invalid replies then repair #2 tool then final', async () => {
+  const { result, tools, requests, logs } = await runScript([
+    malformed,
+    malformed,
+    tool('recovered.ts'),
+    emptyFinal,
+  ]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    tools.map((step) => step.tool.path),
+    ['recovered.ts'],
+  );
+  assert.equal(requests[2]?.source, 'recovery');
+  assert.equal(requests[2]?.repairAttempt, 2);
+  assert.equal(requests[3]?.source, 'normal');
+  const recoveryTool = logs.find((entry) => entry.kind === 'recovery_tool');
+  assert.equal(recoveryTool?.repairAttempt, 2);
+  assert.equal(recoveryTool?.reenteredAgentLoop, true);
+  assert.ok(logs.some((entry) => entry.kind === 'normal_final' && entry.accepted === true));
+});
+
+test('shared runner: JsonContractMismatchError still gets a second fresh repair', async () => {
+  const mismatch = new JsonContractMismatchError('this is not json at all');
+  const { result, requests } = await runScript([mismatch, mismatch, emptyFinal]);
+  assert.equal(result.ok, true);
+  assert.equal(requests[1]?.source, 'recovery');
+  assert.equal(requests[2]?.source, 'recovery');
+  assert.equal(requests[2]?.repairAttempt, 2);
+  assert.doesNotMatch(JSON.stringify(requests), /\{\\"step\\":\{\\"action\\":/);
+});
+
+test('shared runner: two-turn repair budget stays finite after a recovered tool', async () => {
+  const { result, requests } = await runScript(
+    [malformed, malformed, tool('a.ts'), malformed, malformed, malformed],
+    { maxTurns: 6, maxTotalRepairAttempts: 3 },
+  );
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.ok(result.reason === 'parse_failure' || result.reason === 'repair_budget_exhausted');
+  }
+  assert.ok(requests.length <= 6);
+  const repairs = requests.filter((request) => request.source === 'recovery');
+  assert.ok(repairs.length <= 3);
 });
 
 test('shared runner: exhausted recovery budget is repair_budget_exhausted', async () => {

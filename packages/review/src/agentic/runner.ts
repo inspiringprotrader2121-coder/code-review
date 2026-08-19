@@ -7,12 +7,13 @@ import {
 import type {
   AgenticLoopFailure,
   AgenticReviewLoopOptions,
+  AgenticSourceLabel,
   AgenticTurn,
   AgenticTurnLog,
   AgenticTurnSource,
 } from './types.js';
 
-const DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES = 2;
+const DEFAULT_SEMANTIC_REPAIRS_PER_TURN = 2;
 
 function failure(
   reason: AgenticLoopFailure['reason'],
@@ -28,6 +29,11 @@ function responseShapeOf<TTool, TFinal>(
   return classified.type === 'tool' ? 'tool' : classified.type === 'final' ? 'final' : 'invalid';
 }
 
+function sourceLabelFor(source: AgenticTurnSource, repairAttempt: number): AgenticSourceLabel {
+  if (source !== 'recovery') return 'normal';
+  return repairAttempt >= 2 ? 'repair_2' : 'repair_1';
+}
+
 /**
  * Shared agentic investigation loop. Any tool-capable reviewer injects generate /
  * classify / executeTool. Legal states on an active turn are TOOL or FINAL for
@@ -37,9 +43,14 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
   options: AgenticReviewLoopOptions<TTool, TFinal, TResult>,
 ): Promise<TResult> {
   const maxTurns = Math.max(1, options.maxTurns);
-  const maxConsecutiveParseFailures =
-    options.maxConsecutiveParseFailures ?? DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES;
-  const maxTotalRepairAttempts = options.maxTotalRepairAttempts ?? maxTurns;
+  const maxSemanticRepairsPerTurn = Math.max(
+    1,
+    options.maxSemanticRepairsPerTurn ??
+      options.maxConsecutiveParseFailures ??
+      DEFAULT_SEMANTIC_REPAIRS_PER_TURN,
+  );
+  const maxTotalRepairAttempts =
+    options.maxTotalRepairAttempts ?? Math.max(maxTurns, maxSemanticRepairsPerTurn);
   const lastTurnForcesFinal = options.lastTurnForcesFinal !== false;
   const isParseError = options.isParseError ?? isAgenticParseError;
   const extractParseText = options.extractParseText ?? extractAgenticParseText;
@@ -58,11 +69,14 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
     extra: Record<string, unknown> = {},
   ): void => {
     const responseShape = responseShapeOf(classified);
+    const repairAttempt =
+      typeof extra.repairAttempt === 'number' ? extra.repairAttempt : source === 'recovery' ? 1 : 0;
     options.log?.({
       runnerType: 'agentic',
       stage,
       turn,
       source,
+      sourceLabel: sourceLabelFor(source, repairAttempt),
       kind: `${source}_${responseShape}`,
       responseShape,
       parseResult: classified.type,
@@ -71,6 +85,9 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
       toolCallCount,
       totalRepairAttempts,
       consecutiveParseFailures,
+      repairAttempt,
+      semanticRepairAttempt: repairAttempt,
+      agentTurnCount: turn + 1,
       accepted: classified.type !== 'invalid',
       reenteredAgentLoop: source === 'recovery' && classified.type === 'tool',
       model: options.model,
@@ -82,11 +99,13 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
   };
 
   const emitFailure = (turn: number, source: AgenticTurnSource, extra: Record<string, unknown>) => {
+    const repairAttempt = typeof extra.repairAttempt === 'number' ? extra.repairAttempt : 0;
     options.log?.({
       runnerType: 'agentic',
       stage,
       turn,
       source,
+      sourceLabel: sourceLabelFor(source, repairAttempt),
       kind: `${source}_invalid`,
       responseShape: 'invalid',
       parseResult: 'invalid',
@@ -94,6 +113,9 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
       toolCallCount,
       totalRepairAttempts,
       consecutiveParseFailures,
+      repairAttempt,
+      semanticRepairAttempt: repairAttempt,
+      agentTurnCount: turn + 1,
       accepted: false,
       reenteredAgentLoop: false,
       model: options.model,
@@ -112,55 +134,92 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
     | { ok: true; classified: AgenticTurn<TTool, TFinal> }
     | { ok: false; reason: AgenticLoopFailure['reason']; message: string }
   > => {
-    consecutiveParseFailures++;
-    if (
-      consecutiveParseFailures >= maxConsecutiveParseFailures ||
-      totalRepairAttempts >= maxTotalRepairAttempts
-    ) {
-      emitFailure(turn, 'recovery', { finishReason: 'repair_budget_exhausted' });
-      return {
-        ok: false,
-        reason: 'repair_budget_exhausted',
-        message: 'agentic recovery budget exhausted',
-      };
-    }
-    totalRepairAttempts++;
-    const recoveryStarted = Date.now();
-    try {
-      const repaired = await options.generate({
-        turn,
-        lastTurn,
-        source: 'recovery',
-        previousText,
-        previousKind: 'malformed',
-        thinking: false,
-      });
-      const classified = options.classify(repaired);
-      emit(classified, turn, 'recovery', { durationMs: Date.now() - recoveryStarted });
-      if (classified.type === 'invalid') {
-        consecutiveParseFailures++;
+    let previous = previousText;
+    let lastMessage = 'agentic recovery reply remained unparseable';
+    for (let attempt = 1; attempt <= maxSemanticRepairsPerTurn; attempt++) {
+      if (totalRepairAttempts >= maxTotalRepairAttempts) {
+        emitFailure(turn, 'recovery', {
+          finishReason: 'repair_budget_exhausted',
+          repairAttempt: attempt,
+        });
         return {
           ok: false,
-          reason: 'parse_failure',
-          message: 'agentic recovery reply remained unparseable',
+          reason: 'repair_budget_exhausted',
+          message: 'agentic recovery budget exhausted',
         };
       }
-      consecutiveParseFailures = 0;
-      return { ok: true, classified };
-    } catch (error) {
-      if (options.signal?.aborted) throw options.signal.reason ?? error;
-      if (isTransientError(error)) throw error;
-      const reason = classifyProviderFailure(error);
-      emitFailure(turn, 'recovery', {
-        finishReason: reason,
-        durationMs: Date.now() - recoveryStarted,
-      });
-      return {
-        ok: false,
-        reason,
-        message: error instanceof Error ? error.message : String(error),
-      };
+      totalRepairAttempts++;
+      consecutiveParseFailures++;
+      const recoveryStarted = Date.now();
+      try {
+        const repaired = await options.generate({
+          turn,
+          lastTurn,
+          source: 'recovery',
+          previousText: previous,
+          previousKind: 'malformed',
+          thinking: false,
+          repairAttempt: attempt,
+        });
+        const classified = options.classify(repaired);
+        emit(classified, turn, 'recovery', {
+          durationMs: Date.now() - recoveryStarted,
+          repairAttempt: attempt,
+        });
+        if (classified.type !== 'invalid') {
+          consecutiveParseFailures = 0;
+          return { ok: true, classified };
+        }
+        previous = repaired;
+        lastMessage = 'agentic recovery reply remained unparseable';
+      } catch (error) {
+        if (options.signal?.aborted) throw options.signal.reason ?? error;
+        if (isTransientError(error)) throw error;
+        if (isParseError(error)) {
+          const extracted = extractParseText(error);
+          if (extracted) {
+            const classified = options.classify(extracted);
+            emit(classified, turn, 'recovery', {
+              durationMs: Date.now() - recoveryStarted,
+              repairAttempt: attempt,
+            });
+            if (classified.type !== 'invalid') {
+              consecutiveParseFailures = 0;
+              return { ok: true, classified };
+            }
+            previous = extracted;
+          } else {
+            emitFailure(turn, 'recovery', {
+              finishReason: 'parse_failure',
+              durationMs: Date.now() - recoveryStarted,
+              repairAttempt: attempt,
+            });
+          }
+          lastMessage = error instanceof Error ? error.message : String(error);
+          continue;
+        }
+        const reason = classifyProviderFailure(error);
+        emitFailure(turn, 'recovery', {
+          finishReason: reason,
+          durationMs: Date.now() - recoveryStarted,
+          repairAttempt: attempt,
+        });
+        return {
+          ok: false,
+          reason,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
     }
+    emitFailure(turn, 'recovery', {
+      finishReason: 'parse_failure',
+      repairAttempt: maxSemanticRepairsPerTurn,
+    });
+    return {
+      ok: false,
+      reason: 'parse_failure',
+      message: lastMessage,
+    };
   };
 
   for (let turn = 0; turn < maxTurns; turn++) {
@@ -176,11 +235,13 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
         source: 'normal',
         previousText: '',
         thinking: lastTurn,
+        repairAttempt: 0,
       });
       classified = options.classify(text);
       emit(classified, turn, 'normal', {
         durationMs: Date.now() - turnStarted,
         elapsedMs: Date.now() - startedMs,
+        repairAttempt: 0,
       });
       if (classified.type === 'invalid') {
         const recovered = await recover(turn, lastTurn, text);
@@ -197,6 +258,7 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
         emitFailure(turn, 'normal', {
           finishReason: classifyProviderFailure(error),
           durationMs: Date.now() - turnStarted,
+          repairAttempt: 0,
         });
         throw error;
       }
@@ -206,7 +268,10 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
           const recovered = options.classify(previous);
           if (recovered.type !== 'invalid') {
             consecutiveParseFailures = 0;
-            emit(recovered, turn, 'normal', { durationMs: Date.now() - turnStarted });
+            emit(recovered, turn, 'normal', {
+              durationMs: Date.now() - turnStarted,
+              repairAttempt: 0,
+            });
             classified = recovered;
           } else {
             const repaired = await recover(turn, lastTurn, previous);
@@ -227,6 +292,7 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
         emitFailure(turn, 'normal', {
           finishReason: reason,
           durationMs: Date.now() - turnStarted,
+          repairAttempt: 0,
         });
         if (turn === 0) throw error;
         return options.onFailure(
@@ -239,7 +305,10 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
     if (classified.type === 'tool') {
       if (lastTurn && lastTurnForcesFinal) {
         if (totalRepairAttempts >= maxTotalRepairAttempts) {
-          emitFailure(turn, 'recovery', { finishReason: 'repair_budget_exhausted' });
+          emitFailure(turn, 'recovery', {
+            finishReason: 'repair_budget_exhausted',
+            repairAttempt: 1,
+          });
           return options.onFailure(
             failure(
               'repair_budget_exhausted',
@@ -256,13 +325,15 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
             previousText: JSON.stringify(classified.value),
             previousKind: 'last_turn_tool',
             thinking: false,
+            repairAttempt: 1,
           });
           const repaired = options.classify(repairedText);
-          emit(repaired, turn, 'recovery', { lastTurnForcesFinal: true });
+          emit(repaired, turn, 'recovery', { lastTurnForcesFinal: true, repairAttempt: 1 });
           if (repaired.type === 'final') return options.onFinal(repaired.value);
           emitFailure(turn, 'recovery', {
             finishReason: 'tool_loop_exhaustion',
             lastTurnForcesFinal: true,
+            repairAttempt: 1,
           });
         } catch (error) {
           if (options.signal?.aborted) throw options.signal.reason ?? error;
@@ -271,6 +342,7 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
           emitFailure(turn, 'recovery', {
             finishReason: reason,
             lastTurnForcesFinal: true,
+            repairAttempt: 1,
           });
           return options.onFailure(
             failure(reason, error instanceof Error ? error.message : String(error), error),
@@ -293,6 +365,7 @@ export async function runAgenticReviewLoop<TTool, TFinal, TResult>(
   emitFailure(maxTurns, 'normal', {
     finishReason: 'tool_loop_exhaustion',
     durationMs: Date.now() - startedMs,
+    repairAttempt: 0,
   });
   return options.onFailure(
     failure('tool_loop_exhaustion', 'agentic review reached the tool-loop limit without a final'),

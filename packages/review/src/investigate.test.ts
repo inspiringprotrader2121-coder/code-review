@@ -459,7 +459,7 @@ test('investigate repairs one malformed final without replaying tool hops', asyn
 
   assert.equal(calls, 3, 'one tool hop, one final, and one bounded repair are paid');
   assert.match(JSON.stringify(requests[1]), /currentValue/);
-  assert.equal(requests[2]?.max_tokens, 8_000);
+  assert.equal(requests[2]?.max_tokens, 28_000);
   assert.deepEqual(requests[2]?.chat_template_kwargs, { thinking_mode: 'disabled' });
   assert.deepEqual(result, { findings: [], summary: 'Format repaired.' });
 });
@@ -497,7 +497,11 @@ test('investigate never treats summary-only JSON as a completed empty review', a
     },
   );
 
-  assert.equal(calls, 2, 'primary mismatch plus one fresh repair, no prefix continuations');
+  assert.equal(
+    calls,
+    3,
+    'primary mismatch plus two bounded fresh repairs, no prefix continuations',
+  );
   assert.deepEqual(result.findings, []);
   assert.match(result.summary ?? '', /could not be completed/i);
 });
@@ -990,7 +994,7 @@ test('tool then malformed then repair malformed is bounded and fail-closed', asy
     },
   );
 
-  assert.equal(calls, 3, 'one tool hop plus one bounded repair, no infinite loop');
+  assert.equal(calls, 4, 'one tool hop plus two bounded repairs, no infinite loop');
   assert.deepEqual(result.findings, []);
   assert.match(result.summary ?? '', /could not be completed/i);
 });
@@ -1040,4 +1044,210 @@ test('repair may return a valid empty final after a prior tool', async (t) => {
     findings: [],
     summary: 'No actionable issues.',
   });
+});
+
+test('#303 Flash investigate: two completed non-JSON replies then repair #2 FINAL', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-303-final-'));
+  const originalFetch = globalThis.fetch;
+  const { logs, restore } = captureInvestigateLogs();
+  const requests: Array<Record<string, unknown>> = [];
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    if (calls === 1) {
+      return responsesApiStream('Investigation complete. No issues found in this change.');
+    }
+    if (calls === 2) {
+      return responsesApiStream('Still cannot emit the required JSON contract.');
+    }
+    return responsesApiStream(
+      '{"action":"final","findings":[],"summary":"Repaired on second fresh generation."}',
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    restore();
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.test',
+      api: 'responses',
+      reasoningEffort: 'max',
+      maxTokens: 28_000,
+      maxSteps: 4,
+    },
+  );
+
+  assert.equal(calls, 3, 'normal miss plus two fresh semantic repairs');
+  assert.deepEqual(
+    requests.map((request) => jsonSchemaName(request)),
+    ['orvex_investigate_turn', 'orvex_investigate_turn', 'orvex_investigate_turn'],
+  );
+  assert.deepEqual(
+    requests.map((request) => request.max_output_tokens),
+    [28_000, 28_000, 28_000],
+  );
+  assert.equal(
+    requests.every((request) => !('temperature' in request)),
+    true,
+  );
+  assert.match(requestUserText(requests[1] ?? {}), /FORMAT REPAIR/);
+  assert.match(requestUserText(requests[1] ?? {}), /request another tool/);
+  assert.match(requestUserText(requests[2] ?? {}), /FORMAT REPAIR #2/);
+  assert.match(requestUserText(requests[2] ?? {}), /request another tool/);
+  assert.equal(typeof requests[1]?.input, 'string');
+  assert.equal(typeof requests[2]?.input, 'string');
+  assert.doesNotMatch(requestUserText(requests[1] ?? {}), /Complete the JSON object now/);
+  assert.doesNotMatch(requestUserText(requests[2] ?? {}), /Complete the JSON object now/);
+  const contracts = logs.filter((entry) => entry.stage === 'request_contract');
+  assert.deepEqual(
+    contracts.map((entry) => ({
+      sourceLabel: entry.sourceLabel,
+      schemaName: entry.schemaName,
+      toolsEnabled: entry.toolsEnabled,
+      toolChoice: entry.toolChoice,
+      schemaEnforced: entry.schemaEnforced,
+    })),
+    [
+      {
+        sourceLabel: 'normal',
+        schemaName: 'orvex_investigate_turn',
+        toolsEnabled: true,
+        toolChoice: 'tool_or_final',
+        schemaEnforced: true,
+      },
+      {
+        sourceLabel: 'repair_1',
+        schemaName: 'orvex_investigate_turn',
+        toolsEnabled: true,
+        toolChoice: 'tool_or_final',
+        schemaEnforced: true,
+      },
+      {
+        sourceLabel: 'repair_2',
+        schemaName: 'orvex_investigate_turn',
+        toolsEnabled: true,
+        toolChoice: 'tool_or_final',
+        schemaEnforced: true,
+      },
+    ],
+  );
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.kind === 'recovery_final' &&
+        entry.sourceLabel === 'repair_2' &&
+        entry.accepted === true,
+    ),
+  );
+  assert.deepEqual(result, {
+    findings: [],
+    summary: 'Repaired on second fresh generation.',
+  });
+});
+
+test('#303 Flash investigate: two completed non-JSON replies then repair #2 TOOL then FINAL', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-303-tool-'));
+  fs.writeFileSync(path.join(root, 'a.ts'), 'export const currentValue = 1;\n');
+  const originalFetch = globalThis.fetch;
+  const { logs, restore } = captureInvestigateLogs();
+  const requests: Array<Record<string, unknown>> = [];
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    if (calls === 1 || calls === 2) {
+      return responsesApiStream('completed non-JSON investigate reply');
+    }
+    if (calls === 3) {
+      return responsesApiStream(
+        '{"action":"tool","tool":{"name":"read_file","path":"a.ts"},"reason":"inspect after second repair"}',
+      );
+    }
+    return responsesApiStream(
+      '{"action":"done","findings":[],"summary":"Re-entered after repair #2."}',
+    );
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    restore();
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.test',
+      api: 'responses',
+      maxTokens: 28_000,
+      maxSteps: 5,
+    },
+  );
+
+  assert.equal(calls, 4);
+  assert.equal(jsonSchemaName(requests[2] ?? {}), 'orvex_investigate_turn');
+  assert.equal(jsonSchemaName(requests[3] ?? {}), 'orvex_investigate_turn');
+  const repairTool = logs.find((entry) => entry.kind === 'recovery_tool');
+  assert.equal(repairTool?.sourceLabel, 'repair_2');
+  assert.equal(repairTool?.reenteredAgentLoop, true);
+  assert.match(requestUserText(requests[3] ?? {}), /### Tool read_file/);
+  assert.deepEqual(result, { findings: [], summary: 'Re-entered after repair #2.' });
+});
+
+test('#303 both semantic repairs invalid fail closed', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orvex-inv-303-fail-'));
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return responsesApiStream('completed non-JSON investigate reply');
+  }) as typeof globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const result = await runInvestigateReview(
+    [
+      {
+        filename: 'a.ts',
+        status: 'modified',
+        patch: '@@ -1 +1 @@\n-oldValue\n+newValue',
+      },
+    ],
+    {
+      cwd: root,
+      apiKey: 'test-key',
+      model: 'deepseek-v4-flash',
+      baseUrl: 'https://api.deepseek.test',
+      api: 'responses',
+      maxSteps: 4,
+    },
+  );
+
+  assert.equal(calls, 3, 'normal plus two repairs then fail closed');
+  assert.deepEqual(result.findings, []);
+  assert.match(result.summary ?? '', /could not be completed/i);
 });

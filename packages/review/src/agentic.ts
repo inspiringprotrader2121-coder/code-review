@@ -3,6 +3,7 @@ export type {
   AgenticGenerateRequest,
   AgenticLoopFailure,
   AgenticReviewLoopOptions,
+  AgenticSourceLabel,
   AgenticTurn,
   AgenticTurnLog,
   AgenticTurnSource,
