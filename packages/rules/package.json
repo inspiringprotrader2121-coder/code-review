@@ -20,7 +20,7 @@
     "@orvex-review/config": "workspace:*",
     "minimatch": "^10.0.1",
     "yaml": "^2.8.0",
-    "zod": "^3.25.28"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
